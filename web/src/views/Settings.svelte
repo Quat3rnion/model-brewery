@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Infrastructure from '../components/Infrastructure.svelte';
   import { api, ApiError, errorText } from '../lib/api';
   import { brewery } from '../lib/store.svelte';
   import { buildPut, effectiveReadiness, endpointProblem, hostDirty, idProblem, parseHost, parseSettings, validateHost, type Endpoint, type HostSettings } from '../lib/settings';
@@ -23,7 +24,7 @@
     if (!savedHost) return '';
     const h = hosts.find((x) => x.id === savedHost.id);
     const reason = h?.reasons?.baseline;
-    return reason ?? 'The controller does not allow baseline endpoints on this worker. An infrastructure admin must provide an attested baseline runtime first.';
+    return reason ?? 'The controller does not allow baseline endpoints on this worker. An operator must provide an attested baseline runtime first.';
   });
   const dirty = $derived(!!draft && !!savedHost && hostDirty(draft, savedHost));
   const readiness = $derived(savedHost ? effectiveReadiness(savedHost, hosts.find((h) => h.id === savedHost.id)) : []);
@@ -154,7 +155,7 @@
     <h1 tabindex="-1">Settings</h1>
     <p class="muted small">
       Benchmark targets, suites and GSM8K setup for each worker. Saving stores the configuration on the controller and never starts a job. A worker is ready only when the controller reports it; the saved form alone does not make it ready.
-      <a href="#/admin">Infrastructure admin</a> is separate.
+      <a href="#/settings/infrastructure">Infrastructure controls and audit log</a>
     </p>
   </div>
 
@@ -230,7 +231,7 @@
               <fieldset class="group">
                 <legend>GSM8K evaluation</legend>
                 <label class="chk"><input type="checkbox" bind:checked={draft.evaluationEnabled} disabled={!draft.evaluationAllowed && !draft.evaluationEnabled} aria-describedby="ev-allow-h" /> Allow GSM8K evaluation on this worker</label>
-                <p class="xs muted" id="ev-allow-h">{draft.evaluationAllowed ? 'The controller still checks the Halogen runtime; this only allows it.' : 'Not available: this worker has no approved Halogen runtime. An infrastructure admin must provision one first.'}</p>
+                <p class="xs muted" id="ev-allow-h">{draft.evaluationAllowed ? 'The controller still checks the Halogen runtime; this only allows it.' : 'Not available: this worker has no approved Halogen runtime. An operator must provision one first.'}</p>
               </fieldset>
 
               {@render endpointList('BF16 baseline endpoints', 'baselineEndpoints', 'Endpoints that serve the exact BF16 source checkpoint, used to score a source baseline.')}
@@ -254,6 +255,7 @@
       {/if}
     </div>
   {/if}
+  <Infrastructure />
 </div>
 
 <style>

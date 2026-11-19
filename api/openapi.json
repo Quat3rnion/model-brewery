@@ -3,7 +3,7 @@
   "info": {
     "title": "Model Brewery Controller",
     "version": "0.1.0",
-    "description": "A loopback-only API for the Brewery workbench. Start with getState to discover configured workers, their capabilities, registered inputs, and saved prompts. The controller queues only the workflows described here. To convert a model, use createConversion: one request runs inspect, plan, convert and verify. Use createJob with one conversion kind only for a single diagnostic stage. Neither route qualifies a release. Worker and SSH configuration is operator-owned; there is no API for editing it, running shell commands, or reading arbitrary files or the private controller data directory. Two narrow exceptions exist. putSettings saves benchmark and evaluation settings for a worker that the operator enrolled; it accepts only approved ports, approved suites and loopback endpoints. applyAdminAction changes the lifecycle policy of catalog workers and needs the admin key; it installs no worker and changes no SSH trust. Artifact paths in job results are worker-side references, not download URLs.\n\nSend a single Host header for the actual loopback listen address/port or localhost on that port. If sent, Origin must be the matching http origin and Sec-Fetch-Site must be same-origin or none. Non-browser POST clients must send Content-Type: application/json, including for the bodyless cancel action. Unrecognized API paths or methods return a JSON error with status 404 or 405. The router also handles HEAD for GET paths with no response body, except that HEAD on the event stream returns 405."
+    "description": "A loopback-only API for the Brewery workbench. Start with getState to discover configured workers, their capabilities, registered inputs, and saved prompts. The controller queues only the workflows described here. To convert a model, use createConversion: one request runs inspect, plan, convert and verify. Use createJob with one conversion kind only for a single diagnostic stage. Neither route qualifies a release. Worker and SSH configuration is operator-owned; there is no API for editing it, running shell commands, or reading arbitrary files or the private controller data directory. putSettings saves benchmark and evaluation settings for a worker that the operator enrolled; it accepts only approved ports, approved suites and loopback endpoints. applyAdminAction changes the lifecycle policy of catalog workers under the same access rules as Settings; it installs no worker and changes no SSH trust. Artifact paths in job results are worker-side references, not download URLs.\n\nSend a single Host header for the actual loopback listen address/port or localhost on that port. If sent, Origin must be the matching http origin and Sec-Fetch-Site must be same-origin or none. Non-browser POST clients must send Content-Type: application/json, including for the bodyless cancel action. Unrecognized API paths or methods return a JSON error with status 404 or 405. The router also handles HEAD for GET paths with no response body, except that HEAD on the event stream returns 405."
   },
   "servers": [
     {"url": "http://127.0.0.1:{port}", "description": "Default numeric loopback listener", "variables": {"port": {"default": "4141"}}},
@@ -295,7 +295,7 @@
       "get": {
         "operationId": "getSettings",
         "summary": "Read the operational settings of every worker",
-        "description": "Returns one entry for each configured worker. A worker that the operator did not enrol for managed settings has managed false, ready false and a reason. The values are the saved settings and the worker policy. ready means that the worker policy, the suite catalog and the saved settings can be read and are valid. It does not mean that a model endpoint is running. This route needs no admin key.",
+        "description": "Returns one entry for each configured worker. A worker that the operator did not enrol for managed settings has managed false, ready false and a reason. The values are the saved settings and the worker policy. ready means that the worker policy, the suite catalog and the saved settings can be read and are valid. It does not mean that a model endpoint is running.",
         "responses": {
           "200": {
             "description": "The settings of all workers.",
@@ -310,7 +310,7 @@
       "put": {
         "operationId": "putSettings",
         "summary": "Replace the operational settings of one managed worker",
-        "description": "Replaces the whole settings object of an enrolled local worker. The controller checks the body against the worker policy and the suite catalog, then writes it to the private state directory of the worker before it answers. Saving starts no job and does not test an endpoint. The saved revision is the request revision plus one. Send the revision that you read from getSettings. Another save in the meantime, or a stale revision, returns 409: read again, then decide. The save also returns 409 if the host has a queued or running job, or a job with host auto. The effect on getState is immediate: capabilities and the lists of targets, suites and baseline sources follow the saved settings. There is no new event kind. The body has no secrets and no API key. This route needs no admin key; it uses the same access as job creation.",
+        "description": "Replaces the whole settings object of an enrolled local worker. The controller checks the body against the worker policy and the suite catalog, then writes it to the private state directory of the worker before it answers. Saving starts no job and does not test an endpoint. The saved revision is the request revision plus one. Send the revision that you read from getSettings. Another save in the meantime, or a stale revision, returns 409: read again, then decide. The save also returns 409 if the host has a queued or running job, or a job with host auto. The effect on getState is immediate: capabilities and the lists of targets, suites and baseline sources follow the saved settings. There is no new event kind. The body has no secrets and no API key. This route uses the same access as job creation.",
         "parameters": [{"name": "host", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/HostId"}, "description": "Configured worker ID."}],
         "requestBody": {
           "required": true,
@@ -350,14 +350,12 @@
       "get": {
         "operationId": "getAdminState",
         "summary": "Read the administration state",
-        "description": "Infrastructure administration. It is separate from the ordinary workbench access. Send the admin key in the X-Brewery-Admin-Key header with every request. The state lists the workers of the admin catalog, their lifecycle status, their runtimes, and the latest 50 audit entries. The controller never returns the key. This API does not install workers, change SSH aliases or host keys, edit worker files, run commands, or change power or GPU reservations; the unavailable field says so.",
-        "security": [{"AdminKey": []}],
+        "description": "Infrastructure state uses the same access rules as Settings. It lists catalog workers, their lifecycle status, their runtimes, and the latest 50 audit entries. This API does not install workers, change SSH aliases or host keys, edit worker files, run commands, or change power or GPU reservations.",
         "responses": {
           "200": {"description": "The administration state.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AdminState"}}}},
-          "401": {"description": "The admin key is missing, repeated or wrong.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "403": {"$ref": "#/components/responses/Forbidden"},
           "500": {"$ref": "#/components/responses/StorageError"},
-          "503": {"description": "The operator did not configure an admin key.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+          "503": {"description": "No infrastructure catalog workers are configured.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },
@@ -365,8 +363,7 @@
       "post": {
         "operationId": "applyAdminAction",
         "summary": "Apply one administration action",
-        "description": "Changes controller policy for a worker of the admin catalog. The actions are enroll, approve, deactivate, enable_runtime, disable_runtime, install_runtime and set_resource_policy. A worker is visible to the workbench only while its status is active. approve runs a transport readiness probe first. A runtime is enabled only if the operator configured a runtime helper and the pinned bytes pass its check. install_runtime needs the same helper, a pre-staged runtime, a pending or inactive worker and no running job. The controller runs only one action at a time. It writes an audit entry for each action. There is no idempotency key; a repeated lifecycle action can return 409. These actions change policy, not hosts: none installs a worker, changes SSH trust, runs a job, or edits a worker file.",
-        "security": [{"AdminKey": []}],
+        "description": "Changes controller policy for a catalog worker under the same access rules as Settings. The actions are enroll, approve, deactivate, enable_runtime, disable_runtime, install_runtime and set_resource_policy. A worker is visible to the workbench only while its status is active. approve runs a transport readiness probe first. A runtime is enabled only if the operator configured a runtime helper and the pinned bytes pass its check. install_runtime needs the same helper, a pre-staged runtime, a pending or inactive worker and no running job. The controller runs only one action at a time and audits applied actions. There is no idempotency key; a repeated lifecycle action can return 409. These actions change policy, not hosts: none installs a worker, changes SSH trust, runs a job, or edits a worker file.",
         "requestBody": {
           "required": true,
           "x-brewery-max-body-bytes": 4096,
@@ -382,12 +379,12 @@
         "responses": {
           "200": {"description": "The action was applied. The body is the new administration state.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AdminState"}}}},
           "400": {"description": "The body is malformed, too large, not JSON, or has an unknown field or action.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
-          "401": {"description": "The admin key is missing, repeated or wrong.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "403": {"$ref": "#/components/responses/Forbidden"},
           "404": {"$ref": "#/components/responses/NotFound"},
           "409": {"description": "The worker state does not allow the action, the readiness or runtime check failed, the request exceeds the pool ceiling, or the helper is not available.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
           "500": {"$ref": "#/components/responses/StorageError"},
-          "503": {"description": "The operator did not configure an admin key, or another administration action is running.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+          "503": {"description": "No infrastructure catalog workers are configured, or another infrastructure action is running.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
       }
     },
@@ -558,12 +555,6 @@
     }
   },
   "components": {
-    "securitySchemes": {
-      "AdminKey": {
-        "type": "apiKey", "in": "header", "name": "X-Brewery-Admin-Key",
-        "description": "A secret of 64 lowercase hex digits. The controller keeps only its SHA-256 digest, read from the file named by BREWERY_ADMIN_KEY_FILE at start. Send it only to the two admin routes. Send it once; a repeated header is refused."
-      }
-    },
     "parameters": {
       "ResourceId": {
         "name": "id", "in": "path", "required": true, "schema": {"type": "string"},

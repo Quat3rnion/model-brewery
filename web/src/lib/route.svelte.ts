@@ -1,4 +1,4 @@
-export type View = 'library' | 'queue' | 'transfers' | 'compare' | 'convert' | 'evaluate' | 'benchmarks' | 'calibration' | 'settings' | 'admin' | 'profiles' | 'weights' | 'job';
+export type View = 'library' | 'queue' | 'transfers' | 'compare' | 'convert' | 'evaluate' | 'benchmarks' | 'calibration' | 'settings' | 'profiles' | 'weights' | 'job';
 
 export const VIEWS: { id: Exclude<View, 'job'>; label: string }[] = [
   { id: 'library', label: 'Library' },
@@ -21,7 +21,7 @@ export function hashParam(hash: string, name: string): string | null {
 export function parse(hash: string): { view: View; jobId: string | null } {
   const parts = hash.replace(/^#\/?/, '').split('/');
   if (parts[0] === 'jobs' && parts[1]) return { view: 'job', jobId: decodeURIComponent(parts[1]) };
-  if (parts[0] === 'admin') return { view: 'admin', jobId: null };
+  if (parts[0] === 'admin') return { view: 'settings', jobId: null };
   if (parts[0].split('?')[0] === 'profiles') return { view: 'profiles', jobId: null };
   if (parts[0].split('?')[0] === 'weights') return { view: 'weights', jobId: null };
   if (parts[0].split('?')[0] === 'library') return { view: 'library', jobId: null };
@@ -36,6 +36,7 @@ class Route {
   constructor() {
     if (typeof window === 'undefined') return;
     const apply = () => {
+      if (window.location.hash === '#/admin') history.replaceState(null, '', '#/settings/infrastructure');
       const r = parse(window.location.hash);
       this.view = r.view;
       this.jobId = r.jobId;

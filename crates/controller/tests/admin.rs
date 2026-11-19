@@ -10,8 +10,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const KEY: &str = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
-
 struct Test {
     root: tempfile::TempDir,
     child: Option<Child>,
@@ -22,7 +20,6 @@ impl Test {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         for (name, value) in [
-            ("key", format!("{:x}\n", Sha256::digest(KEY))),
             ("catalog.json", json!({"workers":{"candidate":{"ssh_alias":"fixture-ssh",
                 "runtimes":{"evaluator":{"label":"Evaluator","capabilities":["evaluate"]}}}}}).to_string()),
             ("dispatch.json", json!({"hosts":{"candidate":{"ssh":"fixture-ssh","quantization_pool":true,
@@ -49,16 +46,18 @@ impl Test {
         } else {
             command.env_remove("BREWERY_ADMIN_RUNTIME_HELPER");
         }
-        let mut child = command
-            .env("BREWERY_ADMIN_KEY_FILE", root.join("key"))
-            .env("BREWERY_ADMIN_CATALOG", root.join("catalog.json"))
+        command
+            .env_remove("BREWERY_ADMIN_KEY_FILE")
+            .env_remove("BREWERY_ADMIN_CATALOG")
             .env("BREWERY_LISTEN", "127.0.0.1:0")
             .env("BREWERY_DATA", root.join("state"))
             .env("BREWERY_DISPATCH", root.join("dispatch"))
             .env("BREWERY_DISPATCH_CONFIG", root.join("dispatch.json"))
-            .stdout(Stdio::from(fs::File::create(&log).unwrap()))
-            .spawn()
-            .unwrap();
+            .stdout(Stdio::from(fs::File::create(&log).unwrap()));
+        if root.join("catalog.json").exists() {
+            command.env("BREWERY_ADMIN_CATALOG", root.join("catalog.json"));
+        }
+        let mut child = command.spawn().unwrap();
         let until = Instant::now() + Duration::from_secs(4);
         self.addr = loop {
             if let Some(addr) = fs::read_to_string(&log)
@@ -77,14 +76,20 @@ impl Test {
         self.child = Some(child);
     }
 
-    fn request(&self, path: &str, headers: &str, body: Option<Value>) -> (u16, Value) {
+    fn request_with_type(
+        &self,
+        path: &str,
+        headers: &str,
+        media_type: &str,
+        body: Option<Value>,
+    ) -> (u16, Value) {
         let method = if body.is_some() { "POST" } else { "GET" };
         let body = body.map(|b| b.to_string()).unwrap_or_default();
         let mut stream = TcpStream::connect(&self.addr).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(12)))
             .unwrap();
-        write!(stream,"{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{headers}\r\n{body}",self.addr,body.len()).unwrap();
+        write!(stream,"{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Type: {media_type}\r\nContent-Length: {}\r\n{headers}\r\n{body}",self.addr,body.len()).unwrap();
         let mut raw = String::new();
         stream.read_to_string(&mut raw).unwrap();
         let (head, body) = raw.split_once("\r\n\r\n").unwrap();
@@ -93,6 +98,9 @@ impl Test {
             serde_json::from_str(body).unwrap(),
         )
     }
+    fn request(&self, path: &str, headers: &str, body: Option<Value>) -> (u16, Value) {
+        self.request_with_type(path, headers, "application/json", body)
+    }
     fn admin(&self, body: Option<Value>) -> (u16, Value) {
         self.request(
             if body.is_some() {
@@ -100,7 +108,7 @@ impl Test {
             } else {
                 "/api/admin/state"
             },
-            &format!("X-Brewery-Admin-Key: {KEY}\r\n"),
+            "",
             body,
         )
     }
@@ -119,25 +127,46 @@ impl Drop for Test {
 }
 
 #[test]
-fn distinct_admin_auth_cannot_be_forged_with_operator_role_or_query() {
+fn infrastructure_uses_normal_request_guards_without_a_second_key() {
     let mut t = Test::new();
     t.launch();
-    for (path, headers) in [
-        ("/api/admin/state", "X-Brewery-Role: admin\r\n".into()),
-        ("/api/admin/state?role=admin", String::new()),
-        (
-            "/api/admin/state",
-            format!("X-Brewery-Admin-Key: {KEY}\r\nX-Brewery-Admin-Key: {KEY}\r\n"),
-        ),
-        (
-            "/api/admin/state",
-            format!("Authorization: Bearer {KEY}\r\n"),
-        ),
-    ] {
-        assert_eq!(t.request(path, &headers, None).0, 401);
-    }
     assert_eq!(t.admin(None).0, 200);
+    let path = "/api/admin/actions";
+    let action = json!({"action":"enroll","worker":"candidate"});
+    for headers in [
+        "Origin: https://other.invalid\r\n",
+        "Sec-Fetch-Site: cross-site\r\n",
+        "Host: other.invalid\r\n",
+    ] {
+        assert_eq!(t.request("/api/admin/state", headers, None).0, 403);
+        assert_eq!(t.request(path, headers, Some(action.clone())).0, 403);
+    }
+    assert_eq!(
+        t.request_with_type(path, "", "text/plain", Some(action.clone()))
+            .0,
+        415
+    );
+    let before = t.admin(None).1;
+    assert_eq!(before["workers"][0]["status"], "unregistered");
+    assert_eq!(before["audit"], json!([]));
+    let (status, accepted) = t.admin(Some(action));
+    assert_eq!(status, 200, "{accepted}");
+    assert_eq!(accepted["workers"][0]["status"], "pending");
+    assert_eq!(accepted["audit"][0]["action"], "enroll");
+}
+
+#[test]
+fn infrastructure_stays_unavailable_without_catalog_workers() {
+    let mut t = Test::new();
+    fs::remove_file(t.root.path().join("catalog.json")).unwrap();
+    t.launch();
     assert_eq!(t.request("/api/state", "", None).0, 200);
+    assert_eq!(t.admin(None).0, 503);
+    assert_eq!(
+        t.admin(Some(json!({"action":"enroll","worker":"candidate"})))
+            .0,
+        503
+    );
 }
 
 #[test]
@@ -207,7 +236,6 @@ fn catalog_approval_and_resource_changes_apply_and_survive_restart() {
     assert_eq!(state["workers"][0]["allow_pool"], false);
     assert_eq!(state["audit"][0]["action"], "set_resource_policy");
     assert_eq!(state["audit"][0]["outcome"], "applied");
-    assert!(!state.to_string().contains(KEY));
     assert_eq!(
         t.admin(Some(json!({"action":"deactivate","worker":"candidate"})))
             .0,

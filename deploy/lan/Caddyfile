@@ -27,7 +27,6 @@ https://:8443 {
 	# Do not let a hop-by-hop Connection option remove a CSRF signal.
 	@hop_by_hop_signal expression `{http.request.header.Connection}.matches("(?i)(^|,)[ \t]*(origin|sec-fetch-site|content-type)[ \t]*(,|$)")`
 	@has_origin header Origin *
-	@ordinary_request expression `!(({http.request.method} == "GET" && {http.request.orig_uri} == "/api/admin/state") || ({http.request.method} == "POST" && {http.request.orig_uri} == "/api/admin/actions"))`
 	@no_controller expression `!{http.vars.controller_port}.matches("^[1-9][0-9]{0,4}$") || int({http.vars.controller_port}) > 65535`
 
 	route {
@@ -42,7 +41,6 @@ https://:8443 {
 		basic_auth bcrypt "Model Brewery" {
 			import basic-auth.caddy
 		}
-		request_header @ordinary_request -X-Brewery-Admin-Key
 
 		# The private relay identifies the current controller's loopback port.
 		# Capture it once so Host and Origin agree even across controller restarts.

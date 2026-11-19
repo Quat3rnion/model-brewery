@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildPut, endpointProblem, idProblem, parseSettings, validateHost, effectiveReadiness, type HostSettings } from './settings';
-import { adminActionAllowed, isAdminKey, parseAdminState } from './admin';
+import { adminActionAllowed, parseAdminState } from './admin';
 
 const raw = {
   hosts: [
@@ -83,11 +83,6 @@ describe('admin', () => {
     audit: [{ id: 'a1', at_ms: 1, action: 'approve', worker: 'frame' }],
     unavailable: { install_runtime: 'Not implemented', host_provisioning: 'Not implemented', resource_controls: 'Only allow_pool' },
   };
-  it('accepts only a 64-character lowercase hex key', () => {
-    expect(isAdminKey('a'.repeat(64))).toBe(true);
-    expect(isAdminKey('A'.repeat(64))).toBe(false);
-    expect(isAdminKey('a'.repeat(63))).toBe(false);
-  });
   it('parses admin state and allows only actions the backend marks possible', () => {
     const s = parseAdminState(st)!;
     const w = s.workers[0];
@@ -189,4 +184,10 @@ describe('admin install_runtime (task20 update)', () => {
     expect(adminActionAllowed(w, { action: 'enable_runtime', worker: 'w', runtime: 'vllm' })).not.toBeNull();
     expect(adminActionAllowed(w, { action: 'enable_runtime', worker: 'w', runtime: 'hal' })).toBeNull();
   });
+});
+
+it('resolves old infrastructure bookmarks to the normal Settings view', async () => {
+  const { parse } = await import('./route.svelte');
+  expect(parse('#/admin').view).toBe('settings');
+  expect(parse('#/settings/infrastructure').view).toBe('settings');
 });

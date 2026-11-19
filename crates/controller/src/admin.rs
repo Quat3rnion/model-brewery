@@ -7,7 +7,7 @@ use crate::{
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State, rejection::JsonRejection},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -28,7 +28,6 @@ use std::{
 };
 use tokio::{io::AsyncWriteExt, process::Command, sync::Semaphore, time::timeout};
 
-const KEY_HEADER: &str = "x-brewery-admin-key";
 const INSTALL_UNAVAILABLE: &str =
     "Installation requires an operator-configured helper and a pinned, pre-staged runtime";
 const POLICY_UNAVAILABLE: &str = "Only the controller's existing quantization pool eligibility is adjustable; hardware and reservations remain operator-managed";
@@ -36,7 +35,6 @@ const PROVISION_UNAVAILABLE: &str =
     "SSH aliases, pinned host keys, worker provisioning, and admission remain operator-managed";
 
 pub struct Admin {
-    key: Option<[u8; 32]>,
     catalog: Catalog,
     db: Mutex<Connection>,
     changes: Semaphore,
@@ -229,20 +227,6 @@ impl Admin {
         dispatch: Option<&Path>,
         command: &Path,
     ) -> Result<Option<Self>, Error> {
-        let key = env::var_os("BREWERY_ADMIN_KEY_FILE")
-            .map(|p| -> Result<[u8; 32], Error> {
-                let data = private(Path::new(&p), 65)?;
-                let s = data.strip_suffix(b"\n").unwrap_or(&data);
-                if !hex(s) {
-                    return Err("admin key file must contain a lowercase SHA-256 digest".into());
-                }
-                let mut out = [0; 32];
-                for (i, pair) in s.as_chunks::<2>().0.iter().enumerate() {
-                    out[i] = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
-                }
-                Ok(out)
-            })
-            .transpose()?;
         let mut catalog = env::var_os("BREWERY_ADMIN_CATALOG")
             .map(|p| -> Result<Catalog, Error> {
                 Ok(serde_json::from_slice(&private(
@@ -252,7 +236,7 @@ impl Admin {
             })
             .transpose()?
             .unwrap_or_default();
-        if key.is_none() && catalog.workers.is_empty() {
+        if catalog.workers.is_empty() {
             return Ok(None);
         }
         let runtime_helper = env::var_os("BREWERY_ADMIN_RUNTIME_HELPER").map(PathBuf::from);
@@ -329,30 +313,12 @@ impl Admin {
         db.execute_batch("CREATE TABLE IF NOT EXISTS admin_policy(worker TEXT PRIMARY KEY, alias TEXT NOT NULL, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, body TEXT NOT NULL, outcome TEXT NOT NULL);")?;
         Ok(Some(Self {
-            key,
             catalog,
             db: Mutex::new(db),
             changes: Semaphore::new(1),
             command: command.to_owned(),
             runtime_helper,
         }))
-    }
-
-    pub fn authorized(&self, headers: &HeaderMap) -> bool {
-        let Some(key) = self.key else {
-            return false;
-        };
-        let mut all = headers.get_all(KEY_HEADER).iter();
-        let Some(value) = all.next().map(|h| h.as_bytes()) else {
-            return false;
-        };
-        if all.next().is_some() || !hex(value) {
-            return false;
-        }
-        let digest = Sha256::digest(value);
-        digest.iter().zip(key).fold(0, |difference, (&a, b)| {
-            difference | std::hint::black_box(a ^ b)
-        }) == 0
     }
 
     pub fn effective_hosts(&self, hosts: &[Host]) -> Result<Vec<Host>, Error> {
@@ -463,26 +429,15 @@ pub fn router() -> Router<Arc<App>> {
     )
 }
 
-fn authorize<'a>(app: &'a App, headers: &HeaderMap) -> ApiResult<&'a Admin> {
-    let admin = app
-        .admin
-        .as_ref()
-        .filter(|a| a.key.is_some())
-        .ok_or(ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Infrastructure administration is not configured",
-        ))?;
-    if !admin.authorized(headers) {
-        return Err(ApiError(
-            StatusCode::UNAUTHORIZED,
-            "Infrastructure admin key required",
-        ));
-    }
-    Ok(admin)
+fn configured(app: &App) -> ApiResult<&Admin> {
+    app.admin.as_ref().ok_or(ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Infrastructure administration is not configured",
+    ))
 }
 
-async fn state(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    authorize(&app, &headers)?
+async fn state(State(app): State<Arc<App>>) -> ApiResult<Json<Value>> {
+    configured(&app)?
         .view(&app.hosts)
         .map(Json)
         .map_err(ApiError::storage)
@@ -490,10 +445,9 @@ async fn state(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Jso
 
 async fn change(
     State(app): State<Arc<App>>,
-    headers: HeaderMap,
     action: Result<Json<Action>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    authorize(&app, &headers)?;
+    configured(&app)?;
     let Json(action) =
         action.map_err(|_| ApiError(StatusCode::BAD_REQUEST, "Invalid administration action"))?;
     // Keep an accepted management action scoped to the controller, not to the
@@ -504,7 +458,7 @@ async fn change(
 }
 
 async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
-    let admin = app.admin.as_ref().expect("authorized admin");
+    let admin = configured(&app)?;
     let _permit = admin.changes.try_acquire().map_err(|_| {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,

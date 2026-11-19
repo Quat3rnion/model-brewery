@@ -16,7 +16,6 @@
   import Benchmarks from './views/Benchmarks.svelte';
   import Calibration from './views/Calibration.svelte';
   import Settings from './views/Settings.svelte';
-  import Admin from './views/Admin.svelte';
   import Profiles from './views/Profiles.svelte';
   import Weights from './views/Weights.svelte';
 
@@ -49,7 +48,7 @@
   ];
 
   $effect(() => {
-    const label = VIEWS.find((v) => v.id === route.view)?.label ?? (route.view === 'admin' ? 'Admin' : route.view === 'profiles' ? 'Profiles' : route.view === 'weights' ? 'Weight edits' : 'Job');
+    const label = VIEWS.find((v) => v.id === route.view)?.label ?? (route.view === 'profiles' ? 'Profiles' : route.view === 'weights' ? 'Weight edits' : 'Job');
     document.title = `${running ? '▶ ' : ''}${label} · Model Brewery`;
   });
 </script>
@@ -64,7 +63,7 @@
     <ul class="seg">
       {#each VIEWS as v (v.id)}
         <li>
-          <a href="#/{v.id}" aria-current={route.view === v.id || (v.id === 'queue' && route.view === 'job') || (v.id === 'settings' && route.view === 'admin') || (v.id === 'convert' && route.view === 'profiles') || (v.id === 'library' && route.view === 'weights') ? 'page' : undefined}>
+          <a href="#/{v.id}" aria-current={route.view === v.id || (v.id === 'queue' && route.view === 'job') || (v.id === 'convert' && route.view === 'profiles') || (v.id === 'library' && route.view === 'weights') ? 'page' : undefined}>
             {v.label}{#if v.id === 'queue' && activeCount}<span class="count num" aria-label="{activeCount} active">{activeCount}</span>{/if}
           </a>
         </li>
@@ -130,7 +129,6 @@
     {:else if route.view === 'benchmarks'}<Benchmarks />
     {:else if route.view === 'calibration'}<Calibration />
     {:else if route.view === 'settings'}<Settings />
-    {:else if route.view === 'admin'}<Admin />
     {:else if route.view === 'profiles'}<Profiles />
     {:else if route.view === 'weights'}<Weights />
     {/if}

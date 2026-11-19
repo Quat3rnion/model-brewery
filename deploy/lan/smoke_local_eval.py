@@ -9,9 +9,6 @@ import tempfile
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
-from bootstrap_admin import bootstrap
-
-
 def verify(ctrl, scratch, staged):
     scratch = scratch.resolve(strict=True)
     staged = staged.resolve(strict=True)
@@ -19,7 +16,6 @@ def verify(ctrl, scratch, staged):
         raise ValueError("use a staged worker under a private /arboretum scratch directory")
     with tempfile.TemporaryDirectory(prefix="settings-smoke-", dir=scratch) as name:
         path = Path(name)
-        bootstrap(path / "admin")
         data = path / "controller"
         dispatch = path / "dispatch.json"
         cfg = json.loads((staged / "dispatch.proposed.json").read_bytes())
@@ -30,12 +26,10 @@ def verify(ctrl, scratch, staged):
             isolated[key] = val if key == "local-eval" else {"local": True, "worker": "/usr/bin/false",
                                                                "config": str(path / "unused.json")}
         dispatch.write_text(json.dumps({"hosts": isolated}))
-        catalog = path / "admin/catalog.json"
+        catalog = path / "catalog.json"
         catalog.touch(mode=0o600)
         catalog.write_text('{"workers":{"local-eval":{"local":true,"initially_active":true}}}\n')
-        token = (path / "admin/operator.key").read_text().strip()
-        env = {"PATH": "/usr/bin", "HOME": name, "BREWERY_ADMIN_KEY_FILE": str(path / "admin/verify.sha256"),
-               "BREWERY_ADMIN_CATALOG": str(catalog),
+        env = {"PATH": "/usr/bin", "HOME": name, "BREWERY_ADMIN_CATALOG": str(catalog),
                "BREWERY_DATA": str(data), "BREWERY_LISTEN": "127.0.0.1:0",
                "BREWERY_DISPATCH": str(ctrl.resolve(strict=True).with_name("brewery-dispatch")),
                "BREWERY_DISPATCH_CONFIG": str(dispatch)}
@@ -48,10 +42,8 @@ def verify(ctrl, scratch, staged):
                 address = re.fullmatch(r"brewery listening on (http://127\.0\.0\.1:\d+)", proc.stdout.readline().strip())
                 assert address, "controller did not start"
 
-                def request(route, status=200, method=None, value=None, key=None):
+                def request(route, status=200, method=None, value=None):
                     headers = {"Content-Type": "application/json"}
-                    if key:
-                        headers["X-Brewery-Admin-Key"] = key
                     req = Request(address[1] + "/api/" + route, method=method, headers=headers,
                                   data=json.dumps(value).encode() if value is not None else None)
                     try:
@@ -68,9 +60,8 @@ def verify(ctrl, scratch, staged):
                 def caps():
                     return next(row for row in request("state")["hosts"] if row["id"] == "local-eval")["capabilities"]
 
-                assert request("admin/state", 401) is None
                 def admin():
-                    rows = request("admin/state", key=token)["workers"]
+                    rows = request("admin/state")["workers"]
                     assert [row["id"] for row in rows] == ["local-eval"]
                     return rows[0]["status"]
 
@@ -98,10 +89,10 @@ def verify(ctrl, scratch, staged):
                 values["enabled_suites"] = []
                 request(route, method="PUT", value=values)
                 assert not caps()["benchmark"] and request("state")["jobs"] == []
-                request("admin/actions", method="POST", key=token,
+                request("admin/actions", method="POST",
                         value={"action": "deactivate", "worker": "local-eval"})
                 assert admin() == "inactive"
-                request("admin/actions", method="POST", key=token,
+                request("admin/actions", method="POST",
                         value={"action": "approve", "worker": "local-eval"})
                 assert admin() == "active" and request("state")["jobs"] == []
             finally:
@@ -117,4 +108,4 @@ if __name__ == "__main__":
     cli.add_argument("--staged", type=Path, required=True)
     args = cli.parse_args()
     verify(args.controller, args.scratch, args.staged)
-    print("Settings round trip and separate admin key passed; no job or inference sent.")
+    print("Settings and infrastructure round trips passed; no job or inference sent.")

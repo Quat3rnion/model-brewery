@@ -1,14 +1,10 @@
 <script lang="ts">
-  // Infrastructure admin. Separate from the shared workbench login: every
-  // request carries the admin key, checked by the server. Only actions the
-  // backend implements and marks possible are offered.
   import { api, ApiError, errorText } from '../lib/api';
-  import { adminSession } from '../lib/admin.svelte';
+  import { onMount } from 'svelte';
   import { adminActionAllowed, parseAdminState, type AdminAction, type AdminState } from '../lib/admin';
   import { formatTime } from '../lib/format';
   import { brewery } from '../lib/store.svelte';
   import Badge from '../components/Badge.svelte';
-  import AdminKey from '../components/AdminKey.svelte';
 
   let st = $state<AdminState | null>(null);
   let status = $state<'idle' | 'loading' | 'ok' | 'unavailable' | 'error'>('idle');
@@ -18,11 +14,10 @@
   let confirmDeactivate = $state<string | null>(null);
 
   async function load() {
-    const key = adminSession.key;
-    if (!key) return;
+    if (busy) return;
     status = 'loading';
     try {
-      const s = parseAdminState(await api.adminState(key));
+      const s = parseAdminState(await api.adminState());
       if (!s) throw new Error('The controller answered without admin state.');
       st = s;
       status = 'ok';
@@ -32,35 +27,37 @@
     }
   }
   function handle(e: unknown) {
-    if (e instanceof ApiError && e.status === 401) {
-      adminSession.clear();
-      st = null;
-      status = 'idle';
-      error = 'The admin key was refused. Enter it again.';
-    } else if (e instanceof ApiError && (e.status === 503 || e.status === 404 || e.status === 405)) {
+    st = null;
+    if (e instanceof ApiError && (e.status === 503 || e.status === 404 || e.status === 405)) {
       status = 'unavailable';
-      error = e.status === 503 ? errorText(e) : 'This controller has no admin interface.';
+      error = e.status === 503 ? errorText(e) : 'Infrastructure settings are not available on this controller.';
     } else {
       status = 'error';
       error = errorText(e);
     }
   }
-  $effect(() => {
-    if (adminSession.key) void load();
+  onMount(() => {
+    void load();
+    const focusSection = () => {
+      if (window.location.hash === '#/settings/infrastructure') document.getElementById('infrastructure')?.focus();
+    };
+    const frame = requestAnimationFrame(focusSection);
+    window.addEventListener('hashchange', focusSection);
+    return () => { cancelAnimationFrame(frame); window.removeEventListener('hashchange', focusSection); };
   });
 
   async function act(a: AdminAction, label: string) {
-    const key = adminSession.key;
-    if (!key || busy) return;
+    if (!st || busy || status !== 'ok') return;
     busy = label;
     actionError = null;
     try {
-      const s = parseAdminState(await api.adminAction(key, a));
-      if (s) st = s;
+      const s = parseAdminState(await api.adminAction(a));
+      if (!s) throw new Error('Invalid infrastructure settings response. Refresh to check the outcome.');
+      st = s;
       confirmDeactivate = null;
       void brewery.refresh();
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) handle(e);
+      if (e instanceof ApiError && [401,403].includes(e.status)) handle(e);
       else actionError = `${label}: ${errorText(e)}`;
     } finally {
       busy = null;
@@ -69,29 +66,18 @@
   const STATUS_TONE: Record<string, 'ok' | 'warn' | 'muted' | 'info'> = { active: 'ok', pending: 'warn', unregistered: 'muted', inactive: 'muted' };
 </script>
 
-<div class="stack">
+<section class="stack" aria-labelledby="infrastructure">
   <div class="head">
-    <h1 tabindex="-1">Infrastructure admin</h1>
-    <p class="muted small">
-      Worker enrollment, runtimes and pool policy. This is separate from the shared workbench login: the server checks the admin key on every request. Actions change controller configuration only; none of them starts a job, installs software or runs commands.
-      <a href="#/settings">Back to Settings</a>
-    </p>
+    <h2 id="infrastructure" tabindex="-1">Infrastructure</h2>
+    <p class="muted small">Manage worker enrollment, runtimes and conversion pool membership. The audit log records changes.</p>
   </div>
-
-  {#if !adminSession.key}
-    <section class="panel"><div class="body"><AdminKey purpose="Enter the infrastructure admin key to continue." /></div></section>
-    {#if error}<p class="note bad" role="alert">{error}</p>{/if}
-  {:else}
-    <div class="row">
-      <button type="button" class="btn small" onclick={load} disabled={status === 'loading'}>Refresh</button>
-      <button type="button" class="btn small ghost" onclick={() => { adminSession.clear(); st = null; status = 'idle'; }}>Forget admin key</button>
-    </div>
+  <div><button type="button" class="btn small" onclick={load} disabled={!!busy || status === 'loading'}>Refresh infrastructure</button></div>
     {#if status === 'loading' && !st}<p class="muted">Loading…</p>{/if}
-    {#if status === 'unavailable'}<p class="note warn">Admin is not available: {error}</p>{/if}
+    {#if status === 'unavailable'}<p class="note warn">Infrastructure settings unavailable: {error}</p>{/if}
     {#if status === 'error'}<div class="note bad" role="alert"><p>{error}</p><button type="button" class="btn small" onclick={load}>Retry</button></div>{/if}
     {#if actionError}<p class="note bad" role="alert">{actionError}</p>{/if}
 
-    {#if st}
+    {#if st && status === 'ok'}
       <section class="panel" aria-labelledby="wk-h">
         <header><h2 id="wk-h">Workers</h2></header>
         {#if st.workers.length === 0}<p class="empty">No workers.</p>{/if}
@@ -167,11 +153,11 @@
 
       <section class="panel" aria-labelledby="au-h">
         <header><h2 id="au-h">Audit log</h2></header>
-        {#if st.audit.length === 0}<p class="empty">No admin actions yet.</p>
+        {#if st.audit.length === 0}<p class="empty">No infrastructure actions yet.</p>
         {:else}
           <div class="table-wrap">
             <table class="data">
-              <caption class="sr-only">Admin actions, newest last</caption>
+              <caption class="sr-only">Infrastructure actions, newest last</caption>
               <thead><tr><th scope="col">Time</th><th scope="col">Action</th><th scope="col">Worker</th><th scope="col">Detail</th><th scope="col">Outcome</th></tr></thead>
               <tbody>
                 {#each st.audit as a (a.id)}
@@ -183,8 +169,7 @@
         {/if}
       </section>
     {/if}
-  {/if}
-</div>
+</section>
 
 <style>
   .head {

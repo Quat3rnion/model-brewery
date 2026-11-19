@@ -1,7 +1,3 @@
-// Infrastructure admin (task20): GET /api/admin/state, POST /api/admin/actions,
-// header X-Brewery-Admin-Key: 64 lowercase hex. The key is kept in memory
-// only (never stored, logged or put in a URL) and dropped on 401.
-
 import { obj } from './reports';
 
 export type AdminAction =
@@ -38,10 +34,6 @@ export interface AdminState {
   audit: { id: string; at: number | null; action: string; worker: string | null; runtime: string | null; allow_pool: boolean | null; outcome: string | null }[];
   /** Capabilities the backend does not implement, with its reason. Shown, never offered as controls. */
   unavailable: { what: string; reason: string }[];
-}
-
-export function isAdminKey(k: string): boolean {
-  return /^[0-9a-f]{64}$/.test(k);
 }
 
 const b = (v: unknown) => v === true;

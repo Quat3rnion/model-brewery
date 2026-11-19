@@ -35,9 +35,6 @@ class Backend(http.server.BaseHTTPRequestHandler):
         self.reply(200, json.dumps(dict(self.headers)).encode())
 
     def do_POST(self):
-        if self.path == "/api/admin/actions":
-            self.do_GET()
-            return
         # Model the controller's no-body POST guard; the fake backend needs no
         # running controller/worker or data directory.
         origin = self.headers.get("Origin")
@@ -49,6 +46,8 @@ class Backend(http.server.BaseHTTPRequestHandler):
             and self.headers.get_content_type() != "application/json"
         ):
             self.reply(415)
+        elif self.path == "/api/admin/actions":
+            self.do_GET()
         else:
             self.reply(204)
 
@@ -252,25 +251,23 @@ class GatewayTest(unittest.TestCase):
             for name in ("origin", "sec-fetch-site", "content-type"):
                 self.assertNotIn(name, names)
 
-    def test_admin_header_forwarded_only_on_exact_admin_operations(self):
-        name = "X-Brewery-Admin-Key"
-        for method, path, forwarded in (
-            ("GET", "/api/state", False),
-            ("GET", "/api/settings", False),
-            ("GET", "/api/admin/state", True),
-            ("GET", "/api/admin/state/extra", False),
-            ("GET", "/api/admin/actions", False),
-            ("POST", "/api/admin/actions", True),
+    def test_infrastructure_uses_same_gateway_auth_and_origin_checks(self):
+        for method, path in (
+            ("GET", "/api/admin/state"),
+            ("POST", "/api/admin/actions"),
         ):
-            with self.subTest(method=method, path=path), self.request(
-                method, path, headers=[(name, "stub"), ("Content-Type", "application/json")],
-            ) as reply:
-                self.assertEqual(reply.status, 200)
-                headers = {k.lower(): v for k, v in json.loads(reply.read()).items()}
-                self.assertEqual(headers.get(name.lower()), "stub" if forwarded else None)
-                self.assertNotIn("authorization", headers)
-        with self.request(path="/api/admin/state", auth=False, headers=[(name, "stub")]) as reply:
-            self.assertEqual(reply.status, 401)
+            with self.subTest(method=method, path=path):
+                headers = [("Content-Type", "application/json")]
+                with self.request(method, path, headers=headers) as reply:
+                    self.assertEqual(reply.status, 200)
+                    upstream = {k.lower() for k in json.loads(reply.read())}
+                    self.assertNotIn("authorization", upstream)
+                with self.request(method, path, auth=False, headers=headers) as reply:
+                    self.assertEqual(reply.status, 401)
+                with self.request(method, path, headers=headers + [
+                    ("Origin", "https://other.invalid"),
+                ]) as reply:
+                    self.assertEqual(reply.status, 403)
 
     def test_controller_port_update(self):
         original = self.port_file.read_text()

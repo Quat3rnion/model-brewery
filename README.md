@@ -111,9 +111,8 @@ target/release/brewery
 The controller listens on `127.0.0.1:4141` by default. Open
 `http://127.0.0.1:4141/` in a browser on the same machine. Set
 `BREWERY_LISTEN` to use a different loopback address and port. Do not expose
-the controller on a public interface: it has no login. The infrastructure
-admin routes need a separate key; see
-[Web settings and administration](#web-settings-and-administration).
+the controller on a public interface: it has no login. See
+[Web settings](#web-settings) for infrastructure controls.
 
 The optional HTTPS gateway checks the client's source address, the exact
 Host and browser origin, and the password before it forwards requests to
@@ -1318,20 +1317,19 @@ Compare only runs that have the same target, model, version, and protocol.
 The export always has `release_qualified: false`. A good benchmark score
 does not show that a model, a conversion, or a release is correct.
 
-## Web settings and administration
+## Web settings
 
-Two parts of the web page change controller or worker behavior. Both are
-narrow. Neither one installs software, changes SSH trust, edits a dispatch
-file or runs a command.
+Settings has two sections for changing controller or worker policy.
+Neither section provisions workers, changes SSH trust, edits a dispatch file
+or runs arbitrary commands.
 
-| Part | Who | What it does |
-| --- | --- | --- |
-| **Settings** page (`/api/settings`) | Operator: anyone who can use the workbench | Saves benchmark targets, benchmark suites, baseline endpoints and the evaluation switch of a worker that the operator enrolled. |
-| **Admin** page (`/api/admin/*`) | Administrator: the holder of the admin key | Enrols and approves catalog workers, enables or disables their runtimes, and lowers pool membership. |
+| Section | What it does |
+| --- | --- |
+| **Evaluation settings** (`/api/settings`) | Saves benchmark targets, benchmark suites, baseline endpoints and the evaluation switch of an enrolled worker. |
+| **Infrastructure** (`/api/admin/*`) | Enrols and approves catalog workers, enables or disables their runtimes, and adjusts pool membership within the configured limit. |
 
-The operator is the person who passes the gateway login, or who has access
-to the loopback listener. The administrator also needs the admin key. The key
-is separate from the gateway password.
+Both sections require normal workbench access through the authenticated
+gateway or the loopback listener. They use the same request protections.
 
 ### What the operator can set
 
@@ -1423,11 +1421,10 @@ the binaries and the adapters, and it writes a proposed dispatch file next to
 them. It does not change your live dispatch file. You review and install that
 file yourself.
 
-### Administration
+### Infrastructure
 
-The Admin page and `/api/admin/*` manage the **policy** that the controller
-applies to workers of an admin catalog. The page keeps the key in memory of
-one browser tab only. A reload forgets it.
+Settings > Infrastructure and `/api/admin/*` manage the policy that the
+controller applies to catalog workers.
 
 | Action | Effect |
 | --- | --- |
@@ -1442,29 +1439,18 @@ The API **does not**: install a worker or its engine, create or change an SSH
 alias, pin or change a host key, edit `authorized_keys`, a worker file or the
 dispatch file, change GPU admission, power or reservations, or run commands.
 These stay with the operator of the infrastructure. The controller runs one
-action at a time and writes each action to an audit table in
+action at a time and writes applied actions to an audit table in
 `$BREWERY_DATA/admin.db`. The state shows the latest 50 entries.
 
-Status codes: `200` applied, `400` bad or unknown field, `401` missing or
-wrong key, `404` unknown worker or runtime, `409` the state does not allow it
-or a check failed, `503` no admin key is configured or another action runs.
+Status codes: `200` applied, `400` bad or unknown field, `403` invalid host
+or origin, `404` unknown worker or runtime, `409` action unavailable or check
+failed, `503` no catalog workers are configured or another action is running.
 A repeated lifecycle action can return `409`. There is no idempotency key.
 
-### Set up the admin key
+### Configure the infrastructure catalog
 
-1. Run `python3 deploy/lan/bootstrap_admin.py /abs/new-private-dir`. The
-   directory must not exist, and its parent must be a real directory without
-   symbolic links. The tool prints nothing. It creates `operator.key` (the
-   secret token) and `verify.sha256` (its digest) with mode `0600`. It never
-   overwrites a file.
-2. Keep `operator.key` private. You send its content in the
-   `X-Brewery-Admin-Key` header. Do not put it in a URL, an argument list or a
-   log. The controller never returns it.
-3. Set `BREWERY_ADMIN_KEY_FILE` to a private file owned by the controller user
-   that holds the digest (`verify.sha256`). The file has one link and mode
-   `0600`.
-4. Write the admin catalog and set `BREWERY_ADMIN_CATALOG` to it (private file,
-   at most 128 KiB). Each worker ID must exist in the dispatch file:
+1. Set `BREWERY_ADMIN_CATALOG` to the absolute path of a private catalog file
+   (at most 128 KiB). Each worker ID must exist in the dispatch file:
 
    ```json
    {
@@ -1483,16 +1469,11 @@ A repeated lifecycle action can return `409`. There is no idempotency key.
    For a local worker use `{"local": true, "initially_active": true}`. The
    controller then checks that the worker program and its config are trusted
    files. A runtime can only list capabilities that the dispatch entry has.
-5. Optional: set `BREWERY_ADMIN_RUNTIME_HELPER` to a trusted, absolute
+2. Optional: set `BREWERY_ADMIN_RUNTIME_HELPER` to a trusted, absolute
    executable. The controller calls it only as `install-pinned` or
    `probe-installed WORKER RUNTIME SHA256`. It must reply with only the actual
    digest as `{"sha256":"..."}`. This repository has no production helper.
-6. Restart the controller. To rotate the key, run the tool again, replace the
-   digest file and restart.
-
-The gateway keeps its own login. It passes the admin header only for
-`GET /api/admin/state` and `POST /api/admin/actions`. Other routes never
-receive it. The Settings routes do not use the admin key.
+3. Restart the controller.
 
 ### Limits of this feature
 
