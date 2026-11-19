@@ -83,6 +83,15 @@ pub fn is_commit(s: &str) -> bool {
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
+pub fn valid_token(s: &str) -> bool {
+    (4..=256).contains(&s.len())
+        && s.strip_prefix("hf_").is_some_and(|suffix| {
+            suffix
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+        })
+}
+
 use std::path::PathBuf;
 
 #[derive(serde::Serialize, Deserialize)]
@@ -90,6 +99,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub hfr: PathBuf,
     pub max_bytes: u64,
+    pub token_file: Option<PathBuf>,
     // Provisioning only. An isolated test namespace can serve a fake Hub on
     // its own loopback; a job cannot select any origin or pass credentials.
     pub fixture_port: Option<u16>,
@@ -98,6 +108,9 @@ pub struct Config {
 impl Config {
     pub fn validate(&self) -> Result<()> {
         crate::absolute(&self.hfr)?;
+        if let Some(token_file) = &self.token_file {
+            crate::absolute(token_file)?;
+        }
         ensure!(
             (1..=i64::MAX as u64).contains(&self.max_bytes) && self.fixture_port != Some(0),
             "invalid Hugging Face download worker limits"

@@ -2,7 +2,7 @@ use crate::{
     App,
     conversion::{Conversion, NewConversion},
     domain::{KINDS, NewJob, NewModel, NewPrompt, candidates},
-    feed,
+    feed, hf_tokens,
     idempotency::{self, Replay, Submission},
     store::Store,
     suggestions::{self, SuggestError, Suggestions},
@@ -15,7 +15,7 @@ use axum::{
     response::{IntoResponse, Response, Sse, sse::KeepAlive},
     routing::{delete, get, post},
 };
-use serde_json::{Value, json};
+use serde_json::{Value, json, value::RawValue};
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc};
 use tower_http::services::ServeDir;
 
@@ -38,6 +38,13 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
         .route(
             "/settings/{host}",
             axum::routing::put(put_settings).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route("/settings/hf-tokens", get(get_hf_tokens))
+        .route(
+            "/settings/{host}/hf-token",
+            axum::routing::put(set_hf_token)
+                .delete(remove_hf_token)
+                .layer(DefaultBodyLimit::max(2048)),
         )
         .route("/events", get(events))
         .route(
@@ -278,6 +285,94 @@ async fn put_settings(
         PutError::Invalid(error) => ApiError::bad(error),
     })?;
     Ok(Json(json!(view)))
+}
+
+async fn get_hf_tokens(State(app): State<Shared>) -> Result<Json<Value>> {
+    let _store = app.store.lock().map_err(ApiError::storage)?;
+    let hosts = app.effective_hosts().map_err(ApiError::storage)?;
+    let mut statuses = Vec::new();
+    for host in &hosts {
+        if host.capabilities["hf_download"]
+            && let Some(path) = app.hf_tokens.file(&host.id)
+            && let Ok(configured) =
+                hf_tokens::PrivateFile::open(path).and_then(|file| file.configured())
+        {
+            statuses.push(hf_tokens::Status {
+                id: &host.id,
+                configured,
+            });
+        }
+    }
+    Ok(Json(json!({"hosts":statuses})))
+}
+
+async fn set_hf_token(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    payload: std::result::Result<Json<Box<RawValue>>, JsonRejection>,
+) -> Result<Json<Value>> {
+    let set: hf_tokens::Set = read_hf_token_request(payload)?;
+    if !brewery_worker::hf_download::valid_token(&set.token) {
+        return Err(ApiError::bad("invalid Hugging Face token format"));
+    }
+    change_hf_token(&app, &id, Some(&set.token))
+}
+
+async fn remove_hf_token(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    payload: std::result::Result<Json<Box<RawValue>>, JsonRejection>,
+) -> Result<Json<Value>> {
+    let _: hf_tokens::Remove = read_hf_token_request(payload)?;
+    change_hf_token(&app, &id, None)
+}
+
+fn read_hf_token_request<T: serde::de::DeserializeOwned>(
+    payload: std::result::Result<Json<Box<RawValue>>, JsonRejection>,
+) -> Result<T> {
+    let invalid = |status| ApiError(status, "invalid token request".into());
+    let Json(raw) = payload.map_err(|error| invalid(error.status()))?;
+    if !raw.get().starts_with('{') {
+        return Err(invalid(StatusCode::UNPROCESSABLE_ENTITY));
+    }
+    serde_json::from_str(raw.get()).map_err(|_| invalid(StatusCode::UNPROCESSABLE_ENTITY))
+}
+
+fn change_hf_token(app: &App, id: &str, token: Option<&str>) -> Result<Json<Value>> {
+    let store = app.store.lock().map_err(ApiError::storage)?;
+    if !app.hosts.iter().any(|host| host.id == id) {
+        return Err(ApiError::not_found("host"));
+    }
+    let effective = app.effective_hosts().map_err(ApiError::storage)?;
+    let path = app
+        .hf_tokens
+        .file(id)
+        .filter(|_| {
+            effective
+                .iter()
+                .any(|host| host.id == id && host.capabilities["hf_download"])
+        })
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::CONFLICT,
+                "worker is not enabled for local Hugging Face token settings".into(),
+            )
+        })?;
+    if store.host_has_jobs(id).map_err(ApiError::storage)? {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "worker has queued or running jobs".into(),
+        ));
+    }
+    let configured = hf_tokens::PrivateFile::open(path)
+        .and_then(|file| file.change(token))
+        .map_err(|_| {
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Hugging Face token storage unavailable".into(),
+            )
+        })?;
+    Ok(Json(json!(hf_tokens::Status { id, configured })))
 }
 
 async fn events(

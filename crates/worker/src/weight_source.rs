@@ -3,10 +3,12 @@ use crate::{Bundle, Entry, absolute, decode_limited, is_digest, relative, tree_d
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
-    env, fs,
+    env,
+    ffi::CString,
+    fs,
     os::{
-        fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
+        fd::{AsRawFd, FromRawFd},
+        unix::{ffi::OsStrExt, fs::MetadataExt},
     },
     path::{Path, PathBuf},
 };
@@ -35,7 +37,7 @@ pub fn verify_limit(value: Option<&str>) -> Result<u64> {
         .parse()?;
     ensure!(
         (1..=64 << 20).contains(&limit),
-        "SafeTensors verification limit must be 1–67108864 bytes"
+        "SafeTensors verification limit must be 1 to 67108864 bytes"
     );
     Ok(limit)
 }
@@ -241,10 +243,28 @@ pub fn configured_publication(path: &Path, kind: &str) -> Result<Option<Verified
 }
 
 pub fn open_regular(path: &Path) -> Result<fs::File> {
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
+    absolute(path)?;
+    let root = fs::File::open("/")?;
+    let name = CString::new(path.strip_prefix("/")?.as_os_str().as_bytes())?;
+    // RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS, including mutable ancestors.
+    let how = [
+        (libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC) as u64,
+        0,
+        0x08 | 0x04,
+    ];
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            root.as_raw_fd(),
+            name.as_ptr(),
+            how.as_ptr(),
+            std::mem::size_of_val(&how),
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let file = unsafe { fs::File::from_raw_fd(fd as i32) };
     let meta = file.metadata()?;
     ensure!(
         meta.is_file() && meta.nlink() == 1,

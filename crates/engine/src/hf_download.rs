@@ -1,4 +1,6 @@
 //! Fetch public model snapshots with a provisioned, pinned hfr executable.
+mod auth;
+
 use crate::{progress::Progress, Job};
 use anyhow::{ensure, Context, Result};
 use brewery_worker::{
@@ -68,11 +70,21 @@ struct Inventory {
     files: BTreeMap<String, Expected>,
 }
 
-fn page<T: DeserializeOwned>(client: &ureq::Agent, url: &str) -> Result<(T, Option<String>)> {
-    let mut response = client
-        .get(url)
+fn page<T: DeserializeOwned>(
+    client: &ureq::Agent,
+    url: &str,
+    token: Option<&str>,
+) -> Result<(T, Option<String>)> {
+    let mut request = client.get(url);
+    if let Some(token) = token {
+        let mut bearer = ureq::http::HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| anyhow::anyhow!("invalid Hub credential"))?;
+        bearer.set_sensitive(true);
+        request = request.header("Authorization", bearer);
+    }
+    let mut response = request
         .call()
-        .context("Hub metadata request failed")?;
+        .map_err(|_| anyhow::anyhow!("Hub metadata request failed"))?;
     ensure!(response.status() == 200, "unexpected Hub metadata status");
     let next = response
         .headers()
@@ -85,7 +97,8 @@ fn page<T: DeserializeOwned>(client: &ureq::Agent, url: &str) -> Result<(T, Opti
             Ok(url.into())
         })
         .transpose()?;
-    let body = decode_limited(response.body_mut().as_reader(), METADATA_LIMIT)?;
+    let body = decode_limited(response.body_mut().as_reader(), METADATA_LIMIT)
+        .map_err(|_| anyhow::anyhow!("invalid or oversized Hub metadata"))?;
     Ok((body, next))
 }
 
@@ -106,7 +119,7 @@ fn safe_tree_path(path: &str) -> bool {
         })
 }
 
-fn inventory(cfg: &Config, spec: &Spec) -> Result<Inventory> {
+fn inventory(cfg: &Config, spec: &Spec, token: Option<&str>) -> Result<Inventory> {
     let client: ureq::Agent = ureq::Agent::config_builder()
         .proxy(None)
         .max_redirects(0)
@@ -116,14 +129,15 @@ fn inventory(cfg: &Config, spec: &Spec) -> Result<Inventory> {
     let origin = cfg.endpoint();
     let api = format!("{origin}/api/models/{}", spec.repo_id);
     let revision = spec.revision.replace('/', "%2F");
-    let (info, _): (ModelInfo, _) = page(&client, &format!("{api}/revision/{revision}"))?;
+    let (info, _): (ModelInfo, _) = page(&client, &format!("{api}/revision/{revision}"), token)?;
     ensure!(
         info.id.eq_ignore_ascii_case(&spec.repo_id)
             && is_commit(&info.sha)
             && !info.private
-            && info.gated == false
+            && (info.gated == false
+                || (token.is_some() && matches!(info.gated.as_str(), Some("auto" | "manual"))))
             && (!is_commit(&spec.revision) || spec.revision == info.sha),
-        "Hub did not identify an immutable public, ungated model"
+        "Hub did not identify an accessible immutable public model"
     );
     let prefix = format!("{api}/tree/{}?", info.sha);
     let mut url = format!("{prefix}recursive=true&expand=false");
@@ -135,7 +149,7 @@ fn inventory(cfg: &Config, spec: &Spec) -> Result<Inventory> {
     };
     let mut listed = BTreeSet::new();
     for _ in 0..32 {
-        let (rows, next): (Vec<Row>, _) = page(&client, &url)?;
+        let (rows, next): (Vec<Row>, _) = page(&client, &url, token)?;
         for row in rows {
             if let Some(name) = &spec.filename {
                 if &row.path != name {
@@ -307,6 +321,7 @@ fn transfer(
     inv: &Inventory,
     data: &Path,
     home: &Path,
+    endpoint: &str,
     pg: &Progress,
     reserve: u64,
 ) -> Result<()> {
@@ -342,10 +357,9 @@ fn transfer(
                 .env("HOME", home)
                 .env("HF_HOME", home)
                 .env("XDG_CACHE_HOME", home)
+                .env("HF_ENDPOINT", endpoint)
                 .current_dir(home)
                 .args([
-                    "--endpoint",
-                    &inv.origin,
                     "-j",
                     "4",
                     "download",
@@ -504,7 +518,13 @@ pub(crate) fn run(job: &Job, cwd: &Path, pg: &Progress) -> Result<Value> {
     let published = cwd.join("download");
     ensure!(!published.exists(), "download already published");
     let step = pg.start("hf_download_resolve", "items", None);
-    let inv = inventory(&cfg, &spec)?;
+    let token = cfg
+        .token_file
+        .as_deref()
+        .map(auth::read_token)
+        .transpose()?
+        .flatten();
+    let inv = inventory(&cfg, &spec, token.as_deref())?;
     step.finish();
     let bytes = inv.bytes()?;
     ensure!(
@@ -515,7 +535,14 @@ pub(crate) fn run(job: &Job, cwd: &Path, pg: &Progress) -> Result<Value> {
     let home = tempfile::Builder::new()
         .prefix(".hfr-home-")
         .tempdir_in(cwd)?;
-    transfer(&cfg, &inv, &data, home.path(), pg, reserve)?;
+    let broker = token
+        .map(|token| auth::Broker::start(&inv, token, fs::read_dir(&data)?.next().is_some()))
+        .transpose()?;
+    let endpoint = broker
+        .as_ref()
+        .map_or(inv.origin.as_str(), auth::Broker::endpoint);
+    transfer(&cfg, &inv, &data, home.path(), endpoint, pg, reserve)?;
+    drop(broker);
     let files = verify(&inv, &data, pg)?;
     let mut artifact = published.clone();
     let sha256 = if let Some(filename) = &spec.filename {
@@ -533,11 +560,7 @@ pub(crate) fn run(job: &Job, cwd: &Path, pg: &Progress) -> Result<Value> {
     if let Some(filename) = spec.filename {
         receipt["filename"] = json!(filename);
     }
-    // The worker exposes this directory only after the supervisor records a
-    // successful job. The private stage and work are on the same filesystem.
-    let _ = pg.start("publish_output", "items", None);
-    fs::rename(&data, &published)?;
-    File::open(cwd)?.sync_all()?;
-    File::open(root)?.sync_all()?;
+    // Leave the verified bytes in the private stage. The worker checks them
+    // again and commits the rename against cancellation.
     Ok(receipt)
 }

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -70,6 +71,128 @@ class SafeTensors(unittest.TestCase):
         self.assertEqual(source.read_bytes(), original)
         self.assertEqual(result["output_sha256"], sha(out.read_bytes()))
         self.cli("apply", source, approval, out, ok=False)
+
+    def indexed(self):
+        source = self.root / "checkpoint"
+        source.mkdir()
+        a = tensor_file("layer.weight", "BF16", struct.pack("<4H", 0x3f80, 0x4000, 0x4040, 0x4080), [2, 2])
+        b = tensor_file("visual.weight", "F32", struct.pack("<2f", 5., 6.), [1, 2])
+        materials = {
+            "model-00001-of-00002.safetensors": a,
+            "model-00002-of-00002.safetensors": b,
+            "model.safetensors.index.json": json.dumps({
+                "weight_map": {"layer.weight": "model-00001-of-00002.safetensors",
+                               "visual.weight": "model-00002-of-00002.safetensors"},
+                "metadata": {"total_size": 16.0},
+            }).encode(),
+            "config.json": b'{"model_type":"fixture"}\n',
+            "tokenizer.json": b'{"version":"1.0"}\n',
+            "vision/processor.json": b'{}\n',
+            "mtp/overlay.safetensors": tensor_file("mtp.weight", "F32", struct.pack("<f", 7.), [1]),
+            "engram.dat": b"exact sidecar",
+        }
+        for name, data in materials.items():
+            f = source / name
+            f.parent.mkdir(exist_ok=True)
+            f.write_bytes(data)
+        return source, materials
+
+    def test_indexed_tune_apply_preserves_complete_tree(self):
+        source, original = self.indexed()
+        pin = pin_dir(source)
+        manifest = self.doc("manifest", [
+            {"path": name, "bytes": len(raw), "sha256": sha(raw)}
+            for name, raw in sorted(original.items())
+        ])
+        manifest.chmod(0o600)
+        args = ("--source-sha256", pin, "--source-manifest", manifest)
+        inventory = self.cli("inventory", source, *args, "--offset", 0, "--limit", 10)
+        self.assertEqual(inventory["source_format"], "hf")
+        self.assertEqual([t["name"] for t in inventory["tensors"]], ["layer.weight", "visual.weight"])
+        cal = self.doc("calibration", {"activations": [[1, 0], [0, 1]],
+                                       "targets": [[2, 3], [2, 3]]})
+        held = self.doc("held-out", {"activations": [[1, 1], [2, -1]],
+                                      "targets": [[3, 7], [0, 2]]})
+        proposal = self.cli(source, *args, "--tensor", "layer.weight",
+                            "--indices", "[[0,0],[1,1]]", "--max-update", 1,
+                            "--calibration", cal, "--held-out", held, tool="weight_tune.py")
+        self.assertEqual([e["after"] for e in proposal["edits"]], [2., 3.])
+        out = self.root / "revision"
+        result = self.cli("apply", source, "--source-manifest", manifest,
+                          self.doc("approved", proposal), out)
+        self.assertEqual(result["output_sha256"], pin_dir(out))
+        self.assertEqual(result["source_format"], "hf")
+        changed = dict(original)
+        shard = "model-00001-of-00002.safetensors"
+        changed[shard] = original[shard][:-8] + struct.pack("<4H", 0x4000, 0x4000, 0x4040, 0x4040)
+        self.assertEqual({p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file()},
+                         set(original))
+        for name in original:
+            self.assertEqual((source / name).read_bytes(), original[name])
+            self.assertEqual((out / name).read_bytes(), changed[name])
+            self.assertNotEqual((out / name).stat().st_ino, (source / name).stat().st_ino)
+
+    def test_invalid_mapping_links_and_changed_shard_fail_closed(self):
+        source, original = self.indexed()
+        shard = "model-00001-of-00002.safetensors"
+        original_sha = pin_dir(source)
+        options = ("--offset", 0, "--limit", 10)
+        link = source / "substitution"
+        link.symlink_to(source / shard)
+        self.assertIn("without links", self.cli("inventory", source, "--source-sha256",
+                                               original_sha, *options, ok=False))
+        link.unlink()
+        os.link(source / shard, link)
+        self.assertIn("without links", self.cli("inventory", source, "--source-sha256",
+                                               original_sha, *options, ok=False))
+        link.unlink()
+        index = source / "model.safetensors.index.json"
+        index.write_text(json.dumps({"weight_map": {"layer.weight": "../outside.safetensors"}}))
+        self.assertIn("unsafe indexed", self.cli("inventory", source, "--source-sha256",
+                                               pin_dir(source), *options, ok=False))
+        index.write_bytes(original[index.name])
+        manifest = self.doc("manifest", [
+            {"path": name, "bytes": len(raw), "sha256": sha(raw)}
+            for name, raw in sorted(original.items())
+        ])
+        manifest.chmod(0o600)
+        old = original[shard]
+        (source / shard).write_bytes(old[:-1] + bytes([old[-1] ^ 1]))
+        self.assertIn("mismatch", self.cli("inventory", source, "--source-sha256",
+                     original_sha, "--source-manifest", manifest, *options, ok=False))
+
+    def test_noncanonical_tensor_extent_and_unsupported_edit_are_refused(self):
+        source = self.root / "malformed.safetensors"
+        broken = tensor_file("layer.weight", "F32", b"xx", [1, 1])
+        source.write_bytes(broken)
+        self.assertIn("payload size mismatch", self.cli("inventory", source, "--source-sha256",
+                      sha(broken), "--offset", 0, "--limit", 10, ok=False))
+        raw = tensor_file("count", "I64", struct.pack("<q", 42), [])
+        source.write_bytes(raw)
+        pin = ("--source-sha256", sha(raw))
+        row, = self.cli("inventory", source, *pin, "--offset", 0, "--limit", 10)["tensors"]
+        self.assertEqual(row["shape"], [])
+        self.assertFalse(row["editable"])
+        self.assertIn("read-only", self.cli("inspect", source, *pin,
+                                           "--tensor", "count", "--index", "[]", ok=False))
+
+    def test_large_unproven_source_rejected_before_hashing_payload(self):
+        source = self.root / "unproven.safetensors"
+        with source.open("wb") as out:
+            out.truncate((64 << 20) + 1)
+        self.assertIn("requires operator-verified immutable inode manifest", self.cli(
+            "inventory", source, "--source-sha256", "0" * 64, "--offset", 0,
+            "--limit", 1, ok=False))
+        # A claimed immutable proof must first match the actual open inode;
+        # user-authored inode numbers cannot bypass even this metadata check.
+        actual = source.stat()
+        manifest = self.doc("inode-proof", [{"path": "original.safetensors",
+                            "bytes": actual.st_size, "sha256": "0" * 64,
+                            "device": actual.st_dev, "inode": actual.st_ino + 1}])
+        manifest.chmod(0o600)
+        self.assertIn("size or inode differs", self.cli(
+            "inventory", source, "--source-sha256", "0" * 64, "--source-manifest",
+            manifest, "--offset", 0, "--limit", 1, ok=False))
 
 
 if __name__ == "__main__":

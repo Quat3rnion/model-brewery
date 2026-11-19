@@ -36,6 +36,18 @@ fn run_gated(
     hgn: bool,
     packed: bool,
 ) -> Output {
+    run_configured(root, kind, inputs, options, hgn, packed, &[])
+}
+
+fn run_configured(
+    root: &Path,
+    kind: &str,
+    inputs: &[Value],
+    options: Value,
+    hgn: bool,
+    packed: bool,
+    env: &[(&str, &str)],
+) -> Output {
     let cwd = tempfile::tempdir_in(root).unwrap().keep();
     let mut child = Command::new(env!("CARGO_BIN_EXE_brewery-engine"))
         .current_dir(cwd)
@@ -45,6 +57,10 @@ fn run_gated(
         .env("BREWERY_WEIGHT_HGN", if hgn { "1" } else { "0" })
         .env("BREWERY_WEIGHT_PACKED", if packed { "1" } else { "0" })
         .env_remove("BREWERY_EXPECTED_SOURCE_SHA256")
+        .env_remove("BREWERY_WEIGHT_SAFETENSORS_PUBLICATION")
+        .env_remove("BREWERY_WEIGHT_SAFETENSORS_VERIFY_BYTES")
+        .env_remove("BREWERY_WEIGHT_SAFETENSORS_DISK_RESERVE_BYTES")
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -57,6 +73,191 @@ fn run_gated(
     )
     .unwrap();
     child.wait_with_output().unwrap()
+}
+
+#[test]
+#[ignore = "requires local NumPy and the pinned gguf-py checkout"]
+fn real_safetensors_and_indexed_hf_apply_publish_complete_independent_outputs() {
+    use brewery_worker::{tree_digest, Entry};
+    let root = tempfile::tempdir().unwrap();
+    python_helpers(root.path());
+    let tensor = "layer.weight";
+    let config_bytes = b"{\"model_type\":\"fixture\"}\n";
+    let index_name = "model.safetensors.index.json";
+    let shard_name = "model-00001-of-00002.safetensors";
+    let neighbor_name = "model-00002-of-00002.safetensors";
+    let encode = |name: &str, values: [f32; 4]| {
+        let mut header = json!({name:{"dtype":"F32","shape":[2,2],"data_offsets":[0,16]}})
+            .to_string()
+            .into_bytes();
+        header.resize(header.len().next_multiple_of(8), b' ');
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(header);
+        bytes.extend(values.into_iter().flat_map(f32::to_le_bytes));
+        bytes
+    };
+    for kind in ["safetensors", "hf"] {
+        let original = encode(tensor, [1., 2., 3., 4.]);
+        let neighbor = encode("neighbor.weight", [5., 6., 7., 8.]);
+        let path = root.path().join(format!("fixture.{kind}"));
+        let (source, original_path) = if kind == "hf" {
+            fs::create_dir(&path).unwrap();
+            fs::write(path.join("config.json"), config_bytes).unwrap();
+            fs::write(
+                path.join(index_name),
+                json!({
+                    "metadata":{"total_size":32},
+                    "weight_map":{tensor:shard_name,"neighbor.weight":neighbor_name}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            fs::write(path.join(shard_name), &original).unwrap();
+            fs::write(path.join(neighbor_name), &neighbor).unwrap();
+            let files = ["config.json", shard_name, neighbor_name, index_name]
+                .into_iter()
+                .map(|name| {
+                    let data = fs::read(path.join(name)).unwrap();
+                    Entry {
+                        path: name.into(),
+                        bytes: data.len() as u64,
+                        sha256: format!("{:x}", Sha256::digest(data)),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let tree = tree_digest(&files);
+            let bytes = files.iter().map(|i| i.bytes).sum::<u64>();
+            (
+                json!({"kind":"hf","host":"fixture","path":path,"sha256":tree,"bundle_sha256":tree,
+                "bytes":bytes,"files":files}),
+                path.join(shard_name),
+            )
+        } else {
+            fs::write(&path, &original).unwrap();
+            let mut source = input(kind, &path);
+            source["bytes"] = json!(original.len());
+            (source, path.clone())
+        };
+        let source_only = std::slice::from_ref(&source);
+        let safe_env = &[
+            ("BREWERY_WEIGHT_SAFETENSORS", "1"),
+            ("BREWERY_WEIGHT_SAFETENSORS_VERIFY_BYTES", "67108864"),
+        ];
+        let execute = |stage, inputs: &[Value], opts, env: &[(&str, &str)]| {
+            run_configured(root.path(), stage, inputs, opts, false, false, env)
+        };
+        let success = |stage, inputs: &[Value], opts| {
+            let out = execute(stage, inputs, opts, safe_env);
+            assert!(
+                out.status.success(),
+                "{kind} {stage}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(v["source_format"], kind);
+            assert_eq!(v["source_sha256"], source["sha256"]);
+            v
+        };
+        let inspect = json!({"tensor":tensor,"index":[0,1]});
+        let inspected = success("weight_inspect", source_only, inspect.clone());
+        assert_eq!(inspected["report"]["value"], 2.0);
+        let denied = execute(
+            "weight_inspect",
+            source_only,
+            inspect,
+            &[("BREWERY_WEIGHT_SAFETENSORS", "1")],
+        );
+        assert!(String::from_utf8_lossy(&denied.stderr).contains("immutable publication"));
+        let inventory = success(
+            "weight_inspect",
+            source_only,
+            json!({"mode":"inventory","offset":0,"limit":2,"source_sha256":source["sha256"]}),
+        );
+        assert_eq!(
+            inventory["report"]["tensors"].as_array().unwrap().len(),
+            if kind == "hf" { 2 } else { 1 }
+        );
+        let tile = success(
+            "weight_inspect",
+            source_only,
+            json!({"mode":"tile","tensor":tensor,"origin":[0,0],"shape":[2,2],"source_sha256":source["sha256"]}),
+        );
+        assert_eq!(tile["report"]["values"], json!([[1., 2.], [3., 4.]]));
+        let proposal = success(
+            "weight_propose",
+            source_only,
+            json!({"edits":[{"tensor":tensor,"index":[0,1],"op":"set","value":6.0}],"source_sha256":source["sha256"]}),
+        );
+        assert_eq!(proposal["proposal"]["edits"][0]["before"], 2.0);
+        let cal = root.path().join("cal.json");
+        let held = root.path().join("held.json");
+        fs::write(&cal, br#"{"activations":[[0,1]],"targets":[[3,4]]}"#).unwrap();
+        fs::write(&held, br#"{"activations":[[1,0]],"targets":[[1,3]]}"#).unwrap();
+        let tuned = success(
+            "weight_tune",
+            &[
+                source.clone(),
+                input("weight-calibration", &cal),
+                input("weight-calibration", &held),
+            ],
+            json!({"tensor":tensor,"indices":[[0,1]],"max_update":1.0,"source_sha256":source["sha256"]}),
+        );
+        assert_eq!(tuned["proposal"]["edits"][0]["after"], 3.0);
+        let artifact = input(
+            "weight-edit-proposal",
+            Path::new(proposal["artifact"]["path"].as_str().unwrap()),
+        );
+        let approved =
+            json!({"source_sha256":source["sha256"],"proposal_sha256":artifact["sha256"]});
+        let apply_inputs = [source.clone(), artifact];
+        let mut stale = approved.clone();
+        stale["proposal_sha256"] = json!("f".repeat(64));
+        let rejected = execute("weight_apply", &apply_inputs, stale, safe_env);
+        assert!(!rejected.status.success() && rejected.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("approved source or proposal"));
+        let no_space = execute(
+            "weight_apply",
+            &apply_inputs,
+            approved.clone(),
+            &[
+                safe_env[0],
+                safe_env[1],
+                (
+                    "BREWERY_WEIGHT_SAFETENSORS_DISK_RESERVE_BYTES",
+                    "1000000000000000",
+                ),
+            ],
+        );
+        assert!(!no_space.status.success() && no_space.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&no_space.stderr).contains("insufficient disk"));
+        let applied = success("weight_apply", &apply_inputs, approved);
+        assert_eq!(applied["verified"], true);
+        assert_eq!(applied["proposal_sha256"], apply_inputs[1]["sha256"]);
+        assert_eq!(applied["inputs"][0]["files"], source["files"]);
+        let output = Path::new(applied["artifact"]["path"].as_str().unwrap());
+        assert_eq!(applied["artifact"]["kind"], kind);
+        let leaf = if kind == "hf" {
+            assert_eq!(output.file_name().unwrap(), "edited.hf");
+            assert_eq!(applied["artifact"]["files"].as_array().unwrap().len(), 4);
+            assert_eq!(
+                applied["artifact"]["bundle_sha256"],
+                applied["report"]["output_sha256"]
+            );
+            assert_eq!(fs::read(output.join(neighbor_name)).unwrap(), neighbor);
+            for name in ["config.json", index_name] {
+                assert_eq!(
+                    fs::read(output.join(name)).unwrap(),
+                    fs::read(path.join(name)).unwrap()
+                );
+            }
+            output.join(shard_name)
+        } else {
+            assert_eq!(output.file_name().unwrap(), "edited.safetensors");
+            output.into()
+        };
+        assert_eq!(fs::read(&leaf).unwrap(), encode(tensor, [1., 6., 3., 4.]));
+        assert_eq!(fs::read(original_path).unwrap(), original);
+    }
 }
 
 #[test]

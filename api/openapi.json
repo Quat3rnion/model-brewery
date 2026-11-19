@@ -346,6 +346,64 @@
         }
       }
     },
+    "/api/settings/hf-tokens": {
+      "get": {
+        "operationId": "getHfTokenStatus",
+        "summary": "List Hugging Face credential status for eligible workers",
+        "description": "Lists active, opted-in, dedicated local download workers with private credential storage available. Returns only the worker ID and whether its token file is configured. Does not read the token or test it with Hugging Face. Uses the normal Settings access rules.",
+        "responses": {
+          "200": {"description": "Credential status, never credential values or paths.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HfTokenStatusList"}}}},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/settings/{host}/hf-token": {
+      "put": {
+        "operationId": "setHfToken",
+        "summary": "Set or replace the write-only Hugging Face token",
+        "description": "Uses the normal Settings access rules. Only an explicitly opted-in, dedicated local download worker can use this route. The operator must set matching absolute paths in dispatch hf_token_file and worker hf_download.token_file, outside served assets and worker source/state roots. The parent must be owned by the controller/worker account and have mode 0700. The controller writes the token to an owner-only file and never returns it. Saving does not run a job or test the token.",
+        "parameters": [{"name": "host", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/HostId"}}],
+        "requestBody": {
+          "required": true, "x-brewery-max-body-bytes": 2048,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SetHfToken"}}}
+        },
+        "responses": {
+          "200": {"description": "Token configured.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HfTokenStatus"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/HfTokenConflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "500": {"$ref": "#/components/responses/StorageError"},
+          "503": {"$ref": "#/components/responses/HfTokenStorageUnavailable"}
+        }
+      },
+      "delete": {
+        "operationId": "removeHfToken",
+        "summary": "Remove the configured Hugging Face token",
+        "description": "Uses the normal Settings access rules. Send an empty JSON object. Removal is safe to repeat. Future downloads from this worker use anonymous access. No token is returned.",
+        "parameters": [{"name": "host", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/HostId"}}],
+        "requestBody": {
+          "required": true, "x-brewery-max-body-bytes": 2048,
+          "content": {"application/json": {"schema": {"type": "object", "maxProperties": 0}}}
+        },
+        "responses": {
+          "200": {"description": "Token not configured.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HfTokenStatus"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/HfTokenConflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "500": {"$ref": "#/components/responses/StorageError"},
+          "503": {"$ref": "#/components/responses/HfTokenStorageUnavailable"}
+        }
+      }
+    },
     "/api/admin/state": {
       "get": {
         "operationId": "getAdminState",
@@ -578,7 +636,9 @@
       "PayloadTooLarge": {"description": "The request exceeds this operation's body limit, in bytes.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "UnsupportedMediaType": {"description": "Send Content-Type: application/json for JSON requests or a CLI cancel request.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "InvalidJsonData": {"description": "JSON could not be decoded as the request type (for example, wrong field type, unknown top-level field, or missing required field). Kind-specific validation after decoding instead returns 400.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
-      "StorageError": {"description": "A controller storage operation failed.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}, "example": {"error": "controller storage error"}}}}
+      "StorageError": {"description": "A controller storage operation failed.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}, "example": {"error": "controller storage error"}}}},
+      "HfTokenConflict": {"description": "The worker is not eligible, is inactive, or has a queued or running job.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "HfTokenStorageUnavailable": {"description": "The private token file cannot be safely changed.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
     },
     "schemas": {
       "DiscoveryDocument": {
@@ -959,6 +1019,20 @@
       "SettingsList": {
         "type": "object", "required": ["hosts"], "additionalProperties": false,
         "properties": {"hosts": {"type": "array", "items": {"$ref": "#/components/schemas/HostSettings"}}}
+      },
+      "HfTokenStatus": {
+        "type": "object", "required": ["id", "configured"], "additionalProperties": false,
+        "properties": {"id": {"$ref": "#/components/schemas/HostId"}, "configured": {"type": "boolean"}}
+      },
+      "HfTokenStatusList": {
+        "type": "object", "required": ["hosts"], "additionalProperties": false,
+        "properties": {"hosts": {"type": "array", "items": {"$ref": "#/components/schemas/HfTokenStatus"}}}
+      },
+      "SetHfToken": {
+        "type": "object", "required": ["token"], "additionalProperties": false,
+        "properties": {
+          "token": {"type": "string", "minLength": 4, "maxLength": 256, "pattern": "^hf_[A-Za-z0-9_-]+(?![\\s\\S])", "format": "password", "writeOnly": true}
+        }
       },
       "AdminToken": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", "description": "Worker or runtime ID of the admin catalog."},
       "AdminWorkerAction": {

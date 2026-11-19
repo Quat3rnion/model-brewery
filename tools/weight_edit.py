@@ -26,6 +26,7 @@ from cross_container.ggml_in_hgn import gguf_preamble, read_file
 import weight_ggml_codes
 import weight_hgn
 import weight_q8g64
+import weight_safetensors
 
 SCHEMA = "brewery.weight-edit-proposal.v1"
 MAX_JSON = 128 * 1024
@@ -240,7 +241,7 @@ class Source:
             row = {"name": t.name, "shape": t.shape, "dtype": self.dtype(t.name),
                    "elements": math.prod(t.shape)}
             reason = self.reason(t)
-            if self.source_format == "hgn" or reason or row["dtype"] in PACKED:
+            if self.source_format != "gguf" or reason or row["dtype"] in PACKED:
                 row["editable"] = reason is None
             if reason is not None:
                 row["reason"] = reason
@@ -308,11 +309,56 @@ class NativeHgn(Source):
                 "edited HGN layout changed")
 
 
-def load_source(path, source_sha256, *, validate_values=True):
+class SafeTensors(Source):
+    def __init__(self, path, source_sha256, manifest):
+        self.files = weight_safetensors.Files(path, source_sha256, manifest)
+        self.source_sha256 = source_sha256
+        self.source_format = "hf" if self.files.directory else "safetensors"
+        self.tensors = MappingProxyType(self.files.tensors)
+
+    def dtype(self, name):
+        return self.tensor(name).dtype
+
+    def reason(self, tensor):
+        if tensor.dtype not in ("F32", "F16", "BF16"):
+            return "SafeTensors dtype is read-only"
+        if not 1 <= len(tensor.shape) <= 4 or not all(tensor.shape):
+            return "SafeTensors shape is read-only"
+        return None
+
+    def format_fields(self):
+        return {"source_format": self.source_format}
+
+    def scalar(self, name, index):
+        tensor, flat = self._position(name, index)
+        width = weight_safetensors.WIDTHS[tensor.dtype]
+        offset = tensor.start + flat * width
+        value = decode_value(tensor.dtype, self.files.range(tensor.member, offset, width))
+        require(math.isfinite(value), "SafeTensors value is non-finite")
+        return tensor.dtype, (tensor.member, offset), value
+
+    def matrix(self, name):
+        tensor = self.tensor(name)
+        self._check_editable(tensor)
+        require(len(tensor.shape) == 2 and math.prod(tensor.shape) <= 1 << 20,
+                "expected one rank-2 matrix with at most 1,048,576 values")
+        width = weight_safetensors.WIDTHS[tensor.dtype]
+        raw = self.files.range(tensor.member, tensor.start, math.prod(tensor.shape) * width)
+        kind = gguf.GGMLQuantizationType[tensor.dtype]
+        values = gguf.dequantize(np.frombuffer(raw, dtype=np.uint8).reshape(-1, width), kind)
+        values = values.reshape(tensor.shape)
+        values.setflags(write=False)
+        return values
+
+
+def load_source(path, source_sha256, *, validate_values=True, manifest=None):
     """Load an immutable bounded source snapshot after its full hash matches."""
     require(sys.byteorder == "little", "weight editing requires a little-endian CPU")
     require(isinstance(source_sha256, str) and re.fullmatch(r"[0-9a-f]{64}", source_sha256),
             "expected lowercase source SHA-256")
+    if Path(path).suffix == ".safetensors" or Path(path).is_dir():
+        return SafeTensors(path, source_sha256, manifest)
+    require(manifest is None, "source manifest requires SafeTensors or indexed HF")
     data = read_file(path)
     require(hashlib.sha256(data).hexdigest() == source_sha256, "source SHA-256 mismatch")
     reader = NativeHgn if data[:4] == b"HGN1" else Source
@@ -363,10 +409,10 @@ def read_json(path):
     return json.loads(raw, object_pairs_hook=unique)
 
 
-def apply(source_path, proposal, destination):
+def apply(source_path, proposal, destination, *, manifest=None):
     require(type(proposal) is dict and set(proposal) == {"schema", "source_sha256", "edits"}
             and proposal["schema"] == SCHEMA, "invalid proposal schema")
-    source = load_source(source_path, proposal["source_sha256"])
+    source = load_source(source_path, proposal["source_sha256"], manifest=manifest)
     edits = proposal["edits"]
     identity = {"tensor", "index", "op", "value"}
     require(type(edits) is list and all(type(e) is dict and
@@ -379,6 +425,10 @@ def apply(source_path, proposal, destination):
             for k in ("before", "after")), "proposal before/after or dtype does not match")
 
     edit_count = len(edits)
+    if isinstance(source, SafeTensors):
+        digest = source.files.publish(destination, patches)
+        return {"schema": "brewery.weight-edit-result.v1", "source_sha256": source.source_sha256,
+                "output_sha256": digest, "edit_count": edit_count, **source.format_fields()}
     patches.update(source.patch_checksums(patches))
     destination = Path(destination)
     fd, temp = tempfile.mkstemp(prefix=".weight-edit-", dir=destination.parent)
@@ -424,6 +474,8 @@ def main():
     write = commands.add_parser("apply")
     for subcommand in (inspect, inventory, tile, make, write):
         subcommand.add_argument("source", type=Path)
+        subcommand.add_argument("--source-manifest", type=Path,
+                                help="operator-verified SafeTensors source manifest")
     for subcommand in (inspect, inventory, tile, make):
         subcommand.add_argument("--source-sha256", required=True)
     inspect.add_argument("--tensor", required=True)
@@ -439,10 +491,12 @@ def main():
     args = cli.parse_args()
     try:
         if args.command == "apply":
-            result = apply(args.source, read_json(args.proposal), args.destination)
+            result = apply(args.source, read_json(args.proposal), args.destination,
+                           manifest=args.source_manifest)
         else:
             source = load_source(args.source, args.source_sha256,
-                                 validate_values=args.command not in ("inventory", "tile"))
+                                 validate_values=args.command not in ("inventory", "tile"),
+                                 manifest=args.source_manifest)
             if args.command == "inspect":
                 require(len(args.index) <= 256, "index is too large")
                 index = json.loads(args.index)

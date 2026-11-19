@@ -57,6 +57,13 @@ impl Config {
         if let Some(download) = &cfg.hf_download {
             download.validate()?;
             ensure!(
+                download
+                    .token_file
+                    .as_ref()
+                    .is_none_or(|p| !p.starts_with(&cfg.root)),
+                "Hugging Face credentials must stay outside worker state"
+            );
+            ensure!(
                 cfg.pinned_publication.is_none()
                     && cfg.admission.is_none()
                     && cfg.managed_settings.is_none()
@@ -213,7 +220,12 @@ impl Worker {
                         r.reply.state == "succeeded" && r.action == "start",
                         "job output is not published"
                     );
-                    base.join(id).join("work")
+                    let work = base.join(id).join("work");
+                    if r.job.is_some_and(|job| job.kind == "hf_download") {
+                        work.join("download")
+                    } else {
+                        work
+                    }
                 } else {
                     ensure!(is_digest(id), "invalid cache source");
                     base.join(id).join("data")
@@ -265,7 +277,10 @@ impl Worker {
         }
         if self.cfg.hf_download.is_some() {
             return self.record_prepare(
-                id, action, job, Reply::error("This worker only runs Hugging Face download jobs")
+                id,
+                action,
+                job,
+                Reply::error("This worker only runs Hugging Face download jobs"),
             );
         }
         if matches!(
@@ -291,8 +306,17 @@ impl Worker {
                         .is_some_and(|path| Path::new(path).is_absolute()),
                 "weight editing is not configured on this worker"
             );
-            if job.inputs.first().is_some_and(|i| weight_source::supports(&i.kind)) {
-                let denial = if !self.cfg.engine_env.get(weight_source::GATE).is_some_and(|v| v == "1") {
+            if job
+                .inputs
+                .first()
+                .is_some_and(|i| weight_source::supports(&i.kind))
+            {
+                let denial = if !self
+                    .cfg
+                    .engine_env
+                    .get(weight_source::GATE)
+                    .is_some_and(|v| v == "1")
+                {
                     Some("SafeTensors weight editing is not configured on this worker")
                 } else if job.options.get("packed").is_some() {
                     Some("packed weight editing is not supported for SafeTensors sources")
@@ -420,8 +444,12 @@ impl Worker {
             .clone();
         ensure!(input.kind == original.kind, "resolved input kind changed");
         let job = r.job.as_ref().unwrap();
-        let native_safe = index == 0 && weight_source::job(&job.kind) && weight_source::supports(&input.kind);
-        ensure!(!native_safe || provided.is_none(), "SafeTensors weight jobs require a direct local source");
+        let native_safe =
+            index == 0 && weight_source::job(&job.kind) && weight_source::supports(&input.kind);
+        ensure!(
+            !native_safe || provided.is_none(),
+            "SafeTensors weight jobs require a direct local source"
+        );
         let mut pinned = false;
         let (bundle, cached) = if let Some(b) = provided {
             b.validate()?;
@@ -505,8 +533,12 @@ impl Worker {
                     Some((index, count)),
                 );
                 let proof = if native_safe {
-                    self.cfg.engine_env.get(weight_source::PUBLICATION)
-                        .map(|receipt| weight_source::publication(&p, &input.kind, Path::new(receipt)))
+                    self.cfg
+                        .engine_env
+                        .get(weight_source::PUBLICATION)
+                        .map(|receipt| {
+                            weight_source::publication(&p, &input.kind, Path::new(receipt))
+                        })
                         .transpose()
                         .context("SafeTensors immutable publication invalid")?
                         .flatten()
@@ -518,7 +550,10 @@ impl Worker {
                 } else {
                     let max_bytes = if native_safe {
                         let limit = weight_source::verify_limit(
-                            self.cfg.engine_env.get(weight_source::VERIFY_BYTES).map(String::as_str),
+                            self.cfg
+                                .engine_env
+                                .get(weight_source::VERIFY_BYTES)
+                                .map(String::as_str),
                         )?;
                         weight_source::bounded_inventory(&p, &input.kind, limit)?;
                         limit
@@ -526,7 +561,12 @@ impl Worker {
                         u64::MAX
                     };
                     let d = cache::describe_bounded(
-                        &p, &input.kind, &boundary, "hash_input", &mut progress, max_bytes,
+                        &p,
+                        &input.kind,
+                        &boundary,
+                        "hash_input",
+                        &mut progress,
+                        max_bytes,
                     )?;
                     ensure!(
                         d.root.starts_with(&boundary),

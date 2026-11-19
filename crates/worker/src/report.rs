@@ -66,6 +66,7 @@ fn stage(kind: &str) -> &'static str {
         "generate" => "Generating response",
         "evaluate" => "Evaluating model",
         "baseline" => "Running baseline",
+        "hf_download" => "Preparing Hugging Face download",
         _ => "Running engine",
     }
 }

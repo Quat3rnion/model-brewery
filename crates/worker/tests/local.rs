@@ -375,6 +375,127 @@ fn safetensors_weight_jobs_require_their_own_worker_opt_in() {
 }
 
 #[test]
+fn unproven_large_safetensors_is_refused_before_engine_start() {
+    let t = Rig::new();
+    let source = t.src.join("model.safetensors");
+    fs::File::create(&source)
+        .unwrap()
+        .set_len(360_000_000_000)
+        .unwrap();
+    let mut config: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
+    config["engine_env"] = json!({
+        "BREWERY_WEIGHT_EDIT":t.root.join("engine"),
+        "BREWERY_WEIGHT_SAFETENSORS":"1",
+        "BREWERY_WEIGHT_SAFETENSORS_VERIFY_BYTES":"67108864",
+    });
+    fs::write(&t.b, config.to_string()).unwrap();
+    let job = json!({
+        "kind":"weight_inspect",
+        "inputs":[{"kind":"safetensors","host":"b","path":source}],
+        "options":{"tensor":"layer.weight","index":[0,0]}
+    });
+    let denied = t.dispatch("start", "st-unproven", Some(&job));
+    assert_eq!(denied["state"], "failed");
+    assert!(
+        denied["error"]
+            .as_str()
+            .unwrap()
+            .contains("valid immutable publication")
+    );
+    assert!(denied.get("result").is_none());
+    assert!(!t.root.join("b/jobs/st-unproven/work").exists());
+}
+
+#[test]
+fn safetensors_rejects_a_manifest_without_kernel_verity_even_with_explicit_fallback() {
+    use brewery_worker::{Entry, hash, tree_digest};
+    let t = Rig::new();
+    let source = t.src.join("model.safetensors");
+    fs::write(&source, b"ordinary mutable source").unwrap();
+    let entry = Entry {
+        path: "model.safetensors".into(),
+        bytes: fs::metadata(&source).unwrap().len(),
+        sha256: hash(&source).unwrap(),
+    };
+    let receipt = t.root.join("weight-publication.json");
+    fs::write(
+        &receipt,
+        json!({
+            "schema":"brewery.weight-publication.v1",
+            "source":source,
+            "bundle_sha256":tree_digest(std::slice::from_ref(&entry)),
+            "files":[{"path":entry.path,"bytes":entry.bytes,"sha256":entry.sha256,
+                "fsverity_sha256":entry.sha256}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut config: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
+    config["engine_env"] = json!({
+        "BREWERY_WEIGHT_EDIT":t.root.join("engine"),
+        "BREWERY_WEIGHT_SAFETENSORS":"1",
+        "BREWERY_WEIGHT_SAFETENSORS_VERIFY_BYTES":"67108864",
+        "BREWERY_WEIGHT_SAFETENSORS_PUBLICATION":receipt,
+    });
+    fs::write(&t.b, config.to_string()).unwrap();
+    let job = json!({
+        "kind":"weight_inspect",
+        "inputs":[{"kind":"safetensors","host":"b","path":source}],
+        "options":{"tensor":"layer.weight","index":[0,0]}
+    });
+    let denied = t.dispatch("start", "st-false-proof", Some(&job));
+    assert_eq!(denied["state"], "failed");
+    assert_eq!(
+        denied["error"],
+        "SafeTensors immutable publication could not be verified"
+    );
+    assert_eq!(t.dispatch("status", "st-false-proof", None), denied);
+    assert!(!t.root.join("b/jobs/st-false-proof/work").exists());
+}
+
+#[test]
+fn cancelled_safetensors_job_removes_unpublished_weight_output() {
+    let t = Rig::new();
+    let source = t.src.join("model.safetensors");
+    fs::write(&source, b"fixture").unwrap();
+    let engine = t.root.join("engine");
+    fs::write(
+        &engine,
+        "#!/bin/sh\nset -eu\ncat >/dev/null\nmkdir .weight-safetensors-fixture\n\
+         printf partial > .weight-safetensors-fixture/output.safetensors\n\
+         printf edited > edited.safetensors\nexec sleep 60\n",
+    )
+    .unwrap();
+    let mut config: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
+    config["engine_env"] = json!({
+        "BREWERY_WEIGHT_EDIT":engine,
+        "BREWERY_WEIGHT_SAFETENSORS":"1",
+        "BREWERY_WEIGHT_SAFETENSORS_VERIFY_BYTES":"67108864",
+    });
+    fs::write(&t.b, config.to_string()).unwrap();
+    let id = "st-cancelled";
+    t.dispatch(
+        "start",
+        id,
+        Some(&json!({
+            "kind":"weight_apply",
+            "inputs":[{"kind":"safetensors","host":"b","path":source}]
+        })),
+    );
+    let work = t.root.join("b/jobs/st-cancelled/work");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !work.join("edited.safetensors").exists() {
+        assert!(Instant::now() < deadline, "engine did not start");
+        thread::sleep(Duration::from_millis(20));
+    }
+    t.dispatch("cancel", id, None);
+    assert!(t.wait(id, "cancelled").get("result").is_none());
+    assert!(!work.join("edited.safetensors").exists());
+    assert!(!work.join(".weight-safetensors-fixture").exists());
+    assert_eq!(fs::read(source).unwrap(), b"fixture");
+}
+
+#[test]
 fn packed_gate_denial_is_terminal_for_the_same_job_id() {
     let t = Rig::new();
     let source = t.src.join("packed.gguf");

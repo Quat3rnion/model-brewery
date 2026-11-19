@@ -51,6 +51,9 @@ pub fn engine(base: &Path, since: u64) -> Option<ProgressDetail> {
             | "convert_passes_values"
             | "verify_payloads_values"
             | "verify_pinned_input"
+            | "hf_download_resolve"
+            | "hf_download_transfer"
+            | "hf_download_verify"
     )
     .then_some(detail)
 }
@@ -164,6 +167,8 @@ pub fn apply(reply: &mut Reply, detail: ProgressDetail) {
         "verify_cache" => "Verifying cached bundle",
         "verify_staged" => "Verifying staged bundle checksums",
         "verify_output" => "Verifying engine output",
+        "hf_download_transfer" => "Downloading complete files",
+        "hf_download_verify" => "Checking download checksums",
         _ => {
             reply.progress_detail = Some(detail);
             return;

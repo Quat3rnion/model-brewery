@@ -21,6 +21,17 @@ pub(super) struct Source {
 
 impl Source {
     pub fn prepare(input: &Input, id: &Identity, work: &Path, apply: bool) -> Result<Self> {
+        let meminfo = fs::read_to_string("/proc/meminfo")?;
+        let available_kib = meminfo
+            .lines()
+            .find_map(|line| line.strip_prefix("MemAvailable:"))
+            .and_then(|line| line.split_ascii_whitespace().next())
+            .context("cannot determine memory available for SafeTensors worker")?
+            .parse::<u64>()?;
+        ensure!(
+            available_kib >= 256 * 1024,
+            "insufficient available memory for bounded SafeTensors helper"
+        );
         ensure!(
             input
                 .source_host

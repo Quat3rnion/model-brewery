@@ -49,7 +49,7 @@ def fixture(kind, values=ORIGINAL):
         }}, indent=2).encode() + b"\n",
         "config.json": b'{ "architectures": ["Fixture"], "hidden_size": 2 }\n',
         "tokenizer.json": b'{ "version": "1.0" }\n',
-        "assets/extra.txt": b"Keep exact bytes in nested sidecars.\n",
+        "extra.txt": b"Keep exact bytes in flat sidecars.\n",
     }
 
 
@@ -70,7 +70,7 @@ def describe(path):
         name = file.relative_to(path).as_posix() if path.is_dir() else ""
         snapshot[name] = (file.read_bytes(), (info.st_dev, info.st_ino))
     if path.is_dir():
-        assert {p.relative_to(path).as_posix() for p in path.rglob("*") if p.is_dir()} == {"assets"}
+        assert not any(p.is_dir() for p in path.rglob("*"))
     return snapshot
 
 

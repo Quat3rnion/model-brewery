@@ -56,21 +56,39 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
         w.put(id, &r)?;
         job
     };
-    let result = execute(w, id, &base, &job);
+    let download = job.kind == "hf_download";
+    let held = if download {
+        download_lock(w, id).map(Some)
+    } else {
+        Ok(None)
+    };
+    let result = match &held {
+        Ok(_) => execute(w, id, &base, &job),
+        Err(e) => Err(anyhow::anyhow!("{e}")),
+    };
     let _guard = w.state_lock()?;
     let mut r = w.require(id)?;
     if (r.cancel || result.is_err())
         && weight_source::job(&job.kind)
-        && job.inputs.first().is_some_and(|i| weight_source::supports(&i.kind))
+        && job
+            .inputs
+            .first()
+            .is_some_and(|i| weight_source::supports(&i.kind))
     {
         let work = base.join("work");
         // The engine may have been killed before its scratch guard ran.
         if let Ok(entries) = fs::read_dir(&work) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
-                if name.to_str().is_some_and(|s| s.starts_with(".weight-safetensors-") || s == "edited.hf") {
+                if name
+                    .to_str()
+                    .is_some_and(|s| s.starts_with(".weight-safetensors-") || s == "edited.hf")
+                {
                     let _ = fs::remove_dir_all(entry.path());
-                } else if matches!(name.to_str(), Some("edited.safetensors" | "weight-proposal.json")) {
+                } else if matches!(
+                    name.to_str(),
+                    Some("edited.safetensors" | "weight-proposal.json")
+                ) {
                     let _ = fs::remove_file(entry.path());
                 }
             }
@@ -79,6 +97,12 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
     r.reply = if r.cancel {
         Reply::new("cancelled", "process tree stopped")
     } else {
+        let result = result.and_then(|value| {
+            if download {
+                publish_download(w, &base)?;
+            }
+            Ok(value)
+        });
         match result {
             Ok(value) => Reply::success(value),
             Err(e) => Reply::error(e.to_string()),
@@ -87,7 +111,53 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
     w.put(id, &r)
 }
 
+fn download_lock(w: &Worker, id: &str) -> Result<File> {
+    // One bounded private resume stage per dedicated host. Waiting jobs
+    // still observe cancellation without needing the transfer to finish.
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(w.cfg.root.join("hf-download.lock"))?;
+    loop {
+        ensure!(!w.require(id)?.cancel, "cancel requested");
+        match fs2::FileExt::try_lock_exclusive(&lock) {
+            Ok(()) => return Ok(lock),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(300))
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+fn download_stage(w: &Worker) -> PathBuf {
+    w.cfg.root.join("hf-download-stage")
+}
+
+fn publish_download(w: &Worker, base: &Path) -> Result<()> {
+    // Both the state and download lock are held after worker verification.
+    let stage = download_stage(w);
+    let work = base.join("work");
+    let src = stage.join("data");
+    let dest = work.join("download");
+    let stage_dir = File::open(&stage)?;
+    let work_dir = File::open(&work)?;
+    fs::rename(&src, &dest)?;
+    if let Err(e) = work_dir.sync_all().and_then(|()| stage_dir.sync_all()) {
+        let _ = fs::rename(&dest, &src);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
 fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
+    let download = w.cfg.hf_download.as_ref();
+    ensure!(
+        (job.kind == "hf_download") == download.is_some(),
+        "Worker is not configured for this operation"
+    );
     let work = base.join("work");
     fs::create_dir(&work)?;
     let jobfile = base.join("engine-input.json");
@@ -111,10 +181,31 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
         .stdin(File::open(jobfile)?)
         .stdout(File::create(&output)?)
         .stderr(File::create(stderr)?);
+    if let Some(download) = download {
+        let policy = base.join("hf-download-policy.json");
+        atomic(
+            &policy,
+            &(download, download_stage(w), w.cfg.disk_reserve_bytes),
+        )?;
+        command
+            .env_clear()
+            .env("BREWERY_HF_DOWNLOAD_CONFIG", policy);
+    }
     if weight_source::job(&job.kind)
-        && job.inputs.first().is_some_and(|i| weight_source::supports(&i.kind))
+        && job
+            .inputs
+            .first()
+            .is_some_and(|i| weight_source::supports(&i.kind))
     {
-        command.env("BREWERY_WEIGHT_SAFETENSORS_DISK_RESERVE_BYTES", w.cfg.disk_reserve_bytes.to_string());
+        for key in [weight_source::PUBLICATION, weight_source::VERIFY_BYTES] {
+            if !w.cfg.engine_env.contains_key(key) {
+                command.env_remove(key);
+            }
+        }
+        command.env(
+            "BREWERY_WEIGHT_SAFETENSORS_DISK_RESERVE_BYTES",
+            w.cfg.disk_reserve_bytes.to_string(),
+        );
     }
     if let Some(policy) = &w.cfg.managed_settings
         && matches!(
@@ -243,6 +334,49 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
         value.is_object(),
         "Engine output is not a JSON object; check private engine-output.json"
     );
+    if let Some(download) = download {
+        let spec = hf_download::Spec::parse(&job.options)?;
+        let mut path = work.join("download");
+        if let Some(filename) = &spec.filename {
+            path.push(filename);
+        }
+        ensure!(
+            value["kind"] == "hf_download"
+                && value["verified"] == true
+                && value["repo_id"] == spec.repo_id
+                && value["revision"] == spec.revision
+                && value.get("filename").map(Value::as_str) == spec.filename.as_deref().map(Some)
+                && value["commit"].as_str().is_some_and(|commit| {
+                    hf_download::is_commit(commit)
+                        && (!hf_download::is_commit(&spec.revision) || commit == spec.revision)
+                })
+                && value["artifact"]["path"].as_str().map(Path::new) == Some(path.as_path())
+                && value["artifact"]["kind"] == spec.artifact_kind()
+                && value["artifact"]["bytes"]
+                    .as_u64()
+                    .is_some_and(|n| n > 0 && n <= download.max_bytes),
+            "Download engine did not return a verified managed artifact"
+        );
+        let data = download_stage(w).join("data");
+        let mut staging = value.clone();
+        let mut path = data.clone();
+        if let Some(name) = spec.filename.as_deref() {
+            path.push(name);
+            // A selected artifact is exactly one file; do not expand split GGUF names.
+            staging["artifact"]["kind"] = json!("safetensors");
+        }
+        staging["artifact"]["path"] = json!(path);
+        let mut emit = w.progress_callback(id)?;
+        if let Err(e) = verify_artifact(
+            &data,
+            &staging,
+            &mut progress::Reporter::new(&mut emit, None),
+        ) {
+            eprintln!("Download staging verification failed: {e:#}");
+            bail!("Download artifact failed worker validation");
+        }
+        return Ok(value);
+    }
     if job.kind == "weight_apply" {
         let source = job.inputs.first().context("weight apply has no source")?;
         let filename = match source.kind.as_str() {
@@ -255,11 +389,17 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
                 "edited.hgn"
             }
             "hf" | "safetensors" => {
-                ensure!(value["source_format"] == source.kind
-                    && value["proposal_sha256"].is_string()
-                    && value["proposal_sha256"] == job.options["proposal_sha256"],
-                    "weight apply receipt did not bind SafeTensors format and approval");
-                if source.kind == "hf" { "edited.hf" } else { "edited.safetensors" }
+                ensure!(
+                    value["source_format"] == source.kind
+                        && value["proposal_sha256"].is_string()
+                        && value["proposal_sha256"] == job.options["proposal_sha256"],
+                    "weight apply receipt did not bind SafeTensors format and approval"
+                );
+                if source.kind == "hf" {
+                    "edited.hf"
+                } else {
+                    "edited.safetensors"
+                }
             }
             _ => bail!("invalid weight apply source format"),
         };
@@ -340,7 +480,8 @@ fn verify_artifact(work: &Path, result: &Value, reporter: &mut progress::Notify<
     }
     if result["kind"] == "weight_apply" && kind == "hf" {
         ensure!(
-            artifact["bundle_sha256"] == d.bundle.digest && artifact["files"] == to_value(&d.bundle.files)?,
+            artifact["bundle_sha256"] == d.bundle.digest
+                && artifact["files"] == to_value(&d.bundle.files)?,
             "edited HF artifact manifest does not match"
         );
     }

@@ -153,7 +153,7 @@ def tune(args):
     cap = args.max_update
     if not math.isfinite(cap) or cap <= 0:
         raise ValueError("max-update must be finite and positive")
-    source = load_source(args.source, args.source_sha256)
+    source = load_source(args.source, args.source_sha256, manifest=args.source_manifest)
     raw = source.matrix(args.tensor)
     if raw.ndim != 2 or not 1 <= raw.size <= MAX_MATRIX_VALUES:
         raise ValueError("expected one rank-2 matrix with at most 1,048,576 values")
@@ -216,6 +216,7 @@ def main():
     )
     parser.add_argument("source", type=Path)
     parser.add_argument("--source-sha256", required=True)
+    parser.add_argument("--source-manifest", type=Path)
     parser.add_argument("--tensor", required=True)
     parser.add_argument("--indices", required=True, help="JSON list of [output row,input column]")
     parser.add_argument("--calibration", required=True, type=Path)

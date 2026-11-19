@@ -3,6 +3,9 @@ use serde_json::{Value, json};
 #[path = "support/hf_download.rs"]
 mod hf_download;
 
+#[path = "support/hf_tokens.rs"]
+mod hf_tokens;
+
 #[path = "support/weights.rs"]
 mod weights;
 

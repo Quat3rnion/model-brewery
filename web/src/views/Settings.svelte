@@ -1,5 +1,6 @@
 <script lang="ts">
   import Infrastructure from '../components/Infrastructure.svelte';
+  import HfTokenSettings from '../components/HfTokenSettings.svelte';
   import { api, ApiError, errorText } from '../lib/api';
   import { brewery } from '../lib/store.svelte';
   import { buildPut, effectiveReadiness, endpointProblem, hostDirty, idProblem, parseHost, parseSettings, validateHost, type Endpoint, type HostSettings } from '../lib/settings';
@@ -256,6 +257,7 @@
     </div>
   {/if}
   <Infrastructure />
+  <HfTokenSettings />
 </div>
 
 <style>

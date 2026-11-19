@@ -5,6 +5,7 @@ mod domain;
 mod feed;
 mod gguf;
 mod hf_download;
+mod hf_tokens;
 mod idempotency;
 mod profiles;
 mod settings;
@@ -32,6 +33,7 @@ struct App {
     store: Mutex<Store>,
     hosts: Vec<Host>,
     settings: settings::Managed,
+    hf_tokens: hf_tokens::Store,
     pub admin: Option<admin::Admin>,
     suggestions: suggestions::PathSuggestions,
     feed_subscribers: Arc<tokio::sync::Semaphore>,
@@ -89,6 +91,7 @@ async fn main() -> Result<(), Error> {
         store: Mutex::new(store),
         hosts,
         settings: settings::Managed::from_config(config_value.as_ref()),
+        hf_tokens: hf_tokens::Store::from_config(config_value.as_ref(), &dist),
         admin,
         suggestions: suggestions::PathSuggestions::new(dispatcher.command.clone()),
         feed_subscribers: Arc::new(tokio::sync::Semaphore::new(feed::SUBSCRIBERS)),
