@@ -350,7 +350,7 @@
       "get": {
         "operationId": "getHfTokenStatus",
         "summary": "List Hugging Face credential status for eligible workers",
-        "description": "Lists active, opted-in, dedicated local download workers with private credential storage available. Returns only the worker ID and whether its token file is configured. Does not read the token or test it with Hugging Face. Uses the normal Settings access rules.",
+        "description": "Lists the built-in backend downloader if available, and any opted-in dedicated local download workers with private credential storage. Returns only the worker ID and whether its token file is configured. Does not read the token or test it with Hugging Face. Uses the normal Settings access rules.",
         "responses": {
           "200": {"description": "Credential status, never credential values or paths.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HfTokenStatusList"}}}},
           "403": {"$ref": "#/components/responses/Forbidden"},
@@ -362,7 +362,7 @@
       "put": {
         "operationId": "setHfToken",
         "summary": "Set or replace the write-only Hugging Face token",
-        "description": "Uses the normal Settings access rules. Only an explicitly opted-in, dedicated local download worker can use this route. The operator must set matching absolute paths in dispatch hf_token_file and worker hf_download.token_file, outside served assets and worker source/state roots. The parent must be owned by the controller/worker account and have mode 0700. The controller writes the token to an owner-only file and never returns it. Saving does not run a job or test the token.",
+        "description": "Uses the normal Settings access rules. Use backend-hf for the built-in downloader. The backend manages its token in private controller storage without worker enrollment. An opted-in dedicated local worker can also use this route if its operator configures matching private credential paths. The controller writes the token to an owner-only file and never returns it. Saving does not run a job or test the token.",
         "parameters": [{"name": "host", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/HostId"}}],
         "requestBody": {
           "required": true, "x-brewery-max-body-bytes": 2048,
@@ -1364,8 +1364,8 @@
         "properties": {"bundle_sha256": {"$ref": "#/components/schemas/Sha256"}}
       },
       "HfDownloadJob": {
-        "description": "Download from Hugging Face on an explicit worker with hf_download enabled. No inputs or prompt. The worker resolves the revision to an immutable commit. A successful verified download registers a new Library model.",
-        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/RequiredHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
+        "description": "Download from Hugging Face. Omit host or send null to use the built-in backend downloader, which requires no worker enrollment. If the built-in downloader is unavailable, the default request returns 409. An explicit host must have hf_download enabled. No inputs or prompt. The downloader resolves the revision to an immutable commit. A successful verified download registers a new Library model at a persistent backend or worker path.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/DefaultInputHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
         "required": ["options"],
         "properties": {"kind": {"const": "hf_download"}, "input_ids": {"maxItems": 0}, "options": {"$ref": "#/components/schemas/HfDownloadOptions"}}
       },

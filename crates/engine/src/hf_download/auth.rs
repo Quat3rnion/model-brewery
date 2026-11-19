@@ -1,5 +1,5 @@
 //! hfr follows redirects and pagination itself. Keep it credential-free:
-//! for authenticated jobs it only sees a scoped local view of the checked Hub.
+//! it only sees a scoped local view of the checked Hub.
 use super::{Inventory, POLICY};
 use anyhow::{anyhow, ensure, Context, Result};
 use brewery_worker::hf_download::valid_token;

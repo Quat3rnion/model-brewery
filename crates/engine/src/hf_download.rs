@@ -645,13 +645,18 @@ pub(crate) fn run(job: &Job, cwd: &Path, pg: &Progress) -> Result<Value> {
     }
     fs::create_dir(&client_root)?;
     let home = tempfile::tempdir_in(&client_root)?;
-    let broker = (token.is_some() || inv.has_xet())
-        .then(|| auth::Broker::start(&inv, token, fs::read_dir(&data)?.next().is_some()))
-        .transpose()?;
-    let endpoint = broker
-        .as_ref()
-        .map_or(inv.origin.as_str(), auth::Broker::endpoint);
-    transfer(&cfg, &inv, &data, home.path(), endpoint, pg, reserve)?;
+    // hfr must not follow Hub-provided redirects or pagination directly,
+    // even for a public range-only download.
+    let broker = auth::Broker::start(&inv, token, fs::read_dir(&data)?.next().is_some())?;
+    transfer(
+        &cfg,
+        &inv,
+        &data,
+        home.path(),
+        broker.endpoint(),
+        pg,
+        reserve,
+    )?;
     drop(broker);
     let files = verify(&inv, &data, pg)?;
     let mut artifact = published.clone();

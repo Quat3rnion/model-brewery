@@ -2,6 +2,32 @@ use super::*;
 
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
+#[test]
+fn backend_downloads_without_a_configured_worker() {
+    let mut app = Fixture::new();
+    fs::write(app.path("dispatch.json"), r#"{"hosts":{}}"#).unwrap();
+    let companion = app.path("dispatch");
+    app.launch_with(&[
+        ("BREWERY_HF_WORKER", companion.clone()),
+        ("BREWERY_HF_ENGINE", companion.clone()),
+        ("BREWERY_HF_HFR", companion.clone()),
+        ("BREWERY_HF_DISPATCH", companion),
+    ]);
+    let job = app.enqueue(json!({"kind":"hf_download","options":{"repo_id":"example/model"}}));
+    let job = terminal(&app, &job);
+    assert_eq!(job["host"], "backend-hf");
+    assert_eq!(job["state"], "succeeded");
+    assert_eq!(library(&app)[0]["id"], job["result"]["library_model_id"]);
+    assert_eq!(
+        app.json("GET", "/api/settings/hf-tokens", None, 200),
+        json!({"hosts":[{"id":"backend-hf","configured":false}]})
+    );
+    assert_eq!(
+        fs::read_to_string(app.path("dispatch.json")).unwrap(),
+        r#"{"hosts":{}}"#
+    );
+}
+
 fn fixture() -> Fixture {
     let app = Fixture::new();
     fs::write(
@@ -32,7 +58,7 @@ fn hf_download_requires_an_explicit_opted_in_host_and_closed_options() {
     body["host"] = json!("alpha");
     app.json("POST", "/api/jobs", Some(body.clone()), 409);
     body["host"] = Value::Null;
-    app.json("POST", "/api/jobs", Some(body.clone()), 400);
+    app.json("POST", "/api/jobs", Some(body.clone()), 409);
     body["host"] = json!("auto");
     app.json("POST", "/api/jobs", Some(body), 400);
     for options in [

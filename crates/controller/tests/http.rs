@@ -57,6 +57,10 @@ impl Fixture {
     }
 
     fn launch(&mut self) {
+        self.launch_with(&[]);
+    }
+
+    fn launch_with(&mut self, env: &[(&str, PathBuf)]) {
         let log_path = self.path("server.log");
         let log = fs::OpenOptions::new()
             .create(true)
@@ -71,6 +75,7 @@ impl Fixture {
             .env("BREWERY_DISPATCH_CONFIG", self.path("dispatch.json"))
             .env("BREWERY_WEB_DIST", self.path("dist"))
             .env("BREWERY_POLL_MS", "25")
+            .envs(env.iter().map(|(key, value)| (*key, value)))
             .stdout(Stdio::from(log))
             .spawn()
             .unwrap();

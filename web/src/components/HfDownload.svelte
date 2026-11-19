@@ -4,8 +4,7 @@
   import Submit from './Submit.svelte';
 
   const submitter = new Submitter();
-  const workers = $derived((brewery.state?.hosts ?? []).filter((h) => h.capabilities?.hf_download === true));
-  let host = $state('');
+  const available = $derived(brewery.state?.hosts.some((h) => h.id === 'backend-hf' && h.capabilities?.hf_download === true));
   let repo = $state('');
   let revision = $state('');
   let scope = $state('file');
@@ -18,14 +17,13 @@
     if (revision.trim() && !revision.trim().split('/').every(safePart)) errors.push('Enter a branch, tag or commit, not a URL.');
     if (scope === 'file' && (!filename.trim().split('/').every(safePart) || !/\.(gguf|safetensors)$/i.test(filename.trim())))
       errors.push('Enter the exact .gguf or .safetensors filename from the repository.');
-    if (!workers.length) errors.push('No worker has Hugging Face downloads enabled.');
-    else if (!workers.some((w) => w.id === host)) errors.push('Select a download worker.');
+    if (!available) errors.push('The built-in downloader is unavailable.');
     return errors;
   });
   async function start() {
     if (submitter.busy || blockers.length) return;
     const job = await submitter.submit({
-      kind: 'hf_download', host, input_ids: [],
+      kind: 'hf_download', input_ids: [],
       options: { repo_id: repo.trim(), revision: revision.trim(), filename: scope === 'file' ? filename.trim() : undefined },
     });
     if (job) location.hash = `#/jobs/${encodeURIComponent(job.id)}`;
@@ -59,15 +57,8 @@
           <span class="hint" id="hf-file-help">Use the exact name in the repository, including any subfolder.</span>
         </div>
       {/if}
-      <div class="field">
-        <label for="hf-worker">Worker</label>
-        <select id="hf-worker" class="input" bind:value={host} disabled={!workers.length}>
-          <option value="">Select a download worker</option>
-          {#each workers as w (w.id)}<option value={w.id}>{w.name ?? w.id}</option>{/each}
-        </select>
-      </div>
     </div>
-    <p class="hint">The worker downloads {scope === 'file' ? 'this file' : 'the whole repository'} to managed storage. Track progress or cancel in Jobs. A verified download appears in the Library.</p>
+    <p class="hint">Track progress or cancel in Jobs. The Library entry appears after the download is verified.</p>
     <Submit {blockers} busy={submitter.busy} onclick={start}>Start download</Submit>
     {#if submitter.error}<p class="note bad" role="alert">{submitter.error}</p>{/if}
   </div>

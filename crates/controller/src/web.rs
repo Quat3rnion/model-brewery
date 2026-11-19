@@ -513,20 +513,30 @@ async fn add_job(
             Ok(model)
         })
         .collect::<Result<Vec<_>>>()?;
-    let host = request
-        .host
-        .as_deref()
-        .or_else(|| {
-            if matches!(
-                request.kind.as_str(),
-                "cache_cleanup" | "transfer" | "transfer_preview" | "benchmark" | "hf_download"
-            ) {
-                None
-            } else {
-                inputs.first().map(|m| m.host.as_str())
-            }
-        })
-        .ok_or_else(|| ApiError::bad("a destination host is required"))?;
+    let host = if request.kind == "hf_download" && request.host.is_none() {
+        if !app.backend_download {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "Backend Hugging Face downloads are unavailable".into(),
+            ));
+        }
+        crate::backend_hf::ID
+    } else {
+        request
+            .host
+            .as_deref()
+            .or_else(|| {
+                if matches!(
+                    request.kind.as_str(),
+                    "cache_cleanup" | "transfer" | "transfer_preview" | "benchmark"
+                ) {
+                    None
+                } else {
+                    inputs.first().map(|m| m.host.as_str())
+                }
+            })
+            .ok_or_else(|| ApiError::bad("a destination host is required"))?
+    };
     let host = host.to_owned();
     if host != "auto" || request.kind != "convert" {
         let entry = app

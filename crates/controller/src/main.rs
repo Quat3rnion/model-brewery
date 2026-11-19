@@ -1,4 +1,5 @@
 mod admin;
+mod backend_hf;
 mod conversion;
 mod dispatch;
 mod domain;
@@ -34,6 +35,7 @@ struct App {
     hosts: Vec<Host>,
     settings: settings::Managed,
     hf_tokens: hf_tokens::Store,
+    backend_download: bool,
     pub admin: Option<admin::Admin>,
     suggestions: suggestions::PathSuggestions,
     feed_subscribers: Arc<tokio::sync::Semaphore>,
@@ -74,24 +76,36 @@ async fn main() -> Result<(), Error> {
         .as_deref()
         .map(|path| -> Result<Value, Error> { Ok(serde_json::from_reader(fs::File::open(path)?)?) })
         .transpose()?;
-    let hosts = config_value
+    let mut hosts = config_value
         .as_ref()
         .map(load_hosts)
         .transpose()?
         .unwrap_or_default();
     let dist = env_path("BREWERY_WEB_DIST", "web/dist");
-    let dispatcher = Dispatcher {
+    let mut dispatcher = Dispatcher {
         command: env_path("BREWERY_DISPATCH", "brewery-dispatch"),
+        backend: None,
         launch_timeout: Duration::from_secs(env_num("BREWERY_DISPATCH_TIMEOUT_SECS", 21600)?),
         poll: Duration::from_millis(env_num("BREWERY_POLL_MS", 1000)?.max(25)),
     };
     let store = Store::open(&data)?;
     let admin = admin::Admin::from_env(&data, &hosts, config.as_deref(), &dispatcher.command)?;
+    let mut hf_tokens = hf_tokens::Store::from_config(config_value.as_ref(), &dist);
+    match backend_hf::Lane::prepare(&data, &dist) {
+        Ok(Some(lane)) => {
+            hosts.push(lane.host()?);
+            hf_tokens.add_local(backend_hf::ID, lane.local_config());
+            dispatcher.backend = Some(lane);
+        }
+        Ok(None) => {}
+        Err(_) => eprintln!("Backend download storage is unavailable"),
+    }
     let app = Arc::new(App {
         store: Mutex::new(store),
         hosts,
         settings: settings::Managed::from_config(config_value.as_ref()),
-        hf_tokens: hf_tokens::Store::from_config(config_value.as_ref(), &dist),
+        hf_tokens,
+        backend_download: dispatcher.backend.is_some(),
         admin,
         suggestions: suggestions::PathSuggestions::new(dispatcher.command.clone()),
         feed_subscribers: Arc::new(tokio::sync::Semaphore::new(feed::SUBSCRIBERS)),
@@ -127,6 +141,11 @@ fn load_hosts(config: &Value) -> Result<Vec<Host>, Error> {
         .ok_or("dispatch config requires a hosts object")?;
     hosts
         .iter()
-        .map(|(id, entry)| Ok(Host::from_config(id, entry)?))
+        .map(|(id, entry)| {
+            if id == backend_hf::ID {
+                return Err("backend-hf is reserved for controller downloads".into());
+            }
+            Ok(Host::from_config(id, entry)?)
+        })
         .collect()
 }

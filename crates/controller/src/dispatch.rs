@@ -1,5 +1,5 @@
 use crate::{
-    App, Error,
+    App, Error, backend_hf,
     domain::{Envelope, Job, ProgressDetail, State, candidates},
 };
 use serde::Deserialize;
@@ -17,6 +17,7 @@ const SHORT_RPC: Duration = Duration::from_secs(30);
 
 pub struct Dispatcher {
     pub command: PathBuf,
+    pub backend: Option<backend_hf::Lane>,
     pub launch_timeout: Duration,
     pub poll: Duration,
 }
@@ -54,7 +55,18 @@ impl Dispatcher {
             SHORT_RPC
         };
         let payload = envelope.map(serde_json::to_vec).transpose()?;
-        let mut child = Command::new(&self.command)
+        let backend = if job.host == backend_hf::ID {
+            Some(self.backend.as_ref().ok_or("Backend downloader is unavailable")?)
+        } else {
+            None
+        };
+        let mut command = Command::new(backend.map_or(&self.command, |lane| &lane.dispatch));
+        if let Some(lane) = backend {
+            command
+                .env_clear()
+                .env("BREWERY_DISPATCH_CONFIG", &lane.dispatch_config);
+        }
+        let mut child = command
             .args([action, &job.host, &job.id])
             .stdin(if payload.is_some() {
                 Stdio::piped()
@@ -93,6 +105,9 @@ impl Dispatcher {
             .await
             .map_err(|_| format!("{action} timed out"))??;
         if !status.success() {
+            if backend.is_some() {
+                return Err(format!("Backend download helper {action} failed ({status})").into());
+            }
             let text = serde_json::from_slice::<Value>(&stdout)
                 .ok()
                 .and_then(|value| {
@@ -129,11 +144,24 @@ pub async fn run(app: Arc<App>, dispatch: Dispatcher) -> Result<(), Error> {
         let mut store = app.store.lock().expect("store lock");
         let mut running = store.by_state(State::Running)?;
         for job in &mut running {
+            if job.host == backend_hf::ID && dispatch.backend.is_none() {
+                job.state = if job.cancel_requested {
+                    State::Cancelled
+                } else {
+                    State::Failed
+                };
+                job.progress = "Backend downloader is unavailable after restart".into();
+                job.progress_detail = None;
+                job.error = None;
+                store.update(job, None)?;
+                continue;
+            }
             job.progress = "Controller was interrupted; reconciling with worker".into();
             job.progress_detail = None;
             job.error = None;
             store.update(job, None)?;
         }
+        running.retain(|job| job.state == State::Running);
         running
     };
     for job in recovered {

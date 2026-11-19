@@ -53,31 +53,41 @@ pub struct Status<'a> {
 
 impl Store {
     pub fn from_config(config: Option<&Value>, dist: &Path) -> Self {
-        let local = config
-            .and_then(|v| v["hosts"].as_object())
-            .into_iter()
-            .flatten()
-            .filter_map(|(id, host)| {
-                if host["local"] != true || !host["ssh"].is_null() || !host["ssh_config"].is_null()
-                {
-                    return None;
-                }
-                let worker = Path::new(host["worker"].as_str()?);
-                let config = PathBuf::from(host["config"].as_str()?);
-                absolute(worker).ok()?;
-                absolute(&config).ok()?;
-                let token = if host["capabilities"]["hf_download"] == true {
-                    host["hf_token_file"].as_str().map(PathBuf::from)
-                } else {
-                    None
-                };
-                Some((id.clone(), Entry { config, token }))
-            })
-            .collect();
-        Self {
-            local,
+        let mut store = Self {
+            local: BTreeMap::new(),
             dist: std::path::absolute(dist).unwrap_or_else(|_| dist.to_owned()),
+        };
+        if let Some(hosts) = config.and_then(|v| v["hosts"].as_object()) {
+            for (id, host) in hosts {
+                store.add_local(id, host);
+            }
         }
+        store
+    }
+
+    pub fn add_local(&mut self, id: &str, host: &Value) {
+        if host["local"] != true || !host["ssh"].is_null() || !host["ssh_config"].is_null() {
+            return;
+        }
+        let (Some(worker), Some(config)) = (host["worker"].as_str(), host["config"].as_str())
+        else {
+            return;
+        };
+        if absolute(Path::new(worker)).is_err() || absolute(Path::new(config)).is_err() {
+            return;
+        }
+        let token = if host["capabilities"]["hf_download"] == true {
+            host["hf_token_file"].as_str().map(PathBuf::from)
+        } else {
+            None
+        };
+        self.local.insert(
+            id.into(),
+            Entry {
+                config: config.into(),
+                token,
+            },
+        );
     }
 
     // Both operator-owned configs must opt in to the same path. An SSH

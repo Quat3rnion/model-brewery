@@ -1639,6 +1639,12 @@ production data to the workbench or to another service for this workflow.
 
 ## Hugging Face download transport
 
+Select **Library → Download from Hugging Face**. Enter a repository, and
+optionally a revision and an exact model filename. The application backend
+runs the download. You do not need to enroll or select a worker. Public
+models do not need a token. To access a gated public model, set a read token
+in **Settings → Hugging Face access token**.
+
 Library downloads use the pinned Rust `hfr` downloader. No transport switch
 is required in the UI: the worker uses native Xet for files with validated
 Xet metadata and HTTP ranges for other files in the same revision. Failed

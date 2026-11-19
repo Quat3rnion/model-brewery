@@ -106,12 +106,18 @@ class Hub(BaseHTTPRequestHandler):
             return self.respond(403, b"unexpected request", "text/plain")
         for repo in (REPO, BAD, CANCEL):
             prefix = f"/api/models/{repo}"
+            resolve = f"/{repo}/resolve/{COMMIT}/"
+            cache = f"/api/resolve-cache/models/{repo}/{COMMIT}/"
             if url.path in (f"{prefix}/revision/main", f"{prefix}/revision/{COMMIT}"):
                 body = {"id": repo, "sha": COMMIT, "private": False, "gated": False}
             elif url.path == f"{prefix}/tree/{COMMIT}":
                 body = tree()
+            elif url.path == resolve + "config.json":
+                # Hub serves ordinary Git blobs via a same-origin immutable cache redirect.
+                return self.respond(307, b"", "text/plain",
+                                    Location=f"{cache}config.json?etag={git_oid(FILES['config.json'])}")
             else:
-                path = f"/{repo}/resolve/{COMMIT}/"
+                path = cache if url.path.startswith(cache) else resolve
                 if not url.path.startswith(path) or url.path[len(path):] not in FILES:
                     continue
                 name = url.path[len(path):]
@@ -164,6 +170,7 @@ def worker_config(root, bins, hfr, fixture_port):
                   "engine": str(bins / "brewery-engine")}
         host = {"local": True, "worker": str(bins / "brewery-worker"), "config": str(config)}
         if name == HOST:
+            worker["source_roots"] = []
             worker["hf_download"] = {"hfr": str(hfr), "max_bytes": 1 << 20, "fixture_port": fixture_port}
             host["capabilities"] = {"hf_download": True, **dict.fromkeys(CONVERSION, False)}
         save(config, worker)
@@ -295,8 +302,13 @@ class Smoke:
     def transfers(self, since, repo):
         rows = self.server.requests[since:]
         prefix = f"/{repo}/resolve/{COMMIT}/"
+        cache = f"/api/resolve-cache/models/{repo}/{COMMIT}/"
         paths, metadata = set(), set()
         for req in rows:
+            if req["path"].startswith("/api/resolve-cache/"):
+                need(req["path"] == cache + "config.json" and req["method"] == "GET"
+                     and req["range"] is not None and not req["credential"],
+                     f"unexpected immutable Git cache request: {req}")
             if "/resolve/" in req["path"]:
                 need(req["path"].startswith(prefix), f"non-immutable or wrong repository transfer: {req}")
                 if req["method"] == "GET":
@@ -335,10 +347,15 @@ class Smoke:
         need(full_detail["result"]["revision"] == "main", "full job lost requested revision")
         full = self.verified(full_detail, {})
         need(self.transfers(start, REPO) == set(FILES), "full job did not fetch the exact fixture inventory")
-        # The downloader resolves the already verified commit; it must not
-        # resolve a moving branch a second time.
-        need(any(r["path"] == f"/api/models/{REPO}/revision/{COMMIT}" and r["query"] == "expand=sha"
-                 for r in self.server.requests[start:]), "no pinned hfr commit resolution in fixture trace")
+        rows = self.server.requests[start:]
+        revision = f"/api/models/{REPO}/revision/"
+        tree = f"/api/models/{REPO}/tree/{COMMIT}"
+        need([r["path"] for r in rows if r["path"].startswith(revision)] == [revision + "main"]
+             and sum(r["path"] == tree for r in rows) == 1
+             and all(r["method"] == "GET" for r in rows),
+             "hfr bypassed the broker's checked revision, inventory, or range request")
+        need(any(r["path"] == f"/api/resolve-cache/models/{REPO}/{COMMIT}/config.json"
+                 for r in rows), "ordinary Git file did not use the immutable Hub cache route")
 
         start = len(self.server.requests)
         models = self.models()
