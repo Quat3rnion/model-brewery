@@ -1319,17 +1319,19 @@ does not show that a model, a conversion, or a release is correct.
 
 ## Web settings
 
-Settings has two sections for changing controller or worker policy.
-Neither section provisions workers, changes SSH trust, edits a dispatch file
-or runs arbitrary commands.
+Settings has two sections for operational policy.
+Infrastructure also manages host admission and resource policy.
+It can install a pinned worker bundle on a selected SSH host after confirmation.
+It does not accept arbitrary commands.
 
 | Section | What it does |
 | --- | --- |
 | **Evaluation settings** (`/api/settings`) | Saves benchmark targets, benchmark suites, baseline endpoints and the evaluation switch of an enrolled worker. |
-| **Infrastructure** (`/api/admin/*`) | Enrols and approves catalog workers, enables or disables their runtimes, and adjusts pool membership within the configured limit. |
+| **Infrastructure** (`/api/admin/*`) | Sets host admission and adjustable resource policy, manages catalog runtime actions, and defines SSH hosts for confirmed user-level worker installation. |
 
-Both sections require normal workbench access through the authenticated
-gateway or the loopback listener. They use the same request protections.
+Both sections use the same API request protections.
+Infrastructure has no second admin key.
+The loopback listener has no login. Use the authenticated gateway for network access.
 
 ### What the operator can set
 
@@ -1423,8 +1425,15 @@ file yourself.
 
 ### Infrastructure
 
-Settings > Infrastructure and `/api/admin/*` manage the policy that the
-controller applies to catalog workers.
+Settings > Infrastructure manages policy for defined hosts.
+It also has runtime catalog and SSH host controls.
+Host policy covers dispatch hosts and installed SSH hosts.
+It also covers the built-in `backend-hf` service when that service is configured.
+Catalog runtime actions affect only workers listed in `BREWERY_ADMIN_CATALOG`.
+
+The page reads controller state and submits changes.
+The controller applies admission rules.
+The worker enforces the resource limits it receives.
 
 | Action | Effect |
 | --- | --- |
@@ -1432,20 +1441,99 @@ controller applies to catalog workers.
 | `approve` | Runs a transport readiness probe, then moves a `pending` or `inactive` worker to `active`. Only an `active` worker is visible to the workbench. |
 | `deactivate` | Moves an `active` worker to `inactive`. |
 | `enable_runtime`, `disable_runtime` | Turns the capabilities of a catalog runtime on or off for that worker. A disabled runtime shows `Disabled by infrastructure administration`. Enabling needs a pinned digest and the runtime helper. |
-| `install_runtime` | Asks the runtime helper to promote a pre-staged runtime. It needs the helper, a `pending` or `inactive` worker and no running job. Without the helper, the answer is `409`. |
-| `set_resource_policy` | Stops or allows use of the worker for host `auto`. It can lower the pool setting of the dispatch file. It cannot raise it. |
+| `install_runtime` | Asks the runtime helper to promote a pre-staged runtime. It needs the helper, a `pending` or `inactive` worker and no running job. It does not install a worker or engine. |
+| `set_resource_policy` | Allows or blocks use of the worker for host `auto`. It cannot add a worker to a pool that the dispatch file excludes. |
+| `set_host_policy` | Saves the pause state and restricted job types for a defined host. It needs the current host `revision`. |
+| `set_host_resources` | Replaces the resource overrides for a defined host. Use `{}` to inherit all worker settings. |
 
-The API **does not**: install a worker or its engine, create or change an SSH
-alias, pin or change a host key, edit `authorized_keys`, a worker file or the
-dispatch file, change GPU admission, power or reservations, or run commands.
-These stay with the operator of the infrastructure. The controller runs one
-action at a time and writes applied actions to an audit table in
-`$BREWERY_DATA/admin.db`. The state shows the latest 50 entries.
+The controller rejects new work when its destination or any input host is
+paused. It does not cancel work that already runs. Existing work can finish.
+A restricted job type must be a configured capability. Removing a restriction
+does not add a capability.
 
-Status codes: `200` applied, `400` bad or unknown field, `403` invalid host
-or origin, `404` unknown worker or runtime, `409` action unavailable or check
-failed, `503` no catalog workers are configured or another action is running.
-A repeated lifecycle action can return `409`. There is no idempotency key.
+The `hosts` rows in `/api/admin/state` report `installed_jobs`, `allowed_jobs`,
+`resources`, `resource_bounds` and `effective_resources`. `installed_jobs`
+lists job types from host configuration. `allowed_jobs` lists job types that
+remain permitted after capability and job restrictions. The separate `paused`
+field controls new work. `resources` shows saved overrides.
+`resource_bounds` reports allowed ranges. `effective_resources` shows the
+controller's scheduling values, not live resource use.
+
+| Resource | Effect |
+| --- | --- |
+| `concurrency` | Limits concurrent conversion jobs on a conversion-pool host. The default is `1`. |
+| `cpu_threads` | Caps the CPU threads used by an engine job. The worker can apply a stricter local limit. |
+| `min_free_ram_bytes` | Sets the minimum free RAM required before a compatible job starts. |
+| `disk_reserve_bytes` | Sets the free disk space to keep for supported jobs, transfers and worker caches. |
+
+The controller uses `concurrency` when it schedules pool conversions.
+The worker applies its local CPU limits and checks free RAM and disk before
+supported jobs start. RAM and disk settings are admission checks, not live
+quotas. Configure compatible `resource_bounds` in the dispatch entry and
+worker file. `backend-hf` supports host pause and job restrictions, but it has
+no adjustable resource bounds. Its disk reserve stays fixed.
+
+Host policy and runtime actions appear in the audit table in
+`$BREWERY_DATA/admin.db`. The state shows the latest 50 entries. SSH host
+definitions use a separate private registry, so their actions do not appear in
+this audit table.
+
+Host policy and resource changes need the latest `revision`. A stale revision
+returns `409`. An invalid job type or resource value returns `400`. An unknown
+host returns `404`. The API keeps the existing request protections and has no
+idempotency key.
+
+#### SSH hosts and user-level worker installation
+
+The SSH host form stores host ID, display name, address, user, port and host-key
+fingerprint in the private controller registry under
+`$BREWERY_DATA/ssh-hosts`. It writes a private dispatch overlay. It does not
+edit the operator dispatch file or `~/.ssh/config`.
+
+Get the complete ED25519 SHA-256 fingerprint from the host administrator over
+a trusted channel. Do not trust a key that you have not checked independently.
+The form does not accept a password or private key.
+
+1. Save the host definition. This does not connect to the host.
+2. Select **Test connection**. The helper checks the fingerprint and tests
+   key-based SSH login to a non-root Linux account.
+3. Select **Plan installation**. The helper checks the pinned bundle and
+   remote architecture, then returns the worker paths and a plan ID.
+   Planning does not install files on the host.
+4. Review the plan. Confirm it in the form before you select **Install on
+   host**.
+
+The helper installs `brewery-worker`, `brewery-engine` and `worker.json` under
+`~/.local/share/model-brewery/workers/<host-id>/<manifest-sha256>/`. The
+configuration sets `source_roots` to `[]`. The helper uses a pinned manifest
+and checks both binary hashes. The controller then uses a private SSH
+configuration with strict host-key checking.
+
+The SSH workflow does not create accounts, use `sudo`, install system
+services, or change firewall, GPU, driver, power or admission settings. It
+does not delete remote files. An installed host's SSH identity cannot be
+changed; use a new host ID. The controller refuses edits or removal while the
+host has queued or running jobs or an active conversion.
+
+#### Configure SSH worker installation
+
+Set these variables in the controller service environment:
+
+1. Set `BREWERY_SSH_PROVISION` to the absolute path of the trusted SSH
+   provisioning helper. Use `tools/brewery-provision` from this repository.
+2. Set `BREWERY_PROVISION_BUNDLE` to a directory with `manifest.json`,
+   `brewery-worker` and `brewery-engine`.
+3. Set `BREWERY_PROVISION_MANIFEST_SHA256` to the SHA-256 digest of the exact
+   `manifest.json` file.
+4. Optional: set `BREWERY_PROVISION_IDENTITY` to an existing SSH private-key
+   file.
+5. Restart the controller.
+
+The manifest pins the bundle architecture and each binary hash. The helper
+accepts Linux bundles for `x86_64` or `aarch64`. The controller needs
+`/usr/bin/python3`, OpenSSH `ssh` and `ssh-keyscan`. The remote host needs
+`/usr/bin/python3`. If the helper is unavailable, the page cannot test, plan
+or install a worker.
 
 ### Configure the infrastructure catalog
 
@@ -1472,18 +1560,23 @@ A repeated lifecycle action can return `409`. There is no idempotency key.
 2. Optional: set `BREWERY_ADMIN_RUNTIME_HELPER` to a trusted, absolute
    executable. The controller calls it only as `install-pinned` or
    `probe-installed WORKER RUNTIME SHA256`. It must reply with only the actual
-   digest as `{"sha256":"..."}`. This repository has no production helper.
+   digest as `{"sha256":"..."}`. This repository does not include a runtime
+   promotion helper.
 3. Restart the controller.
 
 ### Limits of this feature
 
-- A save is not a start. No page starts, stops or installs a model server.
+- A policy save does not start a job. The SSH workflow installs only the
+  pinned worker and engine files. No page installs or starts a model server.
   Start the endpoint yourself on an approved port.
 - No benchmark or evaluation result from these settings qualifies a release.
 - If the operator did not enrol a worker, the page shows it as not managed.
   That is not an error.
 - The README sections [Managed benchmarks](#managed-benchmarks) and the
   worker file remain the manual way to set up benchmarks.
+- Automated tests cover host policy, resource checks, multi-host HTTP behavior
+  and confirmed SSH installation on a loopback host. They do not show a
+  production deployment.
 
 ## Offline usage and profile preview
 
