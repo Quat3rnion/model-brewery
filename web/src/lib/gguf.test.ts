@@ -78,6 +78,13 @@ describe('imatrix and bodies', () => {
     const rev = 'a'.repeat(64);
     expect(buildGgufConversion(c, { source: 'src', preset: '', revision: { revision: rev, needsImatrix: true }, imatrix: 'im1', threads: null, host: 'frame' }).body).toEqual({ format: 'gguf', host: 'frame', input_ids: ['src', 'im1'], profile_revision: rev });
   });
+  it('requires assets for standalone SafeTensors before an optional importance matrix', () => {
+    const form={source:'weights', sourceKind:'safetensors', assets:'', preset:'Q4_K_M',revision:null,imatrix:'',threads:null,host:''};
+    expect(buildGgufConversion(c,form).body).toBeNull();
+    expect(buildGgufConversion(c,{...form,assets:'cfg'}).body?.input_ids).toEqual(['weights','cfg']);
+    expect(buildGgufConversion(c,{...form,assets:'cfg',preset:'IQ2_XXS',imatrix:'importance'}).body?.input_ids).toEqual(['weights','cfg','importance']);
+    expect(buildGgufConversion(c,{...form,sourceKind:'hf',assets:'cfg'}).body?.input_ids).toEqual(['weights']);
+  });
 });
 
 describe('route', () => {

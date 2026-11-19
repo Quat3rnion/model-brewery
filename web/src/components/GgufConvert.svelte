@@ -2,7 +2,7 @@
   // GGUF output conversion: source, preset or saved GGUF profile, imatrix when
   // required, host. One POST /api/conversions with format 'gguf'.
   import { brewery } from '../lib/store.svelte';
-  import { capability, CONVERT_SOURCE_KINDS } from '../lib/format';
+  import { capability, hostName, modelLabel } from '../lib/format';
   import { profileStore } from '../lib/profiles.svelte';
   import { conversions, ConversionStarter } from '../lib/conversions.svelte';
   import { buildGgufConversion, imatrixRequired, IMATRIX_KIND, type GgufCatalog } from '../lib/gguf';
@@ -19,6 +19,7 @@
 
   let choice = $state(''); // 'preset:<id>' | 'rev:<hex>'
   let imatrix = $state('');
+  let assets = $state('');
   let host = $state('');
   let threads = $state<number | null>(null);
 
@@ -31,20 +32,29 @@
   });
 
   const src = $derived(models.find((m) => m.id === source));
+  const standalone = $derived(src?.kind==='safetensors');
+  const assetChoices = $derived(models.filter(m=>m.kind==='assets' && m.host===src?.host && m.available!==false));
+  const sameHostMatrix = $derived(models.filter(m=>m.kind===IMATRIX_KIND && m.host===src?.host && m.available!==false));
+  $effect(()=>{void source; assets=''; imatrix='';});
   const rev = $derived(choice.startsWith('rev:') ? profileStore.ggufSaved.find((p) => p.revision === choice.slice(4)) : undefined);
   const preset = $derived(choice.startsWith('preset:') ? choice.slice(7) : '');
   const needsImatrix = $derived(rev ? imatrixRequired(catalog, rev.preset, rev.overrides) : !!catalog.presets.find((p) => p.id === preset)?.requiresImatrix);
   const built = $derived(
-    buildGgufConversion(catalog, { source, preset, revision: rev ? { revision: rev.revision, needsImatrix } : null, imatrix: needsImatrix ? imatrix : imatrix || '', threads, host }),
+    buildGgufConversion(catalog, { source, sourceKind:src?.kind, assets, preset, revision: rev ? { revision: rev.revision, needsImatrix } : null, imatrix: needsImatrix ? imatrix : '', threads, host }),
   );
   const target = $derived(hosts.find((h) => h.id === (host || src?.host)));
   const blockers = $derived.by(() => {
     const out = [...built.problems];
-    if (src && src.kind!=='hf' && src.kind!=='gguf') out.push('GGUF output requires a Hugging Face checkpoint or GGUF input.');
+    if (source && (!src || src.available===false || !['hf','gguf','safetensors'].includes(src.kind))) out.push('Choose an available HF checkpoint, standalone SafeTensors file or GGUF input.');
+    if (src && !target) out.push('The controller did not report a worker for this source.');
+    if (src && host && host!==src.host) out.push('Run on the host of the registered inputs.');
+    if (standalone && assets && !assetChoices.some(m=>m.id===assets)) out.push('Choose available assets on the source host.');
+    if (imatrix && needsImatrix && !sameHostMatrix.some(m=>m.id===imatrix)) out.push('Choose an available importance matrix on the source host.');
     if (choice.startsWith('rev:') && !rev) out.push('The chosen GGUF profile revision is no longer listed.');
     if (target) {
       const g = capability(target, 'gguf_output');
       if (!g.allowed) out.push(g.reason ?? `${target.name ?? target.id} cannot write GGUF.`);
+      else if (standalone && !capability(target,'gguf_safetensors_output').allowed) out.push(target.reasons?.gguf_safetensors_output ?? `${target.name ?? target.id} does not report standalone SafeTensors to GGUF support.`);
       else if (src?.kind === 'hf') {
         const h = capability(target, 'gguf_hf_output');
         if (!h.allowed) out.push(h.reason ?? `${target.name ?? target.id} cannot convert a Hugging Face checkpoint to GGUF.`);
@@ -61,7 +71,7 @@
 
 <div class="stack">
   <div class="grid-2">
-    <ModelSelect bind:value={source} kinds={CONVERT_SOURCE_KINDS} label="Source checkpoint" hint="BF16 checkpoint or GGUF. HF sources need a worker with GGUF export." id="gg-source" />
+    <ModelSelect bind:value={source} kinds={['hf','gguf','safetensors']} label="Source checkpoint" hint="HF checkpoint, standalone SafeTensors file, or GGUF. Worker support depends on the input format." id="gg-source" />
     <div class="field">
       <label for="gg-choice">GGUF type</label>
       <select id="gg-choice" class="input" bind:value={choice} aria-describedby="gg-choice-h" aria-required="true">
@@ -81,10 +91,21 @@
       </span>
     </div>
   </div>
-  {#if src}<ComponentPicker source={src} idPrefix="gg-comp" gguf />{/if}
+  {#if standalone && src}
+    <div class="field">
+      <label for="gg-assets">Config and tokenizer assets (required)</label>
+      <select bind:value={assets} id="gg-assets" class="input" disabled={!assetChoices.length} aria-describedby="gg-assets-hint">
+        <option value="">Select matching assets</option>
+        {#each assetChoices as m (m.id)}<option value={m.id}>{modelLabel(m)} · {m.path}</option>{/each}
+      </select>
+      <span class="hint" id="gg-assets-hint">{#if !assetChoices.length}No available assets on {hostName(hosts,src.host)}. <a href="#/library">Register the matching assets directory in Library</a>.{:else}Choose the registered assets directory for these weights on {hostName(hosts,src.host)}.{/if}</span>
+    </div>
+    <p class="xs muted">The weights alone do not identify a complete model. The exporter checks the weights, config, tokenizer and architecture; worker support does not guarantee that this model can be exported.</p>
+  {:else if src}<ComponentPicker source={src} idPrefix="gg-comp" gguf />{/if}
+  {#if src?.kind==='hf' || standalone}<p class="xs muted">The bounded GGUF exporter does not support the Flash-Next layout. For a Flash-Next HF checkpoint, choose HGN bundle output instead.</p>{/if}
   <div class="grid-2">
     {#if needsImatrix}
-      <ModelSelect bind:value={imatrix} kinds={[IMATRIX_KIND]} label="Importance matrix (imatrix)" hint="Required by the IQ types in this choice. Register the .imatrix file in Library; it must match the source model." id="gg-imatrix" />
+      <ModelSelect bind:value={imatrix} kinds={[IMATRIX_KIND]} exclude={models.filter(m=>!sameHostMatrix.some(x=>x.id===m.id)).map(m=>m.id)} label="Importance matrix (imatrix)" hint="Register a matching importance matrix on the source host." id="gg-imatrix" />
     {/if}
     <HostSelect bind:value={host} kind="gguf_output" label="Run on" optional optionalLabel="Host of the source" id="gg-host" />
     <div class="field">

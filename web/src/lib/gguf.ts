@@ -129,6 +129,8 @@ export function buildGgufProfileBody(c: GgufCatalog, name: string, preset: strin
 
 export interface GgufConvertForm {
   source: string;
+  sourceKind?: string;
+  assets?: string;
   preset: string;
   revision: { revision: string; needsImatrix: boolean } | null;
   imatrix: string;
@@ -139,6 +141,7 @@ export interface GgufConvertForm {
 export function buildGgufConversion(c: GgufCatalog, f: GgufConvertForm) {
   const problems: string[] = [];
   if (!f.source) problems.push('Select a source checkpoint.');
+  if (f.sourceKind==='safetensors' && !f.assets) problems.push('Select matching config and tokenizer assets.');
   if (!f.revision && !c.presets.some((p) => p.id === f.preset)) problems.push('Choose a GGUF preset or a saved GGUF profile.');
   const needs = f.revision ? f.revision.needsImatrix : !!c.presets.find((p) => p.id === f.preset)?.requiresImatrix;
   if (needs && !f.imatrix) problems.push('This choice needs an imatrix file. Select one from the Library.');
@@ -146,7 +149,7 @@ export function buildGgufConversion(c: GgufCatalog, f: GgufConvertForm) {
   if (problems.length) return { body: null, problems };
   const body: Record<string, unknown> = { format: 'gguf' };
   if (f.host) body.host = f.host;
-  body.input_ids = f.imatrix ? [f.source, f.imatrix] : [f.source];
+  body.input_ids = [f.source, ...(f.sourceKind==='safetensors' ? [f.assets!] : []), ...(f.imatrix ? [f.imatrix] : [])];
   if (f.revision) {
     body.profile_revision = f.revision.revision;
     if (f.threads !== null) body.options = { threads: f.threads };
