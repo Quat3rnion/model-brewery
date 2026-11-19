@@ -89,6 +89,7 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
             }),
         )
         .merge(crate::admin::router())
+        .merge(crate::infra_hosts::router())
         .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "API endpoint not found".into()) })
         .method_not_allowed_fallback(|| async {
             ApiError(
@@ -207,14 +208,25 @@ async fn suggest_paths(
             "prefix must be empty or a normalized absolute path of at most 4096 bytes",
         ));
     }
-    app.suggestions.get(query).await.map(Json).map_err(|error| {
-        let (status, message) = match error {
-            SuggestError::Busy => (StatusCode::SERVICE_UNAVAILABLE, "path suggestions are busy"),
-            SuggestError::Timeout => (StatusCode::GATEWAY_TIMEOUT, "path suggestions timed out"),
-            SuggestError::Unavailable => (StatusCode::BAD_GATEWAY, "path suggestions unavailable"),
-        };
-        ApiError(status, message.into())
-    })
+    let dispatch_config = app.ssh_hosts.config_for(&[&query.host]);
+    app.suggestions
+        .get(query, dispatch_config)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            let (status, message) = match error {
+                SuggestError::Busy => {
+                    (StatusCode::SERVICE_UNAVAILABLE, "path suggestions are busy")
+                }
+                SuggestError::Timeout => {
+                    (StatusCode::GATEWAY_TIMEOUT, "path suggestions timed out")
+                }
+                SuggestError::Unavailable => {
+                    (StatusCode::BAD_GATEWAY, "path suggestions unavailable")
+                }
+            };
+            ApiError(status, message.into())
+        })
 }
 
 async fn state(State(app): State<Shared>) -> Result<Json<Value>> {
@@ -569,15 +581,18 @@ async fn add_job(
         }
     }
     if host != "auto" || request.kind != "convert" {
-        let entry = app
-            .hosts
+        if !app
+            .defined_hosts()
+            .map_err(ApiError::storage)?
             .iter()
-            .find(|entry| entry.id == host)
-            .ok_or_else(|| ApiError::bad("unknown worker host"))?;
+            .any(|entry| entry.id == host)
+        {
+            return Err(ApiError::bad("unknown worker host"));
+        }
         let effective = app.effective_hosts().map_err(ApiError::storage)?;
         let entry = effective
             .iter()
-            .find(|effective| effective.id == entry.id)
+            .find(|effective| effective.id == host)
             .ok_or_else(|| ApiError(StatusCode::CONFLICT, "worker unavailable".into()))?;
         if !entry.capabilities[&request.kind] {
             return Err(ApiError(
@@ -891,15 +906,15 @@ fn read<T>(payload: std::result::Result<Json<T>, JsonRejection>) -> Result<T> {
         .map_err(|e| ApiError(e.status(), e.body_text()))
 }
 
-struct ApiError(StatusCode, String);
+pub(crate) struct ApiError(pub(crate) StatusCode, pub(crate) String);
 impl ApiError {
-    fn bad(msg: impl Into<String>) -> Self {
+    pub(crate) fn bad(msg: impl Into<String>) -> Self {
         Self(StatusCode::BAD_REQUEST, msg.into())
     }
-    fn not_found(object: &str) -> Self {
+    pub(crate) fn not_found(object: &str) -> Self {
         Self(StatusCode::NOT_FOUND, format!("{object} not found"))
     }
-    fn storage(err: impl std::fmt::Display) -> Self {
+    pub(crate) fn storage(err: impl std::fmt::Display) -> Self {
         eprintln!("controller storage error: {err}");
         Self(
             StatusCode::INTERNAL_SERVER_ERROR,

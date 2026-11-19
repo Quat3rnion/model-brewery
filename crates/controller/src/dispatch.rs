@@ -18,6 +18,7 @@ const SHORT_RPC: Duration = Duration::from_secs(30);
 pub struct Dispatcher {
     pub command: PathBuf,
     pub backend: Option<backend_hf::Lane>,
+    pub ssh_hosts: Arc<crate::infra_hosts::Registry>,
     pub launch_timeout: Duration,
     pub poll: Duration,
 }
@@ -54,7 +55,17 @@ impl Dispatcher {
         } else {
             SHORT_RPC
         };
-        let payload = envelope.map(serde_json::to_vec).transpose()?;
+        let payload = envelope
+            .map(|envelope| {
+                if job.dispatch_resources.is_empty() {
+                    serde_json::to_vec(envelope)
+                } else {
+                    let mut wire = serde_json::to_value(envelope)?;
+                    wire["resources"] = serde_json::to_value(job.dispatch_resources)?;
+                    serde_json::to_vec(&wire)
+                }
+            })
+            .transpose()?;
         let backend = if job.host == backend_hf::ID {
             Some(
                 self.backend
@@ -71,6 +82,14 @@ impl Dispatcher {
                 lane.config_for(&job.kind)
                     .ok_or("Backend executor unavailable for this operation")?,
             );
+        } else {
+            let mut ids = vec![job.host.as_str()];
+            if let Some(envelope) = envelope {
+                ids.extend(envelope.inputs.iter().map(|model| model.host.as_str()));
+            }
+            if let Some(config) = self.ssh_hosts.config_for(&ids) {
+                command.env("BREWERY_DISPATCH_CONFIG", config);
+            }
         }
         let mut child = command
             .args([action, &job.host, &job.id])
@@ -197,7 +216,12 @@ fn allocate(app: &App) -> Result<Vec<Job>, Error> {
     let hosts = app.effective_hosts()?;
     store.advance_conversions()?;
     let active = store.by_state(State::Running)?;
-    let mut busy: Vec<_> = active.iter().map(|job| job.host.clone()).collect();
+    let mut busy = std::collections::BTreeMap::<String, std::collections::BTreeSet<u64>>::new();
+    for job in &active {
+        busy.entry(job.host.clone())
+            .or_default()
+            .insert(job.host_slot.unwrap_or(0));
+    }
     // Recovered work can have an unchanged alias but a disabled pool flag.
     // Treat it as exclusive until it finishes.
     if active.iter().any(|job| {
@@ -229,16 +253,34 @@ fn allocate(app: &App) -> Result<Vec<Job>, Error> {
         if !pool_slot && !busy.is_empty() {
             break;
         }
-        let Some(host) = eligible.into_iter().find(|host| !busy.contains(&host.id)) else {
+        let Some((host, slot)) = eligible.into_iter().find_map(|host| {
+            let cap = if pool_slot {
+                host.effective_resources().concurrency.unwrap_or(1)
+            } else {
+                1
+            };
+            let occupied = busy.get(&host.id);
+            if occupied.is_some_and(|slots| slots.len() as u64 >= cap) {
+                return None;
+            }
+            (0..cap)
+                .find(|slot| occupied.is_none_or(|slots| !slots.contains(slot)))
+                .map(|slot| (host, slot))
+        }) else {
             // A pinned, busy pool worker need not block another idle worker.
             continue;
         };
         job.host = host.id.clone();
         job.pool_slot = pool_slot;
+        job.host_slot = pool_slot.then_some(slot);
+        job.dispatch_resources = host.resources.for_job(&job.kind);
+        if !pool_slot {
+            job.dispatch_resources.concurrency = None;
+        }
         job.state = State::Running;
         job.progress = "Dispatching to worker".into();
         store.update(&mut job, None)?;
-        busy.push(job.host.clone());
+        busy.entry(job.host.clone()).or_default().insert(slot);
         launch.push(job);
         if !pool_slot {
             break;
@@ -268,7 +310,7 @@ async fn drive(app: &App, dispatch: &Dispatcher, job: Job, recovered: bool) -> R
             .job(&job.id)?
             .ok_or("active job disappeared")?;
         if launch && !current.cancel_requested && !interrupt {
-            let hosts = app.effective_hosts()?;
+            let hosts = app.effective_hosts_for_allocated()?;
             let allowed = candidates(&job, &envelope, &hosts)
                 .iter()
                 .any(|h| h.id == job.host)

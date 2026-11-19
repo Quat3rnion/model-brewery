@@ -6,6 +6,9 @@ mod hf_download;
 #[path = "support/hf_tokens.rs"]
 mod hf_tokens;
 
+#[path = "support/infra_hosts.rs"]
+mod infra_hosts;
+
 #[path = "support/weights.rs"]
 mod weights;
 
@@ -803,6 +806,55 @@ fn transfer_and_evaluation_workflows_use_registered_paths_and_typed_options() {
         Some(json!({"kind":"plan","host":"beta","input_ids":[artifact]})),
         409,
     );
+}
+
+#[test]
+fn conversion_slots_follow_host_policy_without_interrupting_active_jobs() {
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts":{
+            "alpha":{"local":true,"quantization_pool":true,
+                "resource_bounds":{"concurrency":{"min":1,"max":2},"cpu_threads":{"min":1,"max":4}}}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let source = app.register("alpha", "hf", "/registered/model");
+    app.touch("hold");
+    let policy = |revision, concurrency| {
+        json!({
+            "action":"set_host_resources","worker":"alpha","revision":revision,
+            "resources":{"concurrency":concurrency,"cpu_threads":1}
+        })
+    };
+    app.json("POST", "/api/admin/actions", Some(policy(0, 3)), 400);
+    app.json("POST", "/api/admin/actions", Some(policy(0, 2)), 200);
+    let submit = || json!({"kind":"convert","host":"alpha","input_ids":[source]});
+    let first = app.enqueue(submit());
+    let second = app.enqueue(submit());
+    for id in [&first, &second] {
+        let running = app.await_job(id, |job| job["progress"] == "worker progress");
+        assert_eq!(
+            running["dispatch_resources"],
+            json!({"concurrency":2,"cpu_threads":1})
+        );
+    }
+    app.json("POST", "/api/admin/actions", Some(policy(1, 1)), 200);
+    let next = app.enqueue(submit());
+    let barrier = app.enqueue(json!({"kind":"inspect","input_ids":[source]}));
+    let behind = app.enqueue(submit());
+    assert_eq!(app.detail(&first)["state"], "running");
+    assert_eq!(app.detail(&second)["state"], "running");
+    for id in [&next, &barrier, &behind] {
+        assert_eq!(app.detail(id)["state"], "queued");
+    }
+    fs::remove_file(app.path("hold")).unwrap();
+    for id in [&first, &second, &next, &barrier, &behind] {
+        app.await_job(id, |job| job["state"] == "succeeded");
+    }
+    assert_eq!(app.detail(&next)["dispatch_resources"]["concurrency"], 1);
 }
 
 #[test]

@@ -352,6 +352,111 @@ fn resolve_input(t: &Rig, id: &str, action: &str, kind: &str, index: usize, inpu
 }
 
 #[test]
+fn requested_disk_reserve_denies_launch_before_engine_work() {
+    let t = Rig::new();
+    let id = "disk-reserve";
+    t.dispatch(
+        "start",
+        id,
+        Some(&json!({
+            "kind":"inspect","inputs":[],"resources":{"disk_reserve_bytes":1_u64 << 50}
+        })),
+    );
+    let result = t.wait(id, "failed");
+    assert!(result["error"].as_str().unwrap().contains("disk reserve"));
+    assert!(!t.root.join("b/jobs/disk-reserve/work/input.json").exists());
+}
+
+#[test]
+fn resource_limits_reach_the_engine_and_worker_floors_cannot_be_lowered() {
+    let t = Rig::new();
+    fs::write(
+        t.root.join("engine"),
+        r#"#!/bin/sh
+set -eu
+cat >/dev/null
+mask=$(awk '/^Cpus_allowed_list:/ {print $2}' /proc/self/status)
+printf '{"threads":"%s","mask":"%s"}\n' "$BREWERY_CPU_THREADS" "$mask"
+"#,
+    )
+    .unwrap();
+    let mut config: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
+    config["engine_env"] = json!({"BREWERY_CPU_THREADS":"1"});
+    fs::write(&t.b, config.to_string()).unwrap();
+    t.dispatch(
+        "start",
+        "cpu-clamped",
+        Some(&json!({
+            "kind":"inspect","inputs":[],"resources":{"cpu_threads":4}
+        })),
+    );
+    let result = t.wait("cpu-clamped", "succeeded");
+    assert_eq!(result["result"]["threads"], "1");
+    assert!(
+        result["result"]["mask"]
+            .as_str()
+            .unwrap()
+            .parse::<u32>()
+            .is_ok()
+    );
+
+    config["disk_reserve_bytes"] = json!(1_u64 << 50);
+    fs::write(&t.b, config.to_string()).unwrap();
+    t.dispatch(
+        "start",
+        "disk-floor",
+        Some(&json!({
+            "kind":"inspect","inputs":[],"resources":{"disk_reserve_bytes":0}
+        })),
+    );
+    assert_eq!(
+        t.wait("disk-floor", "failed")["error"],
+        "Worker disk reserve not met"
+    );
+
+    config["disk_reserve_bytes"] = json!(0);
+    config["resource_bounds"] = json!({"min_free_ram_bytes":{"min":1_u64 << 44,"max":1_u64 << 44}});
+    fs::write(&t.b, config.to_string()).unwrap();
+    t.dispatch(
+        "start",
+        "ram-floor",
+        Some(&json!({
+            "kind":"inspect","inputs":[],"resources":{"min_free_ram_bytes":0}
+        })),
+    );
+    assert_eq!(
+        t.wait("ram-floor", "failed")["error"],
+        "Worker minimum free RAM not met"
+    );
+}
+
+#[test]
+fn worker_launch_concurrency_never_exceeds_configured_ceiling() {
+    let t = Rig::new();
+    fs::write(
+        t.root.join("engine"),
+        "#!/bin/sh\ncat >/dev/null\nexec sleep 60\n",
+    )
+    .unwrap();
+    let mut config: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
+    config["resource_bounds"] = json!({"concurrency":{"min":1,"max":2}});
+    fs::write(&t.b, config.to_string()).unwrap();
+    let request = json!({"kind":"convert","inputs":[],"resources":{"concurrency":2}});
+    for id in ["slot-one", "slot-two"] {
+        t.dispatch("start", id, Some(&request));
+        t.wait(id, "running");
+    }
+    let raised = json!({"kind":"convert","inputs":[],"resources":{"concurrency":16}});
+    let denied = t.dispatch("start", "slot-three", Some(&raised));
+    assert_eq!(denied["state"], "failed");
+    t.dispatch("cancel", "slot-one", None);
+    t.wait("slot-one", "cancelled");
+    assert_eq!(t.dispatch("status", "slot-two", None)["state"], "running");
+    t.dispatch("cancel", "slot-two", None);
+    t.wait("slot-two", "cancelled");
+}
+
+#[test]
 fn safetensors_weight_jobs_require_their_own_worker_opt_in() {
     let t = Rig::new();
     let source = t.src.join("model.safetensors");

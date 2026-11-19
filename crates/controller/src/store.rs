@@ -48,8 +48,11 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(state, seq);
              DROP INDEX IF EXISTS one_active_job;
-             CREATE UNIQUE INDEX IF NOT EXISTS one_job_per_active_host
-               ON jobs(json_extract(body, '$.host')) WHERE state = 'running';
+              DROP INDEX IF EXISTS one_job_per_active_host;
+              CREATE UNIQUE INDEX IF NOT EXISTS one_job_per_active_host_slot
+                ON jobs(json_extract(body, '$.host'),
+                        coalesce(json_extract(body, '$.host_slot'), 0))
+                WHERE state = 'running';
              CREATE TABLE IF NOT EXISTS events(
                seq INTEGER PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), body TEXT NOT NULL
              );
@@ -457,6 +460,29 @@ impl Store {
         self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM jobs WHERE state IN ('queued','running')
              AND (json_extract(body,'$.host') = ? OR json_extract(body,'$.host') = 'auto'))",
+            [host],
+            |row| row.get(0),
+        )
+    }
+    pub fn ssh_host_in_use(&self, host: &str) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM jobs j WHERE
+              (j.state IN ('queued','running') OR EXISTS(
+                 SELECT 1 FROM conversions c WHERE c.current_job=j.id AND c.state IN ('queued','running')
+              )) AND (json_extract(j.body,'$.host') IN (?1,'auto')
+                OR EXISTS(SELECT 1 FROM json_each(j.envelope,'$.inputs')
+                   WHERE json_extract(value,'$.host')=?1)))",
+            [host],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn host_has_history(&self, host: &str) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM models WHERE lower(json_extract(body,'$.host'))=lower(?1))
+                 OR EXISTS(SELECT 1 FROM jobs WHERE lower(json_extract(body,'$.host'))=lower(?1)
+                     OR EXISTS(SELECT 1 FROM json_each(jobs.envelope,'$.inputs')
+                         WHERE lower(json_extract(value,'$.host'))=lower(?1)))",
             [host],
             |row| row.get(0),
         )

@@ -104,6 +104,7 @@ name = "brewery-controller"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "brewery-worker",
  "fs2",
  "futures-util",

@@ -62,13 +62,21 @@ impl PathSuggestions {
         }
     }
 
-    pub async fn get(&self, query: Query) -> Result<Suggestions, SuggestError> {
+    pub async fn get(
+        &self,
+        query: Query,
+        dispatch_config: Option<PathBuf>,
+    ) -> Result<Suggestions, SuggestError> {
         let _permit = self.permits.try_acquire().map_err(|_| SuggestError::Busy)?;
         let payload = serde_json::to_vec(&serde_json::json!({ "prefix": query.prefix }))
             .map_err(|_| SuggestError::Unavailable)?;
         // Keep the child in the request future. Axum drops that future on
         // disconnect; timeout and invalid output also drop the child.
-        let mut child = Command::new(&self.command)
+        let mut command = Command::new(&self.command);
+        if let Some(config) = dispatch_config {
+            command.env("BREWERY_DISPATCH_CONFIG", config);
+        }
+        let mut child = command
             .args(["suggest-paths", &query.host])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

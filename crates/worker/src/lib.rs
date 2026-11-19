@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, ensure};
 pub mod hf_download;
 pub mod operational;
+pub mod resources;
 pub mod weight_source;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -32,6 +33,8 @@ pub struct Job {
     pub options: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "resources::Limits::is_empty")]
+    pub resources: resources::Limits,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -53,6 +56,8 @@ pub struct Reply {
     pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resources_enforced: bool,
 }
 
 impl Reply {
@@ -63,6 +68,7 @@ impl Reply {
             progress_detail: None,
             result: None,
             error: None,
+            resources_enforced: false,
         }
     }
     pub fn success(result: Value) -> Self {
@@ -427,7 +433,9 @@ pub fn is_digest(s: &str) -> bool {
 // RPC errors can include paths or arbitrary error text. Only closed categories
 // may enter the job's externally visible error field.
 pub fn staging_error(detail: &str) -> &'static str {
-    if detail.contains("SafeTensors immutable publication invalid") {
+    if detail.contains("Worker does not support requested resource controls") {
+        "Worker does not support requested resource controls"
+    } else if detail.contains("SafeTensors immutable publication invalid") {
         "SafeTensors immutable publication could not be verified"
     } else if detail.contains("SafeTensors requires an immutable publication")
         || detail.contains("SafeTensors source exceeds explicit verification limit")

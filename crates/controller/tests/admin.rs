@@ -53,7 +53,20 @@ impl Test {
             .env("BREWERY_DATA", root.join("state"))
             .env("BREWERY_DISPATCH", root.join("dispatch"))
             .env("BREWERY_DISPATCH_CONFIG", root.join("dispatch.json"))
+            .env("BREWERY_POLL_MS", "25")
             .stdout(Stdio::from(fs::File::create(&log).unwrap()));
+        if root.join("hfr").exists() {
+            for env in [
+                "BREWERY_HF_DISPATCH",
+                "BREWERY_HF_WORKER",
+                "BREWERY_HF_ENGINE",
+                "BREWERY_HF_HFR",
+            ] {
+                command.env(env, root.join("hfr"));
+            }
+        } else {
+            command.env("BREWERY_HF_HFR", root.join("no-hfr"));
+        }
         if root.join("catalog.json").exists() {
             command.env("BREWERY_ADMIN_CATALOG", root.join("catalog.json"));
         }
@@ -156,17 +169,195 @@ fn infrastructure_uses_normal_request_guards_without_a_second_key() {
 }
 
 #[test]
-fn infrastructure_stays_unavailable_without_catalog_workers() {
+fn defined_hosts_have_revisioned_policy_without_catalog_workers() {
     let mut t = Test::new();
     fs::remove_file(t.root.path().join("catalog.json")).unwrap();
     t.launch();
     assert_eq!(t.request("/api/state", "", None).0, 200);
-    assert_eq!(t.admin(None).0, 503);
+    let (status, state) = t.admin(None);
+    assert_eq!(status, 200);
+    assert_eq!(state["workers"], json!([]));
+    assert_eq!(state["hosts"].as_array().unwrap().len(), 2);
+    let row = |state: Value| {
+        state["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["id"] == "existing")
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(state)["revision"], 0);
     assert_eq!(
         t.admin(Some(json!({"action":"enroll","worker":"candidate"})))
             .0,
-        503
+        404
     );
+    let policy = |revision, paused, jobs| {
+        json!({"action":"set_host_policy","worker":"existing",
+       "revision":revision,"paused":paused,"disabled_jobs":jobs})
+    };
+    assert_eq!(t.admin(Some(policy(0, false, json!(["evaluate"])))).0, 400);
+    assert_eq!(
+        t.admin(Some(policy(0, false, json!(["inspect", "inspect"]))))
+            .0,
+        400
+    );
+    let (status, updated) = t.admin(Some(policy(0, true, json!(["inspect"]))));
+    assert_eq!(status, 200, "{updated}");
+    assert_eq!(row(updated.clone())["paused"], true);
+    assert_eq!(row(updated.clone())["revision"], 1);
+    assert_eq!(row(updated.clone())["disabled_jobs"], json!(["inspect"]));
+    assert_eq!(updated["audit"][0]["action"], "set_host_policy");
+    assert_eq!(t.admin(Some(policy(0, false, json!([])))).0, 409);
+    let resource = |revision, threads| {
+        json!({"action":"set_host_resources","worker":"existing",
+        "revision":revision,"resources":{"cpu_threads":threads}})
+    };
+    assert_eq!(t.admin(Some(resource(0, 2))).0, 409);
+    assert_eq!(t.admin(Some(resource(1, 65))).0, 400);
+    let (status, updated) = t.admin(Some(resource(1, 2)));
+    assert_eq!(status, 200, "{updated}");
+    assert_eq!(row(updated)["effective_resources"]["cpu_threads"], 2);
+    t.stop();
+    t.launch();
+    let restored = row(t.admin(None).1);
+    assert_eq!(restored["paused"], true);
+    assert_eq!(restored["resources"]["cpu_threads"], 2);
+    let (status, updated) = t.admin(Some(policy(2, false, json!([]))));
+    assert_eq!(status, 200, "{updated}");
+    let resumed = row(updated);
+    assert_eq!(resumed["paused"], false);
+    assert_eq!(resumed["revision"], 3);
+    assert_eq!(resumed["resources"]["cpu_threads"], 2);
+}
+
+#[test]
+fn backend_download_lane_is_visible_and_can_be_restricted() {
+    let mut t = Test::new();
+    fs::remove_file(t.root.path().join("catalog.json")).unwrap();
+    let hfr = t.root.path().join("hfr");
+    fs::write(&hfr, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&hfr, fs::Permissions::from_mode(0o700)).unwrap();
+    t.launch();
+    let host = |state: Value| {
+        state["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["id"] == "backend-hf")
+            .unwrap()
+            .clone()
+    };
+    let initial = host(t.admin(None).1);
+    assert!(
+        initial["installed_jobs"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("hf_download"))
+    );
+    let (status, restricted) = t.admin(Some(json!({
+        "action":"set_host_policy","worker":"backend-hf","revision":0,"paused":false,
+        "disabled_jobs":["hf_download"]
+    })));
+    assert_eq!(status, 200, "{restricted}");
+    assert!(
+        !host(restricted)["allowed_jobs"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("hf_download"))
+    );
+    assert_eq!(
+        t.request(
+            "/api/jobs",
+            "",
+            Some(json!({
+                "kind":"hf_download","host":"backend-hf","options":{"repo_id":"fixture/model"}
+            }))
+        )
+        .0,
+        409
+    );
+}
+
+#[test]
+fn pause_drains_running_job_and_blocks_new_work_bound_to_the_source() {
+    let mut t = Test::new();
+    fs::remove_file(t.root.path().join("catalog.json")).unwrap();
+    fs::write(
+        t.root.path().join("dispatch"),
+        include_str!("support/dispatch.py"),
+    )
+    .unwrap();
+    fs::write(t.root.path().join("hold"), b"").unwrap();
+    t.launch();
+    let (status, source) = t.request(
+        "/api/models",
+        "",
+        Some(json!({
+            "host":"existing","kind":"gguf","path":"/models/test.gguf"
+        })),
+    );
+    assert_eq!(status, 201, "{source}");
+    let inspect = json!({"kind":"inspect","input_ids":[source["id"]]});
+    let (status, running) = t.request("/api/jobs", "", Some(inspect.clone()));
+    assert_eq!(status, 201, "{running}");
+    let path = format!("/api/jobs/{}", running["id"].as_str().unwrap());
+    let await_job = |path: &str, condition: &dyn Fn(&Value) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        loop {
+            let (status, row) = t.request(path, "", None);
+            assert_eq!(status, 200, "{row}");
+            if condition(&row) {
+                break row;
+            }
+            assert!(Instant::now() < deadline, "{row}");
+            sleep(Duration::from_millis(15));
+        }
+    };
+    await_job(&path, &|row| row["progress"] == "worker progress");
+    let (status, queued) = t.request(
+        "/api/jobs",
+        "",
+        Some(json!({
+            "kind":"convert","host":"auto","input_ids":[source["id"]]
+        })),
+    );
+    assert_eq!(status, 201, "{queued}");
+    assert_eq!(queued["state"], "queued");
+    let (status, state) = t.admin(Some(json!({
+        "action":"set_host_policy","worker":"existing","revision":0,"paused":true,
+        "disabled_jobs":["inspect"]
+    })));
+    assert_eq!(status, 200, "{state}");
+    let row = |state: Value| {
+        state["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["id"] == "existing")
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(state)["draining"], true);
+    for request in [
+        inspect,
+        json!({"kind":"transfer_preview","host":"candidate","input_ids":[source["id"]]}),
+        json!({"kind":"convert","host":"auto","input_ids":[source["id"]]}),
+    ] {
+        let (status, response) = t.request("/api/jobs", "", Some(request));
+        assert_eq!(status, 409, "{response}");
+    }
+    fs::remove_file(t.root.path().join("hold")).unwrap();
+    let terminal = await_job(&path, &|job| job["state"] != "running");
+    assert_eq!(terminal["state"], "succeeded", "{terminal}");
+    let queued_path = format!("/api/jobs/{}", queued["id"].as_str().unwrap());
+    let refused = await_job(&queued_path, &|job| {
+        !matches!(job["state"].as_str(), Some("queued" | "running"))
+    });
+    assert_eq!(refused["state"], "failed", "{refused}");
+    assert_eq!(refused["host"], "auto");
+    assert_eq!(row(t.admin(None).1)["draining"], false);
 }
 
 #[test]

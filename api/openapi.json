@@ -408,12 +408,11 @@
       "get": {
         "operationId": "getAdminState",
         "summary": "Read the administration state",
-        "description": "Infrastructure state uses the same access rules as Settings. It lists catalog workers, their lifecycle status, their runtimes, and the latest 50 audit entries. This API does not install workers, change SSH aliases or host keys, edit worker files, run commands, or change power or GPU reservations.",
+        "description": "Infrastructure state uses the same access rules as Settings. It lists dispatch hosts, their job admission and resource policy, legacy catalog workers and runtimes, and the latest 50 policy audit entries. Reading state does not contact workers.",
         "responses": {
           "200": {"description": "The administration state.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AdminState"}}}},
           "403": {"$ref": "#/components/responses/Forbidden"},
-          "500": {"$ref": "#/components/responses/StorageError"},
-          "503": {"description": "No infrastructure catalog workers are configured.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+          "500": {"$ref": "#/components/responses/StorageError"}
         }
       }
     },
@@ -421,7 +420,7 @@
       "post": {
         "operationId": "applyAdminAction",
         "summary": "Apply one administration action",
-        "description": "Changes controller policy for a catalog worker under the same access rules as Settings. The actions are enroll, approve, deactivate, enable_runtime, disable_runtime, install_runtime and set_resource_policy. A worker is visible to the workbench only while its status is active. approve runs a transport readiness probe first. A runtime is enabled only if the operator configured a runtime helper and the pinned bytes pass its check. install_runtime needs the same helper, a pre-staged runtime, a pending or inactive worker and no running job. The controller runs only one action at a time and audits applied actions. There is no idempotency key; a repeated lifecycle action can return 409. These actions change policy, not hosts: none installs a worker, changes SSH trust, runs a job, or edits a worker file.",
+        "description": "Changes controller policy using normal Settings access. set_host_policy controls pause and disables installed job kinds; set_host_resources replaces the resource limits within the advertised bounds. Both use the host policy revision. Legacy catalog lifecycle and runtime actions remain separate; changing policy does not change SSH trust.",
         "requestBody": {
           "required": true,
           "x-brewery-max-body-bytes": 4096,
@@ -444,6 +443,46 @@
           "500": {"$ref": "#/components/responses/StorageError"},
           "503": {"description": "No infrastructure catalog workers are configured, or another infrastructure action is running.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
         }
+      }
+    },
+    "/api/admin/ssh-hosts": {
+      "get": {
+        "operationId": "listSshHosts",
+        "summary": "Read managed SSH definitions without connecting",
+        "responses": {"200": {"description": "The local registry.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SshHostList"}}}}, "403": {"$ref": "#/components/responses/Forbidden"}}
+      },
+      "post": {
+        "operationId": "createSshHost",
+        "summary": "Save a new SSH definition without connecting",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateSshHost"}}}},
+        "responses": {"201": {"$ref": "#/components/responses/SshHostRow"}, "400": {"$ref": "#/components/responses/BadRequest"}, "403": {"$ref": "#/components/responses/Forbidden"}, "409": {"$ref": "#/components/responses/SshHostConflict"}}
+      }
+    },
+    "/api/admin/ssh-hosts/{id}": {
+      "put": {
+        "operationId": "updateSshHost",
+        "summary": "Save changes to an SSH definition without connecting",
+        "description": "Changing the target or fingerprint resets verification. An installed host permits only a label change. An ID cannot be reused to point existing Library models at a different machine.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/SshHostId"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UpdateSshHost"}}}},
+        "responses": {"200": {"$ref": "#/components/responses/SshHostRow"}, "400": {"$ref": "#/components/responses/BadRequest"}, "403": {"$ref": "#/components/responses/Forbidden"}, "404": {"$ref": "#/components/responses/NotFound"}, "409": {"$ref": "#/components/responses/SshHostConflict"}}
+      },
+      "delete": {
+        "operationId": "removeSshHost",
+        "summary": "Deregister an idle SSH host without deleting any remote data",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/SshHostId"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SshRevision"}}}},
+        "responses": {"204": {"description": "Deregistered locally. The remote installation and data are not touched."}, "403": {"$ref": "#/components/responses/Forbidden"}, "404": {"$ref": "#/components/responses/NotFound"}, "409": {"$ref": "#/components/responses/SshHostConflict"}}
+      }
+    },
+    "/api/admin/ssh-hosts/{id}/action": {
+      "post": {
+        "operationId": "provisionSshHost",
+        "summary": "Test, plan, or explicitly confirm installation",
+        "description": "Test uses the independently obtained Ed25519 fingerprint. Plan requires a verified definition and returns a confirmation digest. Install requires that exact digest and revision. Only a matching verified installation becomes usable by dispatch. No arbitrary commands or file paths are accepted.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/SshHostId"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SshProvisionAction"}}}},
+        "responses": {"200": {"$ref": "#/components/responses/SshHostRow"}, "403": {"$ref": "#/components/responses/Forbidden"}, "404": {"$ref": "#/components/responses/NotFound"}, "409": {"$ref": "#/components/responses/SshHostConflict"}, "502": {"description": "The helper refused or did not return a matching receipt."}, "503": {"description": "No trusted provisioning helper is configured."}}
       }
     },
     "/api/profiles/catalog": {
@@ -637,6 +676,8 @@
       "UnsupportedMediaType": {"description": "Send Content-Type: application/json for JSON requests or a CLI cancel request.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "InvalidJsonData": {"description": "JSON could not be decoded as the request type (for example, wrong field type, unknown top-level field, or missing required field). Kind-specific validation after decoding instead returns 400.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "StorageError": {"description": "A controller storage operation failed.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}, "example": {"error": "controller storage error"}}}},
+      "SshHostRow": {"description": "The saved SSH definition.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SshHost"}}}},
+      "SshHostConflict": {"description": "The definition is stale, busy, reserved, retired, or not in the required provisioning state.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "HfTokenConflict": {"description": "The worker is not eligible, is inactive, or has a queued or running job.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "HfTokenStorageUnavailable": {"description": "The private token file cannot be safely changed.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
     },
@@ -1034,6 +1075,36 @@
           "token": {"type": "string", "minLength": 4, "maxLength": 256, "pattern": "^hf_[A-Za-z0-9_-]+(?![\\s\\S])", "format": "password", "writeOnly": true}
         }
       },
+      "SshHostId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+      "SshHostFields": {
+        "type": "object", "required": ["name", "host", "user", "port", "fingerprint"],
+        "properties": {
+          "name": {"$ref": "#/components/schemas/Name"},
+          "host": {"type": "string", "minLength": 1, "maxLength": 253, "description": "ASCII DNS name or literal IPv4 or IPv6 address, without scheme, brackets or scope."},
+          "user": {"type": "string", "pattern": "^[a-z_][a-z0-9_-]{0,31}$"},
+          "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+          "fingerprint": {"type": "string", "pattern": "^SHA256:[A-Za-z0-9+/]{43}$", "description": "Independently verified OpenSSH Ed25519 fingerprint."}
+        }
+      },
+      "CreateSshHost": {"allOf": [{"$ref": "#/components/schemas/SshHostFields"}], "required": ["id"], "properties": {"id": {"$ref": "#/components/schemas/SshHostId"}}, "unevaluatedProperties": false},
+      "UpdateSshHost": {"allOf": [{"$ref": "#/components/schemas/SshHostFields"}, {"$ref": "#/components/schemas/SshRevisionFields"}], "unevaluatedProperties": false},
+      "SshRevisionFields": {"type": "object", "required": ["revision"], "properties": {"revision": {"type": "integer", "minimum": 1}}},
+      "SshRevision": {"allOf": [{"$ref": "#/components/schemas/SshRevisionFields"}], "unevaluatedProperties": false},
+      "SshProvisionAction": {
+        "allOf": [{"$ref": "#/components/schemas/SshRevisionFields"}],
+        "required": ["action"], "unevaluatedProperties": false,
+        "properties": {"action": {"enum": ["test", "plan", "install"]}, "confirmation": {"$ref": "#/components/schemas/Sha256"}},
+        "if": {"properties": {"action": {"const": "install"}}}, "then": {"required": ["confirmation"]}, "else": {"not": {"required": ["confirmation"]}}
+      },
+      "SshHost": {
+        "allOf": [{"$ref": "#/components/schemas/SshHostFields"}, {"$ref": "#/components/schemas/SshRevisionFields"}],
+        "required": ["id", "status"], "unevaluatedProperties": false,
+        "properties": {"id": {"$ref": "#/components/schemas/SshHostId"}, "status": {"enum": ["defined", "verified", "planned", "installed"]}, "confirmation": {"$ref": "#/components/schemas/Sha256"}}
+      },
+      "SshHostList": {
+        "type": "object", "additionalProperties": false, "required": ["hosts", "available"],
+        "properties": {"hosts": {"type": "array", "items": {"$ref": "#/components/schemas/SshHost"}}, "available": {"type": "boolean", "description": "A trusted provisioning helper is configured. Not a connectivity test."}}
+      },
       "AdminToken": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", "description": "Worker or runtime ID of the admin catalog."},
       "AdminWorkerAction": {
         "type": "object", "required": ["action", "worker"], "additionalProperties": false,
@@ -1051,11 +1122,47 @@
         "properties": {"action": {"const": "set_resource_policy"}, "worker": {"$ref": "#/components/schemas/AdminToken"}, "allow_pool": {"type": "boolean"}}
       },
       "AdminAction": {
-        "oneOf": [{"$ref": "#/components/schemas/AdminWorkerAction"}, {"$ref": "#/components/schemas/AdminRuntimeAction"}, {"$ref": "#/components/schemas/AdminPolicyAction"}]
+        "oneOf": [{"$ref": "#/components/schemas/AdminWorkerAction"}, {"$ref": "#/components/schemas/AdminRuntimeAction"}, {"$ref": "#/components/schemas/AdminPolicyAction"}, {"$ref": "#/components/schemas/AdminHostPolicyAction"}, {"$ref": "#/components/schemas/AdminHostResourcesAction"}]
+      },
+      "AdminJobKinds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/components/schemas/JobKind"}},
+      "AdminHostPolicyAction": {
+        "type": "object", "additionalProperties": false, "required": ["action", "worker", "revision", "paused", "disabled_jobs"],
+        "properties": {"action": {"const": "set_host_policy"}, "worker": {"$ref": "#/components/schemas/HostId"},
+          "revision": {"type": "integer", "minimum": 0}, "paused": {"type": "boolean"}, "disabled_jobs": {"$ref": "#/components/schemas/AdminJobKinds"}}
+      },
+      "AdminHostResourcesAction": {
+        "type": "object", "additionalProperties": false, "required": ["action", "worker", "revision", "resources"],
+        "properties": {"action": {"const": "set_host_resources"}, "worker": {"$ref": "#/components/schemas/HostId"},
+          "revision": {"type": "integer", "minimum": 0}, "resources": {"$ref": "#/components/schemas/AdminResourceLimits"}}
+      },
+      "AdminResourceLimits": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"concurrency": {"type": "integer", "minimum": 1, "maximum": 16},
+          "cpu_threads": {"type": "integer", "minimum": 1, "maximum": 64},
+          "min_free_ram_bytes": {"type": "integer", "minimum": 0, "maximum": 17592186044416},
+          "disk_reserve_bytes": {"type": "integer", "minimum": 0, "maximum": 1125899906842624}}
+      },
+      "AdminResourceRange": {
+        "type": "object", "additionalProperties": false, "required": ["min", "max"],
+        "properties": {"min": {"type": "integer", "minimum": 0}, "max": {"type": "integer", "minimum": 0}}
+      },
+      "AdminResourceBounds": {
+        "type": ["object", "null"], "additionalProperties": false,
+        "properties": {"concurrency": {"$ref": "#/components/schemas/AdminResourceRange"}, "cpu_threads": {"$ref": "#/components/schemas/AdminResourceRange"},
+          "min_free_ram_bytes": {"$ref": "#/components/schemas/AdminResourceRange"}, "disk_reserve_bytes": {"$ref": "#/components/schemas/AdminResourceRange"}}
+      },
+      "AdminHostPolicy": {
+        "type": "object", "required": ["id", "name", "revision", "paused", "draining", "disabled_jobs", "installed_jobs", "allowed_jobs", "resources", "effective_resources", "resource_bounds"],
+        "properties": {"id": {"$ref": "#/components/schemas/HostId"}, "name": {"$ref": "#/components/schemas/Name"},
+          "revision": {"type": "integer", "minimum": 0}, "paused": {"type": "boolean"}, "draining": {"type": "boolean"},
+          "disabled_jobs": {"$ref": "#/components/schemas/AdminJobKinds"}, "installed_jobs": {"$ref": "#/components/schemas/AdminJobKinds"},
+          "allowed_jobs": {"$ref": "#/components/schemas/AdminJobKinds"}, "resources": {"$ref": "#/components/schemas/AdminResourceLimits"},
+          "effective_resources": {"$ref": "#/components/schemas/AdminResourceLimits"}, "resource_bounds": {"$ref": "#/components/schemas/AdminResourceBounds"}}
       },
       "AdminState": {
-        "type": "object", "required": ["workers", "audit", "unavailable"],
+        "type": "object", "required": ["hosts", "workers", "audit", "unavailable"],
         "properties": {
+          "hosts": {"type": "array", "items": {"$ref": "#/components/schemas/AdminHostPolicy"}},
           "workers": {"type": "array", "items": {
             "type": "object", "required": ["id", "name", "status", "can_enroll", "can_approve", "can_deactivate", "allow_pool", "pool_ceiling", "runtimes"],
             "properties": {

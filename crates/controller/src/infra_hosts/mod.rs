@@ -1,0 +1,265 @@
+mod api;
+mod transport;
+
+use crate::{
+    Error,
+    domain::{Host, KINDS},
+};
+pub use api::router;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs, io,
+    net::IpAddr,
+    os::unix::fs::{DirBuilderExt as _, MetadataExt as _},
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
+use tokio::sync::Semaphore;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Target {
+    host: String,
+    user: String,
+    port: u16,
+    fingerprint: String,
+}
+
+impl Target {
+    fn valid(&self) -> bool {
+        let bytes = self.user.as_bytes();
+        self.port != 0
+            && (1..=32).contains(&bytes.len())
+            && (bytes[0].is_ascii_lowercase() || bytes[0] == b'_')
+            && bytes[1..]
+                .iter()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(b))
+            && (self.host.parse::<IpAddr>().is_ok()
+                || (self.host.len() <= 253
+                    && self.host.split('.').all(|label| {
+                        label.len() <= 63
+                            && label
+                                .as_bytes()
+                                .first()
+                                .is_some_and(u8::is_ascii_alphanumeric)
+                            && label
+                                .as_bytes()
+                                .last()
+                                .is_some_and(u8::is_ascii_alphanumeric)
+                            && label
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    })))
+            && transport::fingerprint_valid(&self.fingerprint)
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        self.host.eq_ignore_ascii_case(&other.host)
+            && self.user == other.user
+            && self.port == other.port
+            && self.fingerprint == other.fingerprint
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum Provision {
+    #[default]
+    Defined,
+    Verified {
+        key: String,
+    },
+    Planned {
+        key: String,
+        confirmation: String,
+        install: transport::Install,
+    },
+    Installed {
+        key: String,
+        install: transport::Install,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Row {
+    id: String,
+    name: String,
+    target: Target,
+    revision: u64,
+    provision: Provision,
+}
+
+impl Row {
+    fn view(&self) -> Value {
+        let status = match &self.provision {
+            Provision::Defined => "defined",
+            Provision::Verified { .. } => "verified",
+            Provision::Planned { .. } => "planned",
+            Provision::Installed { .. } => "installed",
+        };
+        let mut view = json!({
+            "id":self.id,"name":self.name,"host":self.target.host,"user":self.target.user,
+            "port":self.target.port,"fingerprint":self.target.fingerprint,
+            "revision":self.revision,"status":status
+        });
+        if let Provision::Planned { confirmation, .. } = &self.provision {
+            view["confirmation"] = json!(confirmation);
+        }
+        view
+    }
+
+    fn dispatch_host(&self) -> Value {
+        let capabilities = KINDS
+            .iter()
+            .map(|&kind| {
+                (
+                    kind.into(),
+                    json!(matches!(
+                        kind,
+                        "inspect" | "transfer" | "transfer_preview" | "cache_cleanup"
+                    )),
+                )
+            })
+            .collect::<Map<String, Value>>();
+        json!({"name":self.name,"capabilities":capabilities})
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize, Default)]
+struct State {
+    rows: BTreeMap<String, Row>,
+    // IDs are durable Library namespaces. Never let a later host inherit
+    // paths or historical job identities from a removed definition.
+    retired: BTreeSet<String>,
+}
+
+pub struct Registry {
+    dir: PathBuf,
+    base: Map<String, Value>,
+    reserved: BTreeSet<String>,
+    state: Mutex<State>,
+    helper: Option<transport::Helper>,
+    changes: Semaphore,
+}
+
+impl Registry {
+    pub fn open(data: &Path, config: Option<&Value>) -> Result<Self, Error> {
+        let dir = data.canonicalize()?.join("ssh-hosts");
+        if let Err(err) = fs::DirBuilder::new().mode(0o700).create(&dir)
+            && err.kind() != io::ErrorKind::AlreadyExists
+        {
+            return Err(err.into());
+        }
+        brewery_worker::operational::private_root(&dir)?;
+        let state: State = match fs::symlink_metadata(dir.join("registry.json")) {
+            Ok(md)
+                if md.is_file()
+                    && md.uid() == unsafe { libc::geteuid() }
+                    && md.mode() & 0o077 == 0
+                    && md.nlink() == 1 =>
+            {
+                serde_json::from_reader(fs::File::open(dir.join("registry.json"))?)?
+            }
+            Ok(_) => return Err("SSH definition registry is not private".into()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => State::default(),
+            Err(err) => return Err(err.into()),
+        };
+        let base = config
+            .and_then(|v| v["hosts"].as_object())
+            .cloned()
+            .unwrap_or_default();
+        let mut reserved: BTreeSet<_> = base.keys().map(|k| k.to_ascii_lowercase()).collect();
+        reserved.extend(["auto".into(), crate::backend_hf::ID.into()]);
+        let helper = transport::Helper::from_env();
+        let out = Self {
+            dir,
+            base,
+            reserved,
+            state: Mutex::new(state),
+            helper,
+            changes: Semaphore::new(1),
+        };
+        let state = out.state.lock().expect("SSH registry lock");
+        for (id, row) in &state.rows {
+            if id != &row.id
+                || !id_valid(id)
+                || !row.target.valid()
+                || out.reserved.contains(&id.to_ascii_lowercase())
+            {
+                return Err("invalid saved SSH definition".into());
+            }
+        }
+        if !out.reserved.is_disjoint(&state.retired) {
+            return Err("operator host ID conflicts with a retired SSH definition".into());
+        }
+        out.write_dispatch(&state)?;
+        drop(state);
+        Ok(out)
+    }
+
+    pub fn defined_hosts(&self) -> Result<Vec<Host>, Error> {
+        let state = self.state.lock().expect("SSH registry lock");
+        state
+            .rows
+            .values()
+            .filter(|r| self.dispatchable(r))
+            .map(|row| Host::from_config(&row.id, &row.dispatch_host()).map_err(Into::into))
+            .collect()
+    }
+
+    fn dispatchable(&self, row: &Row) -> bool {
+        !self.reserved.contains(&row.id.to_ascii_lowercase())
+            && matches!(&row.provision, Provision::Installed { .. })
+    }
+
+    pub fn config_for(&self, ids: &[&str]) -> Option<PathBuf> {
+        let state = self.state.lock().expect("SSH registry lock");
+        ids.iter()
+            .any(|id| state.rows.get(*id).is_some_and(|r| self.dispatchable(r)))
+            .then(|| self.dir.join("dispatch.json"))
+    }
+
+    fn write_dispatch(&self, state: &State) -> Result<(), Error> {
+        let mut hosts = self.base.clone();
+        for row in state.rows.values().filter(|r| self.dispatchable(r)) {
+            let Provision::Installed { key, install } = &row.provision else {
+                unreachable!()
+            };
+            let config = transport::ssh_config(&self.dir, row, key, install)?;
+            hosts.insert(row.id.clone(), json!({
+                "ssh":row.id,"ssh_config":config,"remote_worker":install.worker,"remote_config":install.config
+            }));
+        }
+        transport::private_write(
+            &self.dir.join("dispatch.json"),
+            &serde_json::to_vec(&json!({"hosts":hosts}))?,
+        )?;
+        Ok(())
+    }
+
+    fn commit(&self, state: &mut State, next: State) -> Result<(), Error> {
+        self.write_dispatch(&next)?;
+        if let Err(err) =
+            transport::private_write(&self.dir.join("registry.json"), &serde_json::to_vec(&next)?)
+        {
+            let _ = self.write_dispatch(state);
+            return Err(err.into());
+        }
+        *state = next;
+        Ok(())
+    }
+}
+
+fn id_valid(id: &str) -> bool {
+    id.len() <= 64
+        && id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+}
+
+fn name_valid(name: &str) -> bool {
+    !name.trim().is_empty() && name.len() <= 256 && !name.chars().any(char::is_control)
+}

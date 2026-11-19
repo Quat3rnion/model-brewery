@@ -34,6 +34,7 @@ struct Config {
     managed_settings: Option<operational::Policy>,
     hf_download: Option<hf_download::Config>,
     backend_weight_download_root: Option<PathBuf>,
+    resource_bounds: Option<resources::Bounds>,
 }
 fn reserve() -> u64 {
     1024 * 1024 * 1024
@@ -50,6 +51,9 @@ impl Config {
             .context("set BREWERY_WORKER_CONFIG")?
             .canonicalize()?;
         let cfg: Config = load(&path)?;
+        if let Some(bounds) = &cfg.resource_bounds {
+            bounds.check_ranges()?;
+        }
         absolute(&cfg.root)?;
         absolute(&cfg.engine)?;
         if let Some(p) = &cfg.admission {
@@ -118,6 +122,73 @@ fn boot_id() -> Result<String> {
 }
 
 impl Worker {
+    fn resource_enabled(&self) -> bool {
+        self.cfg.pinned_publication.is_none()
+            && !self
+                .cfg
+                .engine_env
+                .contains_key("BREWERY_EXPECTED_SOURCE_SHA256")
+            && env::var_os("BREWERY_EXPECTED_SOURCE_SHA256").is_none()
+            && self.cfg.hf_download.is_none()
+            && self.cfg.backend_weight_download_root.is_none()
+    }
+
+    fn resource_bounds(&self) -> resources::Bounds {
+        self.cfg
+            .resource_bounds
+            .unwrap_or(resources::Bounds::standard(true))
+    }
+
+    fn resource_floor(&self, r: &Record) -> u64 {
+        let requested = r.job.as_ref().and_then(|j| j.resources.disk_reserve_bytes);
+        self.disk_floor(requested)
+    }
+
+    fn disk_floor(&self, requested: Option<u64>) -> u64 {
+        let floor = if self.resource_enabled() {
+            self.cfg
+                .resource_bounds
+                .and_then(|b| b.disk_reserve_bytes)
+                .map_or(0, |b| b.min)
+        } else {
+            0
+        };
+        self.cfg
+            .disk_reserve_bytes
+            .max(floor)
+            .max(requested.unwrap_or(0))
+    }
+
+    fn cache_for(&self, r: &Record) -> Cache {
+        Cache {
+            reserve: self.resource_floor(r),
+            complete: self.cache.complete.clone(),
+            partial: self.cache.partial.clone(),
+        }
+    }
+
+    fn conversion_slot(&self, job: &Job) -> Result<bool> {
+        if job.kind != "convert" || !self.resource_enabled() {
+            return Ok(true);
+        }
+        let ceiling = self.resource_bounds().concurrency.map_or(1, |r| r.max);
+        let cap = job.resources.concurrency.unwrap_or(1).min(ceiling);
+        let mut active = 0;
+        for entry in fs::read_dir(&self.jobs)? {
+            let entry = entry?;
+            let id = entry.file_name();
+            if let Some(r) = self.get(id.to_str().context("invalid worker job name")?)?
+                && r.reply.state == "running"
+            {
+                active += 1;
+                if active >= cap {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     fn active_input(r: &Record) -> Option<(usize, usize)> {
         let count = r.job.as_ref()?.inputs.len();
         (0..count)
@@ -356,6 +427,31 @@ impl Worker {
             }
             return Ok(r.reply);
         }
+        if !job.resources.is_empty() {
+            let accepted = self.resource_enabled()
+                && job.resources.for_job(&job.kind) == job.resources
+                && matches!(action.as_str(), "start" | "transfer" | "preview_transfer")
+                && resources::Bounds::MAX.validate(&job.resources).is_ok()
+                && {
+                    let supported = self.resource_bounds();
+                    let req = job.resources;
+                    req.concurrency
+                        .is_none_or(|n| supported.concurrency.is_some_and(|bound| n <= bound.max))
+                        && (req.cpu_threads.is_none() || supported.cpu_threads.is_some())
+                        && (req.min_free_ram_bytes.is_none()
+                            || supported.min_free_ram_bytes.is_some())
+                        && (req.disk_reserve_bytes.is_none()
+                            || supported.disk_reserve_bytes.is_some())
+                };
+            if !accepted {
+                return self.record_prepare(
+                    id,
+                    action,
+                    job,
+                    Reply::error("Worker does not support requested resource controls"),
+                );
+            }
+        }
         if self.cfg.backend_weight_download_root.is_some()
             && !(action == "start"
                 && job.prompt.is_none()
@@ -487,7 +583,14 @@ impl Worker {
         self.record_prepare(id, action, job, Reply::new("queued", "resolving inputs"))
     }
 
-    fn record_prepare(&self, id: &str, action: String, job: Job, reply: Reply) -> Result<Reply> {
+    fn record_prepare(
+        &self,
+        id: &str,
+        action: String,
+        job: Job,
+        mut reply: Reply,
+    ) -> Result<Reply> {
+        reply.resources_enforced = reply.state == "queued" && !job.resources.is_empty();
         self.put(
             id,
             &Record {
@@ -977,7 +1080,7 @@ impl Worker {
                 drop(state);
                 let active = Self::active_input(&r);
                 let mut emit = self.progress_callback(&id)?;
-                let plan = self.cache.plan(
+                let plan = self.cache_for(&r).plan(
                     &bundle,
                     preview,
                     &mut progress::Reporter::new(&mut emit, active),
@@ -1007,7 +1110,7 @@ impl Worker {
                     &mut emit as &mut dyn FnMut(&ProgressDetail) -> Result<()>,
                     active,
                 );
-                let (next, _) = self.cache.write(
+                let (next, _) = self.cache_for(&r).write(
                     &digest,
                     &entry,
                     offset,

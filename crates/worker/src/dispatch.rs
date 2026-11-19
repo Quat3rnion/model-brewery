@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use brewery_hash_pool::ProgressEvent;
 use brewery_worker::*;
 use serde::{Deserialize, de::DeserializeOwned};
@@ -24,6 +24,8 @@ struct Host {
     local: Option<bool>,
     worker: Option<PathBuf>,
     config: Option<PathBuf>,
+    remote_worker: Option<String>,
+    remote_config: Option<String>,
 }
 
 impl Host {
@@ -34,8 +36,13 @@ impl Host {
             self.local,
             &self.worker,
             &self.config,
+            &self.remote_worker,
+            &self.remote_config,
         ) {
-            (Some(alias), config, None, None, None) => {
+            (Some(alias), config, None, None, None, worker, worker_config)
+                if (worker.is_none() && worker_config.is_none())
+                    || (config.is_some() && worker.is_some() && worker_config.is_some()) =>
+            {
                 token(alias)?;
                 let mut c = Command::new("/usr/bin/ssh");
                 if let Some(config) = config {
@@ -68,12 +75,27 @@ impl Host {
                     "ControlPath=none",
                     "--",
                     alias,
-                    "brewery-worker",
-                    "rpc",
                 ]);
+                if let (Some(worker), Some(config)) = (worker, worker_config) {
+                    ensure!(
+                        managed_remote_path(worker)
+                            && managed_remote_path(config)
+                            && worker.strip_suffix("/brewery-worker")
+                                == config.strip_suffix("/worker.json")
+                            && worker.ends_with("/brewery-worker"),
+                        "invalid managed SSH executable or config path"
+                    );
+                    c.args([
+                        format!("BREWERY_WORKER_CONFIG={config}"),
+                        worker.clone(),
+                        "rpc".into(),
+                    ]);
+                } else {
+                    c.args(["brewery-worker", "rpc"]);
+                }
                 Ok(c)
             }
-            (None, None, Some(true), Some(worker), Some(config)) => {
+            (None, None, Some(true), Some(worker), Some(config), None, None) => {
                 absolute(worker)?;
                 absolute(config)?;
                 let mut c = Command::new(worker);
@@ -83,6 +105,18 @@ impl Host {
             _ => bail!("host must select exactly one SSH or explicit local worker"),
         }
     }
+}
+
+fn managed_remote_path(path: &str) -> bool {
+    path.len() <= 1050
+        && path.strip_prefix('/').is_some_and(|path| {
+            path.split('/').all(|part| {
+                !matches!(part, "" | "." | "..")
+                    && part
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+            })
+        })
 }
 
 #[derive(Debug)]
@@ -562,6 +596,7 @@ fn run_job(cfg: &Config, action: &str, dest: &str, id: &str) -> Wire<Reply> {
             } else {
                 decode(stdin.lock())?
             };
+            let resource_request = !job.resources.is_empty();
             ensure_wire(
                 action != "cleanup" || job.inputs.is_empty(),
                 "cleanup must not contain inputs",
@@ -580,6 +615,16 @@ fn run_job(cfg: &Config, action: &str, dest: &str, id: &str) -> Wire<Reply> {
             )?;
             if reply.state != "queued" {
                 return Ok(reply);
+            }
+            if resource_request && !reply.resources_enforced {
+                return cfg.rpc(
+                    dest,
+                    Rpc::Finish {
+                        id: id.into(),
+                        failure: Some("Worker does not support requested resource controls".into()),
+                        result: None,
+                    },
+                );
             }
             match stage(cfg, action, dest, id, job) {
                 Err(Error::Remote(e)) => cfg.rpc(
@@ -613,6 +658,7 @@ fn cleanup_job() -> Job {
         inputs: vec![],
         options: object(),
         prompt: None,
+        resources: resources::Limits::default(),
     }
 }
 

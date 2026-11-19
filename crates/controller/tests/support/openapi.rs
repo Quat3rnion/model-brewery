@@ -74,6 +74,15 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("delete", "/api/settings/{host}/hf-token", "removeHfToken"),
         ("get", "/api/admin/state", "getAdminState"),
         ("post", "/api/admin/actions", "applyAdminAction"),
+        ("get", "/api/admin/ssh-hosts", "listSshHosts"),
+        ("post", "/api/admin/ssh-hosts", "createSshHost"),
+        ("put", "/api/admin/ssh-hosts/{id}", "updateSshHost"),
+        ("delete", "/api/admin/ssh-hosts/{id}", "removeSshHost"),
+        (
+            "post",
+            "/api/admin/ssh-hosts/{id}/action",
+            "provisionSshHost",
+        ),
         ("get", "/api/profiles/catalog", "getProfileCatalog"),
         ("get", "/api/profiles/gguf-catalog", "getGgufCatalog"),
         (

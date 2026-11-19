@@ -84,14 +84,23 @@ fn hf_token_is_write_only_and_rotates_across_restart() {
         );
         assert!(!token_file.exists());
     }
-    for entry in fs::read_dir(app.path("state")).unwrap() {
-        let bytes = fs::read(entry.unwrap().path()).unwrap();
-        for secret in [TOKEN, REPLACEMENT] {
-            assert!(
-                !bytes
-                    .windows(secret.len())
-                    .any(|bytes| bytes == secret.as_bytes())
-            );
+    let mut pending = vec![app.path("state")];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                let bytes = fs::read(entry.path()).unwrap();
+                for secret in [TOKEN, REPLACEMENT] {
+                    assert!(
+                        !bytes
+                            .windows(secret.len())
+                            .any(|bytes| bytes == secret.as_bytes())
+                    );
+                }
+            }
         }
     }
 }

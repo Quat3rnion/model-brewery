@@ -11,6 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use brewery_worker::resources::Limits;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -27,6 +28,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{io::AsyncWriteExt, process::Command, sync::Semaphore, time::timeout};
+
+#[path = "infra_policy.rs"]
+mod infra_policy;
 
 const INSTALL_UNAVAILABLE: &str =
     "Installation requires an operator-configured helper and a pinned, pre-staged runtime";
@@ -92,13 +96,42 @@ struct Policy {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
-    Enroll { worker: String },
-    Approve { worker: String },
-    Deactivate { worker: String },
-    EnableRuntime { worker: String, runtime: String },
-    DisableRuntime { worker: String, runtime: String },
-    InstallRuntime { worker: String, runtime: String },
-    SetResourcePolicy { worker: String, allow_pool: bool },
+    Enroll {
+        worker: String,
+    },
+    Approve {
+        worker: String,
+    },
+    Deactivate {
+        worker: String,
+    },
+    EnableRuntime {
+        worker: String,
+        runtime: String,
+    },
+    DisableRuntime {
+        worker: String,
+        runtime: String,
+    },
+    InstallRuntime {
+        worker: String,
+        runtime: String,
+    },
+    SetResourcePolicy {
+        worker: String,
+        allow_pool: bool,
+    },
+    SetHostPolicy {
+        worker: String,
+        revision: u64,
+        paused: bool,
+        disabled_jobs: Vec<String>,
+    },
+    SetHostResources {
+        worker: String,
+        revision: u64,
+        resources: Limits,
+    },
 }
 
 impl Action {
@@ -110,7 +143,9 @@ impl Action {
             | Self::EnableRuntime { worker, .. }
             | Self::DisableRuntime { worker, .. }
             | Self::InstallRuntime { worker, .. }
-            | Self::SetResourcePolicy { worker, .. } => worker,
+            | Self::SetResourcePolicy { worker, .. }
+            | Self::SetHostPolicy { worker, .. }
+            | Self::SetHostResources { worker, .. } => worker,
         }
     }
 }
@@ -236,9 +271,6 @@ impl Admin {
             })
             .transpose()?
             .unwrap_or_default();
-        if catalog.workers.is_empty() {
-            return Ok(None);
-        }
         let runtime_helper = env::var_os("BREWERY_ADMIN_RUNTIME_HELPER").map(PathBuf::from);
         if runtime_helper
             .as_deref()
@@ -311,7 +343,8 @@ impl Admin {
             .open(&path)?;
         let db = Connection::open(path)?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS admin_policy(worker TEXT PRIMARY KEY, alias TEXT NOT NULL, body TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, body TEXT NOT NULL, outcome TEXT NOT NULL);")?;
+            CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, body TEXT NOT NULL, outcome TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS infra_host_policy(worker TEXT PRIMARY KEY, body TEXT NOT NULL);")?;
         Ok(Some(Self {
             catalog,
             db: Mutex::new(db),
@@ -321,38 +354,88 @@ impl Admin {
         }))
     }
 
-    pub fn effective_hosts(&self, hosts: &[Host]) -> Result<Vec<Host>, Error> {
-        let db = self.db.lock().map_err(|_| "admin storage unavailable")?;
-        let mut effective = Vec::new();
-        for host in hosts {
-            let mut host = host.clone();
-            if let Some(entry) = self.catalog.workers.get(&host.id) {
-                let policy = policy(&db, &host, entry)?;
-                if policy.status != Lifecycle::Active {
-                    continue;
-                }
-                host.quantization_pool &= policy.allow_pool;
-                for (id, runtime) in &entry.runtimes {
-                    if !enabled(&policy, id, runtime) {
-                        for kind in &runtime.capabilities {
-                            host.capabilities.insert(kind.clone(), false);
-                            host.reasons.insert(
-                                kind.clone(),
-                                "Disabled by infrastructure administration".into(),
-                            );
-                        }
+    fn legacy_host(&self, db: &Connection, mut host: Host) -> Result<Option<Host>, Error> {
+        if let Some(entry) = self.catalog.workers.get(&host.id) {
+            let policy = policy(db, &host, entry)?;
+            if policy.status != Lifecycle::Active {
+                return Ok(None);
+            }
+            host.quantization_pool &= policy.allow_pool;
+            for (id, runtime) in &entry.runtimes {
+                if !enabled(&policy, id, runtime) {
+                    for kind in &runtime.capabilities {
+                        host.capabilities.insert(kind.clone(), false);
+                        host.reasons.insert(
+                            kind.clone(),
+                            "Disabled by infrastructure administration".into(),
+                        );
                     }
                 }
             }
-            effective.push(host);
+        }
+        Ok(Some(host))
+    }
+
+    pub fn effective_hosts(&self, hosts: &[Host]) -> Result<Vec<Host>, Error> {
+        self.hosts_with_policy(hosts, true)
+    }
+
+    fn hosts_with_policy(
+        &self,
+        hosts: &[Host],
+        apply_scheduling: bool,
+    ) -> Result<Vec<Host>, Error> {
+        let db = self.db.lock().map_err(|_| "admin storage unavailable")?;
+        let mut effective = Vec::new();
+        for host in hosts {
+            if let Some(mut host) = self.legacy_host(&db, host.clone())? {
+                if apply_scheduling {
+                    infra_policy::Policy::load(&db, &host.id)?.restrict(&mut host)?;
+                }
+                effective.push(host);
+            }
         }
         Ok(effective)
     }
 
-    fn view(&self, hosts: &[Host]) -> Result<Value, Error> {
+    fn view(&self, app: &App) -> Result<Value, Error> {
+        let store = app
+            .store
+            .lock()
+            .map_err(|_| "controller storage unavailable")?;
+        let hosts = app.defined_hosts()?;
+        let mut busy = BTreeSet::new();
+        for job in store.by_state(JobState::Running)? {
+            busy.insert(job.host);
+            busy.extend(
+                store
+                    .envelope(&job.id)?
+                    .inputs
+                    .into_iter()
+                    .map(|input| input.host),
+            );
+        }
+        let operational: BTreeMap<_, _> = app
+            .settings
+            .effective(&hosts)
+            .into_iter()
+            .map(|host| (host.id.clone(), host))
+            .collect();
         let db = self.db.lock().map_err(|_| "admin storage unavailable")?;
+        let mut host_rows = Vec::new();
         let mut workers = Vec::new();
-        for host in hosts {
+        for host in &hosts {
+            let host_policy = infra_policy::Policy::load(&db, &host.id)?;
+            let mut effective = self.legacy_host(&db, operational[&host.id].clone())?;
+            if let Some(effective) = &mut effective {
+                host_policy.restrict(effective)?;
+            }
+            host_rows.push(json!({"id":host.id,"name":host.name,"revision":host_policy.revision,
+                "paused":host_policy.paused,"draining":host_policy.paused && busy.contains(&host.id),
+                "disabled_jobs":host_policy.disabled_jobs,"installed_jobs":infra_policy::job_kinds(host),
+                "resources":host_policy.resources,"resource_bounds":host.resource_bounds,
+                "effective_resources":effective.as_ref().unwrap_or(host).effective_resources(),
+                "allowed_jobs":effective.as_ref().map_or_else(Vec::new, infra_policy::job_kinds)}));
             let Some(entry) = self.catalog.workers.get(&host.id) else {
                 continue;
             };
@@ -386,10 +469,24 @@ impl Admin {
             v["outcome"] = json!(row.get::<_, String>(3)?);
             audit.push(v);
         }
-        Ok(json!({"workers":workers,"audit":audit,"unavailable":{
-            "install_runtime": self.runtime_helper.is_none().then_some(INSTALL_UNAVAILABLE),
-            "host_provisioning":PROVISION_UNAVAILABLE,"resource_controls":POLICY_UNAVAILABLE
-        }}))
+        Ok(
+            json!({"hosts":host_rows,"workers":workers,"audit":audit,"unavailable":{
+                "install_runtime": self.runtime_helper.is_none().then_some(INSTALL_UNAVAILABLE),
+                "host_provisioning":PROVISION_UNAVAILABLE,"resource_controls":POLICY_UNAVAILABLE
+            }}),
+        )
+    }
+}
+
+impl App {
+    // A durable allocation may reconnect after its host has started draining.
+    // Keep immutable and legacy admission checks without applying new job policy.
+    pub(crate) fn effective_hosts_for_allocated(&self) -> Result<Vec<Host>, Error> {
+        let hosts = self.settings.effective(&self.defined_hosts()?);
+        match &self.admin {
+            Some(admin) => admin.hosts_with_policy(&hosts, false),
+            None => Ok(hosts),
+        }
     }
 }
 
@@ -438,7 +535,7 @@ fn configured(app: &App) -> ApiResult<&Admin> {
 
 async fn state(State(app): State<Arc<App>>) -> ApiResult<Json<Value>> {
     configured(&app)?
-        .view(&app.hosts)
+        .view(&app)
         .map(Json)
         .map_err(ApiError::storage)
 }
@@ -466,6 +563,57 @@ async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
         )
     })?;
     let id = action.worker();
+    if let Action::SetHostPolicy { revision, .. } | Action::SetHostResources { revision, .. } =
+        &action
+    {
+        {
+            // Serialize against queue allocation and admission.
+            let _store = app.store.lock().map_err(ApiError::storage)?;
+            let hosts = app.defined_hosts().map_err(ApiError::storage)?;
+            let host = hosts
+                .iter()
+                .find(|host| host.id == id)
+                .ok_or(ApiError(StatusCode::NOT_FOUND, "Unknown defined worker"))?;
+            let mut db = admin.db.lock().map_err(ApiError::storage)?;
+            let tx = db.transaction().map_err(ApiError::storage)?;
+            let mut current = infra_policy::Policy::load(&tx, id).map_err(ApiError::storage)?;
+            if current.revision != *revision {
+                return Err(ApiError::conflict("Host policy revision is stale"));
+            }
+            match &action {
+                Action::SetHostPolicy {
+                    paused,
+                    disabled_jobs,
+                    ..
+                } => {
+                    current.disabled_jobs = infra_policy::validate_jobs(host, disabled_jobs)
+                        .ok_or(ApiError(StatusCode::BAD_REQUEST, "Disabled jobs must be distinct and within the installed worker capabilities"))?;
+                    current.paused = *paused;
+                }
+                Action::SetHostResources { resources, .. } => {
+                    host.resource_bounds
+                        .unwrap_or_default()
+                        .validate(resources)
+                        .map_err(|_| {
+                            ApiError(
+                                StatusCode::BAD_REQUEST,
+                                "Resources must be within the installed worker bounds",
+                            )
+                        })?;
+                    current.resources = *resources;
+                }
+                _ => unreachable!(),
+            }
+            current.revision = current
+                .revision
+                .checked_add(1)
+                .ok_or(ApiError::conflict("Host policy revision limit reached"))?;
+            current.save(&tx, id).map_err(ApiError::storage)?;
+            record_audit(&tx, &action, "applied")?;
+            tx.commit().map_err(ApiError::storage)?;
+        }
+        return admin.view(&app).map(Json).map_err(ApiError::storage);
+    }
     let entry = admin
         .catalog
         .workers
@@ -572,7 +720,7 @@ async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
         let _store = app.store.lock().map_err(ApiError::storage)?;
         admin.record(&action, Some((&entry.binding, &p)), "applied")?;
     }
-    admin.view(&app.hosts).map(Json).map_err(ApiError::storage)
+    admin.view(&app).map(Json).map_err(ApiError::storage)
 }
 
 impl Admin {
@@ -588,21 +736,26 @@ impl Admin {
             tx.execute("INSERT INTO admin_policy(worker,alias,body) VALUES(?,?,?) ON CONFLICT(worker) DO UPDATE SET alias=excluded.alias,body=excluded.body",
                 params![action.worker(),alias,serde_json::to_string(p).map_err(ApiError::storage)?]).map_err(ApiError::storage)?;
         }
-        let at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
-        tx.execute(
-            "INSERT INTO admin_audit(at_ms,body,outcome) VALUES(?,?,?)",
-            params![
-                at,
-                serde_json::to_string(action).map_err(ApiError::storage)?,
-                outcome
-            ],
-        )
-        .map_err(ApiError::storage)?;
+        record_audit(&tx, action, outcome)?;
         tx.commit().map_err(ApiError::storage)
     }
+}
+
+fn record_audit(tx: &Connection, action: &Action, outcome: &str) -> ApiResult<()> {
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    tx.execute(
+        "INSERT INTO admin_audit(at_ms,body,outcome) VALUES(?,?,?)",
+        params![
+            at,
+            serde_json::to_string(action).map_err(ApiError::storage)?,
+            outcome
+        ],
+    )
+    .map_err(ApiError::storage)?;
+    Ok(())
 }
 
 fn worker_busy(app: &App, id: &str) -> ApiResult<bool> {

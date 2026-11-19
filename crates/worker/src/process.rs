@@ -48,6 +48,31 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
             r.inputs.len() == job.inputs.len(),
             "unresolved worker inputs"
         );
+        if !w.conversion_slot(&job)? {
+            return Ok(());
+        }
+        if w.resource_enabled() && resources::engine_job(&job.kind) {
+            let bounds = w.cfg.resource_bounds.unwrap_or_default();
+            let ram = job
+                .resources
+                .min_free_ram_bytes
+                .unwrap_or(0)
+                .max(bounds.min_free_ram_bytes.map_or(0, |b| b.min));
+            // Preserve legacy launch behavior unless a reserve policy applies.
+            let disk = if job.resources.disk_reserve_bytes.is_some()
+                || bounds.disk_reserve_bytes.is_some()
+            {
+                w.resource_floor(&r)
+            } else {
+                0
+            };
+            if let Err(error) =
+                resources::ram_check(ram).and_then(|_| resources::disk_check(&w.cfg.root, disk))
+            {
+                r.reply = Reply::error(error);
+                return w.put(id, &r);
+            }
+        }
         job.inputs = r.inputs.values().cloned().collect();
         r.boot = Some(boot_id()?);
         r.started = Some(report::now());
@@ -181,6 +206,35 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
         .stdin(File::open(jobfile)?)
         .stdout(File::create(&output)?)
         .stderr(File::create(stderr)?);
+    if w.resource_enabled() && resources::engine_job(&job.kind) {
+        let bounds = w.cfg.resource_bounds.unwrap_or_default();
+        if let Some(requested) = job
+            .resources
+            .cpu_threads
+            .or(bounds.cpu_threads.map(|range| range.max))
+        {
+            let configured = w
+                .cfg
+                .engine_env
+                .get("BREWERY_CPU_THREADS")
+                .cloned()
+                .or_else(|| env::var("BREWERY_CPU_THREADS").ok());
+            let ceiling = bounds.cpu_threads.map_or(64, |range| range.max);
+            resources::cap_cpu(&mut command, requested.min(ceiling), configured.as_deref())?;
+        }
+        if matches!(job.kind.as_str(), "inspect" | "plan" | "convert" | "verify") {
+            let reserve = if bounds.disk_reserve_bytes.is_some()
+                || job.resources.disk_reserve_bytes.is_some()
+            {
+                Some(w.disk_floor(job.resources.disk_reserve_bytes))
+            } else {
+                None
+            };
+            if let Some(reserve) = reserve {
+                command.env("BREWERY_CONVERTER_DISK_RESERVE_BYTES", reserve.to_string());
+            }
+        }
+    }
     if let Some(download) = download {
         let policy = base.join("hf-download-policy.json");
         atomic(
@@ -204,7 +258,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
         }
         command.env(
             "BREWERY_WEIGHT_SAFETENSORS_DISK_RESERVE_BYTES",
-            w.cfg.disk_reserve_bytes.to_string(),
+            w.disk_floor(job.resources.disk_reserve_bytes).to_string(),
         );
     }
     if let Some(policy) = &w.cfg.managed_settings

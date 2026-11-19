@@ -626,11 +626,16 @@ pub(crate) fn disk_preflight(path: &Path, payload_bytes: u64) -> Result<Value> {
     let stat = unsafe { stat.assume_init() };
     let avail = (stat.f_bavail as u128) * (stat.f_frsize as u128);
     let payload = u128::from(payload_bytes);
-    let required = payload + payload / 20 + (64 << 20);
+    let reserve = std::env::var("BREWERY_CONVERTER_DISK_RESERVE_BYTES")
+        .ok()
+        .map(|v| v.parse::<u64>())
+        .transpose()?
+        .unwrap_or(0);
+    let required = payload + payload / 20 + (64 << 20) + u128::from(reserve);
     Ok(json!({
         "payload_bytes":payload_bytes,"available_bytes":u64::try_from(avail)?,
         "required_bytes":u64::try_from(required)?,"fits":avail >= required,
-        "scope":"converter HGN payloads plus 5% and 64 MiB; assets and concurrent disk usage excluded; not a reservation"
+        "scope":"converter payloads plus 5%, 64 MiB, and any configured reserve; assets and concurrent disk usage excluded; not a reservation"
     }))
 }
 

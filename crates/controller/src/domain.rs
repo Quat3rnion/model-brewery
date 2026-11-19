@@ -158,6 +158,13 @@ pub struct Job {
     pub requested_host: Option<String>,
     #[serde(default)]
     pub pool_slot: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_slot: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "brewery_worker::resources::Limits::is_empty"
+    )]
+    pub dispatch_resources: brewery_worker::resources::Limits,
     pub state: State,
     pub progress: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -322,6 +329,30 @@ pub struct Host {
     pub benchmarks: Vec<BenchmarkChoice>,
     pub quantization_pool: bool,
     pub quantization_backends: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub scheduling_paused: bool,
+    #[serde(default)]
+    pub resource_bounds: Option<brewery_worker::resources::Bounds>,
+    #[serde(default)]
+    pub resources: brewery_worker::resources::Limits,
+}
+
+impl Host {
+    pub fn effective_resources(&self) -> brewery_worker::resources::Limits {
+        brewery_worker::resources::Limits {
+            concurrency: Some(if self.quantization_pool {
+                self.resources.concurrency.unwrap_or(1)
+            } else {
+                1
+            }),
+            disk_reserve_bytes: if self.id == crate::backend_hf::ID {
+                Some(16 << 30)
+            } else {
+                self.resources.disk_reserve_bytes
+            },
+            ..self.resources
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -501,6 +532,29 @@ impl Host {
             .map(|v| v.as_bool().ok_or("quantization_pool must be a bool"))
             .transpose()?
             .unwrap_or(false);
+        let resource_bounds = if id == crate::backend_hf::ID
+            || config.get("resource_bounds").is_some_and(Value::is_null)
+        {
+            None
+        } else {
+            let mut bounds: brewery_worker::resources::Bounds = config
+                .get("resource_bounds")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|e| format!("invalid {id} resource_bounds: {e}"))?
+                .unwrap_or_else(|| brewery_worker::resources::Bounds::standard(quantization_pool));
+            if !quantization_pool && bounds.concurrency.is_some() {
+                return Err("concurrency control requires a quantization-pool host".into());
+            }
+            // Non-pool scheduling remains globally exclusive.
+            if !quantization_pool {
+                bounds.concurrency = None;
+            }
+            bounds
+                .check_ranges()
+                .map_err(|e| format!("invalid {id} resource_bounds: {e}"))?;
+            Some(bounds)
+        };
         let quantization_backends: BTreeMap<String, Vec<String>> = config
             .get("quantization_backends")
             .map(|v| serde_json::from_value(v.clone()))
@@ -525,6 +579,9 @@ impl Host {
             benchmarks,
             quantization_pool,
             quantization_backends,
+            scheduling_paused: false,
+            resource_bounds,
+            resources: Default::default(),
         })
     }
 
@@ -581,6 +638,13 @@ impl Host {
 // Prefer the source host if eligible, avoiding a transfer. Selection of an
 // *idle* host occurs in the scheduler, not during POST.
 pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<&'a Host> {
+    if envelope.inputs.iter().any(|input| {
+        hosts
+            .iter()
+            .any(|host| host.id == input.host && host.scheduling_paused)
+    }) {
+        return Vec::new();
+    }
     let inputs = &envelope.inputs;
     let needs_components = inputs.first().is_some_and(|source| source.kind == "hf")
         && match job.kind.as_str() {
@@ -620,6 +684,7 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
             .iter()
             .filter(|host| {
                 host.id == job.host
+                    && !host.scheduling_paused
                     && host.capabilities[&job.kind]
                     && (!needs_hgn || host.capabilities["weight_hgn"])
                     && (!needs_safetensors || host.capabilities["weight_safetensors"])
@@ -636,6 +701,7 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
             .iter()
             .filter(|host| {
                 host.id == job.host
+                    && !host.scheduling_paused
                     && host.supports_conversion(&job.options)
                     && components_allowed(host)
             })
@@ -650,7 +716,8 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
                 host.quantization_pool
             } else {
                 Some(host.id.as_str()) == source
-            }) && host.supports_conversion(&job.options)
+            }) && !host.scheduling_paused
+                && host.supports_conversion(&job.options)
                 && components_allowed(host)
         })
         .collect();
@@ -779,6 +846,8 @@ impl NewJob {
             progress_detail: None,
             requested_host,
             pool_slot: false,
+            host_slot: None,
+            dispatch_resources: Default::default(),
             input_ids: self.input_ids,
             options: self.options,
             prompt_id: self.prompt_id,
