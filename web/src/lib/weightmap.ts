@@ -30,6 +30,13 @@ const SHA = /^[0-9a-f]{64}$/;
 export const isDtype = (v: unknown): v is Dtype => typeof v === 'string' && (DTYPES as readonly string[]).includes(v);
 const dims = (v: unknown, min = 1): v is number[] =>
   Array.isArray(v) && v.length >= 1 && v.length <= 4 && v.every((n) => Number.isSafeInteger(n) && n >= min);
+// The SafeTensors reader inventories rank 0–8, including empty tensors.
+// Only explicitly read-only entries may exceed the interactive shape contract.
+function inventoryDims(v: unknown, readOnlySafe: boolean): v is number[] {
+  return readOnlySafe
+    ? Array.isArray(v) && v.length <= 8 && v.every(n => Number.isSafeInteger(n) && n >= 0 && n <= 2 ** 41)
+    : dims(v);
+}
 
 // ---- Tensor roles (after Lanternfish tensors.ts). ----
 
@@ -97,9 +104,10 @@ export function readInventory(result: unknown, expectedFormat?: string): Invento
   const tensors: TensorInfo[] = [];
   for (const [i, raw] of r.tensors.entries()) {
     const t = obj(raw);
-    if (!t || typeof t.name !== 'string' || !t.name || (typeof t.dtype !== 'string' || !t.dtype || (!isDtype(t.dtype) && typeof t.editable !== 'boolean')) || !dims(t.shape)) return null;
+    if (!t || typeof t.name !== 'string' || !t.name || (typeof t.dtype !== 'string' || !t.dtype || (!isDtype(t.dtype) && typeof t.editable !== 'boolean'))) return null;
+    if (!inventoryDims(t.shape, t.editable === false && (r.source_format === 'hf' || r.source_format === 'safetensors'))) return null;
     const elements = t.shape.reduce((a, b) => a * b, 1);
-    if (t.elements !== undefined && t.elements !== elements) return null;
+    if (!Number.isSafeInteger(elements) || (t.elements !== undefined && t.elements !== elements)) return null;
     const locked = t.editable === false || (r.source_format === 'hgn' && t.editable !== true);
     const reason = locked
       ? (typeof t.reason === 'string' && t.reason) || 'The worker did not confirm that this tensor is editable.'

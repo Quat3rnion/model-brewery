@@ -78,6 +78,15 @@ const inv = (tensors: unknown[], extra: Record<string, unknown> = {}) => ({
 });
 
 describe('inventory', () => {
+  it('keeps the Flash-Next vision patch kernel in the HF inventory without opening it for edits', () => {
+    const row = {name:'model.visual.patch_embed.proj.weight', shape:[1152,3,2,16,16], elements:1769472, dtype:'BF16', editable:false, reason:'SafeTensors shape is read-only'};
+    const page = (patch:Record<string,unknown> = {}) => readInventory(inv([{...row,...patch}], {source_format:'hf'}), 'hf');
+    expect(page()?.tensors[0]).toMatchObject({shape:row.shape,reason:row.reason,elements:row.elements});
+    for (const patch of [{editable:true}, {editable:undefined}, {shape:[2.5]}, {shape:[-1]}, {shape:Array(9).fill(1)}, {elements:99}])
+      expect(page(patch)).toBeNull();
+    for (const [shape,elements] of [[[],1], [[2,0],0]] as const)
+      expect(page({shape,elements})?.tensors[0].reason).toBe(row.reason);
+  });
   it('reads tensors with role and layer from the name', () => {
     const p = readInventory(inv([
       { name: 'token_embd.weight', shape: [8, 4], dtype: 'F16', elements: 32 },
