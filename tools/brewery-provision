@@ -1,0 +1,370 @@
+#!/usr/bin/python3 -I
+"""Fixed JSON stdio interface for user-level Brewery installation over SSH."""
+import base64
+from contextlib import ExitStack
+import hashlib
+import hmac
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import shlex
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+BINARIES = ("brewery-worker", "brewery-engine")
+ARCHES = ("x86_64", "aarch64")
+MAX_BINARY = 128 << 20
+MAX_REPLY = 32768
+ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
+USER = r"[a-z_][a-z0-9_-]{0,31}"
+DIGEST = r"[a-f0-9]{64}"
+FP = r"SHA256:[A-Za-z0-9+/]{43}"
+COMPONENT = r"[A-Za-z0-9_.-]+"
+LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+KEY_HEADER = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20"
+ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+
+
+class Problem(Exception):
+    pass
+
+
+def need(ok, message):
+    if not ok:
+        raise Problem(message)
+
+
+def matches(pattern, value):
+    return isinstance(value, str) and re.fullmatch(pattern, value) is not None
+
+
+def unique_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        need(key not in obj, "Duplicate JSON field")
+        obj[key] = value
+    return obj
+
+
+def parse(data):
+    return json.loads(data, object_pairs_hook=unique_object)
+
+
+def encode(obj):
+    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
+
+
+def a_safe_host(host):
+    if not isinstance(host, str) or not 1 <= len(host) <= 253 or "%" in host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return all(matches(LABEL, part) for part in host.split("."))
+
+
+def safe_home(path):
+    return (
+        isinstance(path, str) and path.startswith("/") and len(path) <= 512
+        and all(matches(COMPONENT, p) and p not in (".", "..") for p in path[1:].split("/"))
+    )
+
+
+def read_request():
+    raw = sys.stdin.buffer.read(4097)
+    need(len(raw) <= 4096, "Provision request exceeds limit")
+    req = parse(raw)
+    required = {"op", "id", "host", "user", "port", "fingerprint"}
+    need(isinstance(req, dict) and required <= req.keys(), "Invalid provision request")
+    op = req["op"]
+    need(op in ("test", "plan", "install")
+         and req.keys() == required | ({"confirmation"} if op == "install" else set()),
+         "Invalid provision operation or fields")
+    need(matches(ID, req["id"]) and matches(USER, req["user"]) and req["user"] != "root"
+         and a_safe_host(req["host"]) and type(req["port"]) is int and 1 <= req["port"] <= 65535
+         and matches(FP, req["fingerprint"]), "Invalid SSH host, user, port or fingerprint")
+    if op == "install":
+        need(matches(DIGEST, req["confirmation"]), "Install requires a confirmed plan")
+    return req
+
+
+def capture(argv, seconds, failure, stdin=subprocess.DEVNULL):
+    # Drain only bounded plain data; remote banners, stderr and child error
+    # strings must not enter the helper protocol or service logs.
+    with subprocess.Popen(argv, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                          env=ENV, cwd="/") as child, selectors.DefaultSelector() as selector:
+        try:
+            selector.register(child.stdout, selectors.EVENT_READ)
+            output = bytearray()
+            deadline = time.monotonic() + seconds
+            while True:
+                remaining = deadline - time.monotonic()
+                need(remaining > 0 and selector.select(remaining), failure)
+                chunk = os.read(child.stdout.fileno(), 4096)
+                if not chunk:
+                    break
+                output.extend(chunk)
+                need(len(output) <= MAX_REPLY, failure)
+            need(child.wait(timeout=max(0.1, deadline - time.monotonic())) == 0, failure)
+            return bytes(output)
+        except subprocess.TimeoutExpired:
+            raise Problem(failure) from None
+        finally:
+            if child.poll() is None:
+                child.kill()
+
+
+def pinned_key(req):
+    raw = capture(["/usr/bin/ssh-keyscan", "-T", "5", "-p", str(req["port"]), "-t", "ed25519",
+                   "--", req["host"]], 8, "Could not read the SSH server host key")
+    matched = set()
+    for line in raw.splitlines():
+        cols = line.split()
+        if len(cols) != 3 or cols[1] != b"ssh-ed25519":
+            continue
+        try:
+            blob = base64.b64decode(cols[2], validate=True)
+        except ValueError:
+            continue
+        if (not blob.startswith(KEY_HEADER) or len(blob) != len(KEY_HEADER) + 32
+                or base64.b64encode(blob) != cols[2]):
+            continue
+        fingerprint = b"SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).rstrip(b"=")
+        if hmac.compare_digest(fingerprint, req["fingerprint"].encode("ascii")):
+            matched.add("ssh-ed25519 " + cols[2].decode("ascii"))
+    need(len(matched) == 1, "SSH host key does not match the operator fingerprint")
+    return matched.pop()
+
+
+# The only remote command. The SSH login shell interprets fixed quoting;
+# the host, paths, bundle metadata and bytes exist only in a typed stdin frame.
+REMOTE = r"""
+import fcntl, hashlib, json, os, pwd, re, stat, sys, tempfile
+source = sys.stdin.buffer
+os.umask(0o077)
+uid = os.geteuid()
+home = pwd.getpwuid(uid).pw_dir
+arch = os.uname().machine
+assert uid != 0 and sys.platform == "linux" and arch in ("x86_64", "aarch64")
+assert os.path.realpath(home) == home
+assert re.fullmatch(r"/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", home)
+names = ("brewery-worker", "brewery-engine")
+rootfd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+homemd = os.fstat(rootfd)
+assert homemd.st_uid == uid and not homemd.st_mode & 0o022
+header = source.readline(8193)
+assert len(header) <= 8192 and header.endswith(b"\n")
+request = json.loads(header)
+if request == {"op": "probe"}:
+    print(json.dumps({"home": home, "arch": arch}), flush=True)
+    sys.exit(0)
+assert request.keys() == {"op", "id", "home", "arch", "bundle_id", "files"}
+assert request["op"] == "install" and request["home"] == home and request["arch"] == arch
+host_id, bundle, files = (request[key] for key in ("id", "bundle_id", "files"))
+assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", host_id)
+assert re.fullmatch(r"[a-f0-9]{64}", bundle)
+assert set(files) == set(names)
+for item in files.values():
+    assert item.keys() == {"size", "sha256"} and type(item["size"]) is int and 1 <= item["size"] <= 128 << 20
+    assert re.fullmatch(r"[a-f0-9]{64}", item["sha256"])
+parent = os.path.join(home, ".local/share/model-brewery/workers", host_id)
+dest = os.path.join(parent, bundle)
+config = (json.dumps({"root": os.path.join(parent, "state"), "engine": os.path.join(dest, "brewery-engine"),
+                      "source_roots": []}, sort_keys=True, separators=(",", ":")) + "\n").encode()
+for part in (".local", "share", "model-brewery", "workers", host_id):
+    try:
+        os.mkdir(part, 0o700, dir_fd=rootfd)
+        os.fsync(rootfd)
+    except FileExistsError:
+        pass
+    fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rootfd)
+    md = os.fstat(fd)
+    assert md.st_uid == uid and not md.st_mode & 0o022
+    os.close(rootfd)
+    rootfd = fd
+fcntl.flock(rootfd, fcntl.LOCK_EX)
+parent_fd = f"/proc/self/fd/{rootfd}"
+with tempfile.TemporaryDirectory(prefix=".install-", dir=parent_fd) as stage:
+    for name in names:
+        item = files[name]
+        left = item["size"]
+        sha = hashlib.sha256()
+        with open(os.path.join(stage, name), "xb") as out:
+            while left:
+                data = source.read(min(left, 1 << 20))
+                assert data
+                left -= len(data)
+                sha.update(data)
+                out.write(data)
+            assert sha.hexdigest() == item["sha256"]
+            os.fchmod(out.fileno(), 0o700)
+            out.flush()
+            os.fsync(out.fileno())
+    assert not source.read(1)
+    with open(os.path.join(stage, "worker.json"), "xb") as out:
+        out.write(config)
+        out.flush()
+        os.fsync(out.fileno())
+    stagedir = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    os.fsync(stagedir)
+    os.close(stagedir)
+    try:
+        published = os.open(bundle, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rootfd)
+    except FileNotFoundError:
+        os.rename(os.path.basename(stage), bundle, src_dir_fd=rootfd, dst_dir_fd=rootfd)
+        os.fsync(rootfd)
+    else:
+        md = os.fstat(published)
+        assert md.st_uid == uid and md.st_mode & 0o777 == 0o700
+        assert set(os.listdir(published)) == set(names) | {"worker.json"}
+        for name in (*names, "worker.json"):
+            readfd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=published)
+            with os.fdopen(readfd, "rb") as existing:
+                md = os.fstat(existing.fileno())
+                assert stat.S_ISREG(md.st_mode) and md.st_uid == uid and md.st_nlink == 1
+                if name == "worker.json":
+                    assert md.st_mode & 0o777 == 0o600 and existing.read(len(config) + 1) == config
+                else:
+                    assert md.st_size == files[name]["size"] and md.st_mode & 0o777 == 0o700
+                    with open(os.path.join(stage, name), "rb") as expected:
+                        while data := expected.read(1 << 20):
+                            assert existing.read(len(data)) == data
+        os.close(published)
+print(json.dumps({"installed": bundle}), flush=True)
+"""
+
+
+def ssh(req, known):
+    argv = ["/usr/bin/ssh", "-T", "-F", "/dev/null",
+            "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known}",
+            "-o", "GlobalKnownHostsFile=/dev/null", "-o", "HostKeyAlias=brewery-provision",
+            "-o", "UpdateHostKeys=no", "-o", "VerifyHostKeyDNS=no",
+            "-o", "HostKeyAlgorithms=ssh-ed25519",
+            "-o", "ProxyCommand=none", "-o", "ProxyJump=none",
+            "-o", "ControlMaster=no", "-o", "ControlPath=none",
+            "-o", "PermitLocalCommand=no", "-o", "ClearAllForwardings=yes",
+            "-o", "ForwardAgent=no", "-o", "IdentityAgent=none", "-o", "IdentitiesOnly=yes",
+            "-o", "ForwardX11=no", "-o", "RequestTTY=no",
+            "-o", "BatchMode=yes", "-o", "PreferredAuthentications=publickey",
+            "-o", "GSSAPIAuthentication=no", "-o", "ConnectTimeout=6",
+            "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]
+    identity = os.environ.get("BREWERY_PROVISION_IDENTITY")
+    if identity:
+        need(safe_home(identity), "Invalid local SSH identity configuration")
+        argv.extend(["-i", identity])
+    return [*argv, "-p", str(req["port"]), "-l", req["user"], "--", req["host"],
+            "exec /usr/bin/python3 -I -B -c " + shlex.quote(REMOTE)]
+
+
+def trusted_bundle(stack):
+    folder = os.environ.get("BREWERY_PROVISION_BUNDLE", "")
+    pin = os.environ.get("BREWERY_PROVISION_MANIFEST_SHA256", "")
+    need(safe_home(folder) and matches(DIGEST, pin), "Pinned worker bundle is not configured")
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    stack.callback(os.close, fd)
+
+    def regular(name, max_size):
+        incoming = stack.enter_context(os.fdopen(
+            os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd), "rb"))
+        md = os.fstat(incoming.fileno())
+        need(stat.S_ISREG(md.st_mode) and 0 < md.st_size <= max_size,
+             "Invalid pinned worker bundle file")
+        return incoming, md.st_size
+
+    manifest, _ = regular("manifest.json", 4096)
+    data = manifest.read(4097)
+    need(len(data) <= 4096 and hmac.compare_digest(hashlib.sha256(data).hexdigest(), pin),
+         "Worker bundle manifest does not match the configured pin")
+    info = parse(data)
+    need(isinstance(info, dict) and info.keys() == {"version", "arch", "files"}
+         and type(info["version"]) is int and info["version"] == 1 and info["arch"] in ARCHES
+         and isinstance(info["files"], dict) and info["files"].keys() == set(BINARIES)
+         and all(matches(DIGEST, digest) for digest in info["files"].values()),
+         "Invalid worker bundle manifest")
+    return pin, info, regular
+
+
+def verified_payload(req, info, pin, probe, regular, frame, install):
+    files = {}
+    inputs = {}
+    for name in BINARIES:
+        src, size = regular(name, MAX_BINARY)
+        files[name] = {"size": size, "sha256": info["files"][name]}
+        inputs[name] = src
+    if install:
+        frame.write(encode({"op": "install", "id": req["id"], "bundle_id": pin,
+                            **probe, "files": files}) + b"\n")
+    for name, info in files.items():
+        source = inputs[name]
+        sha = hashlib.sha256()
+        left = info["size"]
+        # Confirm the pinned files also have the selected Linux ELF machine.
+        header = source.read(20)
+        machine = 62 if probe["arch"] == "x86_64" else 183
+        need(len(header) == 20 and header[:6] == b"\x7fELF\x02\x01"
+             and int.from_bytes(header[18:20], "little") == machine, "Worker bundle is not the expected Linux ELF")
+        source.seek(0)
+        while left:
+            data = source.read(min(left, 1 << 20))
+            need(data, "Worker bundle changed during validation")
+            sha.update(data)
+            left -= len(data)
+            if install:
+                frame.write(data)
+        need(not source.read(1) and hmac.compare_digest(sha.hexdigest(), info["sha256"]),
+             "Worker binary does not match its pinned hash")
+
+
+def run(req):
+    key = pinned_key(req)
+    with ExitStack() as stack:
+        scratch = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="brewery-provision-")))
+        known = scratch / "known_hosts"
+        # OpenSSH applies token/tilde expansion to this option value.
+        need(safe_home(str(known)), "Invalid local SSH scratch directory")
+        known.write_text(f"brewery-provision {key}\n")
+        argv = ssh(req, known)
+        with (scratch / "probe").open("w+b") as stdin:
+            stdin.write(b'{"op":"probe"}\n')
+            stdin.seek(0)
+            probe = parse(capture(argv, 12, "Pinned SSH login or Linux worker probe failed", stdin))
+        need(isinstance(probe, dict) and probe.keys() == {"home", "arch"}
+             and safe_home(probe["home"]) and probe["arch"] in ARCHES, "Unsupported SSH worker home or architecture")
+        if req["op"] == "test":
+            return {"state": "verified", "host_key": key}
+        pin, info, open_regular = trusted_bundle(stack)
+        need(info["arch"] == probe["arch"], "Worker bundle does not match the remote architecture")
+        dest = Path(probe["home"]) / ".local/share/model-brewery/workers" / req["id"] / pin
+        fields = {"host_key": key, "bundle_id": pin, "worker": str(dest / "brewery-worker"),
+                  "config": str(dest / "worker.json")}
+        operation = {k: v for k, v in req.items() if k not in ("op", "confirmation")}
+        confirmation = hashlib.sha256(encode({"version": 1, **fields, **operation, **probe})).hexdigest()
+        install = req["op"] == "install"
+        if install:
+            need(hmac.compare_digest(confirmation, req["confirmation"]), "Install confirmation no longer matches the plan")
+        with tempfile.TemporaryFile(dir=scratch) as stdin:
+            verified_payload(req, info, pin, probe, open_regular, stdin, install)
+            if not install:
+                return {"state": "planned", "confirmation": confirmation, **fields}
+            stdin.seek(0)
+            result = parse(capture(argv, 60, "Pinned SSH worker installation failed", stdin))
+        need(result == {"installed": pin}, "Invalid pinned installation receipt")
+        return {"state": "installed", **fields}
+
+
+if __name__ == "__main__":
+    os.umask(0o077)
+    try:
+        result = run(read_request())
+    except Problem as failure:
+        result = {"state": "failed", "error": str(failure)}
+    except (OSError, ValueError, TypeError, RecursionError):
+        result = {"state": "failed", "error": "SSH provision request or runtime unavailable"}
+    print(encode(result).decode("ascii"))
