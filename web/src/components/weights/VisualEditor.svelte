@@ -15,7 +15,7 @@
   import { isSafeSource, hostName, isActive, shortHash } from '../../lib/format';
   import { MAX_COORDINATES, MAX_EDITS, coord, exact, percent, relChange, signed, proposeJob, tuneJob, parseValue, parseMaxUpdate } from '../../lib/weights';
   import {
-    INVENTORY_PAGE, isDtype, isPacked, type Neighbors,
+    isDtype, isPacked, type Neighbors,
     findRead,
     inventoryJob,
     keyOf,
@@ -60,8 +60,6 @@
     onproposal: (jobId: string) => void;
   } = $props();
 
-  const MAX_AUTO_PAGES = 8;
-  let extraPages = $state(0);
   const jobs = $derived(brewery.state?.jobs ?? []);
   const models = $derived(brewery.state?.models ?? []);
 
@@ -89,7 +87,7 @@
   }
 
   // ---- Inventory, page by page. ----
-  type Inv = { pages: InventoryPage[]; job?: JobSummary; need?: { offset: number; sha?: string }; error?: string; more?: number };
+  type Inv = { pages: InventoryPage[]; job?: JobSummary; need?: { offset: number; sha?: string }; error?: string };
   const inv = $derived.by((): Inv => {
     const pages: InventoryPage[] = [];
     let offset = 0;
@@ -105,10 +103,13 @@
       if (p && packedHost && (d.result as {packed?:unknown} | null)?.packed !== true) return { pages, job:j, error:'The worker did not confirm packed inspection.' };
       if (!p) return { pages, job: j, error: 'The tensor list has an unknown shape.' };
       if (sha && p.source_sha256 !== sha) return { pages, job: j, error: 'The source file changed while the tensor list was read. Read it again.' };
+      const end = offset + p.tensors.length;
+      if (p.offset !== offset || end > p.total || (pages.length && p.total !== pages[0].total) ||
+        (p.next_offset === null ? end !== p.total : p.next_offset !== end || end <= offset || end >= p.total))
+        return { pages, job: j, error: 'The worker returned inconsistent tensor inventory pages. Read the list again.' };
       sha = p.source_sha256;
       pages.push(p);
       if (p.next_offset === null) return { pages };
-      if (pages.length >= MAX_AUTO_PAGES + extraPages) return { pages, more: p.next_offset };
       offset = p.next_offset;
     }
   });
@@ -159,7 +160,6 @@
     tensorName = null;
     selected = new Set();
     focusKey = null;
-    extraPages = 0;
   });
 
   const req = $derived(p ? tileRequest(p, { lead, tr, tc }) : null);
@@ -388,14 +388,11 @@
       {/if}
       {#if inv.error}
         <p class="note bad" role="alert">{inv.error}</p>
-      {:else if reads.error && !inv.pages.length}
+      {:else if reads.error && inv.need}
         <p class="note bad" role="alert">{reads.error}</p>
       {/if}
       {#if tensors.length}
         <TensorMap {tensors} selected={tensorName} onopen={openTensor} />
-        {#if inv.more !== undefined}
-          <button type="button" class="btn small" onclick={() => (extraPages += 4)}>Read {Math.min(4 * INVENTORY_PAGE, total - tensors.length)} more tensors</button>
-        {/if}
       {:else if !inv.error}
         <p class="muted small" aria-live="polite">Reading the tensor list from {hostName(brewery.state?.hosts ?? [], source.host)}… The worker checks the registered file and returns its tensor inventory.</p>
       {/if}
