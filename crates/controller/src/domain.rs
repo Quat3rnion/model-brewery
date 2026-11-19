@@ -459,10 +459,13 @@ impl Host {
                     .or_insert_with(|| reason.into());
             }
         }
-        for capability in ["gguf_output", "gguf_hf_output"] {
+        for capability in [
+            "gguf_output",
+            "gguf_hf_output",
+            crate::gguf::STANDALONE_CAPABILITY,
+        ] {
             let enabled = options.remove(capability).unwrap_or(false)
-                && (capability != "gguf_hf_output"
-                    || capabilities.get("gguf_output") == Some(&true));
+                && (capability == "gguf_output" || capabilities.get("gguf_output") == Some(&true));
             capabilities.insert(capability.into(), enabled);
             if !enabled {
                 reasons.entry(capability.into()).or_insert_with(|| {
@@ -666,8 +669,15 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
     let components_allowed = |host: &Host| {
         if !job.format.is_hgn() {
             return host.capabilities["gguf_output"]
-                && (inputs.first().is_none_or(|source| source.kind != "hf")
-                    || host.capabilities["gguf_hf_output"]);
+                && match inputs.first().map(|source| source.kind.as_str()) {
+                    Some("hf") => host.capabilities["gguf_hf_output"],
+                    Some("safetensors") => {
+                        host.capabilities[crate::gguf::STANDALONE_CAPABILITY]
+                            && inputs.iter().all(|input| input.host == host.id)
+                    }
+                    Some("gguf") => true,
+                    _ => false,
+                };
         }
         (!needs_components || host.capabilities["convert_components"])
             && (job.profile_revision.is_none() || host.capabilities["custom_profiles"])
@@ -774,16 +784,13 @@ impl NewJob {
         let source = matches!(main, "hf" | "gguf" | "hgn");
         let baseline_source = self.options.contains_key("baseline_source");
         let valid = if !format.is_hgn() {
-            let source = matches!(main, "gguf" | "hf");
-            match self.kind.as_str() {
-                "inspect" | "plan" | "convert" => {
-                    source && (n == 1 || n == 2 && second == "imatrix")
-                }
-                "verify" => {
-                    source && second == "gguf" && (n == 2 || n == 3 && inputs[2].kind == "imatrix")
-                }
-                _ => false,
+            if main == "safetensors" && host != "auto" && inputs[0].host != host {
+                return Err("standalone SafeTensors GGUF must run on the source worker".into());
             }
+            matches!(
+                self.kind.as_str(),
+                "inspect" | "plan" | "convert" | "verify"
+            ) && crate::gguf::input_layout(&inputs, self.kind == "verify").is_ok()
         } else {
             match self.kind.as_str() {
                 "compare" => n == 2 && main == "gguf" && second == "gguf" && prompt.is_some(),

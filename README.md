@@ -577,14 +577,16 @@ file and checks the output digest. For a different format, it requires a
 fixture adapter that can pack and verify the input. It does not run a
 quantizer or overwrite a destination. This tool does not export external
 components or establish that a model loads, runs on AMD, or retains its
-quality. It is not a production worker or a release qualification step.
+quality. It is not full HGN-to-GGUF support; `hgn` remains refused as a GGUF
+source below. It is not a production worker or a release qualification step.
 
 **Inputs.** `input_ids` is the source, then at most one `imatrix` input.
 
 | Source | Rule |
 | --- | --- |
 | `gguf` | One file. It must hold only F32, F16 or BF16 weights (and integer tensors). A quantized or split GGUF is refused. The host needs `capabilities.gguf_output`. |
-| `hf` | The host needs `gguf_hf_output` as well. The exporter is bounded: it accepts a small, dense Qwen2-style model (at most 512 MiB) with exact tensor names and shapes. See the limits below. |
+| `hf` | The host needs `gguf_hf_output` as well. The exporter accepts only bounded Qwen2 and GPT-2 model forms with exact tensor names and shapes. See the limits below. |
+| `safetensors` | Set `input_ids` to `[weights, assets, optional imatrix]`. Register `weights` as one standalone `.safetensors` file and `assets` as a `kind=assets` directory. Keep all inputs on one worker. Include `config.json`, `tokenizer.json` and `tokenizer_config.json` in `assets`. The worker does not read adjacent files. The host also needs `gguf_safetensors_output`. |
 | `hgn` | Refused. |
 
 **Presets.** `options.preset` is one name from the GGUF catalog
@@ -624,8 +626,9 @@ is off by default.
 | --- | --- | --- |
 | `capabilities.gguf_output` | dispatch host entry | `true` allows GGUF output from a GGUF source. |
 | `capabilities.gguf_hf_output` | dispatch host entry | `true` also allows an HF source. It has an effect only if `gguf_output` is `true`. |
+| `capabilities.gguf_safetensors_output` | dispatch host entry | `true` allows standalone SafeTensors with registered `assets`. It is false by default and requires `gguf_output`. Production workers do not have this capability enabled. |
 | `BREWERY_GGUF_QUANTIZER` | engine | Absolute path of a regular, CPU-only `llama-quantize`. The engine runs it offline with a fixed, cleaned environment. |
-| `BREWERY_GGUF_HF_EXPORTER` | engine | Optional. The bounded exporter for HF sources. |
+| `BREWERY_GGUF_HF_EXPORTER` | engine | Required for HF and standalone SafeTensors sources. Unused for GGUF sources. |
 
 A worker that pins a source for release qualification refuses GGUF output.
 The API has no route to change these settings.
@@ -654,19 +657,44 @@ or accuracy. A GGUF conversion is not a release qualification.
 - the quantizer fails, runs too long, or writes too much log;
 - the disk has too little space for the output.
 
-**Hugging Face limits.** The exporter is narrow. The supported Flash-Next
-checkpoint (`qwen4_exp`) cannot be exported to GGUF: the exporter reports it
-as unsupported (it finds the projector, MTP and engram tensors and refuses).
-Do not expect a GGUF from that model by this path. The accepted candidate is an
-untied dense Qwen2 model of at most 512 MiB, as a flat indexed or single
-`model.safetensors`, with BF16, F16 or F32 tensors, exact expected names and
-shapes, a local Qwen2 tokenizer and no extra, quantized or sidecar tensors.
-It writes one intermediate BF16 or F16 `model.gguf`, no split. It needs a CPU
-PyTorch runtime inside a network-isolated sandbox. The end-to-end runtime check
-of the exporter is not yet done. An export does not show that a runtime can
-load the file or that its quality is good. For HF sources, `inspect` and
-`plan` read metadata and do not promise exact target types; `verify` repeats
-the export in a transient file.
+**Hugging Face limits.** The exporter accepts local HF snapshots and standalone
+SafeTensors for two declared architectures: Qwen2 (`Qwen2ForCausalLM`) and
+GPT-2 (`GPT2LMHeadModel`). Both support only dense inputs up to 512 MiB, with
+exact tensor names and shapes and BF16, F16 or F32 tensors. Qwen2 must be
+untied, use `model_type: qwen2`, and include a local Qwen2 tokenizer. GPT-2
+must use `model_type: gpt2`, declare `GPT2LMHeadModel`, and state
+`tie_word_embeddings`. An untied GPT-2 input also needs `lm_head.weight` and a
+local GPT-2 tokenizer that passes the pinned exporter checks. HF input must be
+a flat indexed snapshot or one `model.safetensors` file. Standalone input must
+be one `.safetensors` file plus the registered `assets` directory described
+above. Extra, quantized or sidecar tensors are refused. The exporter emits one
+BF16 `model.gguf` intermediate without splitting it. A `convert` workflow
+passes that intermediate to the selected `llama-quantize` preset. The exporter
+needs a CPU PyTorch runtime inside a network-isolated sandbox. For HF and
+standalone sources, `inspect` and `plan` read metadata and do not promise
+output types. `verify` repeats the export in a transient file.
+
+A scratch smoke check exported one standalone SafeTensors file with 15
+synthetic Qwen2 tensors and a separately registered metadata directory. The
+export produced a 25,396,320-byte BF16 GGUF. The pinned CPU `llama.cpp` reader
+loaded and decoded that file.
+
+A separate synthetic, declared, untied `GPT2LMHeadModel` fixture completed all
+four workflow stages. Its 17-tensor GGUF kept the untied output head. The
+pinned CPU reader decoded 50,257 finite logits. The pinned public
+`tiny-random-gpt2` snapshot failed inspection because it does not declare
+`GPT2LMHeadModel`. Its download receipt matches the failed input by SHA-256,
+revision and size. The check produced no GGUF artifact and was not a
+production run.
+
+These checks cover only the tested inputs and BF16 output. They do not
+establish universal runtime support, universal input acceptance, general
+quantization coverage, model quality or release qualification.
+
+The `qwen4_exp` Flash-Next checkpoint remains unsupported for GGUF export.
+Inspection can report its text, projector, MTP and engram tensors, but it does
+not write GGUF files for them. Native text-plus-`mmproj` export and runtime
+pairing remain pending.
 
 ### Job kinds
 

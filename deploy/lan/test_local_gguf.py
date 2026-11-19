@@ -1,12 +1,109 @@
 from pathlib import Path
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import local_gguf as ops
+import stage_local_gguf as stages
 
 
 class Admission(unittest.TestCase):
+    def test_standalone_accepts_only_explicit_direct_assets(self):
+        with tempfile.TemporaryDirectory(dir="/arboretum") as name:
+            root = Path(name)
+            source = root / "source.safetensors"
+            source.write_bytes(b"weights")
+            assets = root / "metadata"
+            assets.mkdir()
+            (assets / "config.json").write_text("{}")
+            (assets / "tokenizer.json").write_text("{}")
+            job = {"kind": "convert", "options": {"output_format": "gguf", "gguf_type": "Q4_0"},
+                   "inputs": [{"host": "local-gguf", "kind": kind, "path": str(path)}
+                              for kind, path in (("safetensors", source), ("assets", assets))]}
+            catalog = {"presets": [{"id": "Q4_0"}], "tensor_types": []}
+            with patch.object(ops, "IMPORTS", root), patch.object(ops, "catalog", return_value=catalog):
+                with self.assertRaisesRegex(ValueError, "not staged"):
+                    ops.job_inputs(job, standalone=False)
+                self.assertEqual(ops.job_inputs(job, standalone=True), [source, assets])
+                (assets / "foreign.py").write_text("no")
+                with self.assertRaisesRegex(ValueError, "metadata"):
+                    ops.job_inputs(job, standalone=True)
+                (assets / "foreign.py").unlink()
+                (assets / "tokenizer.json").unlink()
+                (assets / "tokenizer.json").symlink_to(source)
+                with self.assertRaisesRegex(ValueError, "regular files"):
+                    ops.job_inputs(job, standalone=True)
+
+    def test_failed_runtime_probe_never_proposes_or_edits_dispatch(self):
+        with tempfile.TemporaryDirectory(dir="/arboretum") as name:
+            root = Path(name)
+            release, runtime, llama = (root / n for n in ("release", "runtime", "llama"))
+            for path in (release, runtime / "bin", llama):
+                path.mkdir(parents=True)
+            for leaf in ("brewery-worker", "brewery-engine"):
+                (release / leaf).touch()
+            (runtime / "bin/python").touch()
+            quantizer = root / "quantizer"
+            quantizer.touch()
+            catalog = root / "catalog.json"
+            catalog.write_text(json.dumps({"encoder_revision": stages.REVISION}))
+            dispatch = root / "dispatch.json"
+            dispatch.write_text('{"hosts":{"other":{"local":true}}}')
+            original = dispatch.read_bytes()
+            with patch.object(stages, "QUANT_SHA", stages.file_sha(quantizer)), \
+                    patch.object(stages, "probe_export", side_effect=ValueError("failed probe")):
+                with self.assertRaisesRegex(ValueError, "failed probe"):
+                    stages.stage(root / "staged", release, quantizer, catalog, dispatch,
+                                 runtime=runtime, llama=llama, probe_source=root / "model.safetensors",
+                                 probe_assets=root / "assets")
+            self.assertFalse((root / "staged").exists())
+            self.assertEqual(dispatch.read_bytes(), original)
+
+    def test_upgrade_keeps_existing_input_and_job_roots_and_other_workers(self):
+        with tempfile.TemporaryDirectory(dir="/arboretum") as name:
+            root = Path(name)
+            old = root / "old"
+            release, runtime, llama = (root / n for n in ("release", "runtime", "llama"))
+            for path in (release, runtime / "bin", llama, old / "bin", old / "imports", old / "worker"):
+                path.mkdir(parents=True)
+            for leaf in ("brewery-worker", "brewery-engine"):
+                (release / leaf).touch()
+            (runtime / "bin/python").touch()
+            wrapper = old / "bin/local_gguf.py"
+            wrapper.touch()
+            worker = old / "worker.json"
+            worker.write_text(json.dumps({
+                "root": str(old / "worker"), "source_roots": [str(old / "imports")],
+                "admission": str(wrapper), "disk_reserve_bytes": 20 << 30,
+            }))
+            quantizer, catalog, dispatch = (root / n for n in ("quantizer", "catalog.json", "dispatch.json"))
+            quantizer.touch()
+            catalog.write_text(json.dumps({"encoder_revision": stages.REVISION}))
+            hosts = {"another": {"ssh": "fixture-unchanged"}, "local-gguf": {
+                "name": "Existing", "local": True, "worker": str(wrapper), "config": str(worker),
+                "capabilities": {"gguf_output": True, "gguf_hf_output": False},
+            }}
+            dispatch.write_text(json.dumps({"hosts": hosts}))
+            original = (worker.read_bytes(), dispatch.read_bytes())
+            with patch.object(stages, "QUANT_SHA", stages.file_sha(quantizer)), \
+                    patch.object(stages, "probe_export"):
+                staged = root / "staged"
+                stages.stage(staged, release, quantizer, catalog, dispatch,
+                             runtime=runtime, llama=llama, probe_source=root / "fixture.safetensors",
+                             probe_assets=root / "assets")
+            self.assertEqual((worker.read_bytes(), dispatch.read_bytes()), original)
+            proposed = json.loads((staged / "dispatch.proposed.json").read_text())["hosts"]
+            self.assertEqual(proposed["another"], hosts["another"])
+            self.assertEqual(proposed["local-gguf"]["name"], "Existing")
+            self.assertEqual(proposed["local-gguf"]["capabilities"], {
+                "gguf_output": True, "gguf_hf_output": False, "gguf_safetensors_output": True,
+            })
+            cfg = json.loads((staged / "worker.json").read_text())
+            self.assertEqual(cfg["source_roots"], [str(old / "imports")])
+            self.assertEqual(cfg["root"], str(old / "worker"))
+            self.assertEqual(cfg["disk_reserve_bytes"], 20 << 30)
+
     def test_packed_hgn_reaches_unchanged_memory_gate_only_for_local_file(self):
         with tempfile.TemporaryDirectory(dir="/arboretum") as name:
             imports = Path(name)

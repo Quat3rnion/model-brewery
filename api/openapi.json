@@ -818,8 +818,8 @@
       },
       "HostCapabilityMap": {
         "type": "object",
-        "description": "Per-worker availability. It has one boolean for each job kind and the extra capabilities listed below. hf_download is false unless the operator opts in to managed Hugging Face downloads. convert_components is true only if the operator enabled component replacement for a Hugging Face source. custom_profiles is true only if the operator enabled custom profiles with a separate CPU-only converter. gguf_output is true only if the operator set up the GGUF quantizer. gguf_hf_output also requires the bounded Hugging Face exporter. weight_visual enables inventory, tiles, and source-pinned proposals and tuning. weight_hgn enables native HGN sources. weight_packed allows packed weight jobs. weight_safetensors enables standalone SafeTensors and indexed HF weight jobs. The weight capabilities are additional to the per-job opt-in and are false by default. The reasons map can say why.",
-        "propertyNames": {"anyOf": [{"$ref": "#/components/schemas/JobKind"}, {"enum": ["convert_components", "custom_profiles", "gguf_output", "gguf_hf_output", "weight_visual", "weight_hgn", "weight_packed", "weight_safetensors"]}]},
+        "description": "Per-worker availability. It has one boolean for each job kind and the extra capabilities listed below. hf_download is false unless the operator opts in to managed Hugging Face downloads. convert_components is true only if the operator enabled component replacement for a Hugging Face source. custom_profiles is true only if the operator enabled custom profiles with a separate CPU-only converter. gguf_output is true only if the operator set up the GGUF quantizer. gguf_hf_output also requires the bounded Hugging Face exporter. gguf_safetensors_output is a separate opt-in for workers that can pass standalone SafeTensors and a registered assets directory to that exporter. It requires gguf_output; gguf_hf_output alone does not enable it. weight_visual enables inventory, tiles, and source-pinned proposals and tuning. weight_hgn enables native HGN sources. weight_packed allows packed weight jobs. weight_safetensors enables standalone SafeTensors and indexed HF weight jobs. The weight capabilities are additional to the per-job opt-in and are false by default. The reasons map can say why.",
+        "propertyNames": {"anyOf": [{"$ref": "#/components/schemas/JobKind"}, {"enum": ["convert_components", "custom_profiles", "gguf_output", "gguf_hf_output", "gguf_safetensors_output", "weight_visual", "weight_hgn", "weight_packed", "weight_safetensors"]}]},
         "additionalProperties": {"type": "boolean"}, "minProperties": 25
       },
       "ConfiguredToken": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
@@ -1407,7 +1407,7 @@
         }
       },
       "NewConversion": {
-        "description": "Request for the one-submit workflow inspect, plan, convert and verify. Top-level fields are closed. The input rules and the options are the same as for the convert job. The verify stage uses decode_backend. To use a saved custom profile, set profile_revision and do not set options.profile. A custom profile needs a Hugging Face source, the cpu backend for every encoder and for decode_backend, and a worker with capabilities.custom_profiles true; otherwise the controller returns 400 or 409.\n\nGGUF output (format gguf). input_ids is the source, then at most one registered imatrix input. The source is an hf or gguf model; an hgn source is refused. The GGUF source must hold only F32, F16 or BF16 weights and be one file. An hf source needs a worker with capabilities.gguf_hf_output, and the bounded exporter accepts only a small set of dense architectures; the supported Flash-Next layout cannot be exported to GGUF and the job fails. A gguf source needs capabilities.gguf_output. options accepts only preset (an id from getGgufCatalog; default is the catalog default) and threads. decode_backend and every other option are refused. profile_revision must name a GGUF profile and cannot be combined with options.preset. A preset or tensor type that the catalog marks requires_imatrix needs the imatrix input, or the controller returns 400. The workflow runs the same four stages. The controller registers artifact_model_id, a gguf model, only after the independent verify passes. A GGUF conversion is not a release qualification.",
+        "description": "Request for the one-submit workflow inspect, plan, convert and verify. Top-level fields are closed. For HGN output, the input rules and options are the same as for the convert job. The verify stage uses decode_backend. To use a saved custom profile, set profile_revision and do not set options.profile. A custom profile needs a Hugging Face source, the cpu backend for every encoder and for decode_backend, and a worker with capabilities.custom_profiles true; otherwise the controller returns 400 or 409.\n\nGGUF output (format gguf). For hf and gguf sources, input_ids is [source, optional imatrix]. For standalone safetensors, input_ids is [weights, assets, optional imatrix]. The second ID must identify a registered assets directory with model config and tokenizer files. The worker does not search next to the weights file. The weights, assets and any imatrix must be registered on the same worker, and the job must run there. All GGUF workflows need capabilities.gguf_output; hf also needs gguf_hf_output, and safetensors also needs gguf_safetensors_output. The bounded exporter accepts only a small set of dense architectures and rejects Flash-Next. A GGUF source must hold only floating-point weights and be one file. An hgn source is refused. options accepts only preset (an ID from getGgufCatalog; default is the catalog default) and threads. decode_backend and every other option are refused. profile_revision must name a GGUF profile and cannot be combined with options.preset. A preset or tensor type that the catalog marks requires_imatrix needs the imatrix input, or the controller returns 400. The workflow runs the same four stages. The controller registers artifact_model_id, a gguf model, only after independent verification passes. A GGUF conversion is not a release qualification.",
         "type": "object", "required": ["input_ids"], "additionalProperties": false,
         "properties": {
           "format": {"enum": ["hgn", "gguf"], "default": "hgn", "description": "Output format. Absent or hgn: the HGN workflow, unchanged. gguf: see the GGUF rules in the description of this schema."},
@@ -1415,11 +1415,23 @@
             "anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}, {"type": "null"}],
             "description": "Omitted or null: the source model's host. auto: an eligible worker of the configured quantization pool. Otherwise: that worker."
           },
-          "input_ids": {"$ref": "#/components/schemas/ConversionInputIds", "type": "array", "items": {"$ref": "#/components/schemas/Id"}},
-          "options": {"$ref": "#/components/schemas/ConversionOptions"},
+          "input_ids": {"type": "array", "items": {"$ref": "#/components/schemas/Id"}},
+          "options": {"type": "object"},
           "decode_backend": {"$ref": "#/components/schemas/EncoderBackend"},
           "profile_revision": {"$ref": "#/components/schemas/ProfileRevision", "description": "Revision of a saved custom profile. Its format must equal the conversion format. An unknown revision returns 404. The stages use the saved content; the request cannot change it."}
-        }
+        },
+        "if": {"required": ["format"], "properties": {"format": {"const": "gguf"}}},
+        "then": {"properties": {
+          "input_ids": {"minItems": 1, "maxItems": 3},
+          "options": {"additionalProperties": false, "properties": {
+            "preset": {"$ref": "#/components/schemas/GgufPreset"},
+            "threads": {"$ref": "#/components/schemas/Threads"}
+          }}
+        }, "not": {"required": ["decode_backend"]}},
+        "else": {"properties": {
+          "input_ids": {"$ref": "#/components/schemas/ConversionInputIds"},
+          "options": {"$ref": "#/components/schemas/ConversionOptions"}
+        }}
       },
       "ConversionState": {
         "type": "string", "enum": ["running", "succeeded", "failed", "cancelled"],

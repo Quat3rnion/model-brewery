@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use std::{
     fs,
     io::Write,
+    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Command, Output, Stdio},
 };
@@ -11,6 +12,7 @@ fn stage(root: &Path, kind: &str, options: Value, inputs: Vec<Value>, exe: &Path
     fs::create_dir(&work).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_brewery-engine"))
         .env("BREWERY_GGUF_QUANTIZER", exe)
+        .env("BREWERY_GGUF_HF_EXPORTER", root.join("exporter"))
         .env_remove("BREWERY_EXPECTED_SOURCE_SHA256")
         .current_dir(work)
         .stdin(Stdio::piped())
@@ -43,6 +45,75 @@ fn gguf_route_requires_a_dedicated_quantizer_before_reading_the_model() {
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("BREWERY_GGUF_QUANTIZER must be absolute")
     );
+}
+
+#[test]
+fn standalone_inspect_passes_explicit_assets_and_attests_their_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let weights = root.join("weights");
+    let assets = root.join("assets");
+    fs::create_dir(&weights).unwrap();
+    fs::create_dir(&assets).unwrap();
+    let source = weights.join("explicit.safetensors");
+    fs::write(&source, b"fixture weights").unwrap();
+    fs::write(weights.join("config.json"), b"not selected").unwrap();
+    fs::write(assets.join("config.json"), b"selected").unwrap();
+    let exporter = root.join("exporter");
+    fs::write(
+        &exporter,
+        r#"#!/bin/sh
+set -eu
+test "$#" = 7
+test "$1" = inspect
+test "$2" = --source
+test "${3##*/}" = explicit.safetensors
+test "$(cat "$3")" = "fixture weights"
+test "$4 $5 $6" = "--outtype bf16 --assets"
+test "${7##*/}" = assets
+test -f "$7/config.json"
+printf '%s\n' '{"source_format":"safetensors","export_supported":true,"expected_gguf_tensors":{"output.weight":[2,2]}}'
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&exporter, fs::Permissions::from_mode(0o700)).unwrap();
+    let inputs = vec![
+        json!({"kind":"safetensors","host":"fixture","path":source}),
+        json!({"kind":"assets","host":"fixture","path":assets}),
+    ];
+    let inspect = |inputs: Vec<Value>| {
+        let output = stage(
+            root,
+            "inspect",
+            json!({"output_format":"gguf","gguf_type":"Q8_0"}),
+            inputs,
+            Path::new("/usr/bin/false"),
+        );
+        fs::remove_dir_all(root.join("inspect")).unwrap();
+        output
+    };
+    let digest = || {
+        let output = inspect(inputs.clone());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["report"]["source_format"], "safetensors");
+        assert_eq!(result["inputs"][1]["kind"], "assets");
+        result["source_sha256"].clone()
+    };
+    let initial = digest();
+    fs::write(weights.join("config.json"), b"changed unselected sibling").unwrap();
+    assert_eq!(digest(), initial);
+    fs::write(assets.join("config.json"), b"changed explicit metadata").unwrap();
+    assert_ne!(digest(), initial);
+    let mut bad_pin = inputs;
+    bad_pin[1]["bundle_sha256"] = json!("a".repeat(64));
+    let output = inspect(bad_pin);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("bundle SHA-256 mismatch"));
 }
 
 #[test]

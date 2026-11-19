@@ -97,7 +97,7 @@ impl Conversion {
                     .transpose()?;
                 Selection::new(preset, BTreeMap::new())?
             };
-            selection.inputs(&inputs)?;
+            selection.inputs(&inputs, false)?;
             Some(selection)
         } else {
             None
@@ -180,15 +180,12 @@ impl Conversion {
             let selection: Selection =
                 serde_json::from_value(recipe.ok_or("GGUF policy missing")?.clone())
                     .map_err(|_| "invalid GGUF policy")?;
-            selection.inputs(&inputs)?;
-            let has_matrix = inputs.len() == 2;
-            if stage == "verify" {
+            let verify = stage == "verify";
+            if verify {
                 inputs.insert(1, output.ok_or("GGUF output missing")?);
             }
-            let options = selection.options(
-                self.options.get("threads"),
-                has_matrix.then_some(if stage == "verify" { 2 } else { 1 }),
-            );
+            let matrix = selection.inputs(&inputs, verify)?;
+            let options = selection.options(self.options.get("threads"), matrix);
             let (mut job, mut envelope) = NewJob {
                 kind: stage.into(),
                 host: Some(self.host.clone()),

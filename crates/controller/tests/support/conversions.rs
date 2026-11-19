@@ -125,6 +125,84 @@ fn await_conversion(app: &Fixture, created: &Value) -> Value {
 }
 
 #[test]
+fn standalone_gguf_workflow_uses_registered_assets_and_imatrix() {
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts":{
+            "alpha":{"local":true,"capabilities":{
+                "gguf_output":true,"gguf_hf_output":true,"gguf_safetensors_output":true
+            }},
+            "beta":{"local":true,"capabilities":{"gguf_output":true,"gguf_hf_output":true}}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    app.touch("conversion-fixture");
+    let weights = app.register("alpha", "safetensors", "/weights/standalone.safetensors");
+    let assets = app.register("alpha", "assets", "/metadata/assets");
+    let matrix = app.register("alpha", "imatrix", "/calibration/matrix.dat");
+    let remote_assets = app.register("beta", "assets", "/metadata/assets");
+    let old_weights = app.register("beta", "safetensors", "/weights/standalone.safetensors");
+    for (input_ids, options, status) in [
+        (json!([weights]), json!({}), 400),
+        (json!([weights, matrix]), json!({}), 400),
+        (json!([weights, assets, assets]), json!({}), 400),
+        (json!([weights, remote_assets]), json!({}), 400),
+        (json!([weights, assets]), json!({"preset":"IQ2_XXS"}), 400),
+        (
+            json!([weights, assets]),
+            json!({"assets":"/metadata/assets"}),
+            400,
+        ),
+        (json!([old_weights, remote_assets]), json!({}), 409),
+    ] {
+        app.json(
+            "POST",
+            "/api/conversions",
+            Some(json!({"format":"gguf","input_ids":input_ids,"options":options})),
+            status,
+        );
+    }
+    let created = app.json(
+        "POST",
+        "/api/conversions",
+        Some(json!({"format":"gguf","input_ids":[weights,assets,matrix],"options":{"preset":"IQ2_XXS"}})),
+        201,
+    );
+    let done = await_conversion(&app, &created);
+    assert_eq!(done["state"], "succeeded", "{done}");
+    for (stage, expected) in [
+        ("inspect", json!(["safetensors", "assets", "imatrix"])),
+        ("plan", json!(["safetensors", "assets", "imatrix"])),
+        ("convert", json!(["safetensors", "assets", "imatrix"])),
+        (
+            "verify",
+            json!(["safetensors", "gguf", "assets", "imatrix"]),
+        ),
+    ] {
+        let detail = app.detail(done["job_ids"][stage].as_str().unwrap());
+        let envelope = &detail["result"]["envelope"];
+        let inputs = envelope["inputs"].as_array().unwrap();
+        assert_eq!(
+            json!(
+                inputs
+                    .iter()
+                    .map(|input| &input["kind"])
+                    .collect::<Vec<_>>()
+            ),
+            expected
+        );
+        let offset = usize::from(stage == "verify");
+        assert_eq!(inputs[0]["id"], weights);
+        assert_eq!(inputs[1 + offset]["id"], assets);
+        assert_eq!(inputs[2 + offset]["id"], matrix);
+        assert_eq!(envelope["options"]["imatrix"], 2 + offset);
+    }
+}
+
+#[test]
 fn gguf_saved_profiles_require_imatrix_and_do_not_register_failed_verifications() {
     let mut app = Fixture::new();
     fs::write(

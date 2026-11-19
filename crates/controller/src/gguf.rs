@@ -7,6 +7,46 @@ use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, sync::LazyLock};
 
 pub const CATALOG_JSON: &str = include_str!("gguf_catalog.json");
+pub const STANDALONE_CAPABILITY: &str = "gguf_safetensors_output";
+
+pub fn input_layout(inputs: &[Model], verify: bool) -> Result<Option<usize>, String> {
+    let (source, mut remaining) = inputs.split_first().ok_or("GGUF source is required")?;
+    if verify {
+        let (output, rest) = remaining
+            .split_first()
+            .ok_or("GGUF verify output is required")?;
+        if output.kind != "gguf" {
+            return Err("GGUF verify output must be a GGUF file".into());
+        }
+        remaining = rest;
+    }
+    let mut next = if verify { 2 } else { 1 };
+    match source.kind.as_str() {
+        "gguf" | "hf" => {}
+        "safetensors" => {
+            let (assets, rest) = remaining
+                .split_first()
+                .filter(|(assets, _)| assets.kind == "assets")
+                .ok_or("standalone SafeTensors requires a registered assets directory")?;
+            if assets.host != source.host {
+                return Err("SafeTensors weights and assets must be on the same worker".into());
+            }
+            remaining = rest;
+            next += 1;
+        }
+        _ => return Err("GGUF source must be GGUF, HF or standalone SafeTensors".into()),
+    }
+    let matrix = match remaining {
+        [] => None,
+        [matrix] if matrix.kind == "imatrix" => Some(next),
+        _ => return Err("only one registered imatrix may follow the GGUF source inputs".into()),
+    };
+    if source.kind == "safetensors" && inputs.iter().any(|input| input.host != source.host) {
+        return Err("all standalone SafeTensors GGUF inputs must be on the source worker".into());
+    }
+    Ok(matrix)
+}
+
 static CATALOG: LazyLock<Result<Catalog, serde_json::Error>> =
     LazyLock::new(|| serde_json::from_str(CATALOG_JSON));
 
@@ -88,19 +128,12 @@ impl Selection {
         })
     }
 
-    pub fn inputs(&self, inputs: &[Model]) -> Result<(), String> {
-        if !matches!(inputs, [source] | [source, _] if matches!(source.kind.as_str(), "gguf" | "hf"))
-            || inputs.get(1).is_some_and(|input| input.kind != "imatrix")
-        {
-            return Err(
-                "GGUF conversion requires a GGUF or HF source and optionally a registered imatrix"
-                    .into(),
-            );
-        }
-        if self.requires_imatrix && inputs.len() != 2 {
+    pub fn inputs(&self, inputs: &[Model], verify: bool) -> Result<Option<usize>, String> {
+        let matrix = input_layout(inputs, verify)?;
+        if self.requires_imatrix && matrix.is_none() {
             return Err("this GGUF preset or tensor override requires a registered imatrix".into());
         }
-        Ok(())
+        Ok(matrix)
     }
 
     pub fn options(&self, threads: Option<&Value>, imatrix: Option<usize>) -> Map<String, Value> {

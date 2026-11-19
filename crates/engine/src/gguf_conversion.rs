@@ -172,16 +172,18 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         "GGUF output is disabled on source-pinned qualification workers"
     );
     let verify = job.kind == "verify";
-    let base = if verify { 2 } else { 1 };
+    let source = job.inputs.first().context("GGUF source is required")?;
+    let standalone = source.kind == "safetensors";
+    let assets_index = if verify { 2 } else { 1 };
+    let base = assets_index + usize::from(standalone);
     ensure!(
         job.inputs.len() == base + usize::from(options.imatrix.is_some())
             && options.imatrix.is_none_or(|index| index == base),
-        "GGUF expects the source, verify output and optional indexed imatrix only"
+        "GGUF expects the source, verify output, standalone assets and optional indexed imatrix in order"
     );
-    let source = &job.inputs[0];
     ensure!(
-        matches!(source.kind.as_str(), "hf" | "gguf"),
-        "GGUF source must be HF or unquantized GGUF"
+        matches!(source.kind.as_str(), "hf" | "gguf" | "safetensors"),
+        "GGUF source must be HF, unquantized GGUF or standalone SafeTensors"
     );
     ensure!(
         source.integrity_basis.is_none(),
@@ -198,6 +200,32 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         );
     }
     let mut roles = vec![("source", 0)];
+    let assets = if standalone {
+        let input = &job.inputs[assets_index];
+        ensure!(
+            job.inputs.iter().all(|item| item
+                .source_host
+                .as_deref()
+                .is_none_or(|original| original == source.host)),
+            "standalone SafeTensors GGUF requires direct inputs on one worker"
+        );
+        ensure!(
+            source
+                .path
+                .extension()
+                .is_some_and(|ext| ext == "safetensors")
+                && integrity::canonical(&source.path)?.is_file(),
+            "expected a registered standalone .safetensors file"
+        );
+        ensure!(
+            input.kind == "assets" && integrity::canonical(&input.path)?.is_dir(),
+            "standalone SafeTensors requires a registered assets directory"
+        );
+        roles.push(("assets", assets_index));
+        Some(input.path.as_path())
+    } else {
+        None
+    };
     let imatrix = if let Some(index) = options.imatrix {
         let input = &job.inputs[index];
         let meta = integrity::canonical(&input.path)?;
@@ -257,13 +285,14 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let mut exporter_sha = None;
     let mut hf = Value::Null;
     let mut fp_path = source.path.clone();
-    if source.kind == "hf" {
+    let needs_exporter = source.kind == "hf" || standalone;
+    if needs_exporter {
         ensure!(
-            integrity::canonical(&source.path)?.is_dir(),
+            standalone || integrity::canonical(&source.path)?.is_dir(),
             "HF source must be an indexed snapshot directory"
         );
         let exporter = Tool::open("BREWERY_GGUF_HF_EXPORTER")?;
-        let inspect = export(&exporter, work, threads, &source.path, None)?;
+        let inspect = export(&exporter, work, threads, &source.path, assets, None)?;
         let supported = inspect["export_supported"]
             .as_bool()
             .context("invalid HF GGUF inspection receipt")?;
@@ -282,7 +311,15 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
                 "insufficient disk for transient HF export and GGUF output"
             );
             let export_dir = work.join("hf-export");
-            export(&exporter, work, threads, &source.path, Some(&export_dir))?;
+            ids.iter().try_for_each(integrity::Identity::check)?;
+            export(
+                &exporter,
+                work,
+                threads,
+                &source.path,
+                assets,
+                Some(&export_dir),
+            )?;
             fp_path = export_dir.join("model.gguf");
             ensure!(
                 integrity::canonical(&fp_path)?.is_file()
@@ -291,7 +328,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             );
         }
     }
-    let estimate_only = source.kind == "hf" && matches!(job.kind.as_str(), "inspect" | "plan");
+    let estimate_only = needs_exporter && matches!(job.kind.as_str(), "inspect" | "plan");
     let temp_output = work.join("model.gguf");
     let mut report = json!({"kind":job.kind,"source_format":source.kind,"gguf_type":options.gguf_type,
         "requested_tensor_types":options.tensor_types,"hf_export":hf,"tensor_payloads_read":false});
@@ -333,7 +370,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
                 .all(|tensor| matches!(tensor.ty, 0 | 1 | 24..=27 | 30)),
             "source GGUF must contain only F32/F16/BF16 weights and integral tensors"
         );
-        if source.kind == "hf" {
+        if needs_exporter {
             let names = inventory::hf_inventory(&hf["expected_gguf_tensors"])?;
             ensure!(
                 fp.tensors
@@ -471,6 +508,7 @@ fn export(
     work: &Path,
     threads: usize,
     source: &Path,
+    assets: Option<&Path>,
     output: Option<&Path>,
 ) -> Result<Value> {
     let mut cmd = tool.command(work, threads);
@@ -488,11 +526,19 @@ fn export(
     .arg("--source")
     .arg(source)
     .args(["--outtype", "bf16"]);
+    if let Some(assets) = assets {
+        cmd.arg("--assets").arg(assets);
+    }
     if let Some(output) = output {
         cmd.arg("--output").arg(output);
     }
     let (stdout, _) = tool.capture(&mut cmd, work)?;
-    serde_json::from_slice(&stdout).context("invalid HF exporter receipt")
+    let receipt: Value = serde_json::from_slice(&stdout).context("invalid HF exporter receipt")?;
+    ensure!(
+        assets.is_none() || receipt["source_format"] == "safetensors",
+        "HF exporter did not attest standalone SafeTensors"
+    );
+    Ok(receipt)
 }
 
 fn report_artifact(cwd: &Path, progress: &Progress, report: &Value, kind: &str) -> Result<Value> {

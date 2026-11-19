@@ -352,6 +352,47 @@ fn resolve_input(t: &Rig, id: &str, action: &str, kind: &str, index: usize, inpu
 }
 
 #[test]
+fn standalone_gguf_admission_requires_config_and_direct_pinned_assets() {
+    let t = Rig::new();
+    let weights = t.src.join("weights.safetensors");
+    fs::write(&weights, b"weights").unwrap();
+    let metadata = t.src.join("assets");
+    fs::create_dir(&metadata).unwrap();
+    fs::write(metadata.join("config.json"), b"{}").unwrap();
+    let inputs = vec![
+        json!({"host":"b","path":weights,"kind":"safetensors"}),
+        json!({"host":"b","path":metadata,"kind":"assets"}),
+    ];
+    let prepare = |id, inputs: &[Value]| {
+        t.rpc_raw(&json!({"op":"prepare","id":id,"action":"start","job":{
+            "kind":"inspect","inputs":inputs,"options":{"output_format":"gguf","gguf_type":"Q8_0"}
+        }}))["ok"]
+            .clone()
+    };
+    let mut config: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
+    config["engine_env"] = json!({"BREWERY_GGUF_SAFETENSORS":"1"});
+    fs::write(&t.b, config.to_string()).unwrap();
+    assert_eq!(
+        prepare("flag-only", &inputs)["error"],
+        "standalone SafeTensors GGUF is not configured on this worker"
+    );
+    config["engine_env"]["BREWERY_GGUF_QUANTIZER"] = json!("/usr/bin/false");
+    config["engine_env"]["BREWERY_GGUF_HF_EXPORTER"] = json!("/usr/bin/false");
+    fs::write(&t.b, config.to_string()).unwrap();
+    let mut remote = inputs.clone();
+    remote[1]["host"] = json!("a");
+    assert_eq!(prepare("remote-assets", &remote)["state"], "failed");
+    assert_eq!(prepare("direct-assets", &inputs)["state"], "queued");
+    let reply =
+        t.rpc_raw(&json!({"op":"resolve","id":"direct-assets","index":1,"input":inputs[1]}));
+    let pinned = &reply["ok"];
+    assert_eq!(pinned["source_host"], "b");
+    assert_eq!(pinned["path"], metadata.to_str().unwrap());
+    assert_eq!(pinned["bundle_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(pinned["files"][0]["path"], "config.json");
+}
+
+#[test]
 fn requested_disk_reserve_denies_launch_before_engine_work() {
     let t = Rig::new();
     let id = "disk-reserve";

@@ -46,6 +46,14 @@ fn reserve() -> u64 {
     1024 * 1024 * 1024
 }
 
+fn standalone_gguf(job: &Job) -> bool {
+    job.options["output_format"] == "gguf"
+        && job
+            .inputs
+            .first()
+            .is_some_and(|input| input.kind == "safetensors")
+}
+
 impl Config {
     fn load() -> Result<(Self, PathBuf)> {
         let path = env::var_os("BREWERY_WORKER_CONFIG")
@@ -633,6 +641,52 @@ impl Worker {
                 Reply::error("This worker only runs Hugging Face download jobs"),
             );
         }
+        if standalone_gguf(&job) {
+            let source = &job.inputs[0];
+            let assets = if job.kind == "verify" { 2 } else { 1 };
+            let matrix = assets + 1;
+            let has_matrix = job.options.get("imatrix").is_some();
+            let denial = if self.cfg.pinned_publication.is_some()
+                || self
+                    .cfg
+                    .engine_env
+                    .contains_key("BREWERY_EXPECTED_SOURCE_SHA256")
+                || self
+                    .cfg
+                    .engine_env
+                    .get("BREWERY_GGUF_SAFETENSORS")
+                    .map(String::as_str)
+                    != Some("1")
+                || !["BREWERY_GGUF_QUANTIZER", "BREWERY_GGUF_HF_EXPORTER"]
+                    .iter()
+                    .all(|key| {
+                        self.cfg
+                            .engine_env
+                            .get(*key)
+                            .is_some_and(|path| Path::new(path).is_absolute())
+                    }) {
+                Some("standalone SafeTensors GGUF is not configured on this worker")
+            } else if action != "start"
+                || !matches!(job.kind.as_str(), "inspect" | "plan" | "convert" | "verify")
+                || job.prompt.is_some()
+                || job.inputs.len() != matrix + usize::from(has_matrix)
+                || job.inputs[assets].kind != "assets"
+                || (assets == 2 && job.inputs[1].kind != "gguf")
+                || (has_matrix
+                    && (job.options["imatrix"].as_u64() != Some(matrix as u64)
+                        || job.inputs[matrix].kind != "imatrix"))
+                || job.inputs.iter().any(|input| input.host != source.host)
+            {
+                Some(
+                    "standalone SafeTensors GGUF requires direct weights, registered assets and optional imatrix",
+                )
+            } else {
+                None
+            };
+            if let Some(error) = denial {
+                return self.record_prepare(id, action, job, Reply::error(error));
+            }
+        }
         if matches!(
             job.kind.as_str(),
             "weight_inspect" | "weight_propose" | "weight_tune" | "weight_apply"
@@ -801,6 +855,11 @@ impl Worker {
             .clone();
         ensure!(input.kind == original.kind, "resolved input kind changed");
         let job = r.job.as_ref().unwrap();
+        let standalone = standalone_gguf(job);
+        ensure!(
+            !standalone || provided.is_none(),
+            "standalone SafeTensors GGUF requires direct inputs"
+        );
         let native_safe =
             index == 0 && weight_source::job(&job.kind) && weight_source::supports(&input.kind);
         ensure!(
@@ -901,6 +960,19 @@ impl Worker {
                         fs::symlink_metadata(&p)?.is_file()
                             && p.extension().is_some_and(|ext| ext == "hgn"),
                         "HGN weight jobs require a regular .hgn file, not a bundle"
+                    );
+                }
+                if standalone {
+                    let metadata = fs::symlink_metadata(&p)?;
+                    ensure!(
+                        if input.kind == "assets" {
+                            metadata.is_dir()
+                        } else {
+                            metadata.is_file()
+                                && (index != 0
+                                    || p.extension().is_some_and(|ext| ext == "safetensors"))
+                        },
+                        "standalone SafeTensors GGUF requires regular files and an assets directory"
                     );
                 }
                 // A concurrent cache cleanup may not delete a direct source in use.
