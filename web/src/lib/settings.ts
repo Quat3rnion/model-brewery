@@ -25,7 +25,9 @@ export interface HostSettings {
   managed: boolean;
   managementAvailable: boolean | null;
   managementReason: string | null;
-  evaluationStatus: 'managed'|'not_enrolled'|'unavailable';
+  evaluationStatus: 'managed'|'profile_only'|'not_enrolled'|'unavailable';
+  savedProfileTargets: Endpoint[] | null;
+  profileBinding: string | null;
   evaluationReason:string|null;
   ready: boolean;
   reason: string | null;
@@ -67,7 +69,9 @@ export function parseHost(v: unknown): HostSettings | null {
     managed: o.managed === true,
     managementAvailable: typeof obj(o.management)?.available === 'boolean' ? obj(o.management)!.available as boolean : null,
     managementReason: str(obj(o.management)?.reason),
-    evaluationStatus: obj(o.evaluation)?.status === 'managed' ? 'managed' : obj(o.evaluation)?.status === 'not_enrolled' ? 'not_enrolled' : o.evaluation ? 'unavailable' : o.managed === true ? 'managed' : 'not_enrolled',
+    evaluationStatus: obj(o.evaluation)?.status === 'profile_only' ? 'profile_only' : obj(o.evaluation)?.status === 'managed' ? 'managed' : obj(o.evaluation)?.status === 'not_enrolled' ? 'not_enrolled' : o.evaluation ? 'unavailable' : o.managed === true ? 'managed' : 'not_enrolled',
+    savedProfileTargets: Array.isArray(obj(o.saved_profile)?.benchmark_targets) ? endpoints(obj(o.saved_profile)!.benchmark_targets) : null,
+    profileBinding: str(o.profile_binding),
     evaluationReason: str(obj(o.evaluation)?.reason) ?? str(o.reason),
     ready: o.ready === true,
     reason: str(o.reason),
@@ -99,24 +103,15 @@ export function idProblem(id: string): string | null {
 }
 
 /** The controller accepts only numeric loopback HTTP on the worker: http://127.0.0.1:PORT/v1 or http://[::1]:PORT/v1. */
+const loopback = /^http:\/\/(?:127\.0\.0\.1|\[::1\]):([1-9][0-9]{0,4})\/v1$/;
 export function endpointProblem(url: string): string | null {
   if (!url) return 'Enter the endpoint URL.';
-  let u: URL;
-  try {
-    u = new URL(url);
-  } catch {
-    return 'Not a valid URL.';
-  }
-  if (u.protocol !== 'http:') return 'Use plain http on the loopback address.';
-  if (u.username || u.password) return 'Do not put credentials in the URL.';
-  if (u.search || u.hash) return 'Remove the query or fragment.';
-  if (u.hostname !== '127.0.0.1' && u.hostname !== '[::1]') return 'Use http://127.0.0.1:PORT/v1 or http://[::1]:PORT/v1 (loopback on the selected worker).';
-  if (!u.port) return 'Add the port, for example :8000.';
-  if (u.pathname.replace(/\/+$/, '') !== '/v1') return 'The path must be /v1.';
-  return null;
+  const match = loopback.exec(url);
+  return match && match[0] === url && Number(match[1]) <= 65535 ? null :
+    'Use http://127.0.0.1:PORT/v1 or http://[::1]:PORT/v1 with a port from 1 to 65535 and no leading zero.';
 }
 
-function endpointProblems(kind: string, list: Endpoint[], ports: number[], baseline = false): string[] {
+function endpointProblems(kind: string, list: Endpoint[], ports: number[] | null, baseline = false): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const e of list) {
@@ -126,8 +121,8 @@ function endpointProblems(kind: string, list: Endpoint[], ports: number[], basel
     seen.add(e.id);
     const ep = endpointProblem(e.endpoint);
     if (ep) out.push(`${kind} ${e.id || '(no ID)'}: ${ep}`);
-    else {
-      const port = Number(new URL(e.endpoint).port);
+    else if (ports) {
+      const port = Number(loopback.exec(e.endpoint)![1]);
       if (!ports.includes(port)) out.push(`${kind} ${e.id || '(no ID)'}: Port ${port} is not approved on this worker${ports.length ? ` (approved: ${ports.join(', ')})` : '; no port is approved'}.`);
     }
     if (baseline) {
@@ -155,7 +150,7 @@ export function validateHost(h: HostSettings, saved?: HostSettings): string[] {
   const blockedBaselines = h.baselineAllowed === false ? changedBaselines(h, saved) : [];
   return [
     ...blockedBaselines.map((e) => `Baseline ${e.id || '(no ID)'}: baseline endpoints are not allowed on this worker. Remove the new or changed entry.`),
-    ...endpointProblems('Target', h.benchmarkTargets, h.approvedPorts),
+    ...endpointProblems('Target', h.benchmarkTargets, h.evaluationStatus === 'profile_only' ? null : h.approvedPorts),
     ...endpointProblems('Baseline', h.baselineEndpoints, h.approvedPorts, true),
     ...(h.evaluationEnabled && !h.evaluationAllowed ? ['GSM8K evaluation is not allowed on this worker (no approved Halogen runtime).'] : []),
     ...h.enabledSuites.filter((s) => !approved.has(s)).map((s) => `${s} is not an approved suite on this host.`),
@@ -167,6 +162,7 @@ export function buildPut(h: HostSettings) {
     l.map((e) => ({ id: e.id, ...(e.label ? { label: e.label } : {}), endpoint: e.endpoint, model: e.model, ...(baseline ? { source_sha256: e.source_sha256 ?? '', runtime_id: e.runtime_id ?? '' } : {}) }));
   return {
     revision: h.revision,
+    ...(h.evaluationStatus === 'profile_only' && h.profileBinding ? {profile_binding:h.profileBinding} : {}),
     benchmark_targets: clean(h.benchmarkTargets),
     enabled_suites: [...h.enabledSuites],
     baseline_endpoints: clean(h.baselineEndpoints, true),

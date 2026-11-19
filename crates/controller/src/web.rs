@@ -253,30 +253,51 @@ async fn state(State(app): State<Shared>) -> Result<Json<Value>> {
 }
 
 async fn get_settings(State(app): State<Shared>) -> Result<Json<Value>> {
-    let _store = app.store.lock().map_err(ApiError::storage)?;
+    let store = app.store.lock().map_err(ApiError::storage)?;
     let hosts = app.defined_hosts().map_err(ApiError::storage)?;
     let views: Vec<_> = hosts
         .iter()
-        .map(|host| app.settings.view(host, app.admin.is_some()))
-        .collect();
+        .map(|host| app.settings.view(&store, host, app.admin.is_some()))
+        .collect::<std::result::Result<_, _>>()
+        .map_err(ApiError::storage)?;
     Ok(Json(json!({"hosts": views})))
 }
 
 async fn put_settings(
     State(app): State<Shared>,
     Path(id): Path<String>,
-    payload: std::result::Result<Json<brewery_worker::operational::Settings>, JsonRejection>,
+    payload: std::result::Result<Json<Value>, JsonRejection>,
 ) -> Result<Json<Value>> {
     use crate::settings::PutError;
-    let Json(settings) =
+    let Json(mut body) =
         payload.map_err(|error| ApiError(error.status(), "invalid settings request".into()))?;
+    let binding = body
+        .as_object_mut()
+        .and_then(|body| body.remove("profile_binding"));
+    let binding = binding
+        .as_ref()
+        .map(|binding| {
+            binding
+                .as_str()
+                .ok_or_else(|| ApiError::bad("invalid settings profile binding"))
+        })
+        .transpose()?;
+    let settings =
+        serde_json::from_value::<brewery_worker::operational::Settings>(body).map_err(|_| {
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid settings request".into(),
+            )
+        })?;
     let store = app.store.lock().map_err(ApiError::storage)?;
     let hosts = app.defined_hosts().map_err(ApiError::storage)?;
     let host = hosts
         .iter()
         .find(|host| host.id == id)
         .ok_or_else(|| ApiError::not_found("host"))?;
-    if let Some(admin) = &app.admin
+    let native = app.settings.native(&id);
+    if native.managed()
+        && let Some(admin) = &app.admin
         && !admin
             .effective_hosts(std::slice::from_ref(host), &app.local_edit)
             .map_err(ApiError::storage)?
@@ -288,7 +309,7 @@ async fn put_settings(
             "worker disabled by infrastructure administration".into(),
         ));
     }
-    if app.settings.enrolled(&id) && store.host_has_jobs(&id).map_err(ApiError::storage)? {
+    if native.managed() && store.host_has_jobs(&id).map_err(ApiError::storage)? {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "worker has queued or running jobs".into(),
@@ -296,10 +317,10 @@ async fn put_settings(
     }
     let view = app
         .settings
-        .put(host, settings, app.admin.is_some())
+        .put(&store, host, native, settings, binding, app.admin.is_some())
         .map_err(|err| match err {
-            PutError::NotEnrolled(reason) => ApiError(StatusCode::CONFLICT, reason.into()),
             PutError::NotReady(reason) => ApiError(StatusCode::SERVICE_UNAVAILABLE, reason.into()),
+            PutError::Storage(error) => ApiError::storage(error),
             PutError::Conflict => {
                 ApiError(StatusCode::CONFLICT, "settings revision conflict".into())
             }

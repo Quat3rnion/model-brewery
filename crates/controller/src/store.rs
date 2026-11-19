@@ -1,6 +1,7 @@
 use crate::conversion::{self, Conversion};
 use crate::domain::{Envelope, Event, Job, Model, Prompt, State, now};
 use crate::idempotency::{self, Replay, Submission};
+use brewery_worker::operational::Settings;
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -61,7 +62,10 @@ impl Store {
         crate::feed::install(&conn)?;
         idempotency::install(&conn)?;
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS profile_revisions(revision TEXT PRIMARY KEY, body TEXT NOT NULL);",
+            "CREATE TABLE IF NOT EXISTS profile_revisions(revision TEXT PRIMARY KEY, body TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS host_evaluation_profiles(
+                 binding TEXT PRIMARY KEY, body TEXT NOT NULL
+             );",
         )?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS conversions(
@@ -75,6 +79,24 @@ impl Store {
 
     pub fn feed_cursor(&self) -> rusqlite::Result<i64> {
         crate::feed::cursor(&self.conn)
+    }
+
+    pub fn evaluation_profile(&self, binding: &str) -> Result<Option<Settings>> {
+        read_one(
+            &self.conn,
+            "SELECT body FROM host_evaluation_profiles WHERE binding = ?",
+            binding,
+        )
+    }
+
+    // The caller holds App's Store lock across revision comparison and write.
+    pub fn save_evaluation_profile(&self, binding: &str, settings: &Settings) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO host_evaluation_profiles(binding, body) VALUES (?, ?)
+             ON CONFLICT(binding) DO UPDATE SET body=excluded.body",
+            params![binding, encode(settings)?],
+        )?;
+        Ok(())
     }
 
     pub fn feed_batch(&self, after: i64) -> rusqlite::Result<crate::feed::Batch> {

@@ -1,25 +1,69 @@
 use super::*;
 
+pub(super) fn target_profile(row: &Value, port: u16) -> Value {
+    json!({"revision":row["revision"],"profile_binding":row["profile_binding"],
+        "benchmark_targets":[{"id":"desk","endpoint":format!("http://[::1]:{port}/v1"),
+        "model":"demo"}],"enabled_suites":[],"baseline_endpoints":[],
+        "evaluation_enabled":false})
+}
+
+#[test]
+fn profile_only_benchmark_target_survives_restart_without_job_admission() {
+    let mut app = Fixture::new();
+    app.launch();
+    let get = app.json("GET", "/api/settings", None, 200);
+    let alpha = &get["hosts"][0];
+    assert_eq!(alpha["evaluation"]["status"], "profile_only");
+    let payload = target_profile(alpha, 9280);
+    let mut invalid = payload.clone();
+    invalid["benchmark_targets"][0]["endpoint"] = json!("http://192.0.2.1:9280/v1");
+    app.json("PUT", "/api/settings/alpha", Some(invalid), 400);
+    let mut invalid = payload.clone();
+    invalid["enabled_suites"] = json!(["suite"]);
+    app.json("PUT", "/api/settings/alpha", Some(invalid), 400);
+    let mut invalid = payload.clone();
+    invalid["evaluation_enabled"] = json!(true);
+    app.json("PUT", "/api/settings/alpha", Some(invalid), 400);
+    let saved = app.json("PUT", "/api/settings/alpha", Some(payload.clone()), 200);
+    assert_eq!(saved["revision"], 1);
+    assert_eq!(saved["benchmark_targets"], payload["benchmark_targets"]);
+    assert_eq!(saved["approved_ports"], json!([]));
+    app.json("PUT", "/api/settings/alpha", Some(payload), 409);
+    app.stop();
+    app.launch();
+    assert_eq!(
+        app.json("GET", "/api/settings", None, 200)["hosts"][0],
+        saved
+    );
+    let state = app.json("GET", "/api/state", None, 200);
+    assert_eq!(state["hosts"][0]["capabilities"]["benchmark"], false);
+    assert_eq!(state["hosts"][0]["benchmark_targets"], json!([]));
+}
+
 #[test]
 fn backend_and_legacy_hosts_have_management_without_evaluation_enrollment() {
     let mut app = Fixture::new();
     let companion = app.path("dispatch");
-    app.launch_with(&[
+    let env = [
         ("BREWERY_HF_WORKER", companion.clone()),
         ("BREWERY_HF_ENGINE", companion.clone()),
         ("BREWERY_HF_HFR", companion.clone()),
         ("BREWERY_HF_DISPATCH", companion),
-    ]);
+    ];
+    app.launch_with(&env);
     let settings = app.json("GET", "/api/settings", None, 200);
     let hosts = settings["hosts"].as_array().unwrap();
     assert_eq!(hosts.len(), 3);
-    for (id, reason, job) in [
-        ("alpha", "not enrolled", "inspect"),
-        ("beta", "not enrolled", "evaluate"),
+    for (index, (id, reason, job)) in [
+        ("alpha", "eligible local worker", "inspect"),
+        ("beta", "eligible local worker", "evaluate"),
         ("backend-hf", "does not run evaluation", "hf_download"),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let row = hosts.iter().find(|row| row["id"] == id).unwrap();
-        assert_eq!(row["evaluation"]["status"], "not_enrolled");
+        assert_eq!(row["evaluation"]["status"], "profile_only");
         assert!(
             row["evaluation"]["reason"]
                 .as_str()
@@ -50,6 +94,14 @@ fn backend_and_legacy_hosts_have_management_without_evaluation_enrollment() {
             "revision":policy["revision"],"paused":false,"disabled_jobs":[job]});
         app.json("POST", action_url, Some(change.clone()), 200);
         app.json("POST", action_url, Some(change), 409);
+        let payload = target_profile(row, 9000 + index as u16);
+        let saved = app.json(
+            "PUT",
+            &format!("/api/settings/{id}"),
+            Some(payload.clone()),
+            200,
+        );
+        assert_eq!(saved["benchmark_targets"], payload["benchmark_targets"]);
     }
     let state = app.json("GET", "/api/state", None, 200);
     let legacy = state["hosts"]
@@ -60,6 +112,22 @@ fn backend_and_legacy_hosts_have_management_without_evaluation_enrollment() {
         .unwrap();
     assert_eq!(legacy["capabilities"]["evaluate"], false);
     assert_eq!(legacy["capabilities"]["generate"], true);
+    app.stop();
+    app.launch_with(&env);
+    let settings = app.json("GET", "/api/settings", None, 200);
+    for (index, id) in ["alpha", "beta", "backend-hf"].into_iter().enumerate() {
+        let row = settings["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap();
+        assert_eq!(row["revision"], 1);
+        assert_eq!(
+            row["benchmark_targets"],
+            target_profile(row, 9000 + index as u16)["benchmark_targets"]
+        );
+    }
 }
 
 #[test]
@@ -150,7 +218,7 @@ fn managed_settings_persist_and_gate_job_admission() {
     fs::remove_file(catalog).unwrap();
     let settings = app.json("GET", "/api/settings", None, 200);
     let alpha = &settings["hosts"][0];
-    assert_eq!(alpha["evaluation"]["status"], "unavailable");
+    assert_eq!(alpha["evaluation"]["status"], "profile_only");
     assert!(
         alpha["evaluation"]["reason"]
             .as_str()
@@ -158,12 +226,15 @@ fn managed_settings_persist_and_gate_job_admission() {
             .contains("suite catalog")
     );
     assert_eq!(alpha["management"]["available"], true);
+    let draft = target_profile(alpha, 9290);
+    let saved_draft = app.json("PUT", "/api/settings/alpha", Some(draft.clone()), 200);
+    assert_eq!(saved_draft["benchmark_targets"], draft["benchmark_targets"]);
     let state = app.json("GET", "/api/state", None, 200);
     assert_eq!(state["hosts"][0]["capabilities"]["benchmark"], false);
 }
 
 #[test]
-fn source_pinned_worker_does_not_become_editable_when_enrolled() {
+fn source_pinned_worker_saves_a_separate_profile_without_mutating_worker_files() {
     let mut app = Fixture::new();
     let root = app.path("worker");
     fs::create_dir(&root).unwrap();
@@ -189,16 +260,92 @@ fn source_pinned_worker_does_not_become_editable_when_enrolled() {
     let get = app.json("GET", "/api/settings", None, 200);
     let row = &get["hosts"][0];
     assert_eq!(row["management"]["available"], true);
-    assert_eq!(row["evaluation"]["status"], "unavailable");
-    let rejected = app.json(
-        "PUT",
-        "/api/settings/alpha",
-        Some(
-            json!({"revision":0,"evaluation_enabled":false,"benchmark_targets":[],
-            "enabled_suites":[],"baseline_endpoints":[]}),
-        ),
-        503,
+    assert_eq!(row["evaluation"]["status"], "profile_only");
+    assert!(
+        row["evaluation"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("source-pinned")
     );
-    assert_eq!(rejected["error"], row["evaluation"]["reason"]);
+    let draft = target_profile(row, 9281);
+    let before = fs::read(&config).unwrap();
+    let saved = app.json("PUT", "/api/settings/alpha", Some(draft.clone()), 200);
+    assert_eq!(saved["benchmark_targets"], draft["benchmark_targets"]);
+    assert_eq!(fs::read(&config).unwrap(), before);
     assert!(!root.join("operational-settings.json").exists());
+    let mut changed: Value = serde_json::from_slice(&before).unwrap();
+    changed["engine_env"]["BREWERY_EXPECTED_SOURCE_SHA256"] = json!("b".repeat(64));
+    fs::write(&config, changed.to_string()).unwrap();
+    let replacement = app.json("GET", "/api/settings", None, 200);
+    assert_ne!(
+        row["profile_binding"],
+        replacement["hosts"][0]["profile_binding"]
+    );
+    assert_eq!(replacement["hosts"][0]["benchmark_targets"], json!([]));
+    app.json("PUT", "/api/settings/alpha", Some(draft), 409);
+}
+
+#[test]
+fn worker_policy_without_dispatch_opt_in_keeps_saved_profile_for_manual_adoption() {
+    let mut app = Fixture::new();
+    let root = app.path("worker");
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let config = app.path("worker.json");
+    fs::write(&config, json!({"root":root}).to_string()).unwrap();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts":{"alpha":{"local":true,"config":config,"capabilities":{"generate":false}}}})
+            .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let settings = app.json("GET", "/api/settings", None, 200);
+    let draft = target_profile(&settings["hosts"][0], 9283);
+    let saved_draft = app.json("PUT", "/api/settings/alpha", Some(draft.clone()), 200);
+    app.stop();
+    let catalog = app.path("catalog.json");
+    fs::write(&catalog, r#"{"adapters":{}}"#).unwrap();
+    fs::write(
+        &config,
+        json!({"root":root,
+            "managed_settings":{"catalog":catalog,"allowed_ports":[9283],"evaluation_allowed":true},
+            "engine_env":{"BREWERY_ALLOW_GPU_LOAD":"1",
+                "BREWERY_HALOGEN_IMAGE_ID":format!("sha256:{}", "a".repeat(64))}})
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let settings = app.json("GET", "/api/settings", None, 200);
+    let row = &settings["hosts"][0];
+    assert_eq!(row["evaluation"]["status"], "managed");
+    assert_eq!(row["revision"], 0);
+    assert_eq!(row["benchmark_targets"], json!([]));
+    assert_eq!(row["saved_profile"]["revision"], 1);
+    assert_eq!(
+        row["saved_profile"]["benchmark_targets"],
+        saved_draft["benchmark_targets"]
+    );
+    app.json("PUT", "/api/settings/alpha", Some(draft), 409);
+    let mut native = row["saved_profile"].clone();
+    native["revision"] = row["revision"].clone();
+    native["evaluation_enabled"] = json!(true);
+    native["benchmark_targets"][0]["endpoint"] = json!("http://[::1]:9284/v1");
+    app.json("PUT", "/api/settings/alpha", Some(native.clone()), 400);
+    native["benchmark_targets"] = saved_draft["benchmark_targets"].clone();
+    let confirmed = app.json("PUT", "/api/settings/alpha", Some(native), 200);
+    assert_eq!(
+        confirmed["benchmark_targets"],
+        saved_draft["benchmark_targets"]
+    );
+    assert_eq!(confirmed["saved_profile"], row["saved_profile"]);
+    let worker_snapshot: Value =
+        serde_json::from_slice(&fs::read(root.join("operational-settings.json")).unwrap()).unwrap();
+    assert_eq!(
+        worker_snapshot["benchmark_targets"],
+        confirmed["benchmark_targets"]
+    );
+    let state = app.json("GET", "/api/state", None, 200);
+    assert_eq!(state["hosts"][0]["capabilities"]["evaluate"], true);
+    assert_eq!(state["hosts"][0]["capabilities"]["generate"], false);
 }

@@ -325,6 +325,8 @@ impl From<&Job> for Event {
 pub struct Host {
     #[serde(skip)]
     pub local_edit: bool,
+    #[serde(skip)]
+    pub(crate) provision_binding: Option<String>,
     pub id: String,
     pub name: String,
     pub capabilities: BTreeMap<String, bool>,
@@ -576,6 +578,7 @@ impl Host {
         }
         Ok(Self {
             local_edit: false,
+            provision_binding: None,
             id: id.into(),
             name,
             capabilities,

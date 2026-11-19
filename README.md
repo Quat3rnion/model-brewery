@@ -1326,7 +1326,7 @@ It does not accept arbitrary commands.
 
 | Section | What it does |
 | --- | --- |
-| **Worker settings** (`/api/settings`) | Lists each defined host and links to its controls. For workers with an evaluation policy, it also saves benchmark targets, suites, baseline endpoints and the evaluation switch. |
+| **Worker settings** (`/api/settings`) | Saves benchmark target profiles for defined hosts, including installed SSH workers and the backend download service. Workers with a usable evaluation policy can also apply targets, approved suites, baseline endpoints and the evaluation switch. |
 | **Infrastructure** (`/api/admin/*`) | Controls weight editing, job admission and supported resource limits for the selected host. It also manages catalog runtimes and SSH definitions. |
 
 Both sections use the same API request protections.
@@ -1335,14 +1335,17 @@ The loopback listener has no login. Use the authenticated gateway for network ac
 
 ### What the operator can set
 
-The operator can set only what the **worker policy** allows. The policy comes
-from the worker file and from files that the infrastructure owner controls.
-The Settings page cannot widen it.
+Select a worker in **Settings**. If it has no active evaluation policy, add a
+benchmark target and save the profile. The controller stores the target for
+that worker without testing the endpoint, changing job permissions or starting
+an evaluation. When a worker policy becomes available, review the saved targets
+before applying them. The policy still controls what can run.
 
 - **Targets.** A benchmark target has an ID, an optional label, an endpoint and
   the model name that the endpoint expects. The endpoint must be exactly
   `http://127.0.0.1:PORT/v1` or `http://[::1]:PORT/v1`. The address is on the
-  worker host. The port must be in the approved ports of that worker. User
+  worker host. To apply the target for execution, the port must be in the
+  approved ports of that worker. User
   names, queries, fragments, host names and other paths are refused. The
   endpoint must not need a key, and the API has no field for a secret.
 - **Suites.** The operator enables suites from the approved catalog only. The
@@ -1361,9 +1364,8 @@ The Settings page cannot widen it.
 
 ### Save is not ready
 
-A save writes the settings to the private state directory of the worker. It
-does this before the answer. The saved revision grows by one. Two things are
-separate:
+A save writes a target profile on the controller or applies settings to a
+worker with an evaluation policy. The saved revision grows by one.
 
 - **Saved.** The settings are valid for the worker policy and are on disk.
   Saving starts no job. It does not test any endpoint.
@@ -1371,7 +1373,8 @@ separate:
   settings can be read and are valid. It does not show that a model server
   listens on the port. A job still fails if the endpoint does not answer.
 
-After a save, `GET /api/state` shows the effect. `benchmark` is on when the
+Saving a controller profile does not change `GET /api/state`. For applied
+worker settings, `benchmark` is on when the
 worker has at least one target and one suite. `baseline` is on when it has a
 baseline endpoint. `generate` and `evaluate` are on when evaluation is on.
 Otherwise the host shows the reason. A save adds no event to the event stream.
@@ -1390,11 +1393,11 @@ download host and installed SSH hosts. Select **Weight editing settings** or
 **Admission and resource limits** for that host. You do not need an evaluator
 to pause a host or configure a supported weight editor.
 
-The following prerequisites apply only to the evaluation form:
+The following prerequisites apply to worker-side execution, not to saving a
+controller profile:
 
 - The evaluation worker is **local** and has an absolute `config` path.
-- The dispatch entry has `"managed_settings": true`. The controller reads the
-  dispatch file when it starts, so restart the controller after a change.
+- No dispatch enrollment flag is required to use an eligible worker policy.
 - The worker file has a `managed_settings` object with `catalog`,
   `allowed_ports`, `evaluation_allowed` and optional `baseline_allowed`
   (default `false`). `root` must be a private directory (mode `0700`, owned by
@@ -1403,7 +1406,8 @@ The following prerequisites apply only to the evaluation form:
   `executable`, a `version` and a `protocol`. The executable must be a
   regular executable file. It holds at most 32 suites.
 - A worker that pins a source (`pinned_publication` or
-  `BREWERY_EXPECTED_SOURCE_SHA256`) cannot save evaluation settings.
+  `BREWERY_EXPECTED_SOURCE_SHA256`) cannot apply evaluation settings to its
+  qualification runtime.
   This protects its qualification configuration. Two managed evaluation
   workers cannot share or nest their `root` directories.
 

@@ -25,6 +25,19 @@ describe('settings parsing', () => {
 });
 
 describe('validation (controller rules)', () => {
+  it('saves loopback target profiles without granting an execution port or suite', () => {
+    const host=parseHost({...raw.hosts[1],evaluation:{status:'profile_only'},profile_binding:'fixture-binding',approved_ports:[]})!;
+    host.benchmarkTargets=[{id:'draft',endpoint:'http://[::1]:80/v1',model:'test'}];
+    expect(host.evaluationStatus).toBe('profile_only');
+    expect(buildPut(host).profile_binding).toBe('fixture-binding');
+    expect(buildPut({...host,evaluationStatus:'managed'})).not.toHaveProperty('profile_binding');
+    expect(validateHost(host)).toEqual([]);
+    for (const url of ['http://2130706433:8000/v1','http://127.0.0.1:080/v1','http://127.0.0.1:99999/v1','http://127.0.0.1:8000/ignored/../v1']) {
+      expect(validateHost({...host,benchmarkTargets:[{...host.benchmarkTargets[0],endpoint:url}]})).not.toEqual([]);
+    }
+    expect(validateHost({...host,evaluationStatus:'managed'}).join(' ')).toContain('not approved');
+    expect(validateHost({...host,enabledSuites:['mmlu'],evaluationEnabled:true})).toHaveLength(2);
+  });
   it('IDs: [a-z0-9][a-z0-9_-]{0,63}', () => {
     expect(idProblem('local-1')).toBeNull();
     expect(idProblem('Local')).toMatch(/lowercase/);

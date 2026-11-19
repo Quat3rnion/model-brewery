@@ -320,7 +320,7 @@
       "get": {
         "operationId": "getSettings",
         "summary": "Read the operational settings of every worker",
-        "description": "Lists defined hosts, including installed SSH workers. Use management to find each host's revisioned admission and resource controls. evaluation describes only the benchmark and evaluation configuration; lack of evaluation enrollment does not lock the host. Neither field establishes that a particular model can be edited.",
+        "description": "Lists defined hosts, including installed SSH workers. Use management for host admission and resource controls. evaluation.status distinguishes a controller-stored target profile from settings applied under the worker's evaluation policy. Saving a profile does not grant execution capabilities.",
         "responses": {
           "200": {
             "description": "The settings of all workers.",
@@ -335,7 +335,7 @@
       "put": {
         "operationId": "putSettings",
         "summary": "Replace one worker's evaluation configuration",
-        "description": "Replaces the whole settings object of an enrolled local worker. The controller checks the body against the worker policy and the suite catalog, then writes it to the private state directory of the worker before it answers. Saving starts no job and does not test an endpoint. The saved revision is the request revision plus one. Send the revision that you read from getSettings. Another save in the meantime, or a stale revision, returns 409: read again, then decide. The save also returns 409 if the host has a queued or running job, or a job with host auto. The effect on getState is immediate: capabilities and the lists of targets, suites and baseline sources follow the saved settings. There is no new event kind. The body has no secrets and no API key. This route uses the same access as job creation.",
+        "description": "Replaces the selected worker's settings. Send the revision from getSettings; in profile_only mode also echo its profile_binding. A controller profile stores benchmark target definitions without applying them or testing endpoints. In managed mode the worker policy and suite catalog govern validation and execution. Saving starts no job and grants no new endpoint ports.",
         "parameters": [{"name": "host", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/HostId"}, "description": "Configured worker ID."}],
         "requestBody": {
           "required": true,
@@ -358,14 +358,14 @@
           "403": {"$ref": "#/components/responses/Forbidden"},
           "404": {"$ref": "#/components/responses/NotFound"},
           "409": {
-            "description": "The worker is not enrolled for managed settings, the revision is stale, the host has queued or running jobs, or an administrator disabled the worker.",
+            "description": "The revision or profile binding has changed, or a worker-side change conflicts with admission or active work. Read the current settings before retrying.",
             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
           },
           "413": {"$ref": "#/components/responses/PayloadTooLarge"},
           "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
           "422": {"$ref": "#/components/responses/InvalidJsonData"},
           "503": {
-            "description": "The worker is enrolled but its policy, catalog or settings directory cannot be used, or the write failed.",
+            "description": "The policy, catalog or settings store is unavailable, or the write failed.",
             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
           }
         }
@@ -1082,6 +1082,7 @@
         "required": ["revision", "benchmark_targets", "enabled_suites", "baseline_endpoints", "evaluation_enabled"],
         "description": "The complete settings of one worker. Each list holds at most 32 items and IDs are unique inside a list. A suite must be one of approved_suites. baseline_endpoints must stay empty unless baseline_allowed is true. evaluation_enabled can be true only if evaluation_allowed is true.",
         "properties": {
+          "profile_binding": {"type": "string", "description": "Echo the opaque value from HostSettings for profile_only saves. Omit for worker-side settings."},
           "revision": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615, "description": "The revision that you read. A different value returns 409."},
           "benchmark_targets": {"type": "array", "maxItems": 32, "items": {"$ref": "#/components/schemas/SettingsTarget"}},
           "enabled_suites": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"$ref": "#/components/schemas/BenchmarkId"}},
@@ -1105,9 +1106,11 @@
           },
           "evaluation": {
             "type": "object", "required": ["status"],
-            "properties": {"status": {"enum": ["managed", "not_enrolled", "unavailable"]}, "reason": {"type": "string"}}
+            "properties": {"status": {"enum": ["managed", "profile_only", "unavailable"]}, "reason": {"type": "string"}}
           },
-          "managed": {"type": "boolean", "description": "Evaluation enrollment only. Does not describe host management or weight editing."},
+          "profile_binding": {"type": "string", "description": "Opaque binding for the selected controller-stored profile."},
+          "saved_profile": {"$ref": "#/components/schemas/NewSettings", "description": "Previously saved controller profile available for review. Not automatically applied to a worker."},
+          "managed": {"type": "boolean", "description": "Compatibility field. Use evaluation.status to distinguish saved profiles from active worker settings."},
           "ready": {"type": "boolean", "description": "True if evaluation policy, suite catalog and saved evaluation settings are valid. Not a check of any endpoint."},
           "reason": {"type": "string", "description": "Evaluation configuration status, not a host-wide restriction."},
           "approved_ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "description": "Loopback ports that the operator approved for this worker."},

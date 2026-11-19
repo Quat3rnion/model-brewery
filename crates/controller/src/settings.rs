@@ -1,27 +1,29 @@
 use crate::domain::{BaselineSource, BenchmarkChoice, Host};
+use crate::store::Store;
 use brewery_worker::operational::{self, Catalog, Policy, Settings};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::PathBuf};
 
 pub const KINDS: &[&str] = &["benchmark", "baseline", "evaluate", "generate"];
 
 #[derive(Default)]
 pub struct Managed {
-    entries: BTreeMap<String, Option<PathBuf>>,
+    entries: BTreeMap<String, Value>,
     local_configs: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Deserialize)]
 struct WorkerConfig {
-    root: PathBuf,
-    managed_settings: Option<Policy>,
+    root: Option<PathBuf>,
+    managed_settings: Option<Value>,
     pinned_publication: Option<Value>,
     #[serde(default)]
     engine_env: BTreeMap<String, String>,
 }
 
-struct Profile {
+pub(crate) struct Profile {
     root: PathBuf,
     policy: Policy,
     catalog: Catalog,
@@ -29,9 +31,18 @@ struct Profile {
     settings: Settings,
 }
 
-enum ProfileError {
-    NotEnrolled,
-    Unavailable(&'static str),
+pub(crate) enum Native {
+    Managed(Profile),
+    ProfileOnly {
+        reason: &'static str,
+        block_jobs: bool,
+    },
+}
+
+impl Native {
+    pub fn managed(&self) -> bool {
+        matches!(self, Self::Managed(_))
+    }
 }
 
 #[derive(Serialize)]
@@ -63,8 +74,7 @@ impl Management {
 #[serde(rename_all = "snake_case")]
 enum EvaluationStatus {
     Managed,
-    NotEnrolled,
-    Unavailable,
+    ProfileOnly,
 }
 
 #[derive(Serialize)]
@@ -89,13 +99,17 @@ pub struct View<'a> {
     evaluation_allowed: bool,
     baseline_allowed: bool,
     approved_suites: Vec<BenchmarkChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_binding: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    saved_profile: Option<Settings>,
     #[serde(flatten)]
     settings: Settings,
 }
 
 pub enum PutError {
-    NotEnrolled(&'static str),
     NotReady(&'static str),
+    Storage(crate::Error),
     Conflict,
     Invalid(String),
 }
@@ -119,9 +133,7 @@ impl Managed {
             if let Some(path) = &path {
                 local_configs.insert(id.clone(), path.clone());
             }
-            if host["managed_settings"] == true {
-                entries.insert(id.clone(), path);
-            }
+            entries.insert(id.clone(), host.clone());
         }
         Self {
             entries,
@@ -129,58 +141,85 @@ impl Managed {
         }
     }
 
-    pub fn enrolled(&self, id: &str) -> bool {
-        self.entries.contains_key(id)
-    }
-
-    fn profile(&self, id: &str) -> Result<Profile, ProfileError> {
-        let path = self
+    pub fn native(&self, id: &str) -> Native {
+        let explicit = self
             .entries
             .get(id)
-            .ok_or(ProfileError::NotEnrolled)?
-            .as_ref()
-            .ok_or(ProfileError::Unavailable(
-                "Managed evaluation requires a local worker with an absolute config path",
-            ))?;
-        let config: WorkerConfig = operational::read(path).map_err(|_| {
-            ProfileError::Unavailable("Check that the local worker config is readable and valid")
-        })?;
+            .is_some_and(|entry| entry["managed_settings"] == true);
+        let profile_only = |reason, block_jobs| Native::ProfileOnly { reason, block_jobs };
+        let Some(path) = self.local_configs.get(id) else {
+            let reason = if id == crate::backend_hf::ID {
+                "Saved on the controller only; the backend worker does not run evaluation"
+            } else {
+                "Saved on the controller only; execution needs an eligible local worker policy"
+            };
+            return profile_only(reason, explicit);
+        };
+        let Ok(config) = operational::read::<WorkerConfig>(path) else {
+            return profile_only(
+                "Saved on the controller only; check that the local worker config is readable and valid",
+                true,
+            );
+        };
+        let configured = config.managed_settings.is_some();
         if config.pinned_publication.is_some()
             || config
                 .engine_env
                 .contains_key("BREWERY_EXPECTED_SOURCE_SHA256")
             || std::env::var_os("BREWERY_EXPECTED_SOURCE_SHA256").is_some()
         {
-            return Err(ProfileError::Unavailable(
-                "Source-pinned workers cannot use managed evaluation settings; use a separate worker",
-            ));
+            return profile_only(
+                "Saved on the controller only; source-pinned workers cannot apply managed settings",
+                explicit || configured,
+            );
         }
+        let Some(raw_policy) = config.managed_settings else {
+            return profile_only(
+                "Saved on the controller only; no managed evaluation policy is configured",
+                explicit,
+            );
+        };
+        let Ok(policy) = serde_json::from_value::<Policy>(raw_policy) else {
+            return profile_only(
+                "Saved on the controller only; check the format of the worker's managed policy",
+                true,
+            );
+        };
+        let Some(root) = config.root else {
+            return profile_only(
+                "Saved on the controller only; managed evaluation requires a private worker state root",
+                true,
+            );
+        };
         // One managed alias per private config root; aliases would evade busy
         // checking. Separate workers must have disjoint state roots.
         for (other, path) in &self.local_configs {
             if other != id
                 && let Ok(other) = operational::read::<WorkerConfig>(path)
-                && (other.root.starts_with(&config.root) || config.root.starts_with(&other.root))
+                && let Some(other_root) = other.root
+                && (other_root.starts_with(&root) || root.starts_with(&other_root))
             {
-                return Err(ProfileError::Unavailable(
-                    "Managed evaluation requires a separate private state root for each worker",
-                ));
+                return profile_only(
+                    "Saved on the controller only; managed evaluation requires a separate private state root for each worker",
+                    true,
+                );
             }
         }
-        let policy = config.managed_settings.ok_or(ProfileError::Unavailable(
-            "Add a managed evaluation policy to the local worker config",
-        ))?;
-        let catalog = policy.load_catalog().map_err(|_| {
-            ProfileError::Unavailable("Check the worker policy's approved ports and suite catalog")
-        })?;
+        let Ok(catalog) = policy.load_catalog() else {
+            return profile_only(
+                "Saved on the controller only; check the worker policy's approved ports and suite catalog",
+                true,
+            );
+        };
         let eval_ready = operational::eval_ready(&policy, &config.engine_env);
-        let settings = Settings::load(&config.root).map_err(|_| {
-            ProfileError::Unavailable(
-                "Check the worker's private state root and saved evaluation settings",
-            )
-        })?;
-        Ok(Profile {
-            root: config.root,
+        let Ok(settings) = Settings::load(&root) else {
+            return profile_only(
+                "Saved on the controller only; check the worker's private state root and saved evaluation settings",
+                true,
+            );
+        };
+        Native::Managed(Profile {
+            root,
             policy,
             catalog,
             eval_ready,
@@ -188,10 +227,77 @@ impl Managed {
         })
     }
 
-    pub fn view<'a>(&self, host: &'a Host, management_available: bool) -> View<'a> {
+    fn profile_binding(&self, host: &Host) -> String {
+        if let Some(key) = &host.provision_binding {
+            return key.clone();
+        }
+        // Bind to the dispatch route and local source, not labels, capabilities
+        // or mutable policy. Adding or repairing policy keeps the same draft.
+        let route: Vec<_> = self
+            .entries
+            .get(&host.id)
+            .into_iter()
+            .flat_map(|entry| {
+                [
+                    "local",
+                    "worker",
+                    "config",
+                    "ssh",
+                    "ssh_config",
+                    "remote_worker",
+                    "remote_config",
+                ]
+                .into_iter()
+                .map(|field| &entry[field])
+            })
+            .collect();
+        let source = self
+            .local_configs
+            .get(&host.id)
+            .and_then(|path| operational::read::<WorkerConfig>(path).ok())
+            .map(|cfg| {
+                json!([
+                    cfg.root,
+                    cfg.pinned_publication,
+                    cfg.engine_env.get("BREWERY_EXPECTED_SOURCE_SHA256")
+                ])
+            });
+        binding(&json!([
+            "controller",
+            host.id,
+            route,
+            source,
+            std::env::var("BREWERY_EXPECTED_SOURCE_SHA256").ok()
+        ]))
+    }
+
+    pub fn view<'a>(
+        &self,
+        store: &Store,
+        host: &'a Host,
+        management_available: bool,
+    ) -> Result<View<'a>, crate::Error> {
+        let binding = self.profile_binding(host);
+        let draft = store.evaluation_profile(&binding)?;
+        Ok(Self::render(
+            host,
+            management_available,
+            self.native(&host.id),
+            binding,
+            draft,
+        ))
+    }
+
+    fn render(
+        host: &Host,
+        management_available: bool,
+        native: Native,
+        binding: String,
+        draft: Option<Settings>,
+    ) -> View<'_> {
         let management = Management::for_host(host, management_available);
-        match self.profile(&host.id) {
-            Ok(profile) => View {
+        match native {
+            Native::Managed(profile) => View {
                 id: &host.id,
                 name: &host.name,
                 management,
@@ -217,66 +323,84 @@ impl Managed {
                     .keys()
                     .map(|id| choice(id, None))
                     .collect(),
+                profile_binding: None,
+                saved_profile: draft,
                 settings: profile.settings,
             },
-            Err(error) => {
-                let (status, managed, reason) = match error {
-                    ProfileError::NotEnrolled => (
-                        EvaluationStatus::NotEnrolled,
-                        false,
-                        not_enrolled_reason(&host.id),
-                    ),
-                    ProfileError::Unavailable(reason) => {
-                        (EvaluationStatus::Unavailable, true, reason)
-                    }
-                };
-                View {
-                    id: &host.id,
-                    name: &host.name,
-                    management,
-                    evaluation: Evaluation {
-                        status,
-                        reason: Some(reason),
-                    },
-                    managed,
-                    ready: false,
+            Native::ProfileOnly { reason, .. } => View {
+                id: &host.id,
+                name: &host.name,
+                management,
+                evaluation: Evaluation {
+                    status: EvaluationStatus::ProfileOnly,
                     reason: Some(reason),
-                    approved_ports: Vec::new(),
-                    evaluation_allowed: false,
-                    baseline_allowed: false,
-                    approved_suites: Vec::new(),
-                    settings: Settings::default(),
-                }
-            }
+                },
+                managed: false,
+                ready: false,
+                reason: Some(reason),
+                approved_ports: Vec::new(),
+                evaluation_allowed: false,
+                baseline_allowed: false,
+                approved_suites: Vec::new(),
+                profile_binding: Some(binding),
+                saved_profile: None,
+                settings: draft.unwrap_or_default(),
+            },
         }
     }
 
     pub fn put<'a>(
         &self,
+        store: &Store,
         host: &'a Host,
+        native: Native,
         mut replacement: Settings,
+        request_binding: Option<&str>,
         management_available: bool,
     ) -> Result<View<'a>, PutError> {
-        let profile = self.profile(&host.id).map_err(|error| match error {
-            ProfileError::NotEnrolled => PutError::NotEnrolled(not_enrolled_reason(&host.id)),
-            ProfileError::Unavailable(reason) => PutError::NotReady(reason),
-        })?;
-        if replacement.revision != profile.settings.revision {
-            return Err(PutError::Conflict);
-        }
-        replacement
-            .validate(&profile.policy, &profile.catalog, profile.eval_ready)
-            .map_err(|err| PutError::Invalid(err.to_string()))?;
-        replacement.revision = replacement
-            .revision
-            .checked_add(1)
-            .ok_or(PutError::Conflict)?;
-        replacement.save(&profile.root).map_err(|_| {
-            PutError::NotReady(
-                "Could not save evaluation settings; check the worker's private state root",
-            )
-        })?;
-        Ok(self.view(host, management_available))
+        let binding = self.profile_binding(host);
+        let mut draft = store
+            .evaluation_profile(&binding)
+            .map_err(PutError::Storage)?;
+        let native = match native {
+            Native::Managed(mut profile) => {
+                if request_binding.is_some() {
+                    return Err(PutError::Conflict);
+                }
+                advance_revision(&mut replacement, profile.settings.revision)?;
+                replacement
+                    .validate(&profile.policy, &profile.catalog, profile.eval_ready)
+                    .map_err(|err| PutError::Invalid(err.to_string()))?;
+                replacement.save(&profile.root).map_err(|_| {
+                    PutError::NotReady(
+                        "Could not save evaluation settings; check the worker's private state root",
+                    )
+                })?;
+                profile.settings = replacement;
+                Native::Managed(profile)
+            }
+            other => {
+                if request_binding != Some(binding.as_str()) {
+                    return Err(PutError::Conflict);
+                }
+                advance_revision(&mut replacement, draft.as_ref().map_or(0, |d| d.revision))?;
+                replacement
+                    .validate_profile()
+                    .map_err(|err| PutError::Invalid(err.to_string()))?;
+                store
+                    .save_evaluation_profile(&binding, &replacement)
+                    .map_err(PutError::Storage)?;
+                draft = Some(replacement);
+                other
+            }
+        };
+        Ok(Self::render(
+            host,
+            management_available,
+            native,
+            binding,
+            draft,
+        ))
     }
 
     pub fn effective(&self, hosts: &[Host]) -> Vec<Host> {
@@ -284,14 +408,18 @@ impl Managed {
             .iter()
             .cloned()
             .map(|mut host| {
-                if !self.enrolled(&host.id) {
+                let native = self.native(&host.id);
+                if let Native::ProfileOnly {
+                    block_jobs: false, ..
+                } = native
+                {
                     return host;
-                }
+                };
                 let mut enabled = [false; 4];
                 host.benchmark_targets.clear();
                 host.benchmarks.clear();
                 host.baseline_sources.clear();
-                if let Ok(profile) = self.profile(&host.id)
+                if let Native::Managed(profile) = native
                     && profile
                         .settings
                         .validate(&profile.policy, &profile.catalog, profile.eval_ready)
@@ -324,6 +452,10 @@ impl Managed {
                     ];
                 }
                 for (&kind, enabled) in KINDS.iter().zip(enabled) {
+                    let enabled = enabled
+                        && !self.entries.get(&host.id).is_some_and(|entry| {
+                            entry["capabilities"][kind].as_bool() == Some(false)
+                        });
                     if !enabled {
                         host.reasons.insert(
                             kind.into(),
@@ -340,12 +472,16 @@ impl Managed {
     }
 }
 
-fn not_enrolled_reason(id: &str) -> &'static str {
-    if id == crate::backend_hf::ID {
-        "The backend worker does not run evaluation; select an evaluation worker"
-    } else {
-        "This worker is not enrolled for managed evaluation; ask the operator to configure an eligible local worker"
+fn advance_revision(settings: &mut Settings, current: u64) -> Result<(), PutError> {
+    if settings.revision != current {
+        return Err(PutError::Conflict);
     }
+    settings.revision = current.checked_add(1).ok_or(PutError::Conflict)?;
+    Ok(())
+}
+
+pub(crate) fn binding(source: &Value) -> String {
+    format!("{:x}", Sha256::digest(source.to_string().as_bytes()))
 }
 
 fn choice(id: &str, label: Option<String>) -> BenchmarkChoice {

@@ -118,7 +118,7 @@ fn provisioning_requires_verified_key_confirmed_plan_and_busy_checks() {
         .iter()
         .find(|worker| worker["id"] == "reader")
         .expect("Settings must include an installed SSH worker");
-    assert_eq!(worker["evaluation"]["status"], "not_enrolled");
+    assert_eq!(worker["evaluation"]["status"], "profile_only");
     assert_eq!(worker["management"]["available"], true);
     assert_eq!(
         worker["management"]["href"],
@@ -137,19 +137,24 @@ fn provisioning_requires_verified_key_confirmed_plan_and_busy_checks() {
         "revision":policy["revision"],"resources":{"cpu_threads":2}});
     app.json("POST", action_url, Some(resources.clone()), 200);
     app.json("POST", action_url, Some(resources), 409);
-    let invalid_eval = json!({"revision":0,"evaluation_enabled":true,
-        "benchmark_targets":[],"baseline_endpoints":[],"enabled_suites":[]});
-    let rejected = app.json("PUT", "/api/settings/reader", Some(invalid_eval), 409);
-    assert!(rejected["error"].as_str().unwrap().contains("not enrolled"));
+    let payload = settings::target_profile(worker, 9282);
+    let mut invalid_eval = payload.clone();
+    invalid_eval["evaluation_enabled"] = json!(true);
+    app.json("PUT", "/api/settings/reader", Some(invalid_eval), 400);
+    let saved = app.json("PUT", "/api/settings/reader", Some(payload), 200);
     app.stop();
     app.launch_with(&env);
+    let settings = app.json("GET", "/api/settings", None, 200);
+    assert!(settings["hosts"].as_array().unwrap().contains(&saved));
     let state = app.json("GET", "/api/state", None, 200);
     assert!(
         state["hosts"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|worker| worker["id"] == "reader")
+            .any(|worker| worker["id"] == "reader"
+                && worker["capabilities"]["evaluate"] == false
+                && worker["benchmark_targets"] == json!([]))
     );
     let mut changed = target.clone();
     changed.as_object_mut().unwrap().remove("id");

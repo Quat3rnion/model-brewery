@@ -18,6 +18,7 @@
 
   const hosts = $derived(brewery.state?.hosts ?? []);
   const savedHost = $derived(saved.find((h) => h.id === selectedId));
+  const profileOnly = $derived(savedHost?.evaluationStatus === 'profile_only');
   const problems = $derived(draft ? validateHost(draft, savedHost) : []);
   // Baseline setup locked by the controller (baseline_allowed: false). Existing entries stay as they are.
   const baselineLocked = $derived(draft?.baselineAllowed === false);
@@ -53,6 +54,7 @@
     saveError = null;
   }
   function select(id: string) {
+    if (saving || id === selectedId) return;
     if (dirty && !confirm('Discard unsaved changes for this host?')) return;
     selectedId = id;
     saveNote = null;
@@ -67,9 +69,12 @@
     saveNote = null;
     try {
       const h = parseHost(await api.saveSettings(draft.id, buildPut(draft)));
-      if (h) saved = saved.map((x) => (x.id === h.id ? h : x));
+      if (!h || h.id !== draft.id) throw new Error('The controller did not return settings for this worker. Reload saved settings to check the result.');
+      saved = saved.map((x) => (x.id === h.id ? h : x));
       reset();
-      saveNote = 'Saved. No job was started. Readiness below updates when the controller reports the new capabilities.';
+      saveNote = h.evaluationStatus === 'profile_only'
+        ? `Profile saved on the controller for ${h.id}. Nothing was applied to the worker.`
+        : `Evaluation settings saved on ${h.id}. No job was started.`;
       void brewery.refresh();
     } catch (err) {
       if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
@@ -126,7 +131,7 @@
         <div class="field wide">
           <label for="{list}-{i}-url">Endpoint on the worker</label>
           <input id="{list}-{i}-url" readonly={locked} class="input mono" bind:value={ep.endpoint} autocomplete="off" spellcheck="false" inputmode="url" aria-invalid={urlP ? 'true' : undefined} aria-describedby="{list}-{i}-url-h" />
-          <span class="hint" class:bad={!!urlP} id="{list}-{i}-url-h">{urlP ?? `Loopback on the selected worker: the worker connects to this address, not your browser. Approved ports: ${draft?.approvedPorts.join(', ') || 'none'}.`}</span>
+          <span class="hint" class:bad={!!urlP} id="{list}-{i}-url-h">{urlP ?? (profileOnly ? 'Loopback on the selected worker. Saving this address does not connect to it or approve its port.' : `Loopback on the selected worker. Approved ports: ${draft?.approvedPorts.join(', ') || 'none'}.`)}</span>
         </div>
         <div class="field">
           <label for="{list}-{i}-model">Model name</label>
@@ -174,7 +179,7 @@
         <ul>
           {#each saved as h (h.id)}
             <li>
-              <button type="button" class="hb" aria-current={h.id === selectedId ? 'true' : undefined} onclick={() => select(h.id)}>
+              <button type="button" class="hb" disabled={saving} aria-current={h.id === selectedId ? 'true' : undefined} onclick={() => select(h.id)}>
                 <span class="hn">{h.name ?? h.id}</span>
                 <span class="xs muted">{h.id}</span>
               </button>
@@ -197,7 +202,7 @@
             <header><h2 id="rd-h">Evaluation readiness</h2><span class="xs muted">Revision {savedHost.revision}</span></header>
             <div class="body stack">
               <p class="small">
-                <Badge tone={savedHost.ready ? 'ok' : 'warn'} label={savedHost.ready ? 'Configuration ready' : 'Configuration not ready'} />
+                <Badge tone={savedHost.ready ? 'ok' : 'muted'} label={savedHost.ready ? 'Configuration ready' : profileOnly ? 'Profile only' : 'Configuration not ready'} />
                 {#if savedHost.reason}<span class="muted">{savedHost.reason}</span>{/if}
               </p>
               <div class="table-wrap">
@@ -215,14 +220,23 @@
             </div>
           </section>
 
-          {#if savedHost.evaluationStatus !== 'managed'}
-            <p class="note info">Evaluation configuration: {savedHost.evaluationReason ?? 'No approved evaluator is enrolled for this worker.'}</p>
+          {#if savedHost.evaluationStatus !== 'managed' && !profileOnly}
+            <p class="note info">Evaluation settings unavailable: {savedHost.evaluationReason ?? 'This controller did not report an editable profile for this worker.'}</p>
           {:else}
           <form class="panel" aria-labelledby="ed-h" onsubmit={save} novalidate>
             <header><h2 id="ed-h">Evaluation configuration</h2></header>
             <fieldset class="body stack plain" disabled={saving}>
-              {@render endpointList('Benchmark targets', 'benchmarkTargets', 'OpenAI-compatible endpoints that benchmark runs send requests to.')}
+              <p class="small">{profileOnly ? 'Save target profiles on the controller for this worker. These profiles are not installed on the worker and do not enable execution.' : 'Save operational settings on this worker. Only approved ports, suites and runtimes can be used.'}</p>
+              {#if !profileOnly && savedHost.savedProfileTargets?.length}
+                <details class="group"><summary>Saved controller targets ({savedHost.savedProfileTargets.length})</summary>
+                  <p class="xs muted">These targets are not applied automatically. Copy them to replace the targets in this form, then review and save.</p>
+                  <ul>{#each savedHost.savedProfileTargets as ep}<li class="small break">{ep.id} · {ep.model} · <code>{ep.endpoint}</code></li>{/each}</ul>
+                  <button class="btn small" type="button" onclick={() => {if(draft && savedHost?.savedProfileTargets) draft.benchmarkTargets=savedHost.savedProfileTargets.map(e=>({...e}));}}>Copy targets to form</button>
+                </details>
+              {/if}
+              {@render endpointList('Benchmark targets', 'benchmarkTargets', profileOnly ? 'OpenAI-compatible target definitions. The model name identifies the model served by each endpoint.' : 'OpenAI-compatible endpoints that benchmark runs send requests to.')}
 
+              {#if !profileOnly}
               <fieldset class="group">
                 <legend>Benchmark suites</legend>
                 {#if draft.approvedSuites.length === 0}
@@ -244,6 +258,7 @@
               </fieldset>
 
               {@render endpointList('BF16 baseline endpoints', 'baselineEndpoints', 'Endpoints that serve the exact BF16 source checkpoint, used to score a source baseline.')}
+              {/if}
 
               {#if problems.length}
                 <ul class="note warn xs probs" aria-label="Problems to fix before saving">{#each problems as p (p)}<li>{p}</li>{/each}</ul>

@@ -116,6 +116,34 @@ impl Policy {
 }
 
 impl Settings {
+    /// Validate inert controller-side target definitions, not execution policy.
+    pub fn validate_profile(&self) -> Result<()> {
+        ensure!(
+            self.enabled_suites.is_empty()
+                && self.baseline_endpoints.is_empty()
+                && !self.evaluation_enabled,
+            "saved profiles cannot enable evaluation, suites or baseline endpoints"
+        );
+        self.validate_targets(|url| loopback_port(url).map(|_| ()))
+    }
+
+    fn validate_targets(&self, endpoint: impl Fn(&str) -> Result<()>) -> Result<()> {
+        ensure!(
+            self.benchmark_targets.len() <= 32,
+            "use no more than 32 targets"
+        );
+        let mut ids = BTreeSet::new();
+        for target in &self.benchmark_targets {
+            endpoint(&target.endpoint)?;
+            ensure!(
+                valid_target(&target.id, target.label.as_deref(), &target.model)
+                    && ids.insert(&target.id),
+                "invalid or duplicate benchmark target"
+            );
+        }
+        Ok(())
+    }
+
     pub fn load(root: &Path) -> Result<Self> {
         private_root(root)?;
         match read(&root.join(SNAPSHOT)) {
@@ -159,10 +187,8 @@ impl Settings {
 
     pub fn validate(&self, policy: &Policy, catalog: &Catalog, eval_ready: bool) -> Result<()> {
         ensure!(
-            self.benchmark_targets.len() <= 32
-                && self.baseline_endpoints.len() <= 32
-                && self.enabled_suites.len() <= 32,
-            "use no more than 32 targets, suites or baselines"
+            self.baseline_endpoints.len() <= 32 && self.enabled_suites.len() <= 32,
+            "use no more than 32 suites or baselines"
         );
         ensure!(
             !self.evaluation_enabled || eval_ready,
@@ -172,16 +198,8 @@ impl Settings {
             policy.baseline_allowed || self.baseline_endpoints.is_empty(),
             "baseline endpoints are disabled by worker policy"
         );
+        self.validate_targets(|url| check_endpoint(url, policy))?;
         let mut ids = BTreeSet::new();
-        for target in &self.benchmark_targets {
-            check_endpoint(&target.endpoint, policy)?;
-            ensure!(
-                valid_target(&target.id, target.label.as_deref(), &target.model)
-                    && ids.insert(&target.id),
-                "invalid or duplicate benchmark target"
-            );
-        }
-        ids.clear();
         for baseline in &self.baseline_endpoints {
             check_endpoint(&baseline.endpoint, policy)?;
             ensure!(
@@ -271,20 +289,23 @@ pub fn eval_ready(policy: &Policy, env: &BTreeMap<String, String>) -> bool {
 }
 
 fn check_endpoint(url: &str, policy: &Policy) -> Result<()> {
-    let port = url
-        .strip_prefix("http://127.0.0.1:")
-        .or_else(|| url.strip_prefix("http://[::1]:"))
-        .and_then(|tail| tail.strip_suffix("/v1"))
-        .filter(|port| {
-            !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && !port.starts_with('0')
-        })
-        .and_then(|port| port.parse::<u16>().ok());
-    let port = port.context("endpoint must be http://127.0.0.1:PORT/v1 or http://[::1]:PORT/v1")?;
+    let port = loopback_port(url)?;
     ensure!(
         policy.allowed_ports.contains(&port),
         "endpoint port is not approved on this worker"
     );
     Ok(())
+}
+
+fn loopback_port(url: &str) -> Result<u16> {
+    url.strip_prefix("http://127.0.0.1:")
+        .or_else(|| url.strip_prefix("http://[::1]:"))
+        .and_then(|tail| tail.strip_suffix("/v1"))
+        .filter(|port| {
+            !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && !port.starts_with('0')
+        })
+        .and_then(|port| port.parse::<u16>().ok())
+        .context("endpoint must be http://127.0.0.1:PORT/v1 or http://[::1]:PORT/v1")
 }
 
 fn valid_target(key: &str, title: Option<&str>, model: &str) -> bool {

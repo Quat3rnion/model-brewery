@@ -205,7 +205,18 @@ impl Registry {
             .rows
             .values()
             .filter(|r| self.dispatchable(r))
-            .map(|row| Host::from_config(&row.id, &row.dispatch_host()).map_err(Into::into))
+            .map(|row| {
+                let mut host = Host::from_config(&row.id, &row.dispatch_host())?;
+                if let Provision::Installed { install, .. } = &row.provision {
+                    host.provision_binding = Some(crate::settings::binding(&json!([
+                        "provisioned",
+                        row.id,
+                        row.target,
+                        install
+                    ])));
+                }
+                Ok(host)
+            })
             .collect()
     }
 
