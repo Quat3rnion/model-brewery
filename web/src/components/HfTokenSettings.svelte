@@ -41,7 +41,8 @@
     try {
       // The secret lives only in the uncontrolled field and the outbound request.
       const pending = fetch(`/api/settings/${serviceId}/hf-token`, {
-        ...policy, method: remove ? 'DELETE' : 'PUT', headers: { 'Content-Type': 'application/json' },
+        // Firefox otherwise sends Origin: null under the page's no-referrer policy.
+        ...policy, referrerPolicy: 'same-origin', method: remove ? 'DELETE' : 'PUT', headers: { 'Content-Type': 'application/json' },
         body: remove ? '{}' : JSON.stringify({ token: field.value.trim() }),
       });
       clear();
