@@ -275,11 +275,15 @@ fn enabled_local_editor_uses_private_route_and_drains_on_disable() {
         "engine_env":{"BREWERY_EXPECTED_SOURCE_SHA256":"qualification-pin"}});
     fs::write(&config, original.to_string()).unwrap();
     let eval_config = root.join("eval-worker.json");
+    let index = root.join("index.json");
+    fs::write(&index, b"{}").unwrap();
+    let pin = format!("{:x}", Sha256::digest(b"{}"));
     fs::write(&eval_config, r#"{"source_roots":[]}"#).unwrap();
     fs::write(
         root.join("dispatch.json"),
         json!({"hosts":{"existing":{
-        "local":true,"worker":"/usr/bin/false","config":config},
+        "local":true,"worker":"/usr/bin/false","config":config,
+        "local_edit_chunk_index":{"path":index,"sha256":pin}},
         "local-eval":{"local":true,"worker":"/usr/bin/false","config":eval_config}}})
         .to_string(),
     )
@@ -308,6 +312,18 @@ printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","w
     let toggle = |revision, enabled| json!({"action":"set_weight_editor","worker":"existing","revision":revision,"enabled":enabled});
     let (status, initial) = t.admin(None);
     assert_eq!(status, 200);
+    let editor: Value = serde_json::from_slice(
+        &fs::read(t.root.path().join("state/local-edit/existing/worker.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        editor["engine_env"]["BREWERY_WEIGHT_CHUNK_INDEX"],
+        json!(index)
+    );
+    assert_eq!(
+        editor["engine_env"]["BREWERY_WEIGHT_CHUNK_INDEX_SHA256"],
+        pin
+    );
     assert_eq!(initial["hosts"][0]["weight_editor"]["available"], true);
     assert_eq!(initial["hosts"][0]["weight_editor"]["enabled"], false);
     let eval = initial["hosts"]

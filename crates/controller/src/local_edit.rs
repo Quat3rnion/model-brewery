@@ -237,6 +237,24 @@ impl Lanes {
                     engine_env[name] = json!(value);
                 }
             }
+            // Dispatch-owned proof for this editor only. Never grant a source
+            // root or change the original worker's qualification config here.
+            if let Some(index) = profile.get("local_edit_chunk_index") {
+                let pair = index["path"].as_str().zip(index["sha256"].as_str());
+                let Some((path, digest)) = pair.filter(|(p, d)| {
+                    index.as_object().is_some_and(|o| o.len() == 2)
+                        && brewery_worker::absolute(Path::new(p)).is_ok()
+                        && brewery_worker::is_digest(d)
+                }) else {
+                    result.reasons.insert(
+                        id.clone(),
+                        "The local editor chunk index needs an absolute path and a SHA-256 digest.",
+                    );
+                    continue;
+                };
+                engine_env["BREWERY_WEIGHT_CHUNK_INDEX"] = json!(path);
+                engine_env["BREWERY_WEIGHT_CHUNK_INDEX_SHA256"] = json!(digest);
+            }
             let worker_config = json!({
                 "root":root,"engine":engine,"source_roots":roots,"engine_env":engine_env,
                 "disk_reserve_bytes":original["disk_reserve_bytes"].as_u64().unwrap_or(1 << 30)
