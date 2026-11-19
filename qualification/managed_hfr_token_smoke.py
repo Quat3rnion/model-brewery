@@ -18,6 +18,7 @@ from managed_hfr_smoke import (
 FAKE = "hf_fixture_NotARealCredential"
 UNTRUSTED = "brewery-smoke/redirect"
 PAGINATE = "brewery-smoke/paginate"
+BAD_CAS = "brewery-smoke/bad-cas"
 
 
 class TokenHub(Hub):
@@ -29,7 +30,7 @@ class TokenHub(Hub):
 
     def do_GET(self):
         url = urlsplit(self.path)
-        repo = next((repo for repo in (REPO, UNTRUSTED, PAGINATE)
+        repo = next((repo for repo in (REPO, UNTRUSTED, PAGINATE, BAD_CAS)
                      if url.path.startswith((f"/api/models/{repo}/", f"/{repo}/resolve/",
                                              f"/api/resolve-cache/models/{repo}/"))), None)
         auth = self.headers.get("Authorization") == f"Bearer {FAKE}"
@@ -44,6 +45,14 @@ class TokenHub(Hub):
                 return self.respond(200, b"[]", "application/json",
                                     Link=f"<{self.server.other}/tree>; rel=\"next\"")
             body = tree()
+            if repo == BAD_CAS:
+                for row in body:
+                    if row["path"] == FIRST:
+                        row["xetHash"] = "1" * 64
+        elif url.path == f"{api}/xet-read-token/{COMMIT}" and repo == BAD_CAS:
+            import time
+            body = {"casUrl": self.server.other, "accessToken": "cas_fixture_ticket",
+                    "exp": int(time.time()) + 900}
         elif url.path == f"/{repo}/resolve/{COMMIT}/{FIRST}":
             if repo == UNTRUSTED:
                 return self.respond(307, b"", "text/plain", Location=f"{self.server.other}/payload")
@@ -86,6 +95,7 @@ def run(bin_dir, hfr):
             policy = json.loads(config.read_text())
             policy["source_roots"] = []
             policy["hf_download"]["token_file"] = str(token_file)
+            policy["hf_download"]["fixture_xet_cas_port"] = hub.server_port
             save(config, policy)
             env = {"PATH": "/usr/bin:/bin", "HOME": str(root / "home"),
                    "TMPDIR": str(root / "tmp"), "HF_TOKEN": "hf_must_not_be_inherited"}
@@ -93,12 +103,16 @@ def run(bin_dir, hfr):
                 smoke = Smoke(root, url, hub)
                 for label, repo, expected in (("gated", REPO, "succeeded"),
                                               ("redirect", UNTRUSTED, "failed"),
-                                              ("pagination", PAGINATE, "failed")):
+                                              ("pagination", PAGINATE, "failed"),
+                                              ("cas-origin", BAD_CAS, "failed")):
                     job = smoke.submit(label, {"repo_id": repo, "filename": FIRST})
                     result = smoke.wait(label, job, expected)
                     if expected == "succeeded":
                         smoke.verified(result, {}, FIRST)
                     need(FAKE not in json.dumps(result), f"credential in response for {label}")
+                need(("GET", f"/api/models/{BAD_CAS}/xet-read-token/{COMMIT}", True) in hub.requests
+                     and not any(f"/{BAD_CAS}/resolve/" in path for _, path, _ in hub.requests),
+                     "native Xet did not obtain a scoped ticket or fell back to range")
                 before = len(hub.requests)
                 token_file.chmod(0o644)
                 job = smoke.submit("unsafe-permissions", {"repo_id": REPO, "filename": FIRST})

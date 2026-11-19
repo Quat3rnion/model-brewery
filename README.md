@@ -1637,6 +1637,17 @@ not a runnable profile.
 Keep the files local. Use only your own traces and plans. Do not upload
 production data to the workbench or to another service for this workflow.
 
+## Hugging Face download transport
+
+Library downloads use the pinned Rust `hfr` downloader. No transport switch
+is required in the UI: the worker uses native Xet for files with validated
+Xet metadata and HTTP ranges for other files in the same revision. Failed
+Xet reconstruction does not trigger an HTTP fallback. On retry, unfinished
+Xet files restart. The worker independently checks each completed file
+against the pinned Hub manifest before it adds the model to the Library.
+For gated public models, the long-lived Hub token is not sent to the Xet
+content service; the downloader uses a short-lived read ticket.
+
 ## Weight edit tools (fixtures only)
 
 Use `weight_edit.py` and `weight_tune.py` to propose changes to individual

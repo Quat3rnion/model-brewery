@@ -1,8 +1,9 @@
 //! hfr follows redirects and pagination itself. Keep it credential-free:
 //! for authenticated jobs it only sees a scoped local view of the checked Hub.
-use super::Inventory;
+use super::{Inventory, POLICY};
 use anyhow::{anyhow, ensure, Context, Result};
 use brewery_worker::hf_download::valid_token;
+use serde::{Deserialize, Serialize};
 use std::{
     ffi::CString,
     fs::File,
@@ -18,7 +19,7 @@ use std::{
         Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use url::Url;
@@ -109,7 +110,7 @@ impl Broker {
         &self.endpoint
     }
 
-    pub(super) fn start(inv: &Inventory, token: String, resumed: bool) -> Result<Self> {
+    pub(super) fn start(inv: &Inventory, token: Option<String>, resumed: bool) -> Result<Self> {
         let server =
             Arc::new(Server::http("127.0.0.1:0").map_err(|_| anyhow!("Hub relay bind failed"))?);
         // This capability is not the Hub credential. Pass the endpoint only
@@ -130,12 +131,16 @@ impl Broker {
         if resumed {
             // Hub access is repository-scoped. Check it again instead of
             // inheriting a prior job's authorization from complete stage files.
-            let (path, &size) = relay
-                .files
-                .iter()
-                .find(|(_, size)| **size != 0)
-                .context("empty download")?;
-            relay.range(path, size, "bytes=0-0")?;
+            if relay.read_token_route.is_some() {
+                relay.cas_ticket()?;
+            } else if relay.bearer.is_some() {
+                let (path, &size) = relay
+                    .files
+                    .iter()
+                    .find(|(_, size)| **size != 0)
+                    .context("empty download")?;
+                relay.range(path, size, "bytes=0-0")?;
+            }
         }
         let stop = Arc::new(AtomicBool::new(false));
         for _ in 0..4 {
@@ -160,10 +165,21 @@ struct Relay {
     tree: Vec<u8>,
     revision: String,
     listing: String,
+    read_token_route: Option<String>,
+    fixture_xet_cas_port: Option<u16>,
     hub: Url,
     files: std::collections::BTreeMap<String, u64>,
-    bearer: ureq::http::HeaderValue,
+    bearer: Option<ureq::http::HeaderValue>,
     client: ureq::Agent,
+}
+
+// Deliberately no Debug. Only these fields from Hub enter the child response.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CasTicket {
+    cas_url: String,
+    exp: u64,
+    access_token: String,
 }
 
 fn encode(path: &str) -> String {
@@ -179,14 +195,20 @@ fn encode(path: &str) -> String {
 }
 
 impl Relay {
-    fn new(inv: &Inventory, prefix: String, token: String) -> Result<Self> {
-        let mut bearer = ureq::http::HeaderValue::from_str(&format!("Bearer {token}"))
-            .map_err(|_| anyhow!("invalid Hub credential"))?;
-        bearer.set_sensitive(true);
+    fn new(inv: &Inventory, prefix: String, token: Option<String>) -> Result<Self> {
+        let bearer = token
+            .map(|token| -> Result<_> {
+                let mut value = ureq::http::HeaderValue::from_str(&format!("Bearer {token}"))
+                    .map_err(|_| anyhow!("invalid Hub credential"))?;
+                value.set_sensitive(true);
+                Ok(value)
+            })
+            .transpose()?;
         let resolve = format!("/{}/resolve/{}/", inv.repo, inv.commit);
         let files = inv
             .files
             .iter()
+            .filter(|(_, f)| f.xet.is_none())
             .map(|(name, f)| (format!("{resolve}{}", encode(name)), f.bytes))
             .collect();
         let rows: Vec<_> = inv
@@ -196,6 +218,7 @@ impl Relay {
                 serde_json::json!({
                     "type":"file", "path":name, "size":f.bytes,
                     "lfs": f.lfs.as_ref().map(|oid| serde_json::json!({"oid":oid})),
+                    "xetHash": f.xet,
                 })
             })
             .collect();
@@ -209,6 +232,10 @@ impl Relay {
                 "/api/models/{}/tree/{}?recursive=true&expand=false",
                 inv.repo, inv.commit
             ),
+            read_token_route: inv
+                .has_xet()
+                .then(|| format!("/api/models/{}/xet-read-token/{}", inv.repo, inv.commit)),
+            fixture_xet_cas_port: inv.fixture_xet_cas_port,
             info: serde_json::to_vec(&serde_json::json!({"sha": inv.commit}))?,
             tree: serde_json::to_vec(&rows)?,
             files,
@@ -236,6 +263,16 @@ impl Relay {
                 &self.tree
             };
             let _ = request.respond(Response::from_data(body.clone()));
+        } else if *request.method() == Method::Get && self.read_token_route.as_deref() == Some(path)
+        {
+            let ticket = self
+                .cas_ticket()
+                .and_then(|ticket| Ok(serde_json::to_vec(&ticket)?));
+            if let Ok(ticket) = ticket {
+                let _ = request.respond(Response::from_data(ticket));
+            } else {
+                let _ = request.respond(Response::empty(403));
+            }
         } else if let Some(&size) = self.files.get(path) {
             match request.method() {
                 Method::Head => {
@@ -265,6 +302,66 @@ impl Relay {
         }
     }
 
+    fn cas_ticket(&self) -> Result<CasTicket> {
+        let path = self
+            .read_token_route
+            .as_deref()
+            .context("no Xet read scope")?;
+        let url = self.hub.join(path)?;
+        let mut get = self.client.get(url.as_str());
+        if let Some(bearer) = &self.bearer {
+            get = get.header("Authorization", bearer.clone());
+        }
+        let mut response = get
+            .call()
+            .map_err(|_| anyhow!("Hub Xet read authorization failed"))?;
+        ensure!(
+            response.status() == 200,
+            "Hub Xet read authorization failed"
+        );
+        let mut ticket: CasTicket =
+            brewery_worker::decode_limited(response.body_mut().as_reader(), 8192)
+                .map_err(|_| anyhow!("invalid Hub Xet read ticket"))?;
+        let cas = Url::parse(&ticket.cas_url).map_err(|_| anyhow!("invalid Hub Xet CAS origin"))?;
+        let allowed = match self.fixture_xet_cas_port {
+            Some(port) => {
+                cas.scheme() == "http"
+                    && cas.host_str() == Some("127.0.0.1")
+                    && cas.port_or_known_default() == Some(port)
+            }
+            None => {
+                cas.scheme() == "https"
+                    && cas.port().is_none()
+                    && cas.host_str() == Some("cas-server.xethub.hf.co")
+            }
+        };
+        ensure!(
+            allowed && url_is_origin(&cas),
+            "untrusted Hub Xet CAS origin"
+        );
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        ensure!(
+            (now + 1..=now + 3600).contains(&ticket.exp)
+                && (1..=4096).contains(&ticket.access_token.len())
+                && ticket
+                    .access_token
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-~+/=".contains(&b))
+                && !ticket.access_token.starts_with("hf_")
+                && self
+                    .bearer
+                    .as_ref()
+                    .is_none_or(|bearer| bearer.to_str().is_ok_and(|v| !ticket
+                        .access_token
+                        .contains(v.trim_start_matches("Bearer ")))),
+            "invalid Hub Xet read ticket"
+        );
+        // The pinned client receives only the brief CAS-scoped ticket. It
+        // does not have the Hub bearer and cannot request a write token.
+        ticket.cas_url = cas.origin().ascii_serialization();
+        Ok(ticket)
+    }
+
     fn range(&self, path: &str, size: u64, range: &str) -> Result<Response<impl Read + Send>> {
         let (start, end) = range
             .strip_prefix("bytes=")
@@ -272,7 +369,7 @@ impl Relay {
             .context("invalid range")?;
         let (start, end) = (start.parse::<u64>()?, end.parse::<u64>()?);
         ensure!(
-            start <= end && end < size && end - start < 32 * 1024 * 1024,
+            start <= end && end < size && end - start < POLICY.range_chunk_mib * 1024 * 1024,
             "invalid range bounds"
         );
         let len = end - start + 1;
@@ -286,7 +383,9 @@ impl Relay {
                 .header("Range", range)
                 .header("Accept-Encoding", "identity");
             if !remote {
-                get = get.header("Authorization", self.bearer.clone());
+                if let Some(bearer) = &self.bearer {
+                    get = get.header("Authorization", bearer.clone());
+                }
             }
             let response = get
                 .call()
@@ -299,7 +398,9 @@ impl Relay {
                     .to_str()?;
                 ensure!(
                     location.len() <= 8192
-                        && !location.contains(self.bearer.to_str()?.trim_start_matches("Bearer ")),
+                        && self.bearer.as_ref().is_none_or(|bearer| bearer
+                            .to_str()
+                            .is_ok_and(|v| !location.contains(v.trim_start_matches("Bearer ")))),
                     "unsafe Hub redirect"
                 );
                 let next = url.join(location)?;
@@ -370,4 +471,12 @@ impl Relay {
         }
         Err(anyhow!("too many Hub redirects"))
     }
+}
+
+fn url_is_origin(url: &Url) -> bool {
+    url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path() == "/"
 }

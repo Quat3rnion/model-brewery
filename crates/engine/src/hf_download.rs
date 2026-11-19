@@ -30,6 +30,21 @@ use std::{
 const MAX_ENTRIES: usize = 4096;
 const METADATA_LIMIT: u64 = 4 * 1024 * 1024;
 const SIDECAR_FLOOR: u64 = 65536;
+const XET_SCRATCH_BYTES: u64 = 32 * 1024 * 1024;
+const POLICY: TransferPolicy = TransferPolicy {
+    range_chunk_mib: 32,
+    xet_buffer_mib: 64,
+    xet_chunk_cache_bytes: 0,
+    xet_shard_cache_bytes: 0,
+};
+
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+struct TransferPolicy {
+    range_chunk_mib: u64,
+    xet_buffer_mib: u64,
+    xet_chunk_cache_bytes: u64,
+    xet_shard_cache_bytes: u64,
+}
 
 #[derive(Deserialize)]
 struct ModelInfo {
@@ -47,6 +62,8 @@ struct Row {
     size: u64,
     oid: String,
     lfs: Option<Lfs>,
+    #[serde(rename = "xetHash")]
+    xet: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -60,6 +77,7 @@ struct Expected {
     bytes: u64,
     blob: String,
     lfs: Option<String>,
+    xet: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Eq)]
@@ -68,6 +86,8 @@ struct Inventory {
     repo: String,
     commit: String,
     files: BTreeMap<String, Expected>,
+    policy: TransferPolicy,
+    fixture_xet_cas_port: Option<u16>,
 }
 
 fn page<T: DeserializeOwned>(
@@ -146,6 +166,8 @@ fn inventory(cfg: &Config, spec: &Spec, token: Option<&str>) -> Result<Inventory
         repo: spec.repo_id.clone(),
         commit: info.sha,
         files: BTreeMap::new(),
+        policy: POLICY,
+        fixture_xet_cas_port: cfg.fixture_xet_cas_port,
     };
     let mut listed = BTreeSet::new();
     for _ in 0..32 {
@@ -179,12 +201,19 @@ fn inventory(cfg: &Config, spec: &Spec, token: Option<&str>) -> Result<Inventory
                     Ok(lfs.oid)
                 })
                 .transpose()?;
+            ensure!(
+                row.xet
+                    .as_deref()
+                    .is_none_or(|hash| is_digest(hash) && lfs.is_some()),
+                "invalid Hub Xet hash or missing independent LFS checksum"
+            );
             inventory.files.insert(
                 row.path,
                 Expected {
                     bytes: row.size,
                     blob: row.oid,
                     lfs,
+                    xet: row.xet,
                 },
             );
         }
@@ -216,6 +245,10 @@ fn inventory(cfg: &Config, spec: &Spec, token: Option<&str>) -> Result<Inventory
 }
 
 impl Inventory {
+    fn has_xet(&self) -> bool {
+        self.files.values().any(|file| file.xet.is_some())
+    }
+
     fn dirs(&self) -> BTreeSet<String> {
         self.files
             .keys()
@@ -306,6 +339,19 @@ fn prepare_stage(root: &Path, inv: &Inventory) -> Result<PathBuf> {
         let reuse = brewery_worker::load::<Inventory>(&manifest).is_ok_and(|old| old == *inv)
             && scan(&data, inv, true).is_ok();
         if reuse {
+            // Only completed Xet payloads are reusable. The pinned client
+            // does not guarantee a durable mid-file Xet resume.
+            for (name, file) in &inv.files {
+                if file.xet.is_some() {
+                    for suffix in [".incomplete", ".incomplete.chunks"] {
+                        match fs::remove_file(data.join(format!("{name}{suffix}"))) {
+                            Ok(()) => (),
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                            Err(e) => return Err(e.into()),
+                        }
+                    }
+                }
+            }
             return Ok(data);
         }
         fs::remove_dir_all(root)?;
@@ -314,6 +360,33 @@ fn prepare_stage(root: &Path, inv: &Inventory) -> Result<PathBuf> {
     fs::create_dir(&data)?;
     brewery_worker::atomic(&manifest, inv)?;
     Ok(data)
+}
+
+fn check_xet_scratch(home: &Path) -> Result<()> {
+    let (mut left, mut entries) = (XET_SCRATCH_BYTES, 256usize);
+    let mut dirs = vec![home.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(dir)? {
+            let path = entry?.path();
+            entries = entries
+                .checked_sub(1)
+                .context("too many Xet scratch entries")?;
+            let md = match fs::symlink_metadata(&path) {
+                Ok(md) => md,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            if md.is_dir() {
+                dirs.push(path);
+            } else {
+                ensure!(md.is_file() && md.nlink() == 1, "unsafe Xet scratch entry");
+                left = left
+                    .checked_sub(md.len())
+                    .context("Xet scratch limit exceeded")?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn transfer(
@@ -327,13 +400,18 @@ fn transfer(
 ) -> Result<()> {
     // Group only equal-size files: RLIMIT_FSIZE then caps total payload growth
     // even if a repeated tree request unexpectedly returns different sizes.
-    let mut groups: BTreeMap<u64, Vec<&str>> = BTreeMap::new();
+    let mut groups: BTreeMap<(bool, u64), Vec<&str>> = BTreeMap::new();
     let mut budget = 0u64;
     for (name, f) in &inv.files {
         let cap = f.bytes.max(SIDECAR_FLOOR);
-        groups.entry(cap).or_default().push(name);
+        groups.entry((f.xet.is_some(), cap)).or_default().push(name);
         budget = budget
             .checked_add(cap.checked_mul(3).context("stage size overflow")?)
+            .context("stage size overflow")?;
+    }
+    if inv.has_xet() {
+        budget = budget
+            .checked_add(XET_SCRATCH_BYTES)
             .context("stage size overflow")?;
     }
     ensure!(
@@ -349,7 +427,7 @@ fn transfer(
     );
     let mut files_done = 0;
     let deadline = Instant::now() + Duration::from_secs(24 * 3600);
-    for (cap, names) in groups.into_iter().rev() {
+    for ((xet, cap), names) in groups.into_iter().rev() {
         for batch in names.chunks(64) {
             let mut command = Command::new(&cfg.hfr);
             command
@@ -358,6 +436,19 @@ fn transfer(
                 .env("HF_HOME", home)
                 .env("XDG_CACHE_HOME", home)
                 .env("HF_ENDPOINT", endpoint)
+                .env("HF_HUB_DISABLE_TELEMETRY", "1")
+                .env("HF_XET_CACHE", home.join("xet"))
+                .env(
+                    "HF_XET_CHUNK_CACHE_SIZE_BYTES",
+                    POLICY.xet_chunk_cache_bytes.to_string(),
+                )
+                .env(
+                    "HF_XET_SHARD_CACHE_SIZE_LIMIT",
+                    POLICY.xet_shard_cache_bytes.to_string(),
+                )
+                .env("HF_XET_LOG_DEST", "")
+                .env("RUST_LOG", "off")
+                .env("TMPDIR", home)
                 .current_dir(home)
                 .args([
                     "-j",
@@ -368,7 +459,11 @@ fn transfer(
                     "--revision",
                     &inv.commit,
                     "--transfer",
-                    "range",
+                    if xet { "xet" } else { "range" },
+                    "--chunk-mib",
+                    &POLICY.range_chunk_mib.to_string(),
+                    "--xet-buffer-mib",
+                    &POLICY.xet_buffer_mib.to_string(),
                     "--verify",
                     "--local-dir",
                 ])
@@ -388,12 +483,22 @@ fn transfer(
                     if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
+                    let no_core = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_CORE, &no_core) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
                     Ok(())
                 });
             }
             let mut child = command.spawn().context("cannot run pinned hfr")?;
             let result = loop {
                 let poll = (|| -> Result<bool> {
+                    if xet {
+                        check_xet_scratch(home)?;
+                    }
                     let (bytes, files) = scan(data, inv, true)?;
                     phase.set_completed(bytes);
                     for _ in files_done..files {
@@ -407,7 +512,8 @@ fn transfer(
                     if let Some(status) = child.try_wait()? {
                         ensure!(
                             status.success(),
-                            "hfr range transfer or verification failed"
+                            "hfr {} transfer or verification failed",
+                            if xet { "native Xet" } else { "range" }
                         );
                         Ok(true)
                     } else {
@@ -532,11 +638,15 @@ pub(crate) fn run(job: &Job, cwd: &Path, pg: &Progress) -> Result<Value> {
         "model exceeds configured download size"
     );
     let data = prepare_stage(&root, &inv)?;
-    let home = tempfile::Builder::new()
-        .prefix(".hfr-home-")
-        .tempdir_in(cwd)?;
-    let broker = token
-        .map(|token| auth::Broker::start(&inv, token, fs::read_dir(&data)?.next().is_some()))
+    // Clean a prior cancelled attempt before making new client scratch.
+    let client_root = root.join("client");
+    if client_root.exists() {
+        fs::remove_dir_all(&client_root)?;
+    }
+    fs::create_dir(&client_root)?;
+    let home = tempfile::tempdir_in(&client_root)?;
+    let broker = (token.is_some() || inv.has_xet())
+        .then(|| auth::Broker::start(&inv, token, fs::read_dir(&data)?.next().is_some()))
         .transpose()?;
     let endpoint = broker
         .as_ref()

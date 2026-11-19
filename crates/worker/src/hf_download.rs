@@ -103,6 +103,7 @@ pub struct Config {
     // Provisioning only. An isolated test namespace can serve a fake Hub on
     // its own loopback; a job cannot select any origin or pass credentials.
     pub fixture_port: Option<u16>,
+    pub fixture_xet_cas_port: Option<u16>,
 }
 
 impl Config {
@@ -112,7 +113,11 @@ impl Config {
             crate::absolute(token_file)?;
         }
         ensure!(
-            (1..=i64::MAX as u64).contains(&self.max_bytes) && self.fixture_port != Some(0),
+            (1..=i64::MAX as u64).contains(&self.max_bytes)
+                && self.fixture_port != Some(0)
+                && self
+                    .fixture_xet_cas_port
+                    .is_none_or(|p| p != 0 && self.fixture_port.is_some()),
             "invalid Hugging Face download worker limits"
         );
         Ok(())
