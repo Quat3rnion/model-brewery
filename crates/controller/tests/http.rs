@@ -791,10 +791,18 @@ fn transfer_and_evaluation_workflows_use_registered_paths_and_typed_options() {
     );
     let eval = app.enqueue(json!({"kind":"evaluate","input_ids":[hgn]}));
     app.await_job(&eval, |job| job["state"] == "succeeded");
+    let reference = app.register("beta", "gsm8k-evaluation", "/prior/predictions.json");
+    let paired = app.enqueue(json!({"kind":"evaluate","input_ids":[hgn,reference]}));
+    let paired = app.await_job(&paired, |job| job["state"] == "succeeded");
+    assert_eq!(
+        paired["result"]["envelope"]["inputs"][1]["path"],
+        "/prior/predictions.json"
+    );
     for body in [
         json!({"kind":"baseline","host":"beta","options":{"baseline_source":"https://unconfigured.example"}}),
         json!({"kind":"generate","input_ids":[hgn],"prompt":"Hello","options":{"max_tokens":513}}),
         json!({"kind":"evaluate","input_ids":[hgn],"options":{"synthetic_fixture":true}}),
+        json!({"kind":"evaluate","input_ids":[hgn,reference],"options":{"baseline_source":"provider"}}),
         json!({"kind":"convert","input_ids":[a],"options":{"output_path":"/unregistered"}}),
         json!({"kind":"compare","input_ids":[a,artifact],"options":{"n":1}}),
     ] {

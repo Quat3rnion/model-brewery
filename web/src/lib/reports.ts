@@ -141,6 +141,17 @@ export function accuracyText(score: Score): string {
   return `${score.correct.toLocaleString()} / ${score.total.toLocaleString()} correct (${pct})`;
 }
 
+export function referenceInfo(r: Record<string, unknown> | null) {
+  if (!r || !(r.comparison || r.baseline_identity || r.baseline_score || r.baseline_artifact)) return null;
+  const identity = obj(r.baseline_identity);
+  const provenance = obj(identity?.provenance);
+  return {
+    scope: typeof r.reference_scope === 'string' ? r.reference_scope : null,
+    precision: typeof provenance?.precision === 'string' ? provenance.precision : r.reference_scope === 'attested_bf16_same_source' ? 'BF16' : null,
+    identity: r.baseline_identity ?? null, score: r.baseline_score ?? null, artifact: r.baseline_artifact ?? null,
+  };
+}
+
 export function benchmarkLine(job: JobSummary | null, detail: JobDetail | undefined): ReportLine {
   const early = nonTerminal(job, 'GSM8K evaluation');
   if (early) return early;
@@ -158,17 +169,9 @@ export function benchmarkLine(job: JobSummary | null, detail: JobDetail | undefi
       jobId: id,
     };
   const comparison = obj(result.comparison);
-  if (!comparison || typeof comparison.within_two_percentage_points !== 'boolean')
-    return {
-      status: 'unvalidated',
-      label: 'Quality unvalidated',
-      detail: `${accuracyText(score)}. No matching source baseline, so quality is not validated.`,
-      jobId: id,
-    };
-  const delta = typeof comparison.delta_correct === 'number' ? `, ${comparison.delta_correct >= 0 ? '+' : ''}${comparison.delta_correct} vs source` : '';
-  return comparison.within_two_percentage_points
-    ? { status: 'passed', label: 'Within 2 pp of source', detail: `${accuracyText(score)}${delta}.`, jobId: id }
-    : { status: 'failed', label: 'More than 2 pp below source', detail: `${accuracyText(score)}${delta}.`, jobId: id };
+  if (!comparison) return {status:'completed', label:'Standalone GSM8K score', detail:accuracyText(score), jobId:id};
+  const delta = typeof comparison.delta_correct === 'number' ? ` Candidate minus reference: ${comparison.delta_correct >= 0 ? '+' : ''}${comparison.delta_correct} correct.` : '';
+  return {status:'completed', label:'GSM8K score with reference', detail:`${accuracyText(score)}.${delta}`, jobId:id};
 }
 
 export function lineTone(status: ReportStatus): 'ok' | 'bad' | 'warn' | 'info' | 'muted' {

@@ -82,8 +82,8 @@ def provenance(job, identity):
              "invalid imported-predictions identity")
         out["import_sha256"] = p["import_sha256"]
         return out
-    expected = "synthetic-endpoint-fixture" if synthetic else "operator-bf16-endpoint"
-    need(job["kind"] == "baseline" and method == expected
+    expected = ("synthetic-endpoint-fixture",) if synthetic else ("operator-reference-endpoint", "operator-bf16-endpoint")
+    need(job["kind"] == "baseline" and method in expected
          and p["source_evidence"] == "matched-response-headers"
          and all(text(p[key]) for key in ("baseline_source", "runtime_id", "model"))
          and job["options"].get("baseline_source") == p["baseline_source"] and not job["input_ids"],
@@ -91,6 +91,9 @@ def provenance(job, identity):
     out["runtime"] = {"identity": "declared_endpoint",
                       **{k: p[k] for k in ("baseline_source", "runtime_id", "model", "source_evidence")},
                       "image_id": None}
+    if "precision" in p:
+        need(text(p["precision"]), "invalid declared endpoint precision")
+        out["runtime"]["precision"] = p["precision"]
     return out
 
 

@@ -14,9 +14,10 @@ export interface Endpoint {
   label?: string;
   endpoint: string;
   model: string;
-  /** Baseline endpoints only: exact BF16 source checkpoint and serving runtime. */
+  /** Reference endpoints only: identity of the model actually served. */
   source_sha256?: string;
   runtime_id?: string;
+  precision?: string;
 }
 
 export interface HostSettings {
@@ -56,7 +57,7 @@ function endpoints(v: unknown, baseline = false): Endpoint[] {
       ...(typeof e.label === 'string' && e.label ? { label: e.label } : {}),
       endpoint: str(e.endpoint) ?? '',
       model: str(e.model) ?? '',
-      ...(baseline ? { source_sha256: str(e.source_sha256) ?? '', runtime_id: str(e.runtime_id) ?? '' } : {}),
+      ...(baseline ? { source_sha256: str(e.source_sha256) ?? '', runtime_id: str(e.runtime_id) ?? '', ...(typeof e.precision==='string' && e.precision ? {precision:e.precision} : {}) } : {}),
     }));
 }
 
@@ -126,7 +127,8 @@ function endpointProblems(kind: string, list: Endpoint[], ports: number[] | null
       if (!ports.includes(port)) out.push(`${kind} ${e.id || '(no ID)'}: Port ${port} is not approved on this worker${ports.length ? ` (approved: ${ports.join(', ')})` : '; no port is approved'}.`);
     }
     if (baseline) {
-      if (!/^[0-9a-f]{64}$/.test(e.source_sha256 ?? '')) out.push(`${kind} ${e.id || '(no ID)'}: enter the source SHA-256 of the exact BF16 checkpoint (64 lowercase hex).`);
+      if (!/^[0-9a-f]{64}$/.test(e.source_sha256 ?? '')) out.push(`${kind} ${e.id || '(no ID)'}: enter the reference model SHA-256 (64 lowercase hex).`);
+      if (e.precision && !/^[A-Za-z0-9_.-]{1,32}$/.test(e.precision)) out.push(`${kind} ${e.id || '(no ID)'}: precision must use at most 32 letters, digits, dots, hyphens or underscores.`);
       if (!(e.runtime_id ?? '').trim()) out.push(`${kind} ${e.id || '(no ID)'}: enter the runtime ID that serves it.`);
     }
     if (!e.model.trim()) out.push(`${kind} ${e.id || '(no ID)'}: enter the model name served by the endpoint.`);
@@ -134,7 +136,7 @@ function endpointProblems(kind: string, list: Endpoint[], ports: number[] | null
   return out;
 }
 
-const epKey = (e: Endpoint) => JSON.stringify([e.id, e.label ?? '', e.endpoint, e.model, e.source_sha256 ?? '', e.runtime_id ?? '']);
+const epKey = (e: Endpoint) => JSON.stringify([e.id, e.label ?? '', e.endpoint, e.model, e.source_sha256 ?? '', e.runtime_id ?? '',e.precision ?? '']);
 
 /**
  * Baseline endpoints added or changed relative to the saved host. Removing
@@ -159,7 +161,7 @@ export function validateHost(h: HostSettings, saved?: HostSettings): string[] {
 
 export function buildPut(h: HostSettings) {
   const clean = (l: Endpoint[], baseline = false) =>
-    l.map((e) => ({ id: e.id, ...(e.label ? { label: e.label } : {}), endpoint: e.endpoint, model: e.model, ...(baseline ? { source_sha256: e.source_sha256 ?? '', runtime_id: e.runtime_id ?? '' } : {}) }));
+    l.map((e) => ({ id: e.id, ...(e.label ? { label: e.label } : {}), endpoint: e.endpoint, model: e.model, ...(baseline ? { source_sha256: e.source_sha256 ?? '', runtime_id: e.runtime_id ?? '', ...(e.precision ? {precision:e.precision} : {}) } : {}) }));
   return {
     revision: h.revision,
     ...(h.evaluationStatus === 'profile_only' && h.profileBinding ? {profile_binding:h.profileBinding} : {}),

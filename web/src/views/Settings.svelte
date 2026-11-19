@@ -140,13 +140,17 @@
         {#if list === 'baselineEndpoints'}
           {@const shaP = ep.source_sha256 && !/^[0-9a-f]{64}$/.test(ep.source_sha256) ? '64 lowercase hexadecimal characters.' : null}
           <div class="field wide">
-            <label for="{list}-{i}-sha">Source checkpoint SHA-256</label>
+            <label for="{list}-{i}-sha">Reference model SHA-256</label>
             <input id="{list}-{i}-sha" readonly={locked} class="input mono" bind:value={ep.source_sha256} autocomplete="off" spellcheck="false" aria-invalid={shaP ? 'true' : undefined} aria-describedby="{list}-{i}-sha-h" />
-            <span class="hint" class:bad={!!shaP} id="{list}-{i}-sha-h">{shaP ?? 'Identity of the exact BF16 checkpoint this endpoint serves. Evaluations match it to the bundle source.'}</span>
+            <span class="hint" class:bad={!!shaP} id="{list}-{i}-sha-h">{shaP ?? 'Use the identity of the model this endpoint serves, not the bundle being evaluated.'}</span>
           </div>
           <div class="field">
             <label for="{list}-{i}-rt">Runtime ID</label>
             <input id="{list}-{i}-rt" readonly={locked} class="input mono" bind:value={ep.runtime_id} autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="{list}-{i}-precision">Reference precision (optional)</label>
+            <input id="{list}-{i}-precision" readonly={locked} class="input mono" bind:value={ep.precision} maxlength="32" autocomplete="off" spellcheck="false" placeholder="e.g. Q4_K_M" />
           </div>
         {/if}
         <div class="rm"><button type="button" class="btn small ghost" onclick={() => removeEndpoint(list, i)} aria-label="Remove {title.toLowerCase()} {ep.id || i + 1}">Remove</button></div>
@@ -210,7 +214,7 @@
                   <caption class="sr-only">What the controller currently allows on this worker</caption>
                   <thead><tr><th scope="col">Job</th><th scope="col">Controller reports</th></tr></thead>
                   <tbody>
-                    {#each readiness as r (r.what)}
+                    {#each readiness.slice(0, 2) as r (r.what)}
                       <tr><th scope="row">{r.what}</th><td class="rc"><Badge tone={r.allowed ? 'ok' : 'muted'} label={r.allowed ? 'Available' : 'Not available'} />{#if r.reason}<span class="xs muted">{r.reason}</span>{/if}</td></tr>
                     {/each}
                   </tbody>
@@ -257,7 +261,13 @@
                 <p class="xs muted" id="ev-allow-h">{draft.evaluationAllowed ? 'The controller still checks the Halogen runtime; this only allows it.' : 'Not available: this worker has no approved Halogen runtime. An operator must provision one first.'}</p>
               </fieldset>
 
-              {@render endpointList('BF16 baseline endpoints', 'baselineEndpoints', 'Endpoints that serve the exact BF16 source checkpoint, used to score a source baseline.')}
+              {#key draft.id}
+                <details class="disclosure">
+                  <summary>Comparison endpoints (optional){draft.baselineEndpoints.length ? ` · ${draft.baselineEndpoints.length}` : ''}</summary>
+                  {#if readiness[2]}<p class="small">Reference scoring on this worker: {readiness[2].allowed ? 'available' : 'not available'}. {readiness[2].reason ?? ''}</p>{/if}
+                  {@render endpointList('Reference endpoints', 'baselineEndpoints', 'Compare with predictions from a model served on this worker. Standalone evaluation does not use these endpoints.')}
+                </details>
+              {/key}
               {/if}
 
               {#if problems.length}

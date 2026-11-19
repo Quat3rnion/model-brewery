@@ -77,14 +77,14 @@ describe('report lines stay separate and never infer a pass', () => {
     expect(isFullSplit({ dataset: { full_split: true }, identity: { synthetic: true } })).toBe(false);
     expect(isFullSplit({ score })).toBeNull();
   });
-  it('full split without baseline is unvalidated; with comparison it passes or fails', () => {
+  it('full split is a standalone score; optional comparisons never become release verdicts', () => {
     const base = { score, dataset: { full_split: true }, identity: { synthetic: false } };
     const d = { ...job({}), result: base } as JobDetail;
-    expect(benchmarkLine(d, d).status).toBe('unvalidated');
+    expect(benchmarkLine(d, d).label).toBe('Standalone GSM8K score');
     const p = { ...d, result: { ...base, comparison: { within_two_percentage_points: true, delta_correct: -3 } } } as JobDetail;
-    expect(benchmarkLine(p, p).status).toBe('passed');
+    expect(benchmarkLine(p, p).status).toBe('completed');
     const f = { ...d, result: { ...base, comparison: { within_two_percentage_points: false } } } as JobDetail;
-    expect(benchmarkLine(f, f).status).toBe('failed');
+    expect(benchmarkLine(f, f).status).toBe('completed');
   });
   it('synthetic or unconfirmed scores do not qualify', () => {
     const d = { ...job({}), result: { score, dataset: { full_split: true }, identity: { synthetic: true }, comparison: { within_two_percentage_points: true } } } as JobDetail;

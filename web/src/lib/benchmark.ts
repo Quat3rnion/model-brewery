@@ -5,7 +5,7 @@
 // their names match.
 
 import { capability, isTerminal } from './format';
-import { benchmarkLine, isFullSplit, obj, readScore } from './reports';
+import { referenceInfo, benchmarkLine, isFullSplit, obj, readScore } from './reports';
 import type { Host, JobDetail, JobSummary, NewJob } from './types';
 
 export const BENCHMARK_SCHEMA = 'brewery-benchmark-report-v1';
@@ -218,6 +218,7 @@ export interface ScorecardGsm8kEntry {
   score: unknown;
   comparison: unknown;
   /** Verbatim baseline fields of the result, or null when the result has no baseline. */
+  reference: ReturnType<typeof referenceInfo>;
   baseline: { identity: unknown; score: unknown; artifact: unknown } | null;
   artifact: unknown;
   quality: string;
@@ -287,6 +288,7 @@ export function buildScorecard(benchJobs: ScorecardPair[], gsmJobs: ScorecardPai
         identity: verbatim(r?.identity),
         score: r ? (readScore(r) ? r.score : null) : null,
         comparison: verbatim(r?.comparison),
+        reference: referenceInfo(r),
         baseline: hasBaseline ? { identity: verbatim(r!.baseline_identity), score: verbatim(r!.baseline_score), artifact: verbatim(r!.baseline_artifact) } : null,
         artifact: verbatim(r?.artifact),
         quality: d ? benchmarkLine(j, d).status : 'not-loaded',

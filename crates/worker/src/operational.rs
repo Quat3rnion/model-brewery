@@ -52,6 +52,8 @@ pub struct Baseline {
     pub model: String,
     pub source_sha256: String,
     pub runtime_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub precision: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -206,6 +208,7 @@ impl Settings {
                 valid_target(&baseline.id, baseline.label.as_deref(), &baseline.model)
                     && ids.insert(&baseline.id)
                     && id(&baseline.runtime_id)
+                    && baseline.precision.as_deref().is_none_or(precision_ok)
                     && digest(&baseline.source_sha256),
                 "invalid or duplicate baseline endpoint"
             );
@@ -267,11 +270,14 @@ impl Settings {
         Ok(json!(
             self.baseline_endpoints
                 .iter()
-                .map(|b| (
-                    b.id.as_str(),
-                    json!({"url":format!("{}/completions", b.endpoint), "model":b.model,
-                "source_sha256":b.source_sha256, "runtime_id":b.runtime_id})
-                ))
+                .map(|b| {
+                    let mut source = json!({"url":format!("{}/completions", b.endpoint),
+                        "model":b.model,"source_sha256":b.source_sha256,"runtime_id":b.runtime_id});
+                    if let Some(precision) = &b.precision {
+                        source["precision"] = json!(precision);
+                    }
+                    (b.id.as_str(), source)
+                })
                 .collect::<BTreeMap<_, _>>()
         ))
     }
@@ -310,6 +316,14 @@ fn loopback_port(url: &str) -> Result<u16> {
 
 fn valid_target(key: &str, title: Option<&str>, model: &str) -> bool {
     id(key) && title.is_none_or(|title| label(title, 256)) && label(model, 256)
+}
+
+fn precision_ok(precision: &str) -> bool {
+    !precision.is_empty()
+        && precision.len() <= 32
+        && precision
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
 }
 
 fn id(value: &str) -> bool {

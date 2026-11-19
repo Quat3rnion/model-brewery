@@ -1,6 +1,6 @@
 use crate::{
     gsm8k::{Predictions, Question, MAX_TOKENS},
-    hash_ok, read, Result,
+    hash_ok, precision_ok, read, Result,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -11,8 +11,11 @@ use std::{collections::BTreeMap, fs::File, time::Duration};
 pub struct Source {
     url: String,
     model: String,
-    pub source_sha256: String,
+    source_sha256: String,
     runtime_id: String,
+    precision: Option<String>,
+    #[serde(default)]
+    bf16_attested: bool,
     bearer_env: Option<String>,
     #[serde(default)]
     synthetic: bool,
@@ -65,6 +68,8 @@ impl Source {
             || self.model.is_empty()
             || self.model.len() > 256
             || self.model.chars().any(char::is_control)
+            || self.precision.as_deref().is_some_and(|p| !precision_ok(p))
+            || (self.bf16_attested && (synthetic || self.precision.as_deref() != Some("bf16")))
         {
             return Err("invalid baseline endpoint or identity configuration".into());
         }
@@ -142,13 +147,22 @@ impl Source {
             phase.advance(1);
         }
         phase.finish();
+        let mut provenance = json!({
+            "method":if synthetic {"synthetic-endpoint-fixture"} else if self.bf16_attested {
+                "operator-bf16-endpoint"
+            } else {"operator-reference-endpoint"},
+            "baseline_source":id,"runtime_id":self.runtime_id,
+            "model":self.model,"source_evidence":"matched-response-headers"
+        });
+        if let Some(precision) = &self.precision {
+            provenance["precision"] = json!(precision);
+        }
+        if self.bf16_attested {
+            provenance["bf16_attested"] = json!(true);
+        }
         Predictions::new(
             self.source_sha256.clone(),
-            json!({
-            "method":if synthetic {"synthetic-endpoint-fixture"} else {"operator-bf16-endpoint"},
-            "baseline_source":id,"runtime_id":self.runtime_id,
-                "model":self.model,"source_evidence":"matched-response-headers"
-            }),
+            provenance,
             questions,
             texts,
             synthetic,

@@ -71,6 +71,7 @@ impl NewModel {
                 | "ht43"
                 | "gsm8k-baseline"
                 | "gsm8k-predictions"
+                | "gsm8k-evaluation"
                 | "assets"
                 | "imatrix"
                 | "weight-calibration"
@@ -763,6 +764,12 @@ impl NewJob {
         let second = inputs.get(1).map_or("", |m| &m.kind);
         let n = inputs.len();
         let hgn = |kind| matches!(kind, "hgn" | "brewery-bundle" | "hgn-v2" | "ht43");
+        let reference = |kind| {
+            matches!(
+                kind,
+                "gsm8k-predictions" | "gsm8k-baseline" | "gsm8k-evaluation"
+            )
+        };
         let weight_source = matches!(main, "gguf" | "hgn") || crate::weights::is_safetensors(main);
         let source = matches!(main, "hf" | "gguf" | "hgn");
         let baseline_source = self.options.contains_key("baseline_source");
@@ -784,14 +791,10 @@ impl NewJob {
                 "verify" => (2..=6).contains(&n) && source && second == "hgn",
                 "generate" => n == 1 && hgn(main) && prompt.is_some(),
                 "evaluate" => {
-                    hgn(main)
-                        && (n == 1 || (n == 2 && second == "gsm8k-baseline" && !baseline_source))
+                    hgn(main) && (n == 1 || (n == 2 && reference(second) && !baseline_source))
                 }
                 "baseline" => {
-                    (n == 0 && baseline_source)
-                        || (n == 1
-                            && !baseline_source
-                            && matches!(main, "gsm8k-predictions" | "gsm8k-baseline"))
+                    (n == 0 && baseline_source) || (n == 1 && !baseline_source && reference(main))
                 }
                 "transfer" | "transfer_preview" => (1..=32).contains(&n),
                 "cache_cleanup" | "benchmark" | "hf_download" => n == 0,

@@ -764,7 +764,7 @@
         "x-brewery-max-utf8-bytes": 4096,
         "description": "Absolute worker path, at most 4096 UTF-8 bytes, without '..' segments or control characters. Registration also requires a filename component."
       },
-      "ModelKind": {"type": "string", "enum": ["gguf", "hf", "safetensors", "hgn", "brewery-bundle", "hgn-v2", "ht43", "gsm8k-baseline", "gsm8k-predictions", "assets", "imatrix", "ngram", "vision", "mtp", "weight-calibration"]},
+      "ModelKind": {"type": "string", "enum": ["gguf", "hf", "safetensors", "hgn", "brewery-bundle", "hgn-v2", "ht43", "gsm8k-baseline", "gsm8k-predictions", "gsm8k-evaluation", "assets", "imatrix", "ngram", "vision", "mtp", "weight-calibration"]},
       "NewModel": {
         "type": "object", "required": ["host", "path", "kind"], "additionalProperties": false,
         "properties": {
@@ -1073,7 +1073,8 @@
           "id": {"$ref": "#/components/schemas/BenchmarkId"}, "label": {"$ref": "#/components/schemas/Name"},
           "endpoint": {"$ref": "#/components/schemas/LoopbackEndpoint"},
           "model": {"$ref": "#/components/schemas/Name"},
-          "source_sha256": {"$ref": "#/components/schemas/Sha256", "description": "Identity of the exact BF16 source checkpoint that the endpoint serves."},
+          "source_sha256": {"$ref": "#/components/schemas/Sha256", "description": "Identity of the reference endpoint's own source checkpoint. Does not imply BF16 or require the candidate's source."},
+          "precision": {"type":"string","pattern":"^[A-Za-z0-9_.-]{1,32}$","description":"Optional descriptive label for the reference, not a BF16 attestation."},
           "runtime_id": {"$ref": "#/components/schemas/BenchmarkId", "description": "Identity of the serving runtime."}
         }
       },
@@ -1505,23 +1506,23 @@
         "properties": {"max_tokens": {"type": "integer", "minimum": 1, "maximum": 512, "description": "The bundled evaluator uses 128 when this option is omitted."}}
       },
       "EvaluateJob": {
-        "description": "Run GSM8K evaluation on one hgn, brewery-bundle, hgn-v2 or ht43 input. Optionally compare against either a second input of kind gsm8k-baseline or the selected worker's configured baseline_source ID, not both.",
+        "description": "Score one candidate on GSM8K, without a comparison by default. Optionally compare with a saved reference result or the selected worker's configured baseline_source, not both. Ordinary comparisons match the question set and protocol, not the model precision.",
         "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/DefaultInputHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
         "required": ["input_ids"],
         "properties": {
           "kind": {"const": "evaluate"},
-          "input_ids": {"minItems": 1, "maxItems": 2, "x-brewery-input-kinds": [["hgn", "brewery-bundle", "hgn-v2", "ht43"], ["gsm8k-baseline"]]},
+          "input_ids": {"minItems": 1, "maxItems": 2, "x-brewery-input-kinds": [["hgn", "brewery-bundle", "hgn-v2", "ht43"], ["gsm8k-baseline", "gsm8k-evaluation", "gsm8k-predictions"]]},
           "options": {"$ref": "#/components/schemas/BaselineOptions"}
         },
         "if": {"properties": {"input_ids": {"minItems": 2}}},
         "then": {"properties": {"options": {"$ref": "#/components/schemas/EmptyOptions"}}}
       },
       "BaselineJob": {
-        "description": "Score a baseline from one registered gsm8k-predictions or gsm8k-baseline input, or from the selected worker's configured baseline_source. A configured source requires an explicit host and no inputs.",
+        "description": "Optionally prepare a reference from saved predictions, an evaluation or a baseline result, or from the selected worker's configured baseline_source. A configured source requires an explicit host and no inputs.",
         "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/DefaultInputHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
         "properties": {
           "kind": {"const": "baseline"},
-          "input_ids": {"maxItems": 1, "x-brewery-input-kinds": [["gsm8k-predictions", "gsm8k-baseline"]]},
+          "input_ids": {"maxItems": 1, "x-brewery-input-kinds": [["gsm8k-predictions", "gsm8k-baseline", "gsm8k-evaluation"]]},
           "options": {"$ref": "#/components/schemas/BaselineOptions"}
         },
         "oneOf": [

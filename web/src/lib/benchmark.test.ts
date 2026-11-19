@@ -105,18 +105,20 @@ describe('combined scorecard', () => {
       result: { score: { correct: 1000, total: 1319 }, protocol_id: 'gsm8k-v1', dataset: { full_split: true }, identity: { synthetic: false } },
     };
     const card = buildScorecard([], [pair(g)], hosts, 't');
-    expect(card.gsm8k_jobs[0]).toMatchObject({ job_id: 'e1', host: 'frame', input_ids: ['bundle'], protocol_id: 'gsm8k-v1', full_split: true, quality: 'unvalidated', result_loaded: true });
+    expect(card.gsm8k_jobs[0]).toMatchObject({ job_id: 'e1', host: 'frame', input_ids: ['bundle'], protocol_id: 'gsm8k-v1', full_split: true, quality: 'completed', reference: null, result_loaded: true });
     expect(card.gsm8k_jobs[0].provenance_note).toMatch(/not matched/i);
   });
   it('copies the real GSM8K identity, dataset and baseline provenance verbatim', () => {
     const identity = { source_sha256: 'a'.repeat(64), synthetic: false, provenance: { method: 'halogen', bundle_sha256: 'b'.repeat(64) } };
-    const baseline_identity = { source_sha256: 'a'.repeat(64), synthetic: false, provenance: { method: 'imported-predictions', import_sha256: 'c'.repeat(64) } };
+    const baseline_identity = { source_sha256: 'a'.repeat(64), synthetic: false, provenance: { method: 'imported-predictions', precision: 'Q4_0', import_sha256: 'c'.repeat(64) } };
     const dataset = { name: 'openai/grade-school-math', revision: 'r1', split: 'test', sha256: 'd'.repeat(64), rows: 1319, full_split: true };
-    const result = { kind: 'evaluate', dataset, protocol_id: 'p', score: { correct: 1, total: 2 }, identity, baseline_identity, baseline_score: { correct: 1, total: 2 }, baseline_artifact: { sha256: 'e' }, artifact: { sha256: 'f' }, comparison: { within_two_percentage_points: true } };
+    const result = { kind: 'evaluate', reference_scope:'diagnostic', dataset, protocol_id: 'p', score: { correct: 1, total: 2 }, identity, baseline_identity, baseline_score: { correct: 1, total: 2 }, baseline_artifact: { sha256: 'e' }, artifact: { sha256: 'f' }, comparison: { within_two_percentage_points: true } };
     const g: JobDetail = { id: 'e2', kind: 'evaluate', host: 'frame', state: 'succeeded', input_ids: ['bundle', 'base'], result };
     const e = buildScorecard([], [pair(g)], hosts, 't').gsm8k_jobs[0];
     expect(e.identity).toEqual(identity);
     expect(e.dataset).toEqual(dataset);
+    expect(e.reference).toMatchObject({scope:'diagnostic', precision:'Q4_0', identity:baseline_identity});
+    expect(e.quality).toBe('completed');
     expect(e.baseline).toEqual({ identity: baseline_identity, score: { correct: 1, total: 2 }, artifact: { sha256: 'e' } });
     expect(e.artifact).toEqual({ sha256: 'f' });
     expect(e.synthetic).toBe(false);

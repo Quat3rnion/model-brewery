@@ -73,7 +73,7 @@
   // ---- Evaluate ----
   let eBundle = $state('');
   let eHost = $state('');
-  let eBaseMode = $state<'none' | 'file' | 'source'>('file');
+  let eBaseMode = $state<'none' | 'file' | 'source'>('none');
   let eBaseFile = $state('');
   let eSource = $state('');
   const eSources = $derived(sources(hostOf(eBundle, eHost)));
@@ -81,8 +81,8 @@
   const eBlockers = $derived.by(() => {
     const out: string[] = [];
     if (!eBundle) out.push('Select a bundle.');
-    if (eBaseMode === 'file' && !eBaseFile) out.push('Select a baseline results file, or choose no baseline.');
-    if (eBaseMode === 'source' && !eSource) out.push('Select a baseline source.');
+    if (eBaseMode === 'file' && !eBaseFile) out.push('Select reference results.');
+    if (eBaseMode === 'source' && !eSources.some(s=>s.id===eSource)) out.push('Select a configured comparison endpoint.');
     capBlock('evaluate', hostOf(eBundle, eHost), out);
     return out;
   });
@@ -110,12 +110,12 @@
   <div class="head">
     <h1 tabindex="-1">Evaluate</h1>
     <p class="muted small">
-      File verification, generation and benchmark quality are separate results. Generated text is not a quality result. A score qualifies only for the full pinned GSM8K split with a matching source baseline.
+      Score a bundle on the pinned GSM8K split. To measure a difference, compare it with another model’s results from the same protocol. File verification and generated text are separate checks.
     </p>
   </div>
 
   {#if hosts.length && !hosts.some((h) => capability(h, 'evaluate').allowed)}
-    <p class="note info">No worker can run GSM8K evaluation yet. <a href="#/settings">Set up evaluation and baseline endpoints in Settings</a>.</p>
+    <p class="note info">No worker can run GSM8K evaluation yet. <a href="#/settings">Check evaluation settings</a>.</p>
   {/if}
 
   <section class="panel" aria-labelledby="st-h">
@@ -157,11 +157,11 @@
   </section>
 
   <h2 class="group-h">Benchmark quality</h2>
-  <div class="grid-2 forms">
-    <section class="panel" aria-labelledby="bl-h">
-      <header><h3 id="bl-h" class="ph"><span class="stepn" aria-hidden="true">1</span>Source baseline <span class="muted small">(optional, once per source)</span></h3></header>
+  {#snippet prepareReference()}
+    <details class="disclosure">
+      <summary>Prepare a reusable comparison result</summary>
       <div class="body stack">
-        <p class="small muted">Score the BF16 source checkpoint once. Import per-question predictions with provenance, or query an operator-configured endpoint for the exact checkpoint.</p>
+        <p class="small muted">Import predictions from a reference model, or score a configured endpoint on the same questions.</p>
         <div class="seg" role="radiogroup" aria-label="Baseline input">
           <label><input type="radio" bind:group={bMode} value="file" /> Import predictions file</label>
           <label><input type="radio" bind:group={bMode} value="source" /> Configured source</label>
@@ -174,7 +174,7 @@
             <HostSelect bind:value={bHost} kind="baseline" label="Host" />
             <div class="field">
               <Combobox bind:value={bSource} id="b-src" label="Baseline source" options={idOptions(bSources)} disabled={!bHost || bSources.length === 0} placeholder={bHost && bSources.length === 0 ? 'None configured on this host' : bHost ? 'Select or type a source' : 'Select a host first'} emptyText="No source matches." />
-              <span class="hint">Baseline endpoints are configured in <a href="#/settings">Settings</a>.</span>
+              <span class="hint">Comparison endpoints are configured in <a href="#/settings">Settings</a>.</span>
             </div>
           {/if}
         </div>
@@ -186,33 +186,35 @@
               bMode === 'file'
                 ? { kind: 'baseline', host: bHost || undefined, input_ids: [bFile] }
                 : { kind: 'baseline', host: bHost, input_ids: [], options: { baseline_source: bSource } },
-            )}>Queue baseline</Submit
+            )}>Queue comparison result</Submit
         >
         <SubmitStatus s={base} />
       </div>
-    </section>
+    </details>
+  {/snippet}
     <section class="panel" aria-labelledby="ev-h">
-      <header><h3 id="ev-h" class="ph"><span class="stepn" aria-hidden="true">2</span>GSM8K evaluation</h3></header>
+      <header><h3 id="ev-h" class="ph">GSM8K evaluation</h3></header>
       <div class="body stack">
         <ModelSelect bind:value={eBundle} kinds={BUNDLE_KINDS} label="Bundle" />
         <HostSelect bind:value={eHost} kind="evaluate" label="Run on" optional optionalLabel="Host of the bundle" />
         <fieldset class="plain">
-          <legend class="small muted">Source baseline</legend>
+          <legend class="small muted">Scoring mode</legend>
           <div class="seg">
-            <label><input type="radio" bind:group={eBaseMode} value="file" /> Registered results file</label>
-            <label><input type="radio" bind:group={eBaseMode} value="source" disabled={eSources.length === 0} /> Configured source</label>
-            <label><input type="radio" bind:group={eBaseMode} value="none" /> No baseline</label>
+            <label><input type="radio" bind:group={eBaseMode} value="none" /> Standalone score</label>
+            <label><input type="radio" bind:group={eBaseMode} value="file" /> Compare with a file</label>
+            <label><input type="radio" bind:group={eBaseMode} value="source" /> Compare with an endpoint</label>
           </div>
           {#if eBaseMode === 'file'}
-            <ModelSelect bind:value={eBaseFile} kinds={['gsm8k-baseline']} label="Baseline results" hint="Must match the protocol and the exact BF16 source checkpoint." />
+            <ModelSelect bind:value={eBaseFile} kinds={['gsm8k-baseline','gsm8k-evaluation','gsm8k-predictions']} label="Reference results" hint="Select results or predictions for the same GSM8K protocol. The reference can use a different model or precision." />
+            {@render prepareReference()}
           {:else if eBaseMode === 'source'}
             <div class="field">
-              <Combobox bind:value={eSource} id="e-src" label="Baseline source" options={idOptions(eSources)} placeholder="Select or type a source" emptyText="No source matches." />
+              {#if eSources.length}
+                <Combobox bind:value={eSource} id="e-src" label="Comparison endpoint" options={idOptions(eSources)} placeholder="Select an endpoint" emptyText="No endpoint matches." />
+              {:else if !hostOf(eBundle,eHost)}<p class="xs muted">Select the bundle or worker to see its comparison endpoints.</p>
+              {:else}<p class="xs muted">No comparison endpoint on this worker. <a href="#/settings">Check Settings</a> or compare with a file instead.</p>{/if}
             </div>
-          {:else}
-            <p class="note warn">Without a matching baseline the score is reported, but quality stays unvalidated.</p>
           {/if}
-          {#if eSources.length === 0 && eBaseMode !== 'source'}<p class="xs muted">No baseline endpoint on this host. <a href="#/settings">Add one in Settings</a>.</p>{/if}
         </fieldset>
         <Submit
           blockers={eBlockers}
@@ -228,7 +230,6 @@
         <SubmitStatus s={ev} />
       </div>
     </section>
-  </div>
 
   <h2 class="group-h">Generation check</h2>
   <section class="panel" aria-labelledby="gen-h">
@@ -267,25 +268,10 @@
     font-size: var(--fs-title);
     letter-spacing: -0.005em;
   }
-  .stepn {
-    display: inline-grid;
-    place-items: center;
-    width: 20px;
-    height: 20px;
-    margin-right: 8px;
-    border-radius: 50%;
-    border: 1px solid currentColor;
-    font-size: var(--fs-xs);
-    color: var(--text-2);
-    vertical-align: 1px;
-  }
   .head {
     display: flex;
     flex-direction: column;
     gap: 4px;
-  }
-  .forms {
-    align-items: start;
   }
   .status th[scope='row'] {
     font-weight: 500;

@@ -46,6 +46,21 @@ fn bundle_kind(kind: &str) -> bool {
     matches!(kind, "hgn" | "brewery-bundle" | "hgn-v2" | "ht43")
 }
 
+fn reference_file_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "gsm8k-baseline" | "gsm8k-predictions" | "gsm8k-evaluation"
+    )
+}
+
+fn precision_ok(precision: &str) -> bool {
+    !precision.is_empty()
+        && precision.len() <= 32
+        && precision
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+}
+
 fn run(job: Job) -> Result<Value> {
     let progress = Progress::new(&fs::canonicalize(".")?, job.inputs.iter().map(|i| &i.path));
     let Options {
@@ -88,9 +103,7 @@ fn run(job: Job) -> Result<Value> {
                 ([], Some(source)) => {
                     endpoint::load(source)?.run(source, &test, synthetic_fixture, &progress)?
                 }
-                ([input], None)
-                    if matches!(input.kind.as_str(), "gsm8k-baseline" | "gsm8k-predictions") =>
-                {
+                ([input], None) if reference_file_kind(&input.kind) => {
                     import(&input.path, synthetic_fixture, &progress, 1, 1)?
                 }
                 _ => return Err(
@@ -108,12 +121,12 @@ fn run(job: Job) -> Result<Value> {
         "evaluate" => {
             let (candidate, baseline) = match job.inputs.as_slice() {
                 [candidate] => (candidate, None),
-                [candidate, baseline] if baseline.kind == "gsm8k-baseline" => {
+                [candidate, baseline] if reference_file_kind(&baseline.kind) => {
                     (candidate, Some(baseline))
                 }
                 _ => {
                     return Err(
-                        "evaluate requires one candidate and at most one GSM8K baseline file"
+                        "evaluate requires one candidate and at most one GSM8K reference file"
                             .into(),
                     )
                 }
@@ -135,16 +148,7 @@ fn run(job: Job) -> Result<Value> {
             let reference = if let Some(file) = baseline {
                 Some(import(&file.path, synthetic_fixture, &progress, 2, 2)?)
             } else if let Some(id) = baseline_source.as_deref() {
-                let source = endpoint::load(id)?;
-                let bundle = bundle
-                    .as_ref()
-                    .ok_or("synthetic fixtures cannot use a real endpoint")?;
-                if bundle.source_sha256() != source.source_sha256 {
-                    return Err(
-                        "baseline endpoint and candidate do not name the same source".into(),
-                    );
-                }
-                Some(source.run(id, &test, false, &progress)?)
+                Some(endpoint::load(id)?.run(id, &test, synthetic_fixture, &progress)?)
             } else {
                 None
             };
@@ -153,12 +157,6 @@ fn run(job: Job) -> Result<Value> {
                 .map(|r| r.score(&test, synthetic_fixture, &progress, "baseline_scoring"))
                 .transpose()?;
             let run = if let Some(bundle) = bundle.as_ref() {
-                if reference
-                    .as_ref()
-                    .is_some_and(|r| r.source_sha256 != bundle.source_sha256())
-                {
-                    return Err("baseline and candidate do not name the same source".into());
-                }
                 let prompts: Vec<_> = test.iter().map(|q| q.prompt.clone()).collect();
                 let (identity, texts) = generate_bundle(
                     bundle,
@@ -177,13 +175,21 @@ fn run(job: Job) -> Result<Value> {
             } else {
                 import(&candidate.path, true, &progress, 1, job.inputs.len() as u64)?
             };
-            if reference
-                .as_ref()
-                .is_some_and(|r| r.source_sha256 != run.source_sha256)
-            {
-                return Err("baseline and candidate do not name the same source".into());
-            }
             let scored = run.score(&test, synthetic_fixture, &progress, "evaluate_scoring")?;
+            let reference_scope = reference.as_ref().map(|reference| {
+                if !run.synthetic
+                    && run.source_sha256 == reference.source_sha256
+                    && reference.provenance.as_ref().is_some_and(|p| {
+                        p["method"] == "operator-bf16-endpoint"
+                            && p["bf16_attested"] == true
+                            && p["precision"] == "bf16"
+                    })
+                {
+                    "attested_bf16_same_source"
+                } else {
+                    "diagnostic"
+                }
+            });
             let comparison = reference_score
                 .as_ref()
                 .map(|reference| gsm8k::compare(&scored, reference));
@@ -198,8 +204,9 @@ fn run(job: Job) -> Result<Value> {
             let artifact = artifact("gsm8k-evaluation", &run, &progress)?;
             Ok(
                 json!({"kind":"evaluate","dataset":dataset,"protocol_id":PROTOCOL,"score":scored.0,
-               "baseline_score": reference_score.as_ref().map(|r| &r.0),
-               "baseline_identity": reference.as_ref().map(identity),
+                "baseline_score": reference_score.as_ref().map(|r| &r.0),
+                "baseline_identity": reference.as_ref().map(identity),
+                "reference_scope":reference_scope,
                "comparison":comparison,"identity":identity(&run),"artifact":artifact,
                "baseline_artifact":baseline_artifact}),
             )
@@ -253,11 +260,19 @@ fn import(
     if !synthetic && run.provenance.as_ref().is_none_or(|p| !p.is_object()) {
         return Err("a real imported baseline must provide object provenance".into());
     }
-    // Only emit trusted fields from current jobs; keep the immutable digest of
-    // the imported envelope without re-publishing arbitrary provenance fields.
-    run.provenance = Some(
-        json!({"method":"imported-predictions","import_sha256":format!("{:x}", hash.finalize())}),
-    );
+    // Precision from a file is descriptive only; never relay an attestation
+    // or endpoint verification claim from an imported prediction envelope.
+    let mut provenance =
+        json!({"method":"imported-predictions","import_sha256":format!("{:x}", hash.finalize())});
+    if let Some(precision) = run
+        .provenance
+        .as_ref()
+        .and_then(|p| p["precision"].as_str())
+        .filter(|precision| precision_ok(precision))
+    {
+        provenance["precision"] = json!(precision);
+    }
+    run.provenance = Some(provenance);
     phase.file_done();
     phase.finish();
     Ok(run)

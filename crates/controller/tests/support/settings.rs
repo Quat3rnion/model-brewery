@@ -349,3 +349,46 @@ fn worker_policy_without_dispatch_opt_in_keeps_saved_profile_for_manual_adoption
     assert_eq!(state["hosts"][0]["capabilities"]["evaluate"], true);
     assert_eq!(state["hosts"][0]["capabilities"]["generate"], false);
 }
+
+#[test]
+fn managed_reference_precision_does_not_grant_attestation_or_unapproved_ports() {
+    let mut app = Fixture::new();
+    let root = app.path("worker");
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let catalog = app.path("catalog.json");
+    fs::write(&catalog, r#"{"adapters":{}}"#).unwrap();
+    let config = app.path("worker.json");
+    fs::write(
+        &config,
+        json!({"root":root,"managed_settings":{"catalog":catalog,"allowed_ports":[9101],
+            "evaluation_allowed":false,"baseline_allowed":true}})
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts":{"alpha":{"local":true,"config":config}}}).to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let request = json!({"revision":0,"benchmark_targets":[],"enabled_suites":[],
+        "evaluation_enabled":false,"baseline_endpoints":[{"id":"reference","model":"fixture",
+            "endpoint":"http://127.0.0.1:9101/v1","source_sha256":"b".repeat(64),
+            "runtime_id":"fixture","precision":"int8"}]});
+    let mut invalid = request.clone();
+    invalid["baseline_endpoints"][0]["endpoint"] = json!("http://127.0.0.1:9102/v1");
+    app.json("PUT", "/api/settings/alpha", Some(invalid), 400);
+    let mut invalid = request.clone();
+    invalid["baseline_endpoints"][0]["precision"] = json!("not a token");
+    app.json("PUT", "/api/settings/alpha", Some(invalid), 400);
+    let mut invalid = request.clone();
+    invalid["baseline_endpoints"][0]["bf16_attested"] = json!(true);
+    app.json("PUT", "/api/settings/alpha", Some(invalid), 422);
+    let saved = app.json("PUT", "/api/settings/alpha", Some(request.clone()), 200);
+    assert_eq!(saved["revision"], 1);
+    assert_eq!(saved["baseline_endpoints"], request["baseline_endpoints"]);
+    let state = app.json("GET", "/api/state", None, 200);
+    assert_eq!(state["hosts"][0]["capabilities"]["baseline"], true);
+    assert_eq!(state["hosts"][0]["capabilities"]["evaluate"], false);
+}

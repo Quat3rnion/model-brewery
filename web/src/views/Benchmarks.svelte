@@ -309,7 +309,7 @@
             <dt>Source SHA-256</dt><dd class="mono break">{typeof id?.source_sha256 === 'string' ? id.source_sha256 : 'Not stated'}</dd>
             <dt>Data</dt><dd>{id?.synthetic === false ? 'Real (not synthetic)' : id?.synthetic === true ? 'Synthetic fixture' : 'Not stated'}</dd>
             <dt>Provenance</dt><dd class="mono break">{id?.provenance != null ? JSON.stringify(id.provenance) : 'Not stated'}</dd>
-            <dt>Baseline</dt><dd class="mono break">{r?.baseline_identity != null ? JSON.stringify(r.baseline_identity) : 'None in this result'}</dd>
+            {#if r?.baseline_identity}<dt>Reference identity</dt><dd class="mono break">{JSON.stringify(r.baseline_identity)}</dd>{/if}
           </dl>
         {/if}
         <p class="xs muted">Separate evaluation of library input {j.input_ids.map((id) => modelLabel(models.find((m) => m.id === id))).join(' · ') || '—'}. It is not matched to any benchmark job's endpoint or model.</p>

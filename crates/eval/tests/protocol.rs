@@ -65,6 +65,65 @@ fn fixture(rows: usize, wrong: usize) -> Value {
 }
 
 #[test]
+fn standalone_score_can_be_reused_as_a_diagnostic_reference_for_another_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let reference = dir.path().join("reference.json");
+    let candidate = dir.path().join("candidate.json");
+    let mut predictions = fixture(1319, 0);
+    predictions["source_sha256"] = json!(DATA_SHA);
+    predictions["provenance"] = json!({"precision":"int8"});
+    std::fs::write(&reference, predictions.to_string()).unwrap();
+    std::fs::write(&candidate, fixture(1319, 1).to_string()).unwrap();
+    let standalone = job(
+        dir.path(),
+        json!({"kind":"evaluate","inputs":[{"kind":"gsm8k-predictions","path":reference}],
+            "options":{"synthetic_fixture":true}}),
+    );
+    assert!(standalone.status.success(), "{standalone:?}");
+    let standalone: Value = serde_json::from_slice(&standalone.stdout).unwrap();
+    assert_eq!(standalone["score"]["correct"], 1319);
+    assert!(standalone["reference_scope"].is_null());
+    assert!(standalone["comparison"].is_null());
+    let diagnostic = job(
+        dir.path(),
+        json!({"kind":"evaluate","inputs":[{"kind":"gsm8k-predictions","path":candidate},
+            {"kind":"gsm8k-evaluation","path":standalone["artifact"]["path"]}],
+            "options":{"synthetic_fixture":true}}),
+    );
+    assert!(diagnostic.status.success(), "{diagnostic:?}");
+    let diagnostic: Value = serde_json::from_slice(&diagnostic.stdout).unwrap();
+    assert_eq!(diagnostic["reference_scope"], "diagnostic");
+    assert_eq!(diagnostic["identity"]["source_sha256"], SOURCE);
+    assert_eq!(diagnostic["baseline_identity"]["source_sha256"], DATA_SHA);
+    assert_eq!(
+        diagnostic["baseline_identity"]["provenance"]["precision"],
+        "int8"
+    );
+    assert_eq!(diagnostic["comparison"]["changed_answer_ids"], json!([1]));
+    let mut bad_dataset = predictions.clone();
+    bad_dataset["dataset_sha256"] = json!(SOURCE);
+    let mut bad_protocol = predictions.clone();
+    bad_protocol["protocol_id"] = json!("other-protocol");
+    let mut bad_ids = predictions;
+    bad_ids["predictions"][1]["id"] = json!(1);
+    for (bad_reference, reason) in [
+        (bad_dataset, "incompatible prediction"),
+        (bad_protocol, "incompatible prediction"),
+        (bad_ids, "GSM8K row 2"),
+    ] {
+        std::fs::write(&reference, bad_reference.to_string()).unwrap();
+        let result = job(
+            dir.path(),
+            json!({"kind":"evaluate","inputs":[{"kind":"gsm8k-predictions","path":candidate},
+                {"kind":"gsm8k-evaluation","path":reference}],
+                "options":{"synthetic_fixture":true}}),
+        );
+        assert!(!result.status.success() && result.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&result.stderr).contains(reason));
+    }
+}
+
+#[test]
 fn full_synthetic_split_compares_per_question_and_checks_threshold_without_rounding() {
     let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("a.json");
@@ -171,14 +230,32 @@ fn refuses_gpu_load_without_operator_opt_in_and_refuses_job_selected_urls() {
 
 #[test]
 fn local_endpoint_fixture_checks_every_protocol_request_and_fails_on_identity_drift() {
-    for drift in [false, true] {
+    for (synthetic, drift, attested) in [
+        (true, false, false),
+        (true, true, false),
+        (false, false, false),
+        (false, false, true),
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1/completions", listener.local_addr().unwrap());
         let config = dir.path().join("endpoint.json");
         let runtime_id = format!("sha256:{SOURCE}");
+        let precision = if attested { "bf16" } else { "int8" };
         std::fs::write(&config, json!({"test-fixture":{"url":url,"model":"synthetic-test-double",
-            "source_sha256":SOURCE,"runtime_id":runtime_id,"bearer_env":"BREWERY_BASELINE_TOKEN_FIXTURE","synthetic":true}}).to_string()).unwrap();
+            "source_sha256":SOURCE,"runtime_id":runtime_id,"bearer_env":"BREWERY_BASELINE_TOKEN_FIXTURE",
+            "synthetic":synthetic,"precision":precision,"bf16_attested":attested}}).to_string()).unwrap();
+        let options = json!({"baseline_source":"test-fixture","synthetic_fixture":synthetic});
+        let request = if synthetic {
+            let candidate = dir.path().join("candidate.json");
+            let mut predictions = fixture(1319, 1);
+            predictions["source_sha256"] = json!(DATA_SHA);
+            std::fs::write(&candidate, predictions.to_string()).unwrap();
+            json!({"kind":"evaluate","inputs":[{"kind":"gsm8k-predictions","path":candidate}],
+                "options":options})
+        } else {
+            json!({"kind":"baseline","options":options})
+        };
         let progress_path = dir.path().join("progress.json");
         let server = std::thread::spawn(move || {
             for (i, line) in DATA.lines().enumerate() {
@@ -252,11 +329,7 @@ fn local_endpoint_fixture_checks_every_protocol_request_and_fails_on_identity_dr
             }
             1319
         });
-        let result = configured_job(
-            dir.path(),
-            json!({"kind":"baseline","options":{"baseline_source":"test-fixture","synthetic_fixture":true}}),
-            Some(&config),
-        );
+        let result = configured_job(dir.path(), request, Some(&config));
         if drift {
             assert!(!result.status.success());
             assert!(result.stdout.is_empty());
@@ -266,13 +339,31 @@ fn local_endpoint_fixture_checks_every_protocol_request_and_fails_on_identity_dr
             assert!(result.status.success(), "{result:?}");
             assert!(!String::from_utf8_lossy(&result.stdout).contains("not-a-real-secret"));
             let valid: Value = serde_json::from_slice(&result.stdout).unwrap();
-            assert_eq!(valid["score"]["total"], 1319);
-            assert_eq!(valid["score"]["correct"], 1319);
-            assert_eq!(valid["identity"]["synthetic"], true);
-            assert_eq!(
-                valid["identity"]["provenance"]["baseline_source"],
-                "test-fixture"
-            );
+            let (identity, score, method) = if synthetic {
+                assert_eq!(valid["reference_scope"], "diagnostic");
+                assert_eq!(valid["identity"]["source_sha256"], DATA_SHA);
+                assert_eq!(valid["comparison"]["changed_answer_ids"], json!([1]));
+                (
+                    &valid["baseline_identity"],
+                    &valid["baseline_score"],
+                    "synthetic-endpoint-fixture",
+                )
+            } else {
+                let method = if attested {
+                    "operator-bf16-endpoint"
+                } else {
+                    "operator-reference-endpoint"
+                };
+                (&valid["identity"], &valid["score"], method)
+            };
+            assert_eq!(score["total"], 1319);
+            assert_eq!(score["correct"], 1319);
+            assert_eq!(identity["synthetic"], synthetic);
+            assert_eq!(identity["source_sha256"], SOURCE);
+            assert_eq!(identity["provenance"]["baseline_source"], "test-fixture");
+            assert_eq!(identity["provenance"]["precision"], precision);
+            assert_eq!(identity["provenance"]["method"], method);
+            assert_eq!(identity["provenance"]["bf16_attested"] == true, attested);
             assert_eq!(server.join().unwrap(), 1319);
         }
     }

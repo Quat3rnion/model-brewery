@@ -123,6 +123,15 @@ class PairedQuality(unittest.TestCase):
         self.assertEqual(cp.stdout, "")
         self.assertIn(message, cp.stderr)
 
+    def test_ordinary_endpoint_can_be_a_quantized_reference(self):
+        p = self.left[2]["result"]["identity"]["provenance"]
+        p.update(method="operator-reference-endpoint", precision="q4_0", runtime_id="quant-a")
+        cp = self.call()
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        provenance = json.loads(cp.stdout)["left"]["provenance"]
+        self.assertEqual(provenance["method"], "operator-reference-endpoint")
+        self.assertEqual(provenance["runtime"]["precision"], "q4_0")
+
     def test_rejects_mismatched_artifact_bytes_and_unsupported_protocol(self):
         rj, rp = write_side(self.right)
         data = rp.read_bytes()

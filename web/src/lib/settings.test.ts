@@ -132,7 +132,7 @@ describe('contract update: ports, evaluation_allowed, baseline identity', () => 
     const h = host({ baseline_endpoints: [{ id: 'b', endpoint: 'http://127.0.0.1:8080/v1', model: 'm', source_sha256: 'A'.repeat(64), runtime_id: '' }] });
     expect(h.baselineEndpoints[0]).toMatchObject({ source_sha256: 'A'.repeat(64), runtime_id: '' });
     const p = validateHost(h).join(' ');
-    expect(p).toMatch(/source SHA-256/);
+    expect(p).toMatch(/reference model SHA-256/);
     expect(p).toMatch(/runtime ID/);
     const ok = { ...h, baselineEndpoints: [{ ...h.baselineEndpoints[0], source_sha256: 'a'.repeat(64), runtime_id: 'halogen-0.18' }] };
     expect(validateHost(ok)).toEqual([]);
@@ -145,6 +145,12 @@ describe('baseline_allowed', () => {
   const host = (over: Record<string, unknown> = {}) =>
     parseSettings({ hosts: [{ id: 'local-eval', managed: true, ready: false, revision: 1, approved_ports: [8080], evaluation_allowed: false, approved_suites: [], benchmark_targets: [], enabled_suites: [], baseline_endpoints: [], evaluation_enabled: false, ...over }] })[0];
   const existing = { id: 'bf16', endpoint: 'http://127.0.0.1:8080/v1', model: 'm', source_sha256: 'a'.repeat(64), runtime_id: 'rt' };
+  it('round trips optional reference precision without asserting attestation', () => {
+    const ref={...existing,id:'reference',precision:'Q4_K_M'};
+    const h=host({baseline_allowed:true,baseline_endpoints:[ref]});
+    expect(buildPut(h).baseline_endpoints).toEqual([ref]);
+    expect(validateHost({...h,baselineEndpoints:[{...ref,precision:'not a token'}]}).join(' ')).toMatch(/precision/i);
+  });
   it('reads true/false, and absent as unknown (older controller)', () => {
     expect(host({ baseline_allowed: true }).baselineAllowed).toBe(true);
     expect(host({ baseline_allowed: false }).baselineAllowed).toBe(false);

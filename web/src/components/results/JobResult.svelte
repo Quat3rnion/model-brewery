@@ -9,7 +9,7 @@
   import { selectionFrom } from '../../lib/components';
   import { missingSuites, readBenchmarkReport, requestedOf } from '../../lib/benchmark';
   import { formatBytes, shortHash } from '../../lib/format';
-  import { accuracyText, isFullSplit, isSynthetic, loadProofText, obj, readScore, verifyVerdict, explicitVerdict } from '../../lib/reports';
+  import { referenceInfo, accuracyText, isFullSplit, isSynthetic, loadProofText, obj, readScore, verifyVerdict, explicitVerdict } from '../../lib/reports';
   import type { JobDetail } from '../../lib/types';
 
   let { job }: { job: JobDetail } = $props();
@@ -19,7 +19,7 @@
   const bench = $derived(readBenchmarkReport(job.result));
   const requestedRoles = $derived(selectionFrom(job.input_ids, job.options));
   const benchShown = ['kind', 'schema', 'target', 'model', 'status', 'runs', 'release_qualified'];
-  const shown = $derived([...(bench ? benchShown : []), 'artifact', 'traces', 'alignment', 'report', 'text', 'score', 'comparison', 'disk_preflight', 'file_verification', 'hardware_proof', 'load_proof', 'identity', 'kind', 'dataset', 'protocol_id', 'inputs', 'bytes', 'missing_bytes', 'available_bytes', 'removed', 'skipped', 'components', ...(kind.startsWith('weight_') ? ['proposal'] : [])]);
+  const shown = $derived([...(bench ? benchShown : []), 'artifact', 'traces', 'alignment', 'report', 'text', 'score', 'comparison', 'disk_preflight', 'file_verification', 'hardware_proof', 'load_proof', 'identity', 'kind', ...(result?.score ? ['baseline_score','baseline_identity','reference_scope'] : []), 'dataset', 'protocol_id', 'inputs', 'bytes', 'missing_bytes', 'available_bytes', 'removed', 'skipped', 'components', ...(kind.startsWith('weight_') ? ['proposal'] : [])]);
 </script>
 
 {#if !result}
@@ -178,6 +178,7 @@
       {@const score = readScore(result)}
       {@const full = isFullSplit(result)}
       {@const cmp = obj(result.comparison)}
+      {@const reference = referenceInfo(result)}
       <section class="stack">
         <h3 class="h">GSM8K score</h3>
         {#if score}<p class="num">{accuracyText(score)}{typeof score.unparsed === 'number' ? ` · ${score.unparsed} unparsed` : ''}</p>{/if}
@@ -191,14 +192,15 @@
           {:else}
             <Badge tone="warn" label="Split not confirmed — does not qualify" />
           {/if}
-          {#if kind === 'evaluate'}
-            {#if cmp && typeof cmp.within_two_percentage_points === 'boolean'}
-              <Badge tone={cmp.within_two_percentage_points ? 'ok' : 'bad'} label={cmp.within_two_percentage_points ? 'Within 2 pp of source' : 'More than 2 pp below source'} />
-            {:else}
-              <Badge tone="warn" label="Quality unvalidated (no matching baseline)" />
-            {/if}
-          {/if}
+          {#if kind === 'evaluate' && !reference}<Badge tone="muted" label="Standalone evaluation" />{/if}
         </div>
+        {#if reference}
+          <h4>Reference comparison</h4>
+          <p class="small">{reference.scope === 'attested_bf16_same_source' ? 'Attested BF16 reference from the same source.' : 'Diagnostic reference.'} Precision: {reference.precision ?? 'not reported'}. This comparison does not qualify a release.</p>
+          {@const rs = readScore({score:reference.score})}
+          {#if rs}<p class="small num">Reference: {accuracyText(rs)}</p>{/if}
+          {#if reference.identity}<details><summary class="small">Reference identity and provenance</summary><KeyValues data={reference.identity} /></details>{/if}
+        {/if}
         {#if cmp}
           <KeyValues data={cmp} skip={['changed_answers', 'within_two_percentage_points']} />
           {#if Array.isArray(cmp.changed_answers)}
