@@ -1,8 +1,8 @@
-use crate::{Job, bounded, child_budget, child_threads, converter, integrity, progress::Progress};
-use anyhow::{Context, Result, bail, ensure};
+use crate::{bounded, child_budget, child_threads, converter, integrity, progress::Progress, Job};
+use anyhow::{bail, ensure, Context, Result};
 use brewery_worker::weight_source;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
