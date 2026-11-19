@@ -97,31 +97,47 @@ def headers(path, size):
     return tensors
 
 
-def inventory(source):
-    files = {}
-    for path in source.iterdir():
-        need(len(files) < 512, "too many source files")
+def selected_paths(source, assets):
+    paths = {}
+    if assets is not None:
+        need(source.suffix == ".safetensors" and source.is_file(), "expected a standalone .safetensors file")
+        need(assets.is_absolute() and assets.resolve(strict=True) == assets and assets.is_dir(),
+             "assets must be a canonical metadata directory")
+        paths["model.safetensors"] = source
+    else:
+        need(source.is_dir(), "standalone SafeTensors requires a separate --assets directory")
+    for path in (assets or source).iterdir():
+        need(len(paths) < 512, "too many source files")
+        if assets is not None:
+            need(path.name in ASSETS, f"unexpected file in metadata directory: {path.name}")
         need(path.name in ASSETS or path.name == INDEX or re.fullmatch(r"[A-Za-z0-9_.-]+\.safetensors", path.name),
              f"unexpected source file (only flat safetensors and allowed metadata): {path.name}")
-        files[path.name] = stamp(path)
+        paths[path.name] = path
+    return paths
+
+
+def inventory(source, paths=None):
+    if paths is None:
+        paths = selected_paths(source, None)
+    files = {name: stamp(path) for name, path in paths.items()}
     need("config.json" in files, "missing config.json")
     shards = {name for name in files if name.endswith(".safetensors")}
     need(bool(shards), "missing safetensors")
-    declared = read_json(source / INDEX).get("weight_map") if INDEX in files else None
+    declared = read_json(paths[INDEX]).get("weight_map") if INDEX in files else None
     need((isinstance(declared, dict) and declared and all(isinstance(v, str) for v in declared.values())
           and set(declared.values()) == shards)
          or (INDEX not in files and shards == {"model.safetensors"}), "invalid or missing shard index")
-    config = read_json(source / "config.json")
+    config = read_json(paths["config.json"])
     # Never accept source-provided Python dispatch, even if local-only.
     for name in files.keys() & ASSETS:
         need(files[name][2] <= MAX_HEADER, f"oversized asset: {name}")
         if name in ("config.json", "tokenizer_config.json", "processor_config.json"):
-            metadata = config if name == "config.json" else read_json(source / name)
+            metadata = config if name == "config.json" else read_json(paths[name])
             need("auto_map" not in metadata and "custom_pipelines" not in metadata, f"remote code metadata: {name}")
     names = {}
     tensors = {}
     for file in sorted(shards):
-        read = headers(source / file, files[file][2])
+        read = headers(paths[file], files[file][2])
         need(not tensors.keys() & read.keys(), "duplicate tensor across shards")
         need(len(tensors) + len(read) <= 32768, "too many source tensors")
         names.update(dict.fromkeys(read, file))
@@ -176,8 +192,8 @@ def qwen2(config, tensors):
     return {gguf: dims[::-1] for gguf, dims in expected.values()}
 
 
-def inspect(source, outtype):
-    files, config, tensors = inventory(source)
+def inspect(source, outtype, paths=None):
+    files, config, tensors = inventory(source, paths)
     architectures = config.get("architectures")
     need(isinstance(architectures, list) and len(architectures) == 1 and isinstance(architectures[0], str),
          "expected one local HF architecture")
@@ -204,9 +220,9 @@ def inspect(source, outtype):
         if not {"tokenizer.json", "tokenizer_config.json"} <= files.keys():
             report["reason"] = "local tokenizer.json and tokenizer_config.json are required"
         else:
-            tok = read_json(source / "tokenizer_config.json")
+            tok = read_json(paths["tokenizer_config.json"] if paths else source / "tokenizer_config.json")
             need(tok.get("tokenizer_class") in ("Qwen2Tokenizer", "Qwen2TokenizerFast"), "unsupported tokenizer class")
-            tokenizer = read_json(source / "tokenizer.json").get("model")
+            tokenizer = read_json(paths["tokenizer.json"] if paths else source / "tokenizer.json").get("model")
             need(isinstance(tokenizer, dict) and tokenizer.get("type") == "BPE"
                  and isinstance(tokenizer.get("vocab"), dict) and bool(tokenizer["vocab"]),
                  "expected local Qwen2 BPE vocabulary")
@@ -313,12 +329,12 @@ def gguf_inventory(path, outtype, expected):
     return types
 
 
-def export(source, output, report, files):
+def export(source, output, report, files, paths, assets):
     need(report["export_supported"], report.get("reason", "unsupported source"))
     need(output.is_absolute() and output.parent.resolve(strict=True) == output.parent
          and output.name not in ("", ".", "..") and not os.path.lexists(output),
          "output must be a fresh canonical absolute directory")
-    need(not output.is_relative_to(source), "output overlaps source")
+    need(not output.is_relative_to(source) and not (assets and output.is_relative_to(assets)), "output overlaps source")
     # Both the converter spool and final GGUF may widen F16/BF16 vectors to F32.
     # Count the known output tensor bytes twice, plus room for metadata.
     fp_bytes = sum(math.prod(dims) * (4 if len(dims) == 1 else 2)
@@ -343,8 +359,8 @@ def export(source, output, report, files):
         # Expose only inventoried filenames. In particular a new pickle or
         # local Python module added to the source cannot enter this namespace.
         for name in sorted(files):
-            need(stamp(source / name) == files[name], f"source changed: {name}")
-            command += ["--ro-bind", str(source / name), f"/input/{name}"]
+            need(stamp(paths[name]) == files[name], f"source changed: {name}")
+            command += ["--ro-bind", str(paths[name]), f"/input/{name}"]
         if not python.is_relative_to("/usr"):
             runtime = python.parent.parent
             need(runtime not in map(Path, ("/", "/home", "/opt", "/arboretum", "/mnt", "/usr/local"))
@@ -365,7 +381,7 @@ def export(source, output, report, files):
         command += ["--", str(python), "-I", "-B", "-c", bootstrap,
                     "/exporter/convert_hf_to_gguf.py", "--disable-mistral-community-chat-template",
                     "--use-temp-file", "--outfile", "/work/model.gguf", "--outtype", report["outtype"], "/input"]
-        env = {"PATH": "/usr/bin", "HOME": "/work", "TMPDIR": "/work", "HF_HOME": "/work",
+        env = {"PATH": "/usr/bin", "HOME": "/work", "USER": "brewery", "TMPDIR": "/work", "HF_HOME": "/work",
                "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1",
                "CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "2", "OPENBLAS_NUM_THREADS": "2"}
 
@@ -377,7 +393,7 @@ def export(source, output, report, files):
         # Keep exporter stdout separate from the adapter's receipt.
         subprocess.run(command, env=env, stdin=subprocess.DEVNULL, stdout=sys.stderr,
                        check=True, timeout=600, preexec_fn=limits)
-        need({p.name: stamp(p) for p in source.iterdir()} == files, "source changed during export")
+        need({n: stamp(p) for n, p in selected_paths(source, assets).items()} == files, "source changed during export")
         model = work / "model.gguf"
         inventory_out = gguf_inventory(model, report["outtype"], report["expected_gguf_tensors"])
         with model.open("rb") as f:
@@ -400,6 +416,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("inspect", "export"))
     parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--assets", type=Path, help="explicit config/tokenizer directory for a standalone SafeTensors file")
     parser.add_argument("--outtype", choices=("bf16", "f16"), default="bf16")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -407,12 +424,13 @@ def main():
         parser.error("--output is required for export only")
     try:
         source = args.source
-        need(source.is_absolute() and source.resolve(strict=True) == source and source.is_dir(),
-             "source must be an absolute canonical directory")
-        report, files = inspect(source, args.outtype)
-        need({p.name: stamp(p) for p in source.iterdir()} == files, "source changed during inspection")
+        need(source.is_absolute() and source.resolve(strict=True) == source, "source must be an absolute canonical path")
+        paths = selected_paths(source, args.assets)
+        report, files = inspect(source, args.outtype, paths)
+        report["source_format"] = "safetensors" if args.assets else "hf"
+        need({n: stamp(p) for n, p in selected_paths(source, args.assets).items()} == files, "source changed during inspection")
         if args.operation == "export":
-            report = export(source, args.output, report, files)
+            report = export(source, args.output, report, files, paths, args.assets)
         print(json.dumps(report, sort_keys=True, allow_nan=False))
     except (OSError, ValueError, TypeError, RecursionError, subprocess.SubprocessError) as err:
         sys.exit(f"HF GGUF export blocked: {err}")
