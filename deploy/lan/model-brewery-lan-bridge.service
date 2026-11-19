@@ -1,0 +1,11 @@
+[Unit]
+Description=Model Brewery private live-controller bridge
+
+[Service]
+RuntimeDirectory=model-brewery-lan
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/python3 -B %h/.local/lib/model-brewery/lan-supervise.py serve --socket %t/model-brewery-lan/upstream.sock --exe %h/.local/lib/model-brewery/lan-controller
+UMask=0077
+NoNewPrivileges=true
+Restart=on-failure
+RestartSec=3

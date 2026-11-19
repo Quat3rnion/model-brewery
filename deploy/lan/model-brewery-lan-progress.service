@@ -1,0 +1,15 @@
+[Unit]
+Description=Model Brewery legacy local-sm120 progress observer
+ConditionPathIsMountPoint=/mnt/games
+ConditionPathIsDirectory=%h/Projects/model-brewery/web/dist
+
+[Service]
+WorkingDirectory=%h/Projects/model-brewery
+ExecStart=/usr/bin/python3 -B %h/Projects/model-brewery/deploy/lan/observe_progress.py --watch
+UMask=0077
+NoNewPrivileges=yes
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-labelledby="t d">
+<title id="t">Model Brewery</title>
+<desc id="d">Model Brewery mark: a mug of beer. The three foam columns are a bar chart and the square bubbles are bits. Simplified for 16 to 32 px.</desc>
+<g id="mark"><rect x="0" y="0" width="64" height="64" rx="14.00" fill="#1b1430"/>
+<rect x="38.00" y="30.50" width="13.00" height="15.50" rx="5.50" fill="none" stroke="#ece8f5" stroke-width="5.00"/>
+<rect x="17.00" y="26.00" width="22.00" height="23.25" rx="1.00" fill="#b69cff"/>
+<rect x="14.50" y="24.25" width="27.00" height="27.50" rx="4.00" fill="none" stroke="#ece8f5" stroke-width="5.00"/>
+<path d="M10.50 28.50 L10.50 21.25 A5.75 5.75 0 0 1 22.00 21.25 L22.00 16.25 A5.75 5.75 0 0 1 33.50 16.25 L33.50 23.75 A5.75 5.75 0 0 1 45.00 23.75 L45.00 28.50 Z" fill="#ece8f5"/></g>
+</svg>

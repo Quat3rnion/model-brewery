@@ -1,0 +1,724 @@
+//! Authority is local configuration, never a role asserted by a client.
+use crate::{
+    App, Error,
+    dispatch::read_limited,
+    domain::{Host, State as JobState},
+};
+use axum::{
+    Json, Router,
+    extract::{DefaultBodyLimit, State, rejection::JsonRejection},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use rusqlite::{Connection, params};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env,
+    fs::{self, OpenOptions},
+    io::Read,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::{io::AsyncWriteExt, process::Command, sync::Semaphore, time::timeout};
+
+const KEY_HEADER: &str = "x-brewery-admin-key";
+const INSTALL_UNAVAILABLE: &str =
+    "Installation requires an operator-configured helper and a pinned, pre-staged runtime";
+const POLICY_UNAVAILABLE: &str = "Only the controller's existing quantization pool eligibility is adjustable; hardware and reservations remain operator-managed";
+const PROVISION_UNAVAILABLE: &str =
+    "SSH aliases, pinned host keys, worker provisioning, and admission remain operator-managed";
+
+pub struct Admin {
+    key: Option<[u8; 32]>,
+    catalog: Catalog,
+    db: Mutex<Connection>,
+    changes: Semaphore,
+    command: PathBuf,
+    runtime_helper: Option<PathBuf>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Catalog {
+    workers: BTreeMap<String, Worker>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Worker {
+    ssh_alias: Option<String>,
+    #[serde(default)]
+    local: bool,
+    #[serde(default)]
+    initially_active: bool,
+    #[serde(default)]
+    runtimes: BTreeMap<String, Runtime>,
+    #[serde(skip)]
+    binding: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Runtime {
+    label: String,
+    capabilities: Vec<String>,
+    sha256: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Lifecycle {
+    Unregistered,
+    Pending,
+    Active,
+    Inactive,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Policy {
+    status: Lifecycle,
+    allow_pool: bool,
+    #[serde(default)]
+    enabled: BTreeMap<String, String>,
+    #[serde(default)]
+    installed: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum Action {
+    Enroll { worker: String },
+    Approve { worker: String },
+    Deactivate { worker: String },
+    EnableRuntime { worker: String, runtime: String },
+    DisableRuntime { worker: String, runtime: String },
+    InstallRuntime { worker: String, runtime: String },
+    SetResourcePolicy { worker: String, allow_pool: bool },
+}
+
+impl Action {
+    fn worker(&self) -> &str {
+        match self {
+            Self::Enroll { worker }
+            | Self::Approve { worker }
+            | Self::Deactivate { worker }
+            | Self::EnableRuntime { worker, .. }
+            | Self::DisableRuntime { worker, .. }
+            | Self::InstallRuntime { worker, .. }
+            | Self::SetResourcePolicy { worker, .. } => worker,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ApiError(StatusCode, &'static str);
+impl ApiError {
+    fn storage(_: impl std::fmt::Display) -> Self {
+        Self(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Administration storage unavailable",
+        )
+    }
+    fn conflict(reason: &'static str) -> Self {
+        Self(StatusCode::CONFLICT, reason)
+    }
+}
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.0, Json(json!({"error":self.1}))).into_response()
+    }
+}
+type ApiResult<T> = Result<T, ApiError>;
+
+fn token(s: &str) -> bool {
+    (1..=128).contains(&s.len())
+        && s.as_bytes()[0].is_ascii_alphanumeric()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+}
+fn hex(s: &[u8]) -> bool {
+    s.len() == 64
+        && s.iter()
+            .all(|&b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+fn private(path: &Path, limit: usize) -> Result<Vec<u8>, Error> {
+    if !path.is_absolute() {
+        return Err("admin configuration must use absolute paths".into());
+    }
+    let f = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let m = f.metadata()?;
+    if !m.is_file()
+        || m.mode() & 0o077 != 0
+        || m.uid() != unsafe { libc::geteuid() }
+        || m.nlink() != 1
+    {
+        return Err("admin configuration must be a private controller-owned regular file".into());
+    }
+    let mut bytes = Vec::new();
+    f.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err("admin configuration exceeds size limit".into());
+    }
+    Ok(bytes)
+}
+
+fn trusted_file(path: &Path, executable: bool) -> bool {
+    path.is_absolute()
+        && path.canonicalize().is_ok_and(|p| p == path)
+        && fs::symlink_metadata(path).is_ok_and(|m| {
+            m.is_file()
+                && m.mode() & 0o022 == 0
+                && (!executable || m.mode() & 0o111 != 0)
+                && (m.uid() == 0 || m.uid() == unsafe { libc::geteuid() })
+        })
+}
+
+fn catalog_binding(entry: &Worker, profile: &Value) -> Result<String, Error> {
+    if entry.local {
+        let paths = profile["worker"].as_str().zip(profile["config"].as_str());
+        if entry.ssh_alias.is_some()
+            || profile["local"].as_bool() != Some(true)
+            || !profile["ssh"].is_null()
+            || !profile["ssh_config"].is_null()
+            || !paths.is_some_and(|(worker, config)| {
+                trusted_file(Path::new(worker), true) && trusted_file(Path::new(config), false)
+            })
+        {
+            return Err(
+                "local admin catalog entry requires a trusted local worker and config".into(),
+            );
+        }
+        let (worker, config) = paths.unwrap();
+        return Ok(format!(
+            "local:{:x}",
+            Sha256::digest(format!("{worker}\0{config}"))
+        ));
+    }
+    let Some(alias) = &entry.ssh_alias else {
+        return Err("admin catalog must specify a strict SSH alias or local worker".into());
+    };
+    if !token(alias)
+        || profile["ssh"].as_str() != Some(alias)
+        || ["local", "worker", "config"]
+            .iter()
+            .any(|k| !profile[k].is_null())
+        || profile["ssh_config"]
+            .as_str()
+            .is_some_and(|p| !Path::new(p).is_absolute())
+        || (!profile["ssh_config"].is_null() && !profile["ssh_config"].is_string())
+    {
+        return Err("admin catalog must match a strict SSH dispatch alias".into());
+    }
+    Ok(alias.clone())
+}
+
+impl Admin {
+    pub fn from_env(
+        data: &Path,
+        hosts: &[Host],
+        dispatch: Option<&Path>,
+        command: &Path,
+    ) -> Result<Option<Self>, Error> {
+        let key = env::var_os("BREWERY_ADMIN_KEY_FILE")
+            .map(|p| -> Result<[u8; 32], Error> {
+                let data = private(Path::new(&p), 65)?;
+                let s = data.strip_suffix(b"\n").unwrap_or(&data);
+                if !hex(s) {
+                    return Err("admin key file must contain a lowercase SHA-256 digest".into());
+                }
+                let mut out = [0; 32];
+                for (i, pair) in s.as_chunks::<2>().0.iter().enumerate() {
+                    out[i] = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
+                }
+                Ok(out)
+            })
+            .transpose()?;
+        let mut catalog = env::var_os("BREWERY_ADMIN_CATALOG")
+            .map(|p| -> Result<Catalog, Error> {
+                Ok(serde_json::from_slice(&private(
+                    Path::new(&p),
+                    128 * 1024,
+                )?)?)
+            })
+            .transpose()?
+            .unwrap_or_default();
+        if key.is_none() && catalog.workers.is_empty() {
+            return Ok(None);
+        }
+        let runtime_helper = env::var_os("BREWERY_ADMIN_RUNTIME_HELPER").map(PathBuf::from);
+        if runtime_helper
+            .as_deref()
+            .is_some_and(|path| !trusted_file(path, true))
+        {
+            return Err("runtime helper must be a trusted canonical executable".into());
+        }
+        if !catalog.workers.is_empty() {
+            let config: Value = serde_json::from_reader(fs::File::open(
+                dispatch.ok_or("admin workers require dispatch configuration")?,
+            )?)?;
+            if catalog.workers.len() > 64 {
+                return Err("too many admin catalog workers".into());
+            }
+            for (id, entry) in &mut catalog.workers {
+                let profile = &config["hosts"][id];
+                let host = hosts
+                    .iter()
+                    .find(|h| h.id == *id)
+                    .ok_or("admin catalog worker is not in dispatch configuration")?;
+                if !token(id) {
+                    return Err("invalid admin worker ID".into());
+                }
+                entry.binding = catalog_binding(entry, profile)?;
+                let mut capabilities = BTreeSet::new();
+                if entry.runtimes.len() > 32 {
+                    return Err("too many catalog runtimes".into());
+                }
+                for (runtime, definition) in &entry.runtimes {
+                    if !token(runtime)
+                        || definition.label.trim().is_empty()
+                        || definition.label.len() > 96
+                        || definition.label.chars().any(char::is_control)
+                        || definition.capabilities.is_empty()
+                        || definition
+                            .sha256
+                            .as_ref()
+                            .is_some_and(|s| !hex(s.as_bytes()))
+                        || definition.capabilities.iter().any(|kind| {
+                            !matches!(
+                                kind.as_str(),
+                                "inspect"
+                                    | "plan"
+                                    | "convert"
+                                    | "verify"
+                                    | "generate"
+                                    | "evaluate"
+                                    | "baseline"
+                                    | "benchmark"
+                                    | "compare"
+                                    | "convert_components"
+                            ) || host.capabilities.get(kind) != Some(&true)
+                                || !capabilities.insert(kind)
+                        })
+                    {
+                        return Err(
+                            "invalid admin runtime catalog entry or capability ceiling".into()
+                        );
+                    }
+                }
+            }
+        }
+        let path = data.join("admin.db");
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)?;
+        let db = Connection::open(path)?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS admin_policy(worker TEXT PRIMARY KEY, alias TEXT NOT NULL, body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, body TEXT NOT NULL, outcome TEXT NOT NULL);")?;
+        Ok(Some(Self {
+            key,
+            catalog,
+            db: Mutex::new(db),
+            changes: Semaphore::new(1),
+            command: command.to_owned(),
+            runtime_helper,
+        }))
+    }
+
+    pub fn authorized(&self, headers: &HeaderMap) -> bool {
+        let Some(key) = self.key else {
+            return false;
+        };
+        let mut all = headers.get_all(KEY_HEADER).iter();
+        let Some(value) = all.next().map(|h| h.as_bytes()) else {
+            return false;
+        };
+        if all.next().is_some() || !hex(value) {
+            return false;
+        }
+        let digest = Sha256::digest(value);
+        digest.iter().zip(key).fold(0, |difference, (&a, b)| {
+            difference | std::hint::black_box(a ^ b)
+        }) == 0
+    }
+
+    pub fn effective_hosts(&self, hosts: &[Host]) -> Result<Vec<Host>, Error> {
+        let db = self.db.lock().map_err(|_| "admin storage unavailable")?;
+        let mut effective = Vec::new();
+        for host in hosts {
+            let mut host = host.clone();
+            if let Some(entry) = self.catalog.workers.get(&host.id) {
+                let policy = policy(&db, &host, entry)?;
+                if policy.status != Lifecycle::Active {
+                    continue;
+                }
+                host.quantization_pool &= policy.allow_pool;
+                for (id, runtime) in &entry.runtimes {
+                    if !enabled(&policy, id, runtime) {
+                        for kind in &runtime.capabilities {
+                            host.capabilities.insert(kind.clone(), false);
+                            host.reasons.insert(
+                                kind.clone(),
+                                "Disabled by infrastructure administration".into(),
+                            );
+                        }
+                    }
+                }
+            }
+            effective.push(host);
+        }
+        Ok(effective)
+    }
+
+    fn view(&self, hosts: &[Host]) -> Result<Value, Error> {
+        let db = self.db.lock().map_err(|_| "admin storage unavailable")?;
+        let mut workers = Vec::new();
+        for host in hosts {
+            let Some(entry) = self.catalog.workers.get(&host.id) else {
+                continue;
+            };
+            let policy = policy(&db, host, entry)?;
+            let mut runtimes = Vec::new();
+            for (id, runtime) in &entry.runtimes {
+                let available = self.runtime_helper.is_some() && runtime.sha256.is_some();
+                let mut row = json!({"id":id,"label":runtime.label,"enabled":enabled(&policy,id,runtime),"available":available,
+                    "installed":runtime.sha256.as_ref().is_some_and(|sha| policy.installed.get(id)==Some(sha)),
+                    "can_install":available && matches!(policy.status,Lifecycle::Inactive|Lifecycle::Pending)});
+                if !available {
+                    row["reason"] = json!(INSTALL_UNAVAILABLE);
+                }
+                runtimes.push(row);
+            }
+            workers.push(json!({"id":host.id,"name":host.name,"status":policy.status,
+                "can_enroll":policy.status==Lifecycle::Unregistered,
+                "can_approve":matches!(policy.status,Lifecycle::Pending|Lifecycle::Inactive),
+                "can_deactivate":policy.status==Lifecycle::Active,
+                "allow_pool":policy.allow_pool && host.quantization_pool,"pool_ceiling":host.quantization_pool,
+                "runtimes":runtimes}));
+        }
+        let mut query =
+            db.prepare("SELECT id,at_ms,body,outcome FROM admin_audit ORDER BY id DESC LIMIT 50")?;
+        let mut cursor = query.query([])?;
+        let mut audit = Vec::new();
+        while let Some(row) = cursor.next()? {
+            let mut v: Value = serde_json::from_str(&row.get::<_, String>(2)?)?;
+            v["id"] = json!(row.get::<_, i64>(0)?);
+            v["at_ms"] = json!(row.get::<_, i64>(1)?);
+            v["outcome"] = json!(row.get::<_, String>(3)?);
+            audit.push(v);
+        }
+        Ok(json!({"workers":workers,"audit":audit,"unavailable":{
+            "install_runtime": self.runtime_helper.is_none().then_some(INSTALL_UNAVAILABLE),
+            "host_provisioning":PROVISION_UNAVAILABLE,"resource_controls":POLICY_UNAVAILABLE
+        }}))
+    }
+}
+
+fn enabled(policy: &Policy, id: &str, runtime: &Runtime) -> bool {
+    runtime
+        .sha256
+        .as_ref()
+        .is_some_and(|sha| policy.enabled.get(id) == Some(sha))
+}
+
+fn policy(db: &Connection, host: &Host, entry: &Worker) -> Result<Policy, Error> {
+    let mut query = db.prepare("SELECT alias,body FROM admin_policy WHERE worker=?")?;
+    let mut rows = query.query([&host.id])?;
+    if let Some(row) = rows.next()? {
+        let alias: String = row.get(0)?;
+        if alias != entry.binding {
+            return Err("admin catalog alias changed; operator reconciliation required".into());
+        }
+        return Ok(serde_json::from_str(&row.get::<_, String>(1)?)?);
+    }
+    Ok(Policy {
+        status: if entry.initially_active {
+            Lifecycle::Active
+        } else {
+            Lifecycle::Unregistered
+        },
+        allow_pool: host.quantization_pool,
+        installed: BTreeMap::new(),
+        enabled: BTreeMap::new(),
+    })
+}
+
+pub fn router() -> Router<Arc<App>> {
+    Router::new().route("/admin/state", get(state)).route(
+        "/admin/actions",
+        post(change).layer(DefaultBodyLimit::max(4096)),
+    )
+}
+
+fn authorize<'a>(app: &'a App, headers: &HeaderMap) -> ApiResult<&'a Admin> {
+    let admin = app
+        .admin
+        .as_ref()
+        .filter(|a| a.key.is_some())
+        .ok_or(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Infrastructure administration is not configured",
+        ))?;
+    if !admin.authorized(headers) {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Infrastructure admin key required",
+        ));
+    }
+    Ok(admin)
+}
+
+async fn state(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    authorize(&app, &headers)?
+        .view(&app.hosts)
+        .map(Json)
+        .map_err(ApiError::storage)
+}
+
+async fn change(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    action: Result<Json<Action>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    authorize(&app, &headers)?;
+    let Json(action) =
+        action.map_err(|_| ApiError(StatusCode::BAD_REQUEST, "Invalid administration action"))?;
+    // Keep an accepted management action scoped to the controller, not to the
+    // browser connection. A disconnect cannot cause two helpers to overlap.
+    tokio::spawn(apply(app, action))
+        .await
+        .map_err(ApiError::storage)?
+}
+
+async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
+    let admin = app.admin.as_ref().expect("authorized admin");
+    let _permit = admin.changes.try_acquire().map_err(|_| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Another administration action is in progress",
+        )
+    })?;
+    let id = action.worker();
+    let entry = admin
+        .catalog
+        .workers
+        .get(id)
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "Unknown catalog worker"))?;
+    let host = app
+        .hosts
+        .iter()
+        .find(|h| h.id == id)
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "Unknown catalog worker"))?;
+    let mut p = {
+        let db = admin.db.lock().map_err(ApiError::storage)?;
+        policy(&db, host, entry).map_err(ApiError::storage)?
+    };
+    match &action {
+        Action::Enroll { .. } if p.status == Lifecycle::Unregistered => {
+            p.status = Lifecycle::Pending
+        }
+        Action::Approve { .. } if matches!(p.status, Lifecycle::Pending | Lifecycle::Inactive) => {
+            let reply = external(
+                &admin.command,
+                &["suggest-paths", id],
+                Some(b"{\"prefix\":\"\"}"),
+                Duration::from_secs(8),
+            )
+            .await;
+            if !reply.is_some_and(|v| {
+                v["items"].as_array().is_some_and(|a| a.len() <= 32) && v["truncated"].is_boolean()
+            }) {
+                return Err(ApiError::conflict(
+                    "Worker did not pass its configured transport readiness probe",
+                ));
+            }
+            p.status = Lifecycle::Active;
+        }
+        Action::Deactivate { .. } if p.status == Lifecycle::Active => {
+            p.status = Lifecycle::Inactive
+        }
+        Action::SetResourcePolicy { allow_pool, .. } => {
+            if *allow_pool && !host.quantization_pool {
+                return Err(ApiError::conflict(
+                    "Requested policy exceeds the configured pool ceiling",
+                ));
+            }
+            p.allow_pool = *allow_pool;
+        }
+        Action::EnableRuntime { runtime, .. }
+        | Action::DisableRuntime { runtime, .. }
+        | Action::InstallRuntime { runtime, .. } => {
+            let definition = entry
+                .runtimes
+                .get(runtime)
+                .ok_or(ApiError(StatusCode::NOT_FOUND, "Unknown catalog runtime"))?;
+            match &action {
+                Action::DisableRuntime { .. } => {
+                    p.enabled.remove(runtime);
+                }
+                _ => {
+                    let (helper, sha) = admin
+                        .runtime_helper
+                        .as_ref()
+                        .zip(definition.sha256.as_deref())
+                        .ok_or(ApiError::conflict(INSTALL_UNAVAILABLE))?;
+                    if matches!(&action, Action::InstallRuntime { .. }) {
+                        if !matches!(p.status, Lifecycle::Inactive | Lifecycle::Pending)
+                            || worker_busy(&app, id)?
+                        {
+                            return Err(ApiError::conflict(
+                                "Enroll the worker or deactivate it and wait for its existing jobs to finish before installing",
+                            ));
+                        }
+                        // Record an attempt before giving side effects to the helper.
+                        admin.record(&action, None, "started")?;
+                        if !helper_digest(helper, "install-pinned", id, runtime, sha).await
+                            || !helper_digest(helper, "probe-installed", id, runtime, sha).await
+                        {
+                            admin.record(&action, None, "failed")?;
+                            return Err(ApiError::conflict(
+                                "Runtime installation could not be verified",
+                            ));
+                        }
+                        p.installed.insert(runtime.clone(), sha.into());
+                    } else {
+                        if !helper_digest(helper, "probe-installed", id, runtime, sha).await {
+                            return Err(ApiError::conflict(
+                                "The pinned runtime is not installed or cannot be verified",
+                            ));
+                        }
+                        p.installed.insert(runtime.clone(), sha.into());
+                        p.enabled.insert(runtime.clone(), sha.into());
+                    }
+                }
+            }
+        }
+        _ => {
+            return Err(ApiError::conflict(
+                "Worker state does not allow this action",
+            ));
+        }
+    }
+    // The queue takes this lock before evaluating effective policy; already
+    // allocated work remains tracked for draining.
+    {
+        let _store = app.store.lock().map_err(ApiError::storage)?;
+        admin.record(&action, Some((&entry.binding, &p)), "applied")?;
+    }
+    admin.view(&app.hosts).map(Json).map_err(ApiError::storage)
+}
+
+impl Admin {
+    fn record(
+        &self,
+        action: &Action,
+        policy: Option<(&str, &Policy)>,
+        outcome: &str,
+    ) -> ApiResult<()> {
+        let mut db = self.db.lock().map_err(ApiError::storage)?;
+        let tx = db.transaction().map_err(ApiError::storage)?;
+        if let Some((alias, p)) = policy {
+            tx.execute("INSERT INTO admin_policy(worker,alias,body) VALUES(?,?,?) ON CONFLICT(worker) DO UPDATE SET alias=excluded.alias,body=excluded.body",
+                params![action.worker(),alias,serde_json::to_string(p).map_err(ApiError::storage)?]).map_err(ApiError::storage)?;
+        }
+        let at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        tx.execute(
+            "INSERT INTO admin_audit(at_ms,body,outcome) VALUES(?,?,?)",
+            params![
+                at,
+                serde_json::to_string(action).map_err(ApiError::storage)?,
+                outcome
+            ],
+        )
+        .map_err(ApiError::storage)?;
+        tx.commit().map_err(ApiError::storage)
+    }
+}
+
+fn worker_busy(app: &App, id: &str) -> ApiResult<bool> {
+    let store = app.store.lock().map_err(ApiError::storage)?;
+    for job in store
+        .by_state(JobState::Running)
+        .map_err(ApiError::storage)?
+    {
+        if job.host == id
+            || store
+                .envelope(&job.id)
+                .map_err(ApiError::storage)?
+                .inputs
+                .iter()
+                .any(|i| i.host == id)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn helper_digest(helper: &Path, verb: &str, worker: &str, runtime: &str, sha: &str) -> bool {
+    external(
+        helper,
+        &[verb, worker, runtime, sha],
+        None,
+        Duration::from_secs(30),
+    )
+    .await
+    .is_some_and(|v| {
+        v.as_object().is_some_and(|o| o.len() == 1) && v["sha256"].as_str() == Some(sha)
+    })
+}
+
+async fn external(
+    path: &Path,
+    args: &[&str],
+    payload: Option<&[u8]>,
+    limit: Duration,
+) -> Option<Value> {
+    let mut child = Command::new(path)
+        .args(args)
+        .stdin(if payload.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    let output = child.stdout.take()?;
+    let stdin = child.stdin.take();
+    let (bytes, status) = timeout(limit, async {
+        let write = async {
+            if let Some((mut stdin, payload)) = stdin.zip(payload) {
+                stdin.write_all(payload).await?;
+            }
+            Ok::<_, std::io::Error>(())
+        };
+        let (_, bytes, status) = tokio::try_join!(write, read_limited(output, 4096), child.wait())?;
+        Ok::<_, std::io::Error>((bytes, status))
+    })
+    .await
+    .ok()?
+    .ok()?;
+    if !status.success() {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}

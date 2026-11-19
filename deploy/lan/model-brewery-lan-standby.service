@@ -1,0 +1,22 @@
+[Unit]
+Description=Model Brewery loopback controller after the qualification workflow exits
+ConditionPathIsMountPoint=/mnt/games
+ConditionPathExists=/mnt/games/model-brewery/local-sm120/dispatch.json
+
+[Service]
+WorkingDirectory=%h/Projects/model-brewery
+Environment=BREWERY_DATA=/mnt/games/model-brewery/local-sm120/controller
+Environment=BREWERY_LISTEN=127.0.0.1:4141
+Environment=BREWERY_DISPATCH=/mnt/games/model-brewery/local-sm120/bin/brewery-dispatch
+Environment=BREWERY_DISPATCH_CONFIG=/mnt/games/model-brewery/local-sm120/dispatch.json
+Environment=BREWERY_WEB_DIST=%h/Projects/model-brewery/web/dist
+# Preserve the qualification worker's disk headroom and GPU admission policy.
+Environment=BREWERY_SM120_REQUIRED_DISK=260000000000
+Environment=BREWERY_DISPATCH_TIMEOUT_SECS=21600
+ExecStart=/usr/bin/flock --exclusive --no-fork /mnt/games/model-brewery/local-sm120/workflow.lock %h/.local/lib/model-brewery/lan-controller
+UMask=0077
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

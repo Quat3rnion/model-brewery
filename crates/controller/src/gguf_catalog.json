@@ -1,0 +1,347 @@
+{
+  "schema": 1,
+  "format": "gguf",
+  "encoder_revision": "184f6536024668e8908ab8c86033d56708e62b40",
+  "default_preset": "Q4_K_M",
+  "presets": [
+    {
+      "id": "Q1_0",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q2_0",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q4_0",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q4_1",
+      "requires_imatrix": false
+    },
+    {
+      "id": "MXFP4_MOE",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q5_0",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q5_1",
+      "requires_imatrix": false
+    },
+    {
+      "id": "IQ2_XXS",
+      "requires_imatrix": true
+    },
+    {
+      "id": "IQ2_XS",
+      "requires_imatrix": true
+    },
+    {
+      "id": "IQ2_S",
+      "requires_imatrix": true
+    },
+    {
+      "id": "IQ2_M",
+      "requires_imatrix": true
+    },
+    {
+      "id": "IQ1_S",
+      "requires_imatrix": true
+    },
+    {
+      "id": "IQ1_M",
+      "requires_imatrix": true
+    },
+    {
+      "id": "TQ1_0",
+      "requires_imatrix": false
+    },
+    {
+      "id": "TQ2_0",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q2_K",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q2_K_S",
+      "requires_imatrix": true
+    },
+    {
+      "id": "IQ3_XXS",
+      "requires_imatrix": true
+    },
+    {
+      "id": "IQ3_S",
+      "requires_imatrix": false
+    },
+    {
+      "id": "IQ3_M",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q3_K",
+      "requires_imatrix": false
+    },
+    {
+      "id": "IQ3_XS",
+      "requires_imatrix": true
+    },
+    {
+      "id": "Q3_K_S",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q3_K_M",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q3_K_L",
+      "requires_imatrix": false
+    },
+    {
+      "id": "IQ4_NL",
+      "requires_imatrix": false
+    },
+    {
+      "id": "IQ4_XS",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q4_K",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q4_K_S",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q4_K_M",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q5_K",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q5_K_S",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q5_K_M",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q6_K",
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q8_0",
+      "requires_imatrix": false
+    },
+    {
+      "id": "F16",
+      "requires_imatrix": false
+    },
+    {
+      "id": "BF16",
+      "requires_imatrix": false
+    }
+  ],
+  "tensor_types": [
+    {
+      "id": "BF16",
+      "type_id": 30,
+      "block_size": 1,
+      "block_bytes": 2,
+      "requires_imatrix": false
+    },
+    {
+      "id": "F16",
+      "type_id": 1,
+      "block_size": 1,
+      "block_bytes": 2,
+      "requires_imatrix": false
+    },
+    {
+      "id": "IQ1_M",
+      "type_id": 29,
+      "block_size": 256,
+      "block_bytes": 56,
+      "requires_imatrix": true
+    },
+    {
+      "id": "IQ1_S",
+      "type_id": 19,
+      "block_size": 256,
+      "block_bytes": 50,
+      "requires_imatrix": true
+    },
+    {
+      "id": "IQ2_S",
+      "type_id": 22,
+      "block_size": 256,
+      "block_bytes": 82,
+      "requires_imatrix": true
+    },
+    {
+      "id": "IQ2_XS",
+      "type_id": 17,
+      "block_size": 256,
+      "block_bytes": 74,
+      "requires_imatrix": true
+    },
+    {
+      "id": "IQ2_XXS",
+      "type_id": 16,
+      "block_size": 256,
+      "block_bytes": 66,
+      "requires_imatrix": true
+    },
+    {
+      "id": "IQ3_S",
+      "type_id": 21,
+      "block_size": 256,
+      "block_bytes": 110,
+      "requires_imatrix": false
+    },
+    {
+      "id": "IQ3_XXS",
+      "type_id": 18,
+      "block_size": 256,
+      "block_bytes": 98,
+      "requires_imatrix": true
+    },
+    {
+      "id": "IQ4_NL",
+      "type_id": 20,
+      "block_size": 32,
+      "block_bytes": 18,
+      "requires_imatrix": false
+    },
+    {
+      "id": "IQ4_XS",
+      "type_id": 23,
+      "block_size": 256,
+      "block_bytes": 136,
+      "requires_imatrix": false
+    },
+    {
+      "id": "MXFP4",
+      "type_id": 39,
+      "block_size": 32,
+      "block_bytes": 17,
+      "requires_imatrix": false
+    },
+    {
+      "id": "NVFP4",
+      "type_id": 40,
+      "block_size": 64,
+      "block_bytes": 36,
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q1_0",
+      "type_id": 41,
+      "block_size": 128,
+      "block_bytes": 18,
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q2_0",
+      "type_id": 42,
+      "block_size": 64,
+      "block_bytes": 18,
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q2_K",
+      "type_id": 10,
+      "block_size": 256,
+      "block_bytes": 84,
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q3_K",
+      "type_id": 11,
+      "block_size": 256,
+      "block_bytes": 110,
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q4_0",
+      "type_id": 2,
+      "block_size": 32,
+      "block_bytes": 18,
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q4_1",
+      "type_id": 3,
+      "block_size": 32,
+      "block_bytes": 20,
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q4_K",
+      "type_id": 12,
+      "block_size": 256,
+      "block_bytes": 144,
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q5_0",
+      "type_id": 6,
+      "block_size": 32,
+      "block_bytes": 22,
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q5_1",
+      "type_id": 7,
+      "block_size": 32,
+      "block_bytes": 24,
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q5_K",
+      "type_id": 13,
+      "block_size": 256,
+      "block_bytes": 176,
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q6_K",
+      "type_id": 14,
+      "block_size": 256,
+      "block_bytes": 210,
+      "requires_imatrix": false
+    },
+    {
+      "id": "Q8_0",
+      "type_id": 8,
+      "block_size": 32,
+      "block_bytes": 34,
+      "requires_imatrix": false
+    },
+    {
+      "id": "TQ1_0",
+      "type_id": 34,
+      "block_size": 256,
+      "block_bytes": 54,
+      "requires_imatrix": false
+    },
+    {
+      "id": "TQ2_0",
+      "type_id": 35,
+      "block_size": 256,
+      "block_bytes": 66,
+      "requires_imatrix": false
+    }
+  ]
+}

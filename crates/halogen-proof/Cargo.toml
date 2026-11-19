@@ -1,0 +1,13 @@
+[package]
+name = "halogen-proof"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+brewery-hash-pool = { path = "../hash-pool" }
+libc = "0.2.191"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.10.9"
+tempfile = "3.27.0"

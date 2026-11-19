@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "prefill": [1, 2, 3],
+  "decode": [4, 5],
+  "models": [
+    {
+      "kind": "dense",
+      "file": "Qwen3.5-4B-Q4_K_M.gguf",
+      "bytes": 2740937888,
+      "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"
+    },
+    {
+      "kind": "moe",
+      "file": "granite-3.1-1b-a400m-instruct-Q4_K_M.gguf",
+      "source": "lmstudio-community/granite-3.1-1b-a400m-instruct-GGUF",
+      "revision": "20c8444f497d3470eb373d8978159d9e2acfc38f",
+      "bytes": 821847040,
+      "sha256": "4cb8e715a6ceb16d402b897e3de825e5600f4a2b07b04891deae332b327e0071"
+    }
+  ]
+}

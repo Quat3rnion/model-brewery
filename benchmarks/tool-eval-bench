@@ -1,0 +1,53 @@
+#!/usr/bin/env -S python3 -EBs
+"""Tool-eval-bench's deterministic specialist-routing fixture subset."""
+
+import importlib.metadata
+
+from _adapter import AdapterError, main, metric, run_cli
+
+NAME, VERSION, PROTOCOL = "tool-eval-bench", "3.0.0", "tool-eval-safe-v1"
+SCENARIOS = ("TC-01", "TC-02", "TC-04")
+# Accept only measured model outcomes; reject infrastructure/evaluator errors,
+# unknown failure kinds, exclusions or a partially scored scenario set.
+QUALITY_FAILURES = {
+    None, "wrong_tool", "wrong_args", "missing_step", "forbidden_action",
+    "budget_exceeded", "repeated_call_loop", "reasoning_truncated", "partial",
+}
+
+
+def run(base, model):
+    # The upstream CLI unconditionally tries dotenv discovery. Require the
+    # dependencies verified to honor PYTHON_DOTENV_DISABLED and not follow
+    # HTTP redirects, rather than accepting earlier or future defaults.
+    for dependency, version in (("python-dotenv", "1.2.4"), ("httpx", "0.28.1")):
+        try:
+            if importlib.metadata.version(dependency) == version:
+                continue
+        except importlib.metadata.PackageNotFoundError:
+            pass
+        raise AdapterError(f"install {dependency}=={version} in the adapter Python environment")
+    data = run_cli(NAME, VERSION, [
+        "run", f"--base-url={base}", f"--model={model}", "--format=openai",
+        "--scenarios", *SCENARIOS, "--no-warmup", "--no-preflight",
+        "--no-probe-engine", "--timeout=45", "--max-turns=4",
+        "--json-file=raw.json", "--output-dir=runs",
+    ])
+    scores = data["scores"]
+    results = scores["scenario_results"]
+    if (len(results) != len(SCENARIOS)
+            or {r["scenario_id"] for r in results} != set(SCENARIOS)
+            or scores.get("excluded_scenarios")
+            or scores["max_points"] != 2 * len(SCENARIOS)
+            or any(r.get("failure_kind") not in QUALITY_FAILURES for r in results)):
+        raise AdapterError("upstream did not score all fixed mock scenarios")
+    points = {"fail": 0, "partial": 1, "pass": 2}
+    if (any(points.get(r["status"]) != r["points"] for r in results)
+            or scores["total_points"] != sum(r["points"] for r in results)):
+        raise AdapterError("invalid scenario points in upstream report")
+    return {"metrics": [metric("mock_tool_subset_score",
+                               scores["final_score"], "%", "higher")],
+            "samples": len(results)}
+
+
+if __name__ == "__main__":
+    main(NAME, VERSION, PROTOCOL, run)

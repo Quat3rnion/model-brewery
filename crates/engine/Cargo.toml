@@ -1,0 +1,17 @@
+[package]
+name = "brewery-engine"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+brewery-hash-pool = { path = "../hash-pool" }
+brewery-worker = { path = "../worker" }
+anyhow = "1.0"
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+sha1 = "0.10"
+tempfile = "3.27"
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }

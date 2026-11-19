@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""JSON/JSONL client for an operator's loopback Model Brewery controller."""
+import argparse
+import ipaddress
+import json
+import re
+import sys
+import time
+from http.client import HTTPException
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from uuid import UUID
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args):
+        return None
+
+
+def loopback(value):
+    try:
+        u = urlsplit(value)
+        if (u.scheme == "http" and u.port and u.path in ("", "/") and not u.query and not u.fragment
+                and u.username is None and u.password is None and "%" not in u.netloc
+                and ipaddress.ip_address(u.hostname).is_loopback):
+            return f"http://{u.netloc}"
+    except (ValueError, TypeError):
+        pass
+    raise argparse.ArgumentTypeError("expected a numeric loopback HTTP URL with an explicit port")
+
+
+def uuid(value):
+    try:
+        if str(UUID(value)) == value:
+            return value
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("expected a controller UUID")
+
+
+def bounded(reader, limit):
+    data = reader.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("input or response exceeds client byte limit")
+    return data
+
+
+def sse(response, cursor, limit):
+    # The Brewery feed sends one JSON object per frame; comments are keepalives.
+    remaining = limit
+    while True:
+        fields = {}
+        frame_size = 0
+        while True:
+            line = response.readline(8193)
+            if not line or len(line) > 8192 or not line.endswith(b"\n"):
+                raise ValueError("event stream ended or exceeded its bound; resume from last processed ID")
+            line = line.rstrip(b"\r\n")
+            if not line:
+                break
+            if line.startswith(b":"):
+                continue
+            frame_size += len(line)
+            if frame_size > 16384:
+                raise ValueError("event frame exceeds limit")
+            key, _, val = line.decode().partition(":")
+            if key in ("id", "event", "data"):
+                if key in fields:
+                    raise ValueError("repeated field in controller event")
+                fields[key] = val.removeprefix(" ")
+        if not fields:
+            continue
+        kind = fields.get("event")
+        data = json.loads(fields["data"])
+        if not isinstance(data, dict):
+            raise ValueError("invalid event payload")
+        if kind == "resync":
+            print(json.dumps({"event": kind, "data": data}), flush=True)
+            return 3
+        ident = data.get("id")
+        if (kind != "change" or type(ident) is not int or fields.get("id") != str(ident)
+                or ident <= cursor):
+            raise ValueError("invalid change event or cursor ordering")
+        print(json.dumps({"id": ident, "event": kind, "data": data}), flush=True)
+        cursor = ident
+        if remaining is not None:
+            remaining -= 1
+            if remaining == 0:
+                return 0
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--url", type=loopback, default="http://127.0.0.1:4141")
+    verbs = p.add_subparsers(dest="cmd", required=True)
+    for cmd in ["describe", "state", "job", "progress", "cancel", "forget-model",
+                "conversions", "conversion", "cancel-conversion"]:
+        sub = verbs.add_parser(cmd)
+        if cmd not in ("describe", "state", "conversions"):
+            sub.add_argument("id", type=uuid)
+    sub = verbs.add_parser("create", help="create once or recover the ID with the original request and key")
+    sub.add_argument("resource", choices=["models", "prompts", "jobs", "conversions"])
+    sub.add_argument("--key", required=True)
+    sub.add_argument("--file", type=Path, help="request JSON (default: stdin)")
+    sub = verbs.add_parser("wait", help="poll one known ID until terminal; never cancels the job")
+    sub.add_argument("id", type=uuid)
+    sub.add_argument("--timeout", type=int, default=300, metavar="SECONDS")
+    sub = verbs.add_parser("paths")
+    sub.add_argument("host")
+    sub.add_argument("prefix")
+    sub = verbs.add_parser("events", help="JSONL changes; exit 3 on resync, 1 on disconnect")
+    sub.add_argument("--after", type=int, required=True, help="snapshot cursor or last processed change")
+    sub.add_argument("--limit", type=int, help="exit successfully after this many changes")
+    a = p.parse_args()
+    cmd = a.cmd
+    method, body, headers = "GET", None, {"Accept": "application/json"}
+    if cmd == "create":
+        if not re.fullmatch(r"[a-zA-Z0-9._-]{1,128}", a.key):
+            p.error("invalid idempotency key")
+        if a.file:
+            with a.file.open("rb") as f:
+                body = bounded(f, 256 << 10)
+        else:
+            body = bounded(sys.stdin.buffer, 256 << 10)
+        if not isinstance(json.loads(body), dict):
+            raise ValueError("expected JSON object")
+        route, method = a.resource, "POST"
+        headers["Idempotency-Key"] = a.key
+    elif cmd == "events":
+        if not 0 <= a.after < 2**63 or (a.limit is not None and a.limit < 1):
+            p.error("invalid event cursor or limit")
+        route = f"events?after={a.after}"
+        headers["Accept"] = "text/event-stream"
+    elif cmd == "paths":
+        route, method, body = "suggestions/paths", "POST", json.dumps(dict(host=a.host, prefix=a.prefix)).encode()
+    elif cmd == "cancel":
+        route, method, body = f"jobs/{a.id}/cancel", "POST", b"{}"
+    elif cmd == "cancel-conversion":
+        route, method, body = f"conversions/{a.id}/cancel", "POST", b"{}"
+    elif cmd == "conversion":
+        route = f"conversions/{a.id}"
+    elif cmd == "conversions":
+        route = "conversions"
+    elif cmd == "forget-model":
+        route, method = f"models/{a.id}", "DELETE"
+    elif cmd in ("job", "wait", "progress"):
+        route = f"jobs/{a.id}"
+    else:
+        route = {"state": "state", "describe": "openapi.json"}[cmd]
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    req = Request(f"{a.url}/api/{route}", data=body, method=method, headers=headers)
+    # Never forward model paths, prompts or mutation keys through a proxy/redirect.
+    opener = build_opener(ProxyHandler({}), NoRedirect())
+    try:
+        if cmd == "wait":
+            if not 1 <= a.timeout <= 604800:
+                p.error("--timeout must be 1..604800 seconds")
+            deadline = time.monotonic() + a.timeout
+            delay = .5
+            while (left := deadline - time.monotonic()) > 0:
+                try:
+                    with opener.open(req, timeout=min(10, left)) as r:
+                        if r.headers.get_content_type() != "application/json":
+                            raise ValueError("expected controller JSON")
+                        detail = json.loads(bounded(r, 64 << 20))
+                    if not isinstance(detail, dict) or detail.get("id") != a.id:
+                        raise ValueError("wrong job detail")
+                    state = detail.get("state")
+                    if state in ("succeeded", "failed", "cancelled"):
+                        print(json.dumps(detail, separators=(",", ":")))
+                        return 0 if state == "succeeded" else 4
+                    if state not in ("queued", "running"):
+                        raise ValueError("unexpected job state")
+                except HTTPError as e:
+                    if e.code not in (429, 502, 503, 504):
+                        raise
+                    e.close()
+                except (URLError, TimeoutError, ConnectionError, HTTPException):
+                    pass  # Safe to retry this read, never a new submission.
+                time.sleep(min(delay, max(0, deadline - time.monotonic())))
+                delay = min(5, delay * 2)
+            print(json.dumps({"id": a.id, "error": "wait timed out; no cancellation requested"}), file=sys.stderr)
+            return 5
+        with opener.open(req, timeout=35) as response:
+            if cmd == "events":
+                if response.headers.get_content_type() != "text/event-stream":
+                    raise ValueError("expected a controller event stream")
+                return sse(response, a.after, a.limit)
+            if response.status == 204:
+                print("null")
+            else:
+                if response.headers.get_content_type() != "application/json":
+                    raise ValueError("expected a controller JSON response")
+                data = json.loads(bounded(response, 64 << 20))
+                if cmd == "progress":
+                    if not isinstance(data, dict) or data.get("id") != a.id:
+                        raise ValueError("wrong job detail")
+                    detail = None
+                    source = None
+                    if data["state"] == "running" and not data.get("cancel_requested"):
+                        detail = data.get("progress_detail")
+                        if detail is not None:
+                            source = "worker"
+                        else:
+                            try:
+                                with opener.open(a.url + "/live-progress/current.json", timeout=3) as live:
+                                    observation = json.loads(bounded(live, 8192))
+                                if (isinstance(observation, dict)
+                                        and observation.get("schema") == "brewery-live-progress-v1"
+                                        and observation.get("job_id") == a.id
+                                        and type(observation.get("observed_at_ms")) is int
+                                        and -5000 <= time.time_ns() // 1_000_000 - observation["observed_at_ms"] < 60_000
+                                        and isinstance(observation.get("progress_detail"), dict)):
+                                    detail = observation["progress_detail"]
+                                    source = "legacy_observer"
+                            except HTTPError as exc:
+                                exc.close()
+                            except (OSError, HTTPException, ValueError):
+                                pass
+                    data = {"id": a.id, "state": data["state"], "progress": data.get("progress"),
+                            "progress_detail": detail, "source": source}
+                print(json.dumps(data, separators=(",", ":")))
+    except HTTPError as error:
+        with error:
+            raw = error.read(8192)
+        try:
+            message = json.loads(raw)["error"]
+        except (ValueError, KeyError, TypeError):
+            message = "controller request failed"
+        print(json.dumps({"status": error.code, "error": message}), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, HTTPException, ValueError, KeyError, RecursionError) as error:
+        print(json.dumps({"error": str(error)}), file=sys.stderr)
+        sys.exit(1)

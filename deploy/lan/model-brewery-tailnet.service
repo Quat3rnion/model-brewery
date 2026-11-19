@@ -1,0 +1,19 @@
+[Unit]
+Description=Model Brewery authenticated Tailscale HTTPS
+Requires=model-brewery-lan-bridge.service
+After=model-brewery-lan-bridge.service network-online.target
+
+[Service]
+WorkingDirectory=%h/.local/state/model-brewery-lan
+Environment=BREWERY_UPSTREAM_SOCKET=%t/model-brewery-lan/upstream.sock
+EnvironmentFile=%h/.config/model-brewery/tailnet.env
+Environment=BREWERY_TLS_CERT=tls/tailnet.crt
+Environment=BREWERY_TLS_KEY=tls/tailnet.key
+ExecStart=%h/.local/lib/model-brewery/caddy run --config Caddyfile --adapter caddyfile
+UMask=0077
+NoNewPrivileges=true
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

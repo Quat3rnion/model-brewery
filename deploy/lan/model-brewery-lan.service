@@ -1,0 +1,16 @@
+[Unit]
+Description=Model Brewery authenticated LAN HTTPS
+Requires=model-brewery-lan-bridge.service
+After=model-brewery-lan-bridge.service network-online.target
+
+[Service]
+WorkingDirectory=%h/.local/state/model-brewery-lan
+Environment=BREWERY_UPSTREAM_SOCKET=%t/model-brewery-lan/upstream.sock
+ExecStart=%h/.local/lib/model-brewery/caddy run --config Caddyfile --adapter caddyfile
+UMask=0077
+NoNewPrivileges=true
+Restart=on-failure
+RestartSec=4
+
+[Install]
+WantedBy=default.target

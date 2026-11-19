@@ -1,0 +1,1633 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Model Brewery Controller",
+    "version": "0.1.0",
+    "description": "A loopback-only API for the Brewery workbench. Start with getState to discover configured workers, their capabilities, registered inputs, and saved prompts. The controller queues only the workflows described here. To convert a model, use createConversion: one request runs inspect, plan, convert and verify. Use createJob with one conversion kind only for a single diagnostic stage. Neither route qualifies a release. Worker and SSH configuration is operator-owned; there is no API for editing it, running shell commands, or reading arbitrary files or the private controller data directory. Two narrow exceptions exist. putSettings saves benchmark and evaluation settings for a worker that the operator enrolled; it accepts only approved ports, approved suites and loopback endpoints. applyAdminAction changes the lifecycle policy of catalog workers and needs the admin key; it installs no worker and changes no SSH trust. Artifact paths in job results are worker-side references, not download URLs.\n\nSend a single Host header for the actual loopback listen address/port or localhost on that port. If sent, Origin must be the matching http origin and Sec-Fetch-Site must be same-origin or none. Non-browser POST clients must send Content-Type: application/json, including for the bodyless cancel action. Unrecognized API paths or methods return a JSON error with status 404 or 405. The router also handles HEAD for GET paths with no response body, except that HEAD on the event stream returns 405."
+  },
+  "servers": [
+    {"url": "http://127.0.0.1:{port}", "description": "Default numeric loopback listener", "variables": {"port": {"default": "4141"}}},
+    {"url": "http://localhost:{port}", "description": "Use when localhost resolves to the controller listener", "variables": {"port": {"default": "4141"}}},
+    {"url": "http://[::1]:{port}", "description": "When configured to listen on IPv6 loopback", "variables": {"port": {"default": "4141"}}}
+  ],
+  "x-brewery-local-tools": [
+    {"id": "scorecard", "path": "tools/export-scorecard", "scope": "Local CLI that exports a scorecard from saved job detail JSON. It does not qualify a release.", "httpExecution": false},
+    {"id": "sharded-conversion", "path": "qualification/distributed_conversion.py", "scope": "Operator-run CLI for local shard planning and distributed conversion orchestration. Not a controller job or an API to edit dispatch configuration.", "httpExecution": false},
+    {"id": "release-check", "path": "qualification/release_check.py", "scope": "Local CLI for checking saved release evidence. No HTTP execution or deployment.", "httpExecution": false},
+    {"id": "expert-usage", "path": "qualification/expert_usage.py", "scope": "Local CLI that reads saved replay traces and creates a calibration-page report.", "httpExecution": false},
+    {"id": "profile-preview", "path": "qualification/profile_preview.py", "scope": "Local CLI that creates a profile preview report, not a runnable profile.", "httpExecution": false},
+    {"id": "halogen-speculation", "path": "qualification/halogen_speculation.py", "scope": "Local CLI that reads saved evidence and creates a speculation report.", "httpExecution": false},
+    {"id": "build-diff", "path": "qualification/build_diff.py", "scope": "Compare two successful conversion job exports by source, profile, recorded file hashes and size.", "httpExecution": false},
+    {"id": "paired-quality", "path": "qualification/paired_quality.py", "scope": "Validate two prediction artifacts and compare paired outcomes under the pinned GSM8K protocol.", "httpExecution": false}
+  ],
+  "paths": {
+    "/api/openapi.json": {
+      "get": {
+        "operationId": "getOpenApi",
+        "summary": "Read this OpenAPI contract",
+        "responses": {
+          "200": {
+            "description": "The OpenAPI 3.1 document embedded in the controller.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DiscoveryDocument"}}}
+          },
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/state": {
+      "get": {
+        "operationId": "getState",
+        "summary": "Read the workbench snapshot and change cursor",
+        "description": "Use hosts and their capabilities, configured baseline source IDs, benchmark targets and suites to construct requests. The jobs list contains summaries, not result objects. Pass event_cursor to streamEvents to follow changes after this snapshot.",
+        "responses": {
+          "200": {
+            "description": "Current workbench state, including the cursor at the snapshot.",
+            "content": {"application/json": {
+              "schema": {"$ref": "#/components/schemas/WorkbenchState"},
+              "example": {"hosts": [], "models": [], "prompts": [], "jobs": [], "event_cursor": 0, "capabilities": {
+                "compare": false, "inspect": false, "plan": false, "convert": false, "verify": false, "generate": false,
+                "evaluate": false, "baseline": false, "benchmark": false, "transfer": false, "transfer_preview": false, "cache_cleanup": false
+              }}
+            }}
+          },
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/events": {
+      "get": {
+        "operationId": "streamEvents",
+        "summary": "Follow controller changes with Server-Sent Events",
+        "description": "Open this stream with after set to a getState snapshot's event_cursor, or reconnect with Last-Event-ID set to the last change ID processed. An explicit Last-Event-ID takes precedence over after. The cursor is exclusive: first replay retained changes with ID greater than the cursor, then stream new changes. If neither parameter is supplied, start live at the current cursor. The controller retains up to 1024 changes. A stale or ahead cursor gets a resync event with no ID and then the stream closes; fetch getState again and reconnect with its cursor. Treat change events as invalidation notices and use the normal read endpoints for data. Comment heartbeats every 15 seconds carry no event ID or data.",
+        "parameters": [
+          {"name": "after", "in": "query", "description": "Exclusive cursor as nonnegative decimal digits, within the signed 64-bit range.", "schema": {"$ref": "#/components/schemas/EventCursor"}, "example": 12},
+          {"name": "Last-Event-ID", "in": "header", "description": "Single exclusive cursor. Decimal digits only; must fit in a nonnegative signed 64-bit integer. Takes precedence over after.", "schema": {"type": "string", "pattern": "^[0-9]+$"}, "example": "12"}
+        ],
+        "responses": {
+          "200": {
+            "description": "UTF-8 SSE stream. A change event has a decimal id field and JSON data; resync has JSON data and no id field.",
+            "content": {"text/event-stream": {
+              "schema": {"type": "string"},
+              "x-brewery-sse-events": {
+                "change": {"$ref": "#/components/schemas/ChangeEvent"},
+                "resync": {"$ref": "#/components/schemas/ResyncEvent"}
+              },
+              "examples": {
+                "change": {"value": "event: change\nid: 13\ndata: {\"id\":13,\"kind\":\"job.updated\",\"entity_id\":\"ed205d69-459b-4088-b750-8cdaec2a9bf7\",\"state\":\"running\"}\n\n"},
+                "resync": {"value": "event: resync\ndata: {\"reason\":\"stale\",\"event_cursor\":42}\n\n"}
+              }
+            }}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "500": {"$ref": "#/components/responses/StorageError"},
+          "503": {
+            "description": "All 16 event stream slots are in use. Retry later.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          }
+        }
+      }
+    },
+    "/api/suggestions/paths": {
+      "post": {
+        "operationId": "suggestPaths",
+        "summary": "Suggest paths on a configured worker",
+        "description": "Suggest paths only within worker-configured suggestion roots. This does not read file contents or persist a record, and does not reserve a compute slot.",
+        "requestBody": {
+          "required": true,
+          "x-brewery-max-body-bytes": 32768,
+          "content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/PathQuery"},
+            "example": {"host": "worker-a", "prefix": "/models/"}
+          }}
+        },
+        "responses": {
+          "200": {
+            "description": "Bounded list of matching worker paths. No match may return an empty list.",
+            "content": {"application/json": {
+              "schema": {"$ref": "#/components/schemas/PathSuggestions"},
+              "example": {"items": [{"path": "/models/example.gguf", "kind": "file"}], "truncated": false}
+            }}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "502": {
+            "description": "Worker path suggestions are unavailable or the worker reply is invalid.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "503": {
+            "description": "Both path suggestion slots are busy.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "504": {
+            "description": "The path suggestion request exceeded the three-second deadline.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          }
+        }
+      }
+    },
+    "/api/models": {
+      "post": {
+        "operationId": "createModel",
+        "summary": "Register a worker-side model or input artifact",
+        "description": "Registers metadata only. This does not upload bytes or verify file existence. The controller accepts bf16-checkpoint as an alias and stores the kind as hf.",
+        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
+        "requestBody": {
+          "required": true,
+          "x-brewery-max-body-bytes": 262144,
+          "content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/NewModel"},
+            "example": {"host": "worker-a", "kind": "gguf", "path": "/models/example.gguf"}
+          }}
+        },
+        "responses": {
+          "200": {"$ref": "#/components/responses/CreateReplay"},
+          "201": {
+            "description": "Registered model record.",
+            "content": {"application/json": {
+              "schema": {"$ref": "#/components/schemas/Model"},
+              "example": {"id": "a1314ac4-3570-4549-9111-67b904f8bdad", "name": "example.gguf", "host": "worker-a", "kind": "gguf", "path": "/models/example.gguf"}
+            }}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/CreateConflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/models/{id}": {
+      "delete": {
+        "operationId": "deleteModel",
+        "summary": "Remove a registered model record",
+        "description": "Does not delete files on a worker or change the input snapshots of existing jobs.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "responses": {
+          "204": {"description": "The model record was removed; no response body."},
+          "400": {"$ref": "#/components/responses/InvalidPath"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/prompts": {
+      "post": {
+        "operationId": "createPrompt",
+        "summary": "Save a prompt for later use by ID",
+        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
+        "requestBody": {
+          "required": true,
+          "x-brewery-max-body-bytes": 262144,
+          "content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/NewPrompt"},
+            "example": {"name": "Quick check", "text": "Give one example of a prime number."}
+          }}
+        },
+        "responses": {
+          "200": {"$ref": "#/components/responses/CreateReplay"},
+          "201": {
+            "description": "Saved prompt record.",
+            "content": {"application/json": {
+              "schema": {"$ref": "#/components/schemas/Prompt"},
+              "example": {"id": "0d34320e-39fb-4f35-80f1-d8110af8e763", "name": "Quick check", "text": "Give one example of a prime number."}
+            }}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/CreateConflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/jobs": {
+      "post": {
+        "operationId": "createJob",
+        "summary": "Validate and enqueue a controller workflow",
+        "description": "This operation does not wait for the worker to start or finish. Each input ID must reference a registered model whose host is still configured. Input order matters. Unless required explicitly, host defaults to the first input's host. Only convert accepts auto. Unsupported workflows or the absence of an eligible worker return 409. For a normal conversion, use createConversion. Use inspect, plan, convert and verify here only to run one stage for diagnosis. See the kind-specific schemas for host, prompt and input constraints; the controller checks their values against the live catalog.",
+        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
+        "requestBody": {
+          "required": true,
+          "x-brewery-max-body-bytes": 262144,
+          "content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/NewJob"},
+            "examples": {
+              "plan": {"value": {"kind": "plan", "input_ids": ["a1314ac4-3570-4549-9111-67b904f8bdad"], "options": {"profile": "v2", "threads": 8}}},
+              "benchmark": {"value": {"kind": "benchmark", "host": "worker-a", "options": {"benchmark_target": "reference", "benchmarks": ["mmlu"]}}}
+            }
+          }}
+        },
+        "responses": {
+          "200": {"$ref": "#/components/responses/CreateReplay"},
+          "201": {
+            "description": "Newly queued job summary; use its id with getJob to track progress.",
+            "content": {"application/json": {
+              "schema": {"$ref": "#/components/schemas/Job"},
+              "example": {
+                "id": "ed205d69-459b-4088-b750-8cdaec2a9bf7", "kind": "plan", "host": "worker-a", "pool_slot": false,
+                "state": "queued", "progress": "Waiting for the compute slot", "input_ids": ["a1314ac4-3570-4549-9111-67b904f8bdad"],
+                "options": {"profile": "v2", "threads": 8}, "cancel_requested": false, "has_result": false,
+                "created_at": 1700000000000, "updated_at": 1700000000000
+              }
+            }},
+            "links": {"job": {"operationId": "getJob", "parameters": {"id": "$response.body#/id"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {
+            "description": "The host does not support this job, no eligible worker matches the options, or the idempotency key was previously bound to a different request.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/jobs/{id}": {
+      "get": {
+        "operationId": "getJob",
+        "summary": "Read a job with its lifecycle history and any result",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "responses": {
+          "200": {
+            "description": "Current job, ordered lifecycle events and, if present, the worker's result object.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JobDetail"}}}
+          },
+          "400": {"$ref": "#/components/responses/InvalidPath"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/jobs/{id}/cancel": {
+      "post": {
+        "operationId": "cancelJob",
+        "summary": "Request cancellation of a job",
+        "description": "No body is needed. Send Content-Type: application/json if calling without a same-origin browser signal. A queued job becomes cancelled at once; for a running job this requests worker cancellation and may return while the job is still running. Repeated requests and terminal jobs return the current job.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "responses": {
+          "200": {
+            "description": "Current job summary; cancel_requested and state distinguish a pending request from a terminal state.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}
+          },
+          "400": {"$ref": "#/components/responses/InvalidPath"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "operationId": "getSettings",
+        "summary": "Read the operational settings of every worker",
+        "description": "Returns one entry for each configured worker. A worker that the operator did not enrol for managed settings has managed false, ready false and a reason. The values are the saved settings and the worker policy. ready means that the worker policy, the suite catalog and the saved settings can be read and are valid. It does not mean that a model endpoint is running. This route needs no admin key.",
+        "responses": {
+          "200": {
+            "description": "The settings of all workers.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SettingsList"}}}
+          },
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/settings/{host}": {
+      "put": {
+        "operationId": "putSettings",
+        "summary": "Replace the operational settings of one managed worker",
+        "description": "Replaces the whole settings object of an enrolled local worker. The controller checks the body against the worker policy and the suite catalog, then writes it to the private state directory of the worker before it answers. Saving starts no job and does not test an endpoint. The saved revision is the request revision plus one. Send the revision that you read from getSettings. Another save in the meantime, or a stale revision, returns 409: read again, then decide. The save also returns 409 if the host has a queued or running job, or a job with host auto. The effect on getState is immediate: capabilities and the lists of targets, suites and baseline sources follow the saved settings. There is no new event kind. The body has no secrets and no API key. This route needs no admin key; it uses the same access as job creation.",
+        "parameters": [{"name": "host", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/HostId"}, "description": "Configured worker ID."}],
+        "requestBody": {
+          "required": true,
+          "x-brewery-max-body-bytes": 65536,
+          "content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/NewSettings"},
+            "example": {
+              "revision": 0,
+              "benchmark_targets": [{"id": "local-model", "label": "Local model, port 8080", "endpoint": "http://127.0.0.1:8080/v1", "model": "model-name-as-the-endpoint-reports-it"}],
+              "enabled_suites": ["tool-eval-bench"], "baseline_endpoints": [], "evaluation_enabled": false
+            }
+          }}
+        },
+        "responses": {
+          "200": {
+            "description": "The saved settings with their new revision.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HostSettings"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {
+            "description": "The worker is not enrolled for managed settings, the revision is stale, the host has queued or running jobs, or an administrator disabled the worker.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "503": {
+            "description": "The worker is enrolled but its policy, catalog or settings directory cannot be used, or the write failed.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          }
+        }
+      }
+    },
+    "/api/admin/state": {
+      "get": {
+        "operationId": "getAdminState",
+        "summary": "Read the administration state",
+        "description": "Infrastructure administration. It is separate from the ordinary workbench access. Send the admin key in the X-Brewery-Admin-Key header with every request. The state lists the workers of the admin catalog, their lifecycle status, their runtimes, and the latest 50 audit entries. The controller never returns the key. This API does not install workers, change SSH aliases or host keys, edit worker files, run commands, or change power or GPU reservations; the unavailable field says so.",
+        "security": [{"AdminKey": []}],
+        "responses": {
+          "200": {"description": "The administration state.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AdminState"}}}},
+          "401": {"description": "The admin key is missing, repeated or wrong.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "500": {"$ref": "#/components/responses/StorageError"},
+          "503": {"description": "The operator did not configure an admin key.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/api/admin/actions": {
+      "post": {
+        "operationId": "applyAdminAction",
+        "summary": "Apply one administration action",
+        "description": "Changes controller policy for a worker of the admin catalog. The actions are enroll, approve, deactivate, enable_runtime, disable_runtime, install_runtime and set_resource_policy. A worker is visible to the workbench only while its status is active. approve runs a transport readiness probe first. A runtime is enabled only if the operator configured a runtime helper and the pinned bytes pass its check. install_runtime needs the same helper, a pre-staged runtime, a pending or inactive worker and no running job. The controller runs only one action at a time. It writes an audit entry for each action. There is no idempotency key; a repeated lifecycle action can return 409. These actions change policy, not hosts: none installs a worker, changes SSH trust, runs a job, or edits a worker file.",
+        "security": [{"AdminKey": []}],
+        "requestBody": {
+          "required": true,
+          "x-brewery-max-body-bytes": 4096,
+          "content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/AdminAction"},
+            "examples": {
+              "approve": {"value": {"action": "approve", "worker": "worker-a"}},
+              "disable": {"value": {"action": "disable_runtime", "worker": "worker-a", "runtime": "evaluator"}},
+              "pool": {"value": {"action": "set_resource_policy", "worker": "worker-a", "allow_pool": false}}
+            }
+          }}
+        },
+        "responses": {
+          "200": {"description": "The action was applied. The body is the new administration state.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AdminState"}}}},
+          "400": {"description": "The body is malformed, too large, not JSON, or has an unknown field or action.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"description": "The admin key is missing, repeated or wrong.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"description": "The worker state does not allow the action, the readiness or runtime check failed, the request exceeds the pool ceiling, or the helper is not available.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "500": {"$ref": "#/components/responses/StorageError"},
+          "503": {"description": "The operator did not configure an admin key, or another administration action is running.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/api/profiles/catalog": {
+      "get": {
+        "operationId": "getProfileCatalog",
+        "summary": "Read the tensor catalog for custom HGN profiles",
+        "description": "Returns the catalog that is embedded in the controller. It lists every tensor of the one supported architecture, the encoding that each built-in profile (v2 and ht43) gives it, whether a custom profile can change it (editable), and the signed byte difference from v2 to ht43 (delta_bytes). The bytes are computed from the layout of the catalog. They are not a measurement of a real output. The catalog_sha256 binds a custom profile to this catalog. The tensors that are not editable keep their built-in encoding.",
+        "responses": {
+          "200": {"description": "The embedded catalog, as stored.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ProfileCatalog"}}}},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/profiles/gguf-catalog": {
+      "get": {
+        "operationId": "getGgufCatalog",
+        "summary": "Read the GGUF preset and tensor type catalog",
+        "description": "Returns the pinned catalog that is embedded in the controller. presets are the whole-model recipes of the pinned upstream quantizer, with aliases. tensor_types are the raw types that the encoder can write. Both mark which entries need an imatrix. The catalog lists no type that the encoder cannot write: it has no IQ1_XXS, and it has no F32 preset. A name in the catalog is not a promise that a given model can use it: the quantizer decides per tensor, and the job fails if the result differs from the plan.",
+        "responses": {
+          "200": {"description": "The embedded catalog, as stored.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GgufCatalog"}}}},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/profiles/{revision}/export-options": {
+      "get": {
+        "operationId": "getProfileExportOptions",
+        "summary": "Preview both container choices for a saved profile",
+        "description": "Read-only. The saved profile's encoder stays fixed. Its own container uses the existing workflow, subject to normal source and worker admission. The other container cannot be submitted. The experimental extension names a possible lossless path, not a requirement. A compatible exact stock export could suffice in the future. This preview does not test artifacts or runtimes. It provides no evidence of payload preservation, tensor coverage, or release qualification.",
+        "parameters": [{"name": "revision", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}],
+        "responses": {
+          "200": {"description": "HGN and GGUF export options, in that order.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ProfileExportOptions"}}}},
+          "400": {"description": "Invalid profile revision.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"description": "Profile revision not found.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/profiles": {
+      "get": {
+        "operationId": "listProfiles",
+        "summary": "List the saved custom profile revisions",
+        "description": "Rows of both formats are mixed, oldest first. A GGUF row always has format gguf. An older HGN row can have no format. Each revision is immutable. A change is a new revision.",
+        "responses": {
+          "200": {"description": "All saved revisions, oldest first.", "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/Profile"}}}}},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      },
+      "post": {
+        "operationId": "saveProfile",
+        "summary": "Save a custom profile as an immutable revision",
+        "description": "The body picks the format. Without format, or with format hgn, the rules below apply. With format gguf the body is a preset plus optional exact-tensor type overrides, and the controller checks them against the pinned GGUF catalog; see getGgufCatalog. A GGUF profile has no size estimate. A custom HGN profile starts from a base (v2 or ht43) and lists tensors that use the other built-in encoding. It chooses between these two encodings only. It cannot create a new encoding. The controller checks the catalog digest, the name, and that every override names an editable tensor with the alternate encoding. It then computes the predicted size from the catalog and saves the profile under revision, the SHA-256 of the canonical recipe. Saving does not start a job. The same content gives the same revision. Use the revision as profile_revision in createConversion. The predicted size is a layout estimate from the catalog. It does not show the quality or the runtime accuracy of the converted model.",
+        "requestBody": {
+          "required": true,
+          "x-brewery-max-body-bytes": 524288,
+          "content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/NewProfile"},
+            "example": {"name": "Experts in HT43", "base": "v2", "catalog_sha256": "7f4d3e813f1f080783e4387e358aa5a6c733a2bcf0c679805a25a93b6ab50235", "overrides": {"layers.0.attn_hyper_connection.block_inject_weight.weight": "ht43"}}
+          }}
+        },
+        "responses": {
+          "200": {"description": "An identical revision exists. It is returned unchanged.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Profile"}}}},
+          "201": {"description": "New revision saved.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Profile"}}}},
+          "400": {"description": "The catalog digest differs, the name is invalid, there are no overrides or more than 4096, or an override is unknown, not editable, or equal to the base.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/conversions": {
+      "post": {
+        "operationId": "createConversion",
+        "summary": "Start the default one-submit conversion workflow",
+        "description": "Default way to convert a model. One request makes the controller run the child jobs inspect, plan, convert and verify in this order on one worker. The controller stores the workflow, so it continues if the client disconnects, and resumes after a controller restart by using the stored child job IDs. A child job that was running and cannot be checked is not retried. The workflow stops at the first failed or cancelled child job. Later stages are not queued. The call does not wait for the worker. Poll getConversion, or follow the child jobs with getJob and streamEvents. There is no conversion event kind and no conversion key in capabilities; the child jobs use the normal job events. A succeeded workflow means that all four child jobs succeeded. It is not a release qualification, and it does not show model quality. To run one stage alone for diagnosis, use createJob.\n\nHost: omit host to use the source model's host. Set host to auto to use an eligible worker of the configured quantization pool. Set a worker ID to pin that worker. The workflow reports host auto as requested_host.\n\nIdempotency: a new request returns 201. A repeat with the same key and the same typed body returns 200 with the current workflow, not only an ID. A different body for the same key returns 409.",
+        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
+        "requestBody": {
+          "required": true,
+          "x-brewery-max-body-bytes": 262144,
+          "content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/NewConversion"},
+            "example": {"host": "auto", "input_ids": ["a1314ac4-3570-4549-9111-67b904f8bdad"], "options": {"profile": "v2", "threads": 8}, "decode_backend": "cuda"}
+          }}
+        },
+        "responses": {
+          "200": {
+            "description": "Same key and same request. The current workflow; no new write.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Conversion"}}}
+          },
+          "201": {
+            "description": "New workflow. The first child job, inspect, is queued.",
+            "content": {"application/json": {
+              "schema": {"$ref": "#/components/schemas/Conversion"},
+              "example": {
+                "id": "6f1d6b3e-3f0a-4f0e-9a52-0f6a6d4a3c11", "host": "worker-a", "state": "running", "stage": "inspect",
+                "job_ids": {"inspect": "ed205d69-459b-4088-b750-8cdaec2a9bf7"}, "cancel_requested": false,
+                "created_at": 1700000000000, "updated_at": 1700000000000
+              }
+            }},
+            "links": {"conversion": {"operationId": "getConversion", "parameters": {"id": "$response.body#/id"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {
+            "description": "The workflow is disabled, no eligible worker matches the request, or the idempotency key was bound to a different request.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      },
+      "get": {
+        "operationId": "listConversions",
+        "summary": "List conversion workflows",
+        "responses": {
+          "200": {
+            "description": "All stored conversion workflows.",
+            "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/Conversion"}}}}
+          },
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/conversions/{id}": {
+      "get": {
+        "operationId": "getConversion",
+        "summary": "Read one conversion workflow",
+        "description": "Poll this route for the workflow state and stage. Use job_ids with getJob to read the output and the error of each stage. The state is the state of the whole workflow, not of one stage.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "responses": {
+          "200": {
+            "description": "The current workflow.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Conversion"}}}
+          },
+          "400": {"$ref": "#/components/responses/InvalidPath"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/conversions/{id}/cancel": {
+      "post": {
+        "operationId": "cancelConversion",
+        "summary": "Request cancellation of a conversion workflow",
+        "description": "No body is needed. Send Content-Type: application/json if calling without a same-origin browser signal. The controller sets cancel_requested and cancels the active child job. It never starts a later stage. The response can show state running until the child job stops. Poll getConversion until the state is terminal. A repeat request, or a request for a terminal workflow, returns the current workflow. A timeout or a lost link is not proof that a worker stopped.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "responses": {
+          "200": {
+            "description": "The current workflow. cancel_requested and state show if the request is still pending.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Conversion"}}}
+          },
+          "400": {"$ref": "#/components/responses/InvalidPath"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "AdminKey": {
+        "type": "apiKey", "in": "header", "name": "X-Brewery-Admin-Key",
+        "description": "A secret of 64 lowercase hex digits. The controller keeps only its SHA-256 digest, read from the file named by BREWERY_ADMIN_KEY_FILE at start. Send it only to the two admin routes. Send it once; a repeated header is refused."
+      }
+    },
+    "parameters": {
+      "ResourceId": {
+        "name": "id", "in": "path", "required": true, "schema": {"type": "string"},
+        "description": "ID returned by the controller.", "example": "ed205d69-459b-4088-b750-8cdaec2a9bf7"
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "description": "Optional single, case-sensitive key scoped to this create operation. A new successful request returns 201 and binds the key to the typed body and generated ID. A matching retry returns 200 with only the original id and no new side effects, even if that object was deleted or the input catalog changed. The exception is createConversion: a matching retry returns 200 with the current conversion workflow. A different typed body for an already bound key returns 409. Malformed or repeated header fields return 400. JSON whitespace and object order do not change the typed body; optional null and omitted values and omitted versus empty default job lists/maps compare equally. Failed creates do not bind keys. Keys have no expiry and persist in the same controller database across restart. Without a key, each successful request creates a new resource.",
+        "schema": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]{1,128}$"},
+        "example": "workbench.plan.001"
+      }
+    },
+    "responses": {
+      "BadRequest": {"description": "Malformed JSON, invalid header or cursor, or a request that fails controller validation.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "Forbidden": {"description": "The loopback Host, Origin, or Fetch Metadata guard rejected this request.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}, "example": {"error": "host or origin is not allowed"}}}},
+      "NotFound": {"description": "No record has the given ID.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "InvalidPath": {"description": "The path parameter could not be decoded as UTF-8.", "content": {"text/plain": {"schema": {"type": "string"}}}},
+      "CreateReplay": {"description": "Same bound idempotency key and typed request; no write. This response contains only the originally allocated ID.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreatedId"}, "example": {"id": "ed205d69-459b-4088-b750-8cdaec2a9bf7"}}}},
+      "CreateConflict": {"description": "The idempotency key is bound to a different request for this operation.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "PayloadTooLarge": {"description": "The request exceeds this operation's body limit, in bytes.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "UnsupportedMediaType": {"description": "Send Content-Type: application/json for JSON requests or a CLI cancel request.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "InvalidJsonData": {"description": "JSON could not be decoded as the request type (for example, wrong field type, unknown top-level field, or missing required field). Kind-specific validation after decoding instead returns 400.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "StorageError": {"description": "A controller storage operation failed.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}, "example": {"error": "controller storage error"}}}}
+    },
+    "schemas": {
+      "DiscoveryDocument": {
+        "type": "object", "required": ["openapi", "info", "servers", "paths", "components"],
+        "properties": {
+          "openapi": {"const": "3.1.0"}, "info": {"type": "object"}, "servers": {"type": "array", "items": {"type": "object"}},
+          "paths": {"type": "object", "additionalProperties": {"type": "object"}}, "components": {"type": "object"}
+        }
+      },
+      "Error": {
+        "type": "object", "required": ["error"], "additionalProperties": false,
+        "properties": {"error": {"type": "string", "description": "Human-readable diagnostic, not a stable machine code."}}
+      },
+      "Id": {"type": "string", "format": "uuid"},
+      "CreatedId": {
+        "type": "object", "required": ["id"], "additionalProperties": false, "properties": {"id": {"$ref": "#/components/schemas/Id"}}
+      },
+      "EventCursor": {"type": "integer", "format": "int64", "minimum": 0, "maximum": 9223372036854775807},
+      "Name": {
+        "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000-\\u001f\\u007f-\\u009f]*(?![\\s\\S])",
+        "x-brewery-max-utf8-bytes": 256, "description": "Non-blank name, at most 256 UTF-8 bytes, without control characters."
+      },
+      "PromptText": {
+        "type": "string", "minLength": 1, "maxLength": 65536, "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000]*(?![\\s\\S])",
+        "x-brewery-max-utf8-bytes": 65536, "description": "Non-blank text, at most 65536 UTF-8 bytes; NUL is not allowed."
+      },
+      "HostId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", "not": {"const": "auto"}, "description": "Configured worker ID; see getState."},
+      "AbsoluteWorkerPath": {
+        "type": "string", "minLength": 1, "maxLength": 4096,
+        "pattern": "^/(?!\\.\\.(?:/|$))(?!.*[/]\\.\\.(?:/|$))[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+        "x-brewery-max-utf8-bytes": 4096,
+        "description": "Absolute worker path, at most 4096 UTF-8 bytes, without '..' segments or control characters. Registration also requires a filename component."
+      },
+      "ModelKind": {"type": "string", "enum": ["gguf", "hf", "safetensors", "hgn", "brewery-bundle", "hgn-v2", "ht43", "gsm8k-baseline", "gsm8k-predictions", "assets", "imatrix", "ngram", "vision", "mtp", "weight-calibration"]},
+      "NewModel": {
+        "type": "object", "required": ["host", "path", "kind"], "additionalProperties": false,
+        "properties": {
+          "name": {"description": "If null or omitted, use the path's filename.", "anyOf": [{"$ref": "#/components/schemas/Name"}, {"type": "null"}]},
+          "host": {"$ref": "#/components/schemas/HostId"},
+          "path": {"$ref": "#/components/schemas/AbsoluteWorkerPath", "pattern": "/(?!\\.(?:/|$))[^/]+(?:/+\\.)*/*$"},
+          "kind": {"anyOf": [{"$ref": "#/components/schemas/ModelKind"}, {"const": "bf16-checkpoint"}]}
+        }
+      },
+      "Model": {
+        "type": "object", "required": ["id", "name", "host", "path", "kind"], "additionalProperties": false,
+        "properties": {
+          "id": {"$ref": "#/components/schemas/Id"}, "name": {"$ref": "#/components/schemas/Name"}, "host": {"$ref": "#/components/schemas/HostId"},
+          "path": {"$ref": "#/components/schemas/AbsoluteWorkerPath"}, "kind": {"$ref": "#/components/schemas/ModelKind"}
+        }
+      },
+      "NewPrompt": {
+        "type": "object", "required": ["name", "text"], "additionalProperties": false,
+        "properties": {"name": {"$ref": "#/components/schemas/Name"}, "text": {"$ref": "#/components/schemas/PromptText"}}
+      },
+      "Prompt": {
+        "type": "object", "required": ["id", "name", "text"], "additionalProperties": false,
+        "properties": {"id": {"$ref": "#/components/schemas/Id"}, "name": {"$ref": "#/components/schemas/Name"}, "text": {"$ref": "#/components/schemas/PromptText"}}
+      },
+      "PathQuery": {
+        "type": "object", "required": ["host", "prefix"], "additionalProperties": false,
+        "properties": {
+          "host": {"$ref": "#/components/schemas/HostId"},
+          "prefix": {
+            "type": "string", "maxLength": 4096, "x-brewery-max-utf8-bytes": 4096,
+            "pattern": "^(?:|/(?!/|\\.\\.?(?:/|$))(?!.*(?:/\\.\\.?(?:/|$)|//))[^\\u0000-\\u001f\\u007f-\\u009f]*)$",
+            "description": "Empty for configured roots, otherwise a normalized absolute prefix of at most 4096 UTF-8 bytes. No control characters or '.' or '..' segments or doubled slash. A trailing slash is allowed."
+          }
+        }
+      },
+      "PathSuggestions": {
+        "type": "object", "required": ["items", "truncated"], "additionalProperties": false,
+        "properties": {
+          "items": {"type": "array", "maxItems": 32, "description": "At most 16 KiB of UTF-8 path data in total.", "items": {
+            "type": "object", "required": ["path", "kind"], "additionalProperties": false,
+            "properties": {"path": {"$ref": "#/components/schemas/AbsoluteWorkerPath"}, "kind": {"type": "string", "enum": ["file", "directory"]}}
+          }},
+          "truncated": {"type": "boolean"}
+        }
+      },
+      "JobKind": {"type": "string", "enum": ["compare", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply"]},
+      "JobState": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled"]},
+      "CapabilityMap": {
+        "type": "object", "description": "Map from each known job kind to its availability.",
+        "propertyNames": {"$ref": "#/components/schemas/JobKind"}, "additionalProperties": {"type": "boolean"}, "minProperties": 17
+      },
+      "HostCapabilityMap": {
+        "type": "object",
+        "description": "Per-worker availability. It has one boolean for each job kind and the extra capabilities listed below. hf_download is false unless the operator opts in to managed Hugging Face downloads. convert_components is true only if the operator enabled component replacement for a Hugging Face source. custom_profiles is true only if the operator enabled custom profiles with a separate CPU-only converter. gguf_output is true only if the operator set up the GGUF quantizer. gguf_hf_output also requires the bounded Hugging Face exporter. weight_visual enables inventory, tiles, and source-pinned proposals and tuning. weight_hgn enables native HGN sources. weight_packed allows packed weight jobs. weight_safetensors enables standalone SafeTensors and indexed HF weight jobs. The weight capabilities are additional to the per-job opt-in and are false by default. The reasons map can say why.",
+        "propertyNames": {"anyOf": [{"$ref": "#/components/schemas/JobKind"}, {"enum": ["convert_components", "custom_profiles", "gguf_output", "gguf_hf_output", "weight_visual", "weight_hgn", "weight_packed", "weight_safetensors"]}]},
+        "additionalProperties": {"type": "boolean"}, "minProperties": 25
+      },
+      "ConfiguredToken": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
+      "BenchmarkId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+      "BenchmarkChoice": {
+        "type": "object", "required": ["id"], "additionalProperties": false,
+        "properties": {"id": {"$ref": "#/components/schemas/BenchmarkId"}, "label": {"$ref": "#/components/schemas/Name"}}
+      },
+      "BaselineSource": {
+        "type": "object", "required": ["id", "label"], "additionalProperties": false,
+        "properties": {"id": {"$ref": "#/components/schemas/ConfiguredToken"}, "label": {"anyOf": [{"$ref": "#/components/schemas/Name"}, {"type": "null"}]}}
+      },
+      "Host": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "name", "capabilities", "reasons", "baseline_sources", "benchmark_targets", "benchmarks", "quantization_pool", "quantization_backends"],
+        "properties": {
+          "id": {"$ref": "#/components/schemas/HostId"}, "name": {"$ref": "#/components/schemas/Name"},
+          "capabilities": {"$ref": "#/components/schemas/HostCapabilityMap"},
+          "component_cpu_only": {"type": "boolean", "description": "If true, this worker accepts only the cpu backend for inspect, plan, convert and verify, including the decode_backend of a conversion workflow. Default false."},
+          "reasons": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Configured capability diagnostics, keyed by capability name."},
+          "baseline_sources": {"type": "array", "items": {"$ref": "#/components/schemas/BaselineSource"}},
+          "benchmark_targets": {"type": "array", "items": {"$ref": "#/components/schemas/BenchmarkChoice"}},
+          "benchmarks": {"type": "array", "items": {"$ref": "#/components/schemas/BenchmarkChoice"}},
+          "quantization_pool": {"type": "boolean"},
+          "quantization_backends": {
+            "type": "object", "description": "Per-encoder configured backend allowlists. No key means there is no restriction for that encoder.",
+            "propertyNames": {"enum": ["ht", "i4r", "q4cp"]}, "additionalProperties": {"type": "array", "items": {"$ref": "#/components/schemas/ConfiguredToken"}}
+          }
+        }
+      },
+      "WorkbenchState": {
+        "type": "object", "required": ["hosts", "models", "prompts", "jobs", "capabilities", "event_cursor"], "additionalProperties": false,
+        "properties": {
+          "hosts": {"type": "array", "items": {"$ref": "#/components/schemas/Host"}},
+          "models": {"type": "array", "items": {"$ref": "#/components/schemas/Model"}},
+          "prompts": {"type": "array", "items": {"$ref": "#/components/schemas/Prompt"}},
+          "jobs": {"type": "array", "items": {"$ref": "#/components/schemas/Job"}},
+          "capabilities": {"$ref": "#/components/schemas/CapabilityMap", "description": "A capability is true when at least one configured worker supports it."},
+          "event_cursor": {"$ref": "#/components/schemas/EventCursor"}
+        }
+      },
+      "ChangeEvent": {
+        "type": "object", "required": ["id", "kind", "entity_id"], "additionalProperties": false,
+        "properties": {
+          "id": {"$ref": "#/components/schemas/EventCursor"}, "entity_id": {"$ref": "#/components/schemas/Id"},
+          "kind": {"enum": ["job.created", "job.updated", "model.created", "model.deleted", "prompt.created"]},
+          "state": {"$ref": "#/components/schemas/JobState"}
+        },
+        "if": {"properties": {"kind": {"enum": ["job.created", "job.updated"]}}},
+        "then": {"required": ["state"]}, "else": {"not": {"required": ["state"]}}
+      },
+      "ResyncEvent": {
+        "type": "object", "required": ["reason", "event_cursor"], "additionalProperties": false,
+        "properties": {"reason": {"enum": ["stale", "ahead"]}, "event_cursor": {"$ref": "#/components/schemas/EventCursor"}}
+      },
+      "Job": {
+        "type": "object",
+        "required": ["id", "kind", "host", "pool_slot", "state", "progress", "input_ids", "options", "cancel_requested", "has_result", "created_at", "updated_at"],
+        "properties": {
+          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"$ref": "#/components/schemas/JobKind"},
+          "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}], "description": "Concrete worker ID, or auto before assignment of a pool conversion."},
+          "requested_host": {"const": "auto", "description": "Present if auto conversion routing was requested."},
+          "pool_slot": {"type": "boolean"}, "state": {"$ref": "#/components/schemas/JobState"}, "progress": {"type": "string"},
+          "progress_detail": {"$ref": "#/components/schemas/ProgressDetail"},
+          "input_ids": {"type": "array", "maxItems": 32, "items": {"$ref": "#/components/schemas/Id"}},
+          "options": {
+            "description": "Enqueued options; see the request schema for the corresponding kind.",
+            "anyOf": [
+              {"$ref": "#/components/schemas/CompareOptions"}, {"$ref": "#/components/schemas/ConversionOptions"},
+              {"$ref": "#/components/schemas/VerifyOptions"}, {"$ref": "#/components/schemas/GenerateOptions"},
+              {"$ref": "#/components/schemas/BaselineOptions"}, {"$ref": "#/components/schemas/BenchmarkOptions"},
+              {"$ref": "#/components/schemas/CacheCleanupOptions"}, {"$ref": "#/components/schemas/EmptyOptions"}
+            ]
+          },
+          "prompt_id": {"$ref": "#/components/schemas/Id"},
+          "format": {"const": "gguf", "description": "Present only on a child job of a GGUF conversion. Absent means HGN."},
+          "profile_revision": {"$ref": "#/components/schemas/ProfileRevision", "description": "Present on a child job of a conversion workflow that uses a custom profile. The recipe is not in options or in the job detail."},
+          "cancel_requested": {"type": "boolean"}, "has_result": {"type": "boolean"}, "error": {"type": "string"},
+          "created_at": {"$ref": "#/components/schemas/UnixMillis"}, "updated_at": {"$ref": "#/components/schemas/UnixMillis"}
+        }
+      },
+      "UnixMillis": {"type": "integer", "minimum": 0, "description": "Milliseconds since the Unix epoch."},
+      "ProgressDetail": {
+        "type": "object",
+        "description": "Latest valid worker measurement for a running job. Absent for older workers and during cancellation or when no valid sample is available. Counters apply to the current phase, not the whole job. The controller sends ordinary job.updated invalidations when measurements change.",
+        "required": ["phase", "unit", "completed", "updated_at_ms"],
+        "additionalProperties": false,
+        "properties": {
+          "phase": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+          "unit": {"enum": ["bytes", "items", "tokens", "questions", "suites", "files"]},
+          "completed": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+          "total": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+          "current_file": {"type": "string", "minLength": 1, "maxLength": 255, "description": "A basename of at most 255 UTF-8 bytes; never a path."},
+          "files_completed": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+          "threads": {"type":"array","maxItems":16,"description":"Observed active logical pool slots, sorted and unique by slot. These are not OS thread or CPU core IDs. Unreported slots have unknown activity.","items":{"type":"object","additionalProperties":false,"required":["slot","task"],"properties":{"slot":{"type":"integer","minimum":1,"maximum":64},"task":{"type":"string","minLength":1,"maxLength":96,"x-brewery-max-utf8-bytes":96,"description":"Safe basename or short task label, not a path."}}}},
+          "files_total": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+          "input_index": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+          "input_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+          "updated_at_ms": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615, "description": "Worker sample time in milliseconds since the Unix epoch."}
+        }
+      },
+      "JobEvent": {
+        "type": "object", "required": ["at", "state", "progress"], "additionalProperties": false,
+        "properties": {"at": {"$ref": "#/components/schemas/UnixMillis"}, "state": {"$ref": "#/components/schemas/JobState"}, "progress": {"type": "string"}, "error": {"type": "string"}}
+      },
+      "JobDetail": {
+        "allOf": [{"$ref": "#/components/schemas/Job"}, {
+          "type": "object", "required": ["events"],
+          "properties": {
+            "events": {"type": "array", "items": {"$ref": "#/components/schemas/JobEvent"}},
+            "result": {"$ref": "#/components/schemas/JobResult"}
+          }
+        }]
+      },
+      "NewJob": {
+        "description": "Choose the request variant by kind. Top-level fields are closed. Unknown options are rejected for every kind. input_ids and options default to empty when not required. A null host or prompt field is equivalent to omitting it; arrays and option objects cannot be null.",
+        "oneOf": [
+          {"$ref": "#/components/schemas/CompareJob"}, {"$ref": "#/components/schemas/InspectJob"}, {"$ref": "#/components/schemas/PlanJob"},
+          {"$ref": "#/components/schemas/ConvertJob"}, {"$ref": "#/components/schemas/VerifyJob"}, {"$ref": "#/components/schemas/GenerateJob"},
+          {"$ref": "#/components/schemas/EvaluateJob"}, {"$ref": "#/components/schemas/BaselineJob"}, {"$ref": "#/components/schemas/BenchmarkJob"},
+          {"$ref": "#/components/schemas/TransferJob"}, {"$ref": "#/components/schemas/TransferPreviewJob"}, {"$ref": "#/components/schemas/CacheCleanupJob"},
+          {"$ref": "#/components/schemas/HfDownloadJob"},
+          {"$ref": "#/components/schemas/WeightInspectJob"}, {"$ref": "#/components/schemas/WeightProposeJob"},
+          {"$ref": "#/components/schemas/WeightTuneJob"}, {"$ref": "#/components/schemas/WeightApplyJob"}
+        ],
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "compare": "#/components/schemas/CompareJob", "inspect": "#/components/schemas/InspectJob", "plan": "#/components/schemas/PlanJob",
+            "convert": "#/components/schemas/ConvertJob", "verify": "#/components/schemas/VerifyJob", "generate": "#/components/schemas/GenerateJob",
+            "evaluate": "#/components/schemas/EvaluateJob", "baseline": "#/components/schemas/BaselineJob", "benchmark": "#/components/schemas/BenchmarkJob",
+            "transfer": "#/components/schemas/TransferJob", "transfer_preview": "#/components/schemas/TransferPreviewJob", "cache_cleanup": "#/components/schemas/CacheCleanupJob",
+            "hf_download": "#/components/schemas/HfDownloadJob",
+            "weight_inspect": "#/components/schemas/WeightInspectJob", "weight_propose": "#/components/schemas/WeightProposeJob",
+            "weight_tune": "#/components/schemas/WeightTuneJob", "weight_apply": "#/components/schemas/WeightApplyJob"
+          }
+        }
+      },
+      "JobRequestFields": {
+        "type": "object", "required": ["kind"], "additionalProperties": false,
+        "properties": {
+          "kind": {"$ref": "#/components/schemas/JobKind"},
+          "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}, {"type": "null"}]},
+          "input_ids": {"type": "array", "maxItems": 32, "items": {"$ref": "#/components/schemas/Id"}},
+          "options": {"type": "object"},
+          "prompt_id": {"anyOf": [{"$ref": "#/components/schemas/Id"}, {"type": "null"}]},
+          "prompt": {"anyOf": [{"$ref": "#/components/schemas/PromptText"}, {"type": "null"}]}
+        }
+      },
+      "NoPrompt": {"properties": {"prompt_id": {"type": "null"}, "prompt": {"type": "null"}}},
+      "OnePrompt": {
+        "oneOf": [
+          {"required": ["prompt_id"], "properties": {"prompt_id": {"$ref": "#/components/schemas/Id"}, "prompt": {"type": "null"}}},
+          {"required": ["prompt"], "properties": {"prompt": {"type": "string"}, "prompt_id": {"type": "null"}}}
+        ]
+      },
+      "DefaultInputHost": {
+        "properties": {"host": {
+          "anyOf": [{"$ref": "#/components/schemas/HostId"}, {"type": "null"}],
+          "description": "Configured worker ID. If omitted or null, use the first input's registered host."
+        }}
+      },
+      "RequiredHost": {"required": ["host"], "properties": {"host": {"$ref": "#/components/schemas/HostId"}}},
+      "CompareJob": {
+        "description": "Compare two GGUF inputs on one worker. Supply exactly one of an inline prompt or saved prompt ID; the resolved text is limited to 8192 UTF-8 bytes.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/DefaultInputHost"}, {"$ref": "#/components/schemas/OnePrompt"}],
+        "required": ["input_ids"],
+        "properties": {
+          "kind": {"const": "compare"},
+          "input_ids": {"minItems": 2, "maxItems": 2, "x-brewery-input-kinds": [["gguf"], ["gguf"]]},
+          "prompt": {"maxLength": 8192, "x-brewery-max-utf8-bytes": 8192},
+          "options": {"$ref": "#/components/schemas/CompareOptions"}
+        }
+      },
+      "CompareOptions": {
+        "type": "object", "additionalProperties": false, "dependentRequired": {"gpu_layers": ["gpu_device"]},
+        "properties": {
+          "n": {"type": "integer", "minimum": 0, "maximum": 128},
+          "labels": {"type": "integer", "minimum": 0, "maximum": 600},
+          "threads": {"$ref": "#/components/schemas/Threads"},
+          "raw": {"type": "boolean"}, "think": {"type": "boolean"},
+          "gpu_layers": {"type": "integer", "minimum": 1, "maximum": 4096},
+          "gpu_device": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"}
+        }
+      },
+      "Threads": {"type": "integer", "minimum": 1, "maximum": 64},
+      "EncoderBackend": {"type": "string", "enum": ["cpu", "hip", "cuda"]},
+      "Sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+      "ConversionInputIds": {
+        "minItems": 1, "maxItems": 5,
+        "description": "First ID: hf, gguf or hgn. Then zero to four auxiliaries, at most one of each type: assets, ngram, vision and mtp. Each auxiliary needs its matching zero-based index in options. With an hf source, omit all auxiliaries to use the components of the snapshot: vision (model.visual.*), the 128 numbered n-gram shards, mtp (mtp.*) and the flat assets. An auxiliary then replaces the whole embedded role. It is allowed only on a worker whose capabilities.convert_components is true; otherwise the controller returns 409. A replacement is a registered worker path, not an upload. Accepted formats: assets, a flat directory of tokenizer and config files; vision, ngram and mtp, a role-only SafeTensors file, a flat directory with one SafeTensors index and its shards, or a native hgn file with the matching role identity. The worker and the engine check the format and the tensor names and shapes when a job uses the input. A gguf source needs assets, mtp and vision, and ngram if the GGUF has no embedded table.",
+        "x-brewery-input-kinds": [["hf", "gguf", "hgn"]],
+        "x-brewery-additional-input-kinds": ["assets", "ngram", "vision", "mtp"]
+      },
+      "InspectJob": {
+        "description": "Inspect a registered conversion source and optional auxiliaries.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/DefaultInputHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
+        "required": ["input_ids"],
+        "properties": {"kind": {"const": "inspect"}, "input_ids": {"$ref": "#/components/schemas/ConversionInputIds"}, "options": {"$ref": "#/components/schemas/InspectOptions"}}
+      },
+      "InspectOptions": {
+        "type": "object",
+        "properties": {
+          "profile": {"type": "string", "enum": ["v2", "ht43"]},
+          "ht_backend": {"$ref": "#/components/schemas/EncoderBackend"},
+          "i4r_backend": {"$ref": "#/components/schemas/EncoderBackend"},
+          "q4cp_backend": {"$ref": "#/components/schemas/EncoderBackend"},
+          "assets": {"$ref": "#/components/schemas/ConversionAuxIndex"},
+          "ngram": {"$ref": "#/components/schemas/ConversionAuxIndex"},
+          "vision": {"$ref": "#/components/schemas/ConversionAuxIndex"},
+          "mtp": {"$ref": "#/components/schemas/ConversionAuxIndex"}
+        },
+        "not": {"anyOf": [{"required": ["threads"]}, {"required": ["seed"]}, {"required": ["ht_beam"]}]},
+        "allOf": [{"$ref": "#/components/schemas/ConversionOptions"}]
+      },
+      "ConversionAuxIndex": {
+        "type": "integer", "minimum": 1, "maximum": 4,
+        "description": "Zero-based index into input_ids; must point to an input of the same kind as this option."
+      },
+      "ConversionOptions": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "profile": {"type": "string", "enum": ["v2", "ht43"]},
+          "ht_backend": {"$ref": "#/components/schemas/EncoderBackend"},
+          "i4r_backend": {"$ref": "#/components/schemas/EncoderBackend"},
+          "q4cp_backend": {"$ref": "#/components/schemas/EncoderBackend"},
+          "assets": {"$ref": "#/components/schemas/ConversionAuxIndex"},
+          "ngram": {"$ref": "#/components/schemas/ConversionAuxIndex"},
+          "vision": {"$ref": "#/components/schemas/ConversionAuxIndex"},
+          "mtp": {"$ref": "#/components/schemas/ConversionAuxIndex"},
+          "threads": {"$ref": "#/components/schemas/Threads"},
+          "seed": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615, "description": "Unsigned 64-bit seed. Preserve integer precision when sending large values."},
+          "ht_beam": {"type": "integer", "minimum": 1, "maximum": 256}
+        }
+      },
+      "LoopbackEndpoint": {
+        "type": "string", "pattern": "^http://(127\\.0\\.0\\.1|\\[::1\\]):[1-9][0-9]*/v1$",
+        "description": "Exactly http://127.0.0.1:PORT/v1 or http://[::1]:PORT/v1. The port must be in approved_ports of the worker. The address is on the worker host. No credentials, query, fragment, host name or other path."
+      },
+      "SettingsTarget": {
+        "type": "object", "required": ["id", "endpoint", "model"], "additionalProperties": false,
+        "properties": {
+          "id": {"$ref": "#/components/schemas/BenchmarkId"}, "label": {"$ref": "#/components/schemas/Name"},
+          "endpoint": {"$ref": "#/components/schemas/LoopbackEndpoint"},
+          "model": {"$ref": "#/components/schemas/Name", "description": "Model name that the endpoint expects."}
+        }
+      },
+      "SettingsBaseline": {
+        "type": "object", "required": ["id", "endpoint", "model", "source_sha256", "runtime_id"], "additionalProperties": false,
+        "properties": {
+          "id": {"$ref": "#/components/schemas/BenchmarkId"}, "label": {"$ref": "#/components/schemas/Name"},
+          "endpoint": {"$ref": "#/components/schemas/LoopbackEndpoint"},
+          "model": {"$ref": "#/components/schemas/Name"},
+          "source_sha256": {"$ref": "#/components/schemas/Sha256", "description": "Identity of the exact BF16 source checkpoint that the endpoint serves."},
+          "runtime_id": {"$ref": "#/components/schemas/BenchmarkId", "description": "Identity of the serving runtime."}
+        }
+      },
+      "NewSettings": {
+        "type": "object", "additionalProperties": false,
+        "required": ["revision", "benchmark_targets", "enabled_suites", "baseline_endpoints", "evaluation_enabled"],
+        "description": "The complete settings of one worker. Each list holds at most 32 items and IDs are unique inside a list. A suite must be one of approved_suites. baseline_endpoints must stay empty unless baseline_allowed is true. evaluation_enabled can be true only if evaluation_allowed is true.",
+        "properties": {
+          "revision": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615, "description": "The revision that you read. A different value returns 409."},
+          "benchmark_targets": {"type": "array", "maxItems": 32, "items": {"$ref": "#/components/schemas/SettingsTarget"}},
+          "enabled_suites": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"$ref": "#/components/schemas/BenchmarkId"}},
+          "baseline_endpoints": {"type": "array", "maxItems": 32, "items": {"$ref": "#/components/schemas/SettingsBaseline"}},
+          "evaluation_enabled": {"type": "boolean"}
+        }
+      },
+      "HostSettings": {
+        "type": "object",
+        "required": ["id", "name", "managed", "ready", "approved_ports", "evaluation_allowed", "baseline_allowed", "approved_suites", "revision", "benchmark_targets", "enabled_suites", "baseline_endpoints", "evaluation_enabled"],
+        "properties": {
+          "id": {"$ref": "#/components/schemas/HostId"}, "name": {"type": "string"},
+          "managed": {"type": "boolean", "description": "True if the operator enrolled this worker in the dispatch file. Only an enrolled local worker can be saved."},
+          "ready": {"type": "boolean", "description": "True if the worker policy, the suite catalog and the saved settings are valid. Not a check of any endpoint."},
+          "reason": {"type": "string", "description": "Why ready is false."},
+          "approved_ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "description": "Loopback ports that the operator approved for this worker."},
+          "evaluation_allowed": {"type": "boolean", "description": "True only if worker policy, GPU load permission and the pinned image allow generate and evaluate. Set by the operator, not by this API."},
+          "baseline_allowed": {"type": "boolean", "description": "False unless worker policy allows managed baseline endpoints."},
+          "approved_suites": {"type": "array", "items": {"$ref": "#/components/schemas/BenchmarkChoice"}, "description": "Suites in the operator's catalog."},
+          "revision": {"type": "integer", "minimum": 0},
+          "benchmark_targets": {"type": "array", "items": {"$ref": "#/components/schemas/SettingsTarget"}},
+          "enabled_suites": {"type": "array", "items": {"$ref": "#/components/schemas/BenchmarkId"}},
+          "baseline_endpoints": {"type": "array", "items": {"$ref": "#/components/schemas/SettingsBaseline"}},
+          "evaluation_enabled": {"type": "boolean"}
+        }
+      },
+      "SettingsList": {
+        "type": "object", "required": ["hosts"], "additionalProperties": false,
+        "properties": {"hosts": {"type": "array", "items": {"$ref": "#/components/schemas/HostSettings"}}}
+      },
+      "AdminToken": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", "description": "Worker or runtime ID of the admin catalog."},
+      "AdminWorkerAction": {
+        "type": "object", "required": ["action", "worker"], "additionalProperties": false,
+        "description": "Move a worker through its lifecycle: unregistered, pending, active, inactive. enroll: unregistered to pending. approve: pending or inactive to active, after a readiness probe. deactivate: active to inactive and hidden from the workbench.",
+        "properties": {"action": {"enum": ["enroll", "approve", "deactivate"]}, "worker": {"$ref": "#/components/schemas/AdminToken"}}
+      },
+      "AdminRuntimeAction": {
+        "type": "object", "required": ["action", "worker", "runtime"], "additionalProperties": false,
+        "description": "enable_runtime and install_runtime need the operator's runtime helper and a pinned digest. disable_runtime needs neither. A disabled runtime turns off its capabilities for the worker.",
+        "properties": {"action": {"enum": ["enable_runtime", "disable_runtime", "install_runtime"]}, "worker": {"$ref": "#/components/schemas/AdminToken"}, "runtime": {"$ref": "#/components/schemas/AdminToken"}}
+      },
+      "AdminPolicyAction": {
+        "type": "object", "required": ["action", "worker", "allow_pool"], "additionalProperties": false,
+        "description": "Allow or stop the use of a worker for host auto. It can only lower the pool setting that the operator configured in the dispatch file.",
+        "properties": {"action": {"const": "set_resource_policy"}, "worker": {"$ref": "#/components/schemas/AdminToken"}, "allow_pool": {"type": "boolean"}}
+      },
+      "AdminAction": {
+        "oneOf": [{"$ref": "#/components/schemas/AdminWorkerAction"}, {"$ref": "#/components/schemas/AdminRuntimeAction"}, {"$ref": "#/components/schemas/AdminPolicyAction"}]
+      },
+      "AdminState": {
+        "type": "object", "required": ["workers", "audit", "unavailable"],
+        "properties": {
+          "workers": {"type": "array", "items": {
+            "type": "object", "required": ["id", "name", "status", "can_enroll", "can_approve", "can_deactivate", "allow_pool", "pool_ceiling", "runtimes"],
+            "properties": {
+              "id": {"$ref": "#/components/schemas/AdminToken"}, "name": {"type": "string"},
+              "status": {"enum": ["unregistered", "pending", "active", "inactive"]},
+              "can_enroll": {"type": "boolean"}, "can_approve": {"type": "boolean"}, "can_deactivate": {"type": "boolean"},
+              "allow_pool": {"type": "boolean"}, "pool_ceiling": {"type": "boolean", "description": "The operator's dispatch setting. allow_pool cannot exceed it."},
+              "runtimes": {"type": "array", "items": {
+                "type": "object", "required": ["id", "label", "enabled", "available", "installed", "can_install"],
+                "properties": {
+                  "id": {"$ref": "#/components/schemas/AdminToken"}, "label": {"type": "string"},
+                  "enabled": {"type": "boolean"}, "available": {"type": "boolean", "description": "True if the operator configured a helper and a pinned digest."},
+                  "installed": {"type": "boolean"}, "can_install": {"type": "boolean"}, "reason": {"type": "string"}
+                }
+              }}
+            }
+          }},
+          "audit": {"type": "array", "maxItems": 50, "description": "Latest entries first. Each holds the action fields and id, at_ms and outcome (started, applied or failed).", "items": {"type": "object"}},
+          "unavailable": {"type": "object", "description": "Texts that name what this API does not do: runtime installation without a helper, host provisioning, and resource controls."}
+        }
+      },
+      "ProfileBase": {"enum": ["v2", "ht43"]},
+      "ProfileRevision": {"type": "string", "pattern": "^[a-f0-9]{64}$", "description": "SHA-256 of the canonical recipe. A content address, not a secret."},
+      "ProfileCatalog": {
+        "type": "object", "required": ["schema", "architecture", "source_sha256", "catalog_sha256", "base_bytes", "tensors"],
+        "properties": {
+          "schema": {"const": 1}, "architecture": {"type": "string"},
+          "source_sha256": {"$ref": "#/components/schemas/Sha256", "description": "Identity of the checkpoint that the layout was taken from."},
+          "catalog_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "base_bytes": {"type": "object", "required": ["v2", "ht43"], "properties": {"v2": {"$ref": "#/components/schemas/ByteCount"}, "ht43": {"$ref": "#/components/schemas/ByteCount"}}, "description": "Catalog size of each built-in profile. A layout estimate."},
+          "tensors": {"type": "array", "items": {
+            "type": "object", "required": ["name", "file", "group", "role", "v2", "ht43", "editable", "delta_bytes"],
+            "properties": {
+              "name": {"type": "string"}, "file": {"type": "string"},
+              "group": {"enum": ["trunk", "vision", "mtp", "global", "engram"]},
+              "layer": {"type": ["integer", "null"], "minimum": 0},
+              "role": {"type": "string", "description": "For example hyper_connection, routed_expert, rotation_companion or fixed."},
+              "v2": {"type": "string", "description": "Encoding in the v2 profile."}, "ht43": {"type": "string", "description": "Encoding in the ht43 profile."},
+              "editable": {"type": "boolean"},
+              "delta_bytes": {"type": "integer", "description": "Signed bytes, ht43 minus v2, with the companion tensors that change with it. Zero if fixed."},
+              "reason": {"type": "string", "description": "Why a tensor is not editable."}
+            }
+          }}
+        }
+      },
+      "NewHgnProfile": {
+        "type": "object", "required": ["name", "base", "catalog_sha256", "overrides"], "additionalProperties": false,
+        "properties": {
+          "format": {"const": "hgn", "description": "Optional. Absent means hgn."},
+          "name": {"type": "string", "minLength": 1, "maxLength": 256, "x-brewery-max-utf8-bytes": 256, "description": "No control characters. Not a built-in name."},
+          "base": {"$ref": "#/components/schemas/ProfileBase"},
+          "catalog_sha256": {"$ref": "#/components/schemas/Sha256", "description": "Must equal catalog_sha256 of getProfileCatalog."},
+          "overrides": {
+            "type": "object", "minProperties": 1, "maxProperties": 4096,
+            "description": "Tensor name to the encoding that replaces the base. Each value must differ from base. Each name must be editable. Names are unique.",
+            "additionalProperties": {"$ref": "#/components/schemas/ProfileBase"}
+          }
+        }
+      },
+      "HgnProfile": {
+        "type": "object", "required": ["revision", "name", "base", "catalog_sha256", "overrides", "size", "created_at", "architecture"],
+        "description": "An HGN profile. Older rows have no format field.",
+        "properties": {
+          "format": {"const": "hgn"},
+          "revision": {"$ref": "#/components/schemas/ProfileRevision"}, "name": {"type": "string"},
+          "base": {"$ref": "#/components/schemas/ProfileBase"}, "catalog_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "overrides": {"type": "object", "additionalProperties": {"$ref": "#/components/schemas/ProfileBase"}},
+          "size": {
+            "type": "object", "required": ["base_bytes", "predicted_bytes", "delta_bytes"],
+            "description": "Layout estimate from the catalog: the base size plus the signed deltas of the overrides. It is not a measured output size.",
+            "properties": {"base_bytes": {"$ref": "#/components/schemas/ByteCount"}, "predicted_bytes": {"$ref": "#/components/schemas/ByteCount"}, "delta_bytes": {"type": "integer"}}
+          },
+          "created_at": {"$ref": "#/components/schemas/UnixMillis"},
+          "architecture": {"type": "string", "description": "Saved with the content, so a later catalog cannot change a saved recipe."}
+        }
+      },
+      "GgufPreset": {"type": "string", "pattern": "^[A-Za-z0-9_]{1,32}$", "description": "An id in presets of getGgufCatalog."},
+      "GgufTensorType": {"type": "string", "pattern": "^[A-Za-z0-9_]{1,32}$", "description": "An id in tensor_types of getGgufCatalog. A raw type that the encoder produces; names that the catalog does not list are refused."},
+      "NewGgufProfile": {
+        "type": "object", "required": ["format", "name", "preset"], "additionalProperties": false,
+        "properties": {
+          "format": {"const": "gguf"},
+          "name": {"type": "string", "minLength": 1, "maxLength": 256, "x-brewery-max-utf8-bytes": 256},
+          "preset": {"$ref": "#/components/schemas/GgufPreset"},
+          "overrides": {
+            "type": "object", "maxProperties": 256, "additionalProperties": {"$ref": "#/components/schemas/GgufTensorType"},
+            "description": "Exact GGUF tensor name (1 to 63 ASCII letters, digits, dot, underscore or hyphen) to a raw tensor type. Floating-point presets (F16, BF16, F32) accept no override. The name is checked against the source inventory when the conversion runs, not when you save."
+          }
+        }
+      },
+      "GgufProfile": {
+        "type": "object", "required": ["format", "name", "revision", "created_at", "preset", "overrides", "encoder_revision", "requires_imatrix"],
+        "properties": {
+          "format": {"const": "gguf"}, "name": {"type": "string"}, "revision": {"$ref": "#/components/schemas/ProfileRevision"},
+          "created_at": {"$ref": "#/components/schemas/UnixMillis"},
+          "preset": {"$ref": "#/components/schemas/GgufPreset"},
+          "overrides": {"type": "object", "additionalProperties": {"$ref": "#/components/schemas/GgufTensorType"}},
+          "encoder_revision": {"type": "string", "description": "Revision of the pinned encoder catalog that the profile was checked against."},
+          "requires_imatrix": {"type": "boolean", "description": "True if the preset or any override needs an imatrix. The profile has no size estimate: the quantizer decides the exact types per tensor."}
+        }
+      },
+      "NewProfile": {"oneOf": [{"$ref": "#/components/schemas/NewHgnProfile"}, {"$ref": "#/components/schemas/NewGgufProfile"}], "description": "Choose by format. A body without format is an HGN profile."},
+      "Profile": {"oneOf": [{"$ref": "#/components/schemas/HgnProfile"}, {"$ref": "#/components/schemas/GgufProfile"}]},
+      "ProfileExportOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["revision", "encoder", "options"],
+        "properties": {
+          "revision": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "encoder": {"enum": ["hgn", "gguf"], "description": "Encoder family of the saved revision. Container choice does not change this field."},
+          "options": {
+            "type": "array", "minItems": 2, "maxItems": 2,
+            "items": {"$ref": "#/components/schemas/ProfileExportOption"}
+          }
+        }
+      },
+      "ProfileExportOption": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["format", "admission", "stock_preservation", "extension_requirement", "runtime_proof"],
+        "properties": {
+          "format": {"enum": ["hgn", "gguf"]},
+          "admission": {"enum": ["standard_workflow", "unavailable"], "description": "Standard workflow means an existing submission path. It does not establish worker or source eligibility."},
+          "stock_preservation": {"enum": ["by_design", "not_established"], "description": "By design means that the standard workflow targets the encoder's own container. The preview does not verify an artifact."},
+          "extension_requirement": {"enum": ["not_required", "not_established"]},
+          "experimental_extension": {"const": "brewery.cross-container.v1", "description": "Present only for the alternate container. This names an experimental path. It does not establish that an extension is necessary or that a runtime supports it."},
+          "runtime_proof": {"const": "not_assessed"}
+        }
+      },
+      "GgufCatalog": {
+        "type": "object", "required": ["schema", "format", "encoder_revision", "default_preset", "presets", "tensor_types"],
+        "properties": {
+          "schema": {"const": 1}, "format": {"const": "gguf"},
+          "encoder_revision": {"type": "string", "description": "Revision of the pinned upstream encoder source that the lists come from."},
+          "default_preset": {"type": "string"},
+          "presets": {"type": "array", "description": "Named presets, including aliases. Each is a whole-model recipe; the quantizer picks a type for each tensor.", "items": {
+            "type": "object", "required": ["id", "requires_imatrix"], "properties": {"id": {"type": "string"}, "requires_imatrix": {"type": "boolean"}}
+          }},
+          "tensor_types": {"type": "array", "description": "Raw tensor types that the encoder can write. Only these can be an override.", "items": {
+            "type": "object", "required": ["id", "type_id", "block_size", "block_bytes", "requires_imatrix"],
+            "properties": {"id": {"type": "string"}, "type_id": {"type": "integer"}, "block_size": {"type": "integer"}, "block_bytes": {"type": "integer"}, "requires_imatrix": {"type": "boolean"}}
+          }}
+        }
+      },
+      "NewConversion": {
+        "description": "Request for the one-submit workflow inspect, plan, convert and verify. Top-level fields are closed. The input rules and the options are the same as for the convert job. The verify stage uses decode_backend. To use a saved custom profile, set profile_revision and do not set options.profile. A custom profile needs a Hugging Face source, the cpu backend for every encoder and for decode_backend, and a worker with capabilities.custom_profiles true; otherwise the controller returns 400 or 409.\n\nGGUF output (format gguf). input_ids is the source, then at most one registered imatrix input. The source is an hf or gguf model; an hgn source is refused. The GGUF source must hold only F32, F16 or BF16 weights and be one file. An hf source needs a worker with capabilities.gguf_hf_output, and the bounded exporter accepts only a small set of dense architectures; the supported Flash-Next layout cannot be exported to GGUF and the job fails. A gguf source needs capabilities.gguf_output. options accepts only preset (an id from getGgufCatalog; default is the catalog default) and threads. decode_backend and every other option are refused. profile_revision must name a GGUF profile and cannot be combined with options.preset. A preset or tensor type that the catalog marks requires_imatrix needs the imatrix input, or the controller returns 400. The workflow runs the same four stages. The controller registers artifact_model_id, a gguf model, only after the independent verify passes. A GGUF conversion is not a release qualification.",
+        "type": "object", "required": ["input_ids"], "additionalProperties": false,
+        "properties": {
+          "format": {"enum": ["hgn", "gguf"], "default": "hgn", "description": "Output format. Absent or hgn: the HGN workflow, unchanged. gguf: see the GGUF rules in the description of this schema."},
+          "host": {
+            "anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}, {"type": "null"}],
+            "description": "Omitted or null: the source model's host. auto: an eligible worker of the configured quantization pool. Otherwise: that worker."
+          },
+          "input_ids": {"$ref": "#/components/schemas/ConversionInputIds", "type": "array", "items": {"$ref": "#/components/schemas/Id"}},
+          "options": {"$ref": "#/components/schemas/ConversionOptions"},
+          "decode_backend": {"$ref": "#/components/schemas/EncoderBackend"},
+          "profile_revision": {"$ref": "#/components/schemas/ProfileRevision", "description": "Revision of a saved custom profile. Its format must equal the conversion format. An unknown revision returns 404. The stages use the saved content; the request cannot change it."}
+        }
+      },
+      "ConversionState": {
+        "type": "string", "enum": ["running", "succeeded", "failed", "cancelled"],
+        "description": "Workflow state. running includes the time that the active child job waits in the queue. There is no queued state."
+      },
+      "ConversionStage": {"type": "string", "enum": ["inspect", "plan", "convert", "verify"]},
+      "Conversion": {
+        "type": "object", "required": ["id", "host", "state", "stage", "job_ids", "cancel_requested", "created_at", "updated_at"],
+        "properties": {
+          "id": {"$ref": "#/components/schemas/Id"},
+          "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}], "description": "Concrete worker ID, or auto before assignment of a pool worker."},
+          "requested_host": {"const": "auto", "description": "Present if auto routing was requested."},
+          "format": {"const": "gguf", "description": "Present only for a GGUF conversion. Absent means HGN."},
+          "state": {"$ref": "#/components/schemas/ConversionState"},
+          "stage": {"$ref": "#/components/schemas/ConversionStage", "description": "The current stage while running. After a stop, the stage where the workflow stopped or finished."},
+          "job_ids": {
+            "type": "object", "required": ["inspect"], "additionalProperties": false,
+            "description": "IDs of the child jobs, added as each stage is queued. Read each child with getJob.",
+            "properties": {
+              "inspect": {"$ref": "#/components/schemas/Id"}, "plan": {"$ref": "#/components/schemas/Id"},
+              "convert": {"$ref": "#/components/schemas/Id"}, "verify": {"$ref": "#/components/schemas/Id"}
+            }
+          },
+          "profile_revision": {"$ref": "#/components/schemas/ProfileRevision", "description": "Present if the workflow uses a custom profile."},
+          "profile_name": {"type": "string", "description": "Name of that profile at the time of the request."},
+          "cancel_requested": {"type": "boolean"},
+          "error": {"type": "string", "description": "Error of the failed child job when the worker gave one. Human-readable, not a stable machine code."},
+          "artifact_model_id": {
+            "$ref": "#/components/schemas/Id",
+            "description": "Model record of the converted hgn output. The controller can register it before verify passes. Its presence does not show that the workflow succeeded: check state."
+          },
+          "created_at": {"$ref": "#/components/schemas/UnixMillis"}, "updated_at": {"$ref": "#/components/schemas/UnixMillis"},
+          "finished_at": {"$ref": "#/components/schemas/UnixMillis"}
+        }
+      },
+      "PlanJob": {
+        "description": "Plan conversion using a registered source and optional auxiliaries.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/DefaultInputHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
+        "required": ["input_ids"],
+        "properties": {"kind": {"const": "plan"}, "input_ids": {"$ref": "#/components/schemas/ConversionInputIds"}, "options": {"$ref": "#/components/schemas/ConversionOptions"}}
+      },
+      "ConvertJob": {
+        "description": "Convert a registered source. The only kind that accepts host auto. Auto uses an eligible member of the configured quantization pool, preferring the source host when eligible; without a configured pool, auto uses only the source host. An explicit host is checked against its backend allowlists. Null or omitted host selects the source host, not the auto pool.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/NoPrompt"}],
+        "required": ["input_ids"],
+        "properties": {"kind": {"const": "convert"}, "input_ids": {"$ref": "#/components/schemas/ConversionInputIds"}, "options": {"$ref": "#/components/schemas/ConversionOptions"}}
+      },
+      "VerifyJob": {
+        "description": "Verify converted HGN from a registered source. First input: hf, gguf or hgn source. Second: hgn output. Each further input must be a distinct auxiliary kind (assets, ngram, vision or mtp) selected by its zero-based option index.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/DefaultInputHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
+        "required": ["input_ids"],
+        "properties": {
+          "kind": {"const": "verify"},
+          "input_ids": {"minItems": 2, "maxItems": 6, "x-brewery-input-kinds": [["hf", "gguf", "hgn"], ["hgn"]], "x-brewery-additional-input-kinds": ["assets", "ngram", "vision", "mtp"]},
+          "options": {"$ref": "#/components/schemas/VerifyOptions"}
+        }
+      },
+      "VerifyAuxIndex": {
+        "type": "integer", "minimum": 2, "maximum": 5,
+        "description": "Zero-based index into input_ids; must point to an input of the same kind as this option."
+      },
+      "VerifyOptions": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "decode_backend": {"$ref": "#/components/schemas/EncoderBackend"},
+          "assets": {"$ref": "#/components/schemas/VerifyAuxIndex"},
+          "ngram": {"$ref": "#/components/schemas/VerifyAuxIndex"},
+          "vision": {"$ref": "#/components/schemas/VerifyAuxIndex"},
+          "mtp": {"$ref": "#/components/schemas/VerifyAuxIndex"}
+        }
+      },
+      "GenerateJob": {
+        "description": "Generate text with a single hgn, brewery-bundle, hgn-v2 or ht43 input. Supply exactly one of an inline prompt or saved prompt ID. The controller accepts up to 65536 UTF-8 bytes, but the bundled evaluator fails jobs whose resolved prompt exceeds 16384 bytes.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/DefaultInputHost"}, {"$ref": "#/components/schemas/OnePrompt"}],
+        "required": ["input_ids"],
+        "properties": {
+          "kind": {"const": "generate"},
+          "input_ids": {"minItems": 1, "maxItems": 1, "x-brewery-input-kinds": [["hgn", "brewery-bundle", "hgn-v2", "ht43"]]},
+          "options": {"$ref": "#/components/schemas/GenerateOptions"}
+        }
+      },
+      "GenerateOptions": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"max_tokens": {"type": "integer", "minimum": 1, "maximum": 512, "description": "The bundled evaluator uses 128 when this option is omitted."}}
+      },
+      "EvaluateJob": {
+        "description": "Run GSM8K evaluation on one hgn, brewery-bundle, hgn-v2 or ht43 input. Optionally compare against either a second input of kind gsm8k-baseline or the selected worker's configured baseline_source ID, not both.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/DefaultInputHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
+        "required": ["input_ids"],
+        "properties": {
+          "kind": {"const": "evaluate"},
+          "input_ids": {"minItems": 1, "maxItems": 2, "x-brewery-input-kinds": [["hgn", "brewery-bundle", "hgn-v2", "ht43"], ["gsm8k-baseline"]]},
+          "options": {"$ref": "#/components/schemas/BaselineOptions"}
+        },
+        "if": {"properties": {"input_ids": {"minItems": 2}}},
+        "then": {"properties": {"options": {"$ref": "#/components/schemas/EmptyOptions"}}}
+      },
+      "BaselineJob": {
+        "description": "Score a baseline from one registered gsm8k-predictions or gsm8k-baseline input, or from the selected worker's configured baseline_source. A configured source requires an explicit host and no inputs.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/DefaultInputHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
+        "properties": {
+          "kind": {"const": "baseline"},
+          "input_ids": {"maxItems": 1, "x-brewery-input-kinds": [["gsm8k-predictions", "gsm8k-baseline"]]},
+          "options": {"$ref": "#/components/schemas/BaselineOptions"}
+        },
+        "oneOf": [
+          {"required": ["input_ids"], "properties": {"input_ids": {"minItems": 1}, "options": {"$ref": "#/components/schemas/EmptyOptions"}}},
+          {"allOf": [{"$ref": "#/components/schemas/RequiredHost"}], "required": ["options"], "properties": {"input_ids": {"maxItems": 0}, "options": {"required": ["baseline_source"]}}}
+        ]
+      },
+      "BaselineOptions": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"baseline_source": {"$ref": "#/components/schemas/ConfiguredToken", "description": "Worker-configured baseline provider ID from getState, never a URL."}}
+      },
+      "BenchmarkJob": {
+        "description": "Run an operator-configured endpoint target and one or more suites on an explicitly chosen, benchmark-capable host. No model inputs or prompt. Use the target and suite IDs reported by getState for this host; requests cannot provide endpoints or commands.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/RequiredHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
+        "required": ["options"],
+        "properties": {"kind": {"const": "benchmark"}, "input_ids": {"maxItems": 0}, "options": {"$ref": "#/components/schemas/BenchmarkOptions"}}
+      },
+      "BenchmarkOptions": {
+        "type": "object", "required": ["benchmark_target", "benchmarks"], "additionalProperties": false,
+        "properties": {
+          "benchmark_target": {"$ref": "#/components/schemas/BenchmarkId"},
+          "benchmarks": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": {"$ref": "#/components/schemas/BenchmarkId"}}
+        }
+      },
+      "TransferJob": {
+        "description": "Stage 1 to 32 registered inputs of any kind to an explicit configured destination worker. No options or prompts.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/RequiredHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
+        "required": ["input_ids"],
+        "properties": {"kind": {"const": "transfer"}, "input_ids": {"minItems": 1}, "options": {"$ref": "#/components/schemas/EmptyOptions"}}
+      },
+      "TransferPreviewJob": {
+        "description": "Plan staging for 1 to 32 registered inputs of any kind to an explicit configured destination worker without copying model payloads. No options or prompts.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/RequiredHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
+        "required": ["input_ids"],
+        "properties": {"kind": {"const": "transfer_preview"}, "input_ids": {"minItems": 1}, "options": {"$ref": "#/components/schemas/EmptyOptions"}}
+      },
+      "EmptyOptions": {"type": "object", "maxProperties": 0},
+      "CacheCleanupJob": {
+        "description": "Remove unpinned staged bundles from the chosen worker's managed cache, limited to one digest if supplied. No input IDs or prompt. Does not delete registered source files.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/RequiredHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
+        "properties": {"kind": {"const": "cache_cleanup"}, "input_ids": {"maxItems": 0}, "options": {"$ref": "#/components/schemas/CacheCleanupOptions"}}
+      },
+      "CacheCleanupOptions": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"bundle_sha256": {"$ref": "#/components/schemas/Sha256"}}
+      },
+      "HfDownloadJob": {
+        "description": "Download from Hugging Face on an explicit worker with hf_download enabled. No inputs or prompt. The worker resolves the revision to an immutable commit. A successful verified download registers a new Library model.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/RequiredHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
+        "required": ["options"],
+        "properties": {"kind": {"const": "hf_download"}, "input_ids": {"maxItems": 0}, "options": {"$ref": "#/components/schemas/HfDownloadOptions"}}
+      },
+      "HfRepoId": {
+        "type": "string", "maxLength": 193,
+        "pattern": "^(?:(?![^/]*(?:\\.\\.|--))(?![^/]*(?:\\.git|[-.])(?:/|$))[A-Za-z0-9][A-Za-z0-9._-]{0,95}/)?(?![^/]*(?:\\.\\.|--))(?![^/]*(?:\\.git|[-.])$)[A-Za-z0-9][A-Za-z0-9._-]{0,95}(?![\\s\\S])",
+        "description": "Hugging Face model repository ID, not a URL."
+      },
+      "HfRevision": {
+        "type": "string", "maxLength": 128,
+        "pattern": "^(?:(?![^/]*\\.\\.)(?![^/]*(?:\\.lock|\\.)(?:/|$))[A-Za-z0-9][A-Za-z0-9._-]*/)*(?![^/]*\\.\\.)(?![^/]*(?:\\.lock|\\.)$)[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])",
+        "description": "Branch, tag, or commit. A full lowercase hexadecimal commit must match the resolved commit."
+      },
+      "HfFilename": {
+        "type": "string", "maxLength": 512,
+        "pattern": "^(?:(?![^/]*\\.\\.)(?![^/]*\\./)[A-Za-z0-9][A-Za-z0-9._-]{0,254}/){0,15}(?![^/]*\\.\\.)(?=[^/]{1,255}(?![\\s\\S]))[A-Za-z0-9][A-Za-z0-9._-]*\\.(?:gguf|safetensors)(?![\\s\\S])",
+        "description": "Exact relative file name within the repository; no glob or local path."
+      },
+      "HfDownloadOptions": {
+        "type": "object", "additionalProperties": false, "required": ["repo_id"],
+        "properties": {
+          "repo_id": {"$ref": "#/components/schemas/HfRepoId"},
+          "revision": {"$ref": "#/components/schemas/HfRevision", "default": "main"},
+          "filename": {"$ref": "#/components/schemas/HfFilename", "description": "Omit to download the full checkpoint."}
+        }
+      },
+      "WeightTensorName": {"type": "string", "pattern": "^(?!\\.)(?!.*\\.\\.)[A-Za-z0-9._-]{1,63}$"},
+      "WeightCoordinate": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+      "WeightIndex": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"$ref": "#/components/schemas/WeightCoordinate"}},
+      "PackedWeightOptIn": {
+        "const": true,
+        "description": "Opt in to fixed-scale packed operations for GGUF Q4_0 or Q8_0, or HGN Q8G64. Requires weight_packed and all other applicable worker capabilities. Omit for the legacy floating-point mode. A successful packed job returns packed: true. A packed proposal or tune report gives the dtype and realized before and after values for each edit."
+      },
+      "WeightSingleSource": {
+        "description": "The input is a Library ID for GGUF, single-file HGN (kind hgn), standalone SafeTensors (kind safetensors), or an indexed HF checkpoint directory (kind hf) on the selected worker. HGN requires weight_hgn. SafeTensors and HF require weight_safetensors and do not support packed mode. These capabilities are additional to the per-job opt-in.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/NoPrompt"}],
+        "required": ["input_ids", "options"],
+        "properties": {"input_ids": {"minItems": 1, "maxItems": 1}, "host": {"not": {"const": "auto"}}}
+      },
+      "WeightInspectJob": {
+        "description": "Read one scalar, a tensor inventory page, or a tensor tile from a registered weight source. Inventory and tiles also require weight_visual on the selected worker. Tiles use the inventory's source digest; later inventory pages can use that digest too. For standalone SafeTensors, the digest is the file SHA-256. For indexed HF, it is the canonical bundle SHA-256. A source mismatch fails the job without publishing values.",
+        "allOf": [{"$ref": "#/components/schemas/WeightSingleSource"}],
+        "properties": {"kind": {"const": "weight_inspect"}, "options": {"$ref": "#/components/schemas/WeightInspectOptions"}}
+      },
+      "WeightInspectOptions": {
+        "type": "object",
+        "oneOf": [
+          {"additionalProperties": false, "required": ["tensor", "index"],
+           "properties": {"tensor": {"$ref": "#/components/schemas/WeightTensorName"}, "index": {"$ref": "#/components/schemas/WeightIndex"},
+             "packed": {"$ref": "#/components/schemas/PackedWeightOptIn"}}},
+          {"additionalProperties": false, "required": ["mode", "offset", "limit"], "properties": {
+            "mode": {"const": "inventory"}, "offset": {"$ref": "#/components/schemas/WeightCoordinate"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 128},
+            "source_sha256": {"$ref": "#/components/schemas/Sha256"},
+            "packed": {"$ref": "#/components/schemas/PackedWeightOptIn"}
+          }},
+          {"additionalProperties": false, "required": ["mode", "tensor", "origin", "shape", "source_sha256"], "properties": {
+            "mode": {"const": "tile"}, "tensor": {"$ref": "#/components/schemas/WeightTensorName"},
+            "origin": {"$ref": "#/components/schemas/WeightIndex"},
+            "shape": {"type": "array", "minItems": 1, "maxItems": 4,
+              "items": {"type": "integer", "minimum": 1, "maximum": 1024},
+              "description": "Same rank as origin. Rank 1: up to 1024 elements. Rank 2–4: the last two dimensions are at most 32 each; all leading dimensions equal 1."},
+            "source_sha256": {"$ref": "#/components/schemas/Sha256"},
+            "packed": {"$ref": "#/components/schemas/PackedWeightOptIn"}
+          }}
+        ]
+      },
+      "WeightProposeJob": {
+        "description": "Prepare a proposal for a registered weight source without writing model weights. HGN, SafeTensors, and HF receipts identify source_format as the Library kind.",
+        "allOf": [{"$ref": "#/components/schemas/WeightSingleSource"}],
+        "properties": {"kind": {"const": "weight_propose"}, "options": {"$ref": "#/components/schemas/WeightProposeOptions"}}
+      },
+      "WeightProposeOptions": {
+          "type": "object", "additionalProperties": false, "required": ["edits"],
+           "properties": {"source_sha256": {"$ref": "#/components/schemas/Sha256", "description": "Use the inspected source digest for edits based on a visual read. Requires weight_visual."},
+             "packed": {"$ref": "#/components/schemas/PackedWeightOptIn"},
+             "edits": {"type": "array", "minItems": 1, "maxItems": 256, "items": {
+            "type": "object", "additionalProperties": false, "required": ["tensor", "index", "op", "value"],
+            "properties": {"tensor": {"$ref": "#/components/schemas/WeightTensorName"}, "index": {"$ref": "#/components/schemas/WeightIndex"},
+              "op": {"enum": ["set", "delta"]}, "value": {"type": "number"}}
+          }}}
+      },
+      "WeightTuneJob": {
+        "description": "Prepare a proposal for selected coordinates in a rank-two tensor. Inputs are a registered weight source (GGUF, single-file HGN, standalone SafeTensors, or indexed HF), calibration, and held-out data in that order. Use two distinct weight-calibration records. All inputs must be on the same opted-in worker. HGN requires weight_hgn. SafeTensors and HF require weight_safetensors and do not support packed mode.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/NoPrompt"}],
+        "required": ["input_ids", "options"],
+        "properties": {"kind": {"const": "weight_tune"}, "host": {"not": {"const": "auto"}}, "input_ids": {"minItems": 3, "maxItems": 3, "uniqueItems": true},
+          "options": {"$ref": "#/components/schemas/WeightTuneOptions"}}
+      },
+      "WeightTuneOptions": {
+          "type": "object", "additionalProperties": false, "required": ["tensor", "indices", "max_update"], "properties": {
+             "tensor": {"$ref": "#/components/schemas/WeightTensorName"}, "max_update": {"type": "number", "exclusiveMinimum": 0},
+             "source_sha256": {"$ref": "#/components/schemas/Sha256", "description": "Use the inspected source digest for tuning based on a visual read. Requires weight_visual."},
+             "packed": {"$ref": "#/components/schemas/PackedWeightOptIn"},
+            "indices": {"type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": {
+              "allOf": [{"$ref": "#/components/schemas/WeightIndex"}], "minItems": 2, "maxItems": 2
+            }}
+          }
+      },
+      "WeightApplyJob": {
+        "description": "Confirm review of an existing successful proposal or tune job. Its source and worker must match the input record exactly. The controller supplies the proposal to the worker and derives packed intent from the reviewed job. A packed apply needs weight_packed and must confirm the exact approved proposal digest. A verified result registers a new model of the same kind without overwriting the original. A failed or cancelled apply does not register an artifact.",
+        "allOf": [{"$ref": "#/components/schemas/WeightSingleSource"}],
+        "properties": {"kind": {"const": "weight_apply"}, "options": {"$ref": "#/components/schemas/WeightApplyOptions"}}
+      },
+      "WeightApplyOptions": {
+          "type": "object", "additionalProperties": false, "required": ["proposal_job_id", "reviewed"],
+          "properties": {"proposal_job_id": {"$ref": "#/components/schemas/Id"}, "reviewed": {"const": true}}
+      },
+      "WeightApplyResult": {
+        "description": "The worker verified an edit in the registered source format. The artifact must have the same kind as the source and be in this job's work directory. SafeTensors and HF require the exact approved proposal digest. HF output retains every source manifest member and its size; ancillary files are unchanged. The bundle digest is SHA-256 over sorted relative path, NUL, decimal bytes, NUL, lowercase file SHA-256, newline records. Registration is not a quality or release verdict.",
+        "type": "object", "required": ["kind", "verified", "source_sha256", "report", "artifact", "library_model_id"],
+        "properties": {"kind": {"const": "weight_apply"}, "verified": {"const": true},
+          "packed": {"const": true}, "proposal_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "source_format": {"enum": ["gguf", "hgn", "safetensors", "hf"]},
+          "source_sha256": {"$ref": "#/components/schemas/Sha256"}, "artifact": {"$ref": "#/components/schemas/Artifact"},
+          "library_model_id": {"$ref": "#/components/schemas/Id"}, "report": {
+            "type": "object", "required": ["schema", "source_sha256", "output_sha256", "edit_count", "verified"],
+            "properties": {"schema": {"const": "brewery.weight-edit-result.v1"}, "verified": {"const": true},
+              "source_sha256": {"$ref": "#/components/schemas/Sha256"}, "output_sha256": {"$ref": "#/components/schemas/Sha256"},
+              "edit_count": {"type": "integer", "minimum": 1, "maximum": 256}}
+          }
+        },
+        "dependentRequired": {"packed": ["proposal_sha256"]},
+        "oneOf": [
+          {"properties": {"source_format": {"const": "gguf"}, "artifact": {
+            "properties": {"kind": {"const": "gguf"}, "path": {"pattern": "/work/edited\\.gguf$"}}
+          }}},
+          {"required": ["source_format"], "properties": {"source_format": {"const": "hgn"}, "artifact": {
+            "properties": {"kind": {"const": "hgn"}, "path": {"pattern": "/work/edited\\.hgn$"}}
+          }}},
+          {"required": ["source_format", "proposal_sha256"], "not": {"required": ["packed"]},
+           "properties": {"source_format": {"const": "safetensors"}, "artifact": {
+             "properties": {"kind": {"const": "safetensors"}, "path": {"pattern": "/work/edited\\.safetensors$"}},
+             "not": {"anyOf": [{"required": ["files"]}, {"required": ["bundle_sha256"]}]}
+          }}},
+          {"required": ["source_format", "proposal_sha256"], "not": {"required": ["packed"]},
+           "properties": {"source_format": {"const": "hf"}, "artifact": {
+             "required": ["bundle_sha256", "files"],
+             "properties": {"kind": {"const": "hf"}, "path": {"pattern": "/work/edited\\.hf$"},
+               "files": {"type": "array", "minItems": 2, "maxItems": 16384, "items": {
+                 "type": "object", "required": ["path", "bytes", "sha256"],
+                 "properties": {"path": {"type": "string", "description": "Canonical relative file path in the checkpoint."},
+                   "bytes": {"$ref": "#/components/schemas/ByteCount"}, "sha256": {"$ref": "#/components/schemas/Sha256"}}
+               }}}
+          }}}
+        ]
+      },
+      "HfDownloadResult": {
+        "description": "Verified download registered in the Library. The artifact path is under this job's managed download directory on the worker.",
+        "type": "object", "additionalProperties": false, "required": ["kind", "repo_id", "revision", "commit", "verified", "artifact", "library_model_id"],
+        "properties": {
+          "kind": {"const": "hf_download"}, "verified": {"const": true},
+          "repo_id": {"$ref": "#/components/schemas/HfRepoId"}, "revision": {"$ref": "#/components/schemas/HfRevision"},
+          "commit": {"type": "string", "minLength": 40, "maxLength": 40, "pattern": "^[0-9a-f]{40}$"},
+          "filename": {"$ref": "#/components/schemas/HfFilename"}, "library_model_id": {"$ref": "#/components/schemas/Id"},
+          "artifact": {
+            "type": "object", "additionalProperties": false, "required": ["kind", "path", "sha256", "bytes"],
+            "properties": {
+              "kind": {"enum": ["hf", "gguf", "safetensors"]},
+              "path": {"$ref": "#/components/schemas/AbsoluteWorkerPath"},
+              "sha256": {"$ref": "#/components/schemas/Sha256"}, "bytes": {"type": "integer", "minimum": 1}
+            }
+          }
+        },
+        "if": {"required": ["filename"]},
+        "then": {"properties": {"artifact": {"properties": {"kind": {"enum": ["gguf", "safetensors"]}}}}},
+        "else": {"properties": {"artifact": {"properties": {"kind": {"const": "hf"}}}}}
+      },
+      "JobResult": {
+        "description": "Worker result. Weight apply and Hugging Face download check output identity and register a Library model only on verified success. A job result is not a release verdict.",
+        "oneOf": [
+          {"$ref": "#/components/schemas/CompareResult"},
+          {"$ref": "#/components/schemas/ConversionResult"},
+          {"$ref": "#/components/schemas/GenerateResult"},
+          {"$ref": "#/components/schemas/Gsm8kResult"},
+          {"$ref": "#/components/schemas/BenchmarkResult"},
+          {"$ref": "#/components/schemas/TransferResult"},
+          {"$ref": "#/components/schemas/CacheCleanupResult"},
+          {"$ref": "#/components/schemas/WeightApplyResult"},
+          {"$ref": "#/components/schemas/HfDownloadResult"},
+          {"type": "object", "not": {"anyOf": [
+            {"$ref": "#/components/schemas/CompareResult"}, {"$ref": "#/components/schemas/ConversionResult"},
+            {"$ref": "#/components/schemas/GenerateResult"}, {"$ref": "#/components/schemas/Gsm8kResult"},
+            {"$ref": "#/components/schemas/BenchmarkResult"}, {"$ref": "#/components/schemas/TransferResult"},
+             {"$ref": "#/components/schemas/CacheCleanupResult"}, {"$ref": "#/components/schemas/WeightApplyResult"},
+             {"required": ["kind"], "properties": {"kind": {"const": "hf_download"}}}
+          ]}}
+        ]
+      },
+      "ByteCount": {"type": "integer", "minimum": 0},
+      "Artifact": {
+        "type": "object", "required": ["kind", "path", "sha256", "bytes"],
+        "properties": {
+          "kind": {"type": "string"}, "path": {"type": "string", "description": "Path on the worker, not an API download URL."},
+          "sha256": {"$ref": "#/components/schemas/Sha256"}, "bytes": {"$ref": "#/components/schemas/ByteCount"},
+          "bundle_sha256": {"$ref": "#/components/schemas/Sha256"}, "files": {"type": "array", "items": {"type": "object"}}
+        }
+      },
+      "CompareResult": {
+        "type": "object", "required": ["kind", "host", "traces", "alignment", "artifact"],
+        "properties": {
+          "kind": {"const": "compare"}, "host": {"$ref": "#/components/schemas/HostId"},
+          "traces": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "object"}},
+          "alignment": {
+            "type": "object", "required": ["status", "matched_prefix_tokens", "reason"],
+            "properties": {
+              "status": {"enum": ["not_aligned", "prefix_only"]},
+              "matched_prefix_tokens": {"type": "integer", "minimum": 0}, "reason": {"type": "string"}
+            }
+          },
+          "artifact": {"$ref": "#/components/schemas/Artifact"}
+        }
+      },
+      "ConversionResult": {
+        "type": "object", "required": ["kind", "host", "source_sha256", "report", "artifact", "file_verification"],
+        "properties": {
+          "kind": {"enum": ["inspect", "plan", "convert", "verify"]}, "host": {"$ref": "#/components/schemas/HostId"},
+          "source_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "report": {"type": "object", "description": "Native converter report. Inspect describes the source; plan adds plan and layouts; convert reports publication; verify reports source/output checks."},
+          "artifact": {"$ref": "#/components/schemas/Artifact"},
+          "file_verification": {
+            "type": "object", "required": ["status", "scope"],
+            "properties": {"status": {"enum": ["passed", "not_performed"]}, "scope": {"type": "string"}}
+          },
+          "disk_preflight": {"type": ["object", "null"], "properties": {
+            "payload_bytes": {"$ref": "#/components/schemas/ByteCount"}, "required_bytes": {"$ref": "#/components/schemas/ByteCount"},
+            "available_bytes": {"$ref": "#/components/schemas/ByteCount"}, "fits": {"type": "boolean"}, "scope": {"type": "string"}
+          }},
+          "inference_bundle": {"type": ["object", "null"], "properties": {
+            "status": {"enum": ["not_created", "manifest_created"]}, "reason": {"type": "string"}, "manifest": {"type": "string"}, "format": {"type": "string"}
+          }}
+        },
+        "allOf": [
+          {"if": {"properties": {"kind": {"const": "plan"}}}, "then": {"properties": {"report": {
+            "required": ["summary", "plan", "layouts"], "properties": {"summary": {"type": "object"}, "plan": {"type": "object"}, "layouts": {"type": "array"}}
+          }}}},
+          {"if": {"properties": {"kind": {"const": "convert"}}}, "then": {"properties": {"report": {
+            "required": ["published", "manifest"], "properties": {"published": {"const": true}, "manifest": {"type": "string"}}
+          }}}},
+          {"if": {"properties": {"kind": {"const": "verify"}}}, "then": {"properties": {"report": {
+            "required": ["passed", "manifest_schema", "provenance_attested"], "properties": {"passed": {"const": true}, "manifest_schema": {"const": 2}, "provenance_attested": {"const": true}}
+          }}}}
+        ]
+      },
+      "GenerateResult": {
+        "type": "object", "required": ["kind", "text", "identity", "protocol"],
+        "properties": {
+          "kind": {"const": "generate"}, "text": {"type": "string"}, "identity": {"type": "object"},
+          "protocol": {"type": "object", "required": ["id", "temperature", "max_tokens", "prompt_sha256"], "properties": {
+            "id": {"const": "raw-greedy-v1"}, "temperature": {"const": 0}, "max_tokens": {"type": "integer", "minimum": 1, "maximum": 512},
+            "prompt_sha256": {"$ref": "#/components/schemas/Sha256"}
+          }}
+        }
+      },
+      "Gsm8kResult": {
+        "type": "object", "required": ["kind", "dataset", "protocol_id", "score", "identity", "artifact"],
+        "properties": {
+          "kind": {"enum": ["evaluate", "baseline"]}, "protocol_id": {"type": "string"},
+          "dataset": {"type": "object", "properties": {
+            "name": {"type": "string"}, "revision": {"type": "string"}, "split": {"type": "string"}, "sha256": {"$ref": "#/components/schemas/Sha256"},
+            "rows": {"type": "integer", "minimum": 0}, "full_split": {"type": "boolean"}
+          }},
+          "score": {"$ref": "#/components/schemas/Gsm8kScore"},
+          "identity": {"$ref": "#/components/schemas/Gsm8kIdentity"}, "artifact": {"$ref": "#/components/schemas/Artifact"},
+          "baseline_score": {"anyOf": [{"$ref": "#/components/schemas/Gsm8kScore"}, {"type": "null"}]},
+          "baseline_identity": {"anyOf": [{"$ref": "#/components/schemas/Gsm8kIdentity"}, {"type": "null"}]},
+          "baseline_artifact": {"anyOf": [{"$ref": "#/components/schemas/Artifact"}, {"type": "null"}]},
+          "comparison": {"type": ["object", "null"], "properties": {
+            "changed_answers": {"type": "integer", "minimum": 0}, "changed_answer_ids": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+            "delta_correct": {"type": "integer"}, "within_two_percentage_points": {"type": "boolean"}
+          }}
+        }
+      },
+      "Gsm8kScore": {
+        "type": "object", "required": ["correct", "total", "unparsed", "accuracy_basis_points"],
+        "properties": {
+          "correct": {"type": "integer", "minimum": 0}, "total": {"type": "integer", "minimum": 0},
+          "unparsed": {"type": "integer", "minimum": 0}, "accuracy_basis_points": {"type": "integer", "minimum": 0, "maximum": 10000}
+        }
+      },
+      "Gsm8kIdentity": {
+        "type": "object", "required": ["source_sha256", "synthetic", "provenance"],
+        "properties": {"source_sha256": {"$ref": "#/components/schemas/Sha256"}, "synthetic": {"type": "boolean"}, "provenance": {"type": ["object", "null"]}}
+      },
+      "BenchmarkResult": {
+        "type": "object", "required": ["kind", "schema", "target", "model", "status", "runs", "release_qualified", "artifact"],
+        "properties": {
+          "kind": {"const": "benchmark"}, "schema": {"const": "brewery-benchmark-report-v1"},
+          "target": {"$ref": "#/components/schemas/BenchmarkId"}, "model": {"type": "string"},
+          "status": {"enum": ["complete", "partial", "failed"], "description": "Aggregate suite coverage, separate from the controller job state."},
+          "runs": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/components/schemas/BenchmarkRun"}},
+          "release_qualified": {"const": false}, "artifact": {"$ref": "#/components/schemas/Artifact"}
+        }
+      },
+      "BenchmarkRun": {
+        "type": "object", "required": ["benchmark", "version", "protocol", "status", "metrics", "duration_ms"],
+        "properties": {
+          "benchmark": {"$ref": "#/components/schemas/BenchmarkId"}, "version": {"type": "string"}, "protocol": {"type": "string"},
+          "status": {"enum": ["succeeded", "failed"]}, "duration_ms": {"type": "integer", "minimum": 0},
+          "metrics": {"type": "array", "items": {"type": "object", "required": ["name", "value", "unit", "direction"], "properties": {
+            "name": {"type": "string"}, "value": {"type": "number"}, "unit": {"type": "string"}, "direction": {"enum": ["higher", "lower", "neutral"]}
+          }}},
+          "samples": {"type": "integer", "minimum": 0}, "error": {"type": "string"},
+          "executable_sha256": {"$ref": "#/components/schemas/Sha256"}, "raw_artifact": {"$ref": "#/components/schemas/Artifact"},
+          "raw_error": {"type": "string"}
+        }
+      },
+      "TransferResult": {
+        "type": "object", "description": "Worker transfer or transfer_preview report.",
+        "required": ["bytes", "missing_bytes", "available_bytes", "inputs"],
+        "not": {"anyOf": [{"required": ["kind"]}, {"required": ["removed", "skipped"]}]},
+        "properties": {
+          "bytes": {"$ref": "#/components/schemas/ByteCount"}, "missing_bytes": {"$ref": "#/components/schemas/ByteCount"},
+          "available_bytes": {"$ref": "#/components/schemas/ByteCount"},
+          "inputs": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "object", "required": ["id", "host", "path", "kind"], "properties": {
+            "id": {"$ref": "#/components/schemas/Id"}, "host": {"$ref": "#/components/schemas/HostId"},
+            "source_host": {"$ref": "#/components/schemas/HostId"}, "path": {"type": "string"}, "kind": {"$ref": "#/components/schemas/ModelKind"}
+          }}}
+        }
+      },
+      "CacheCleanupResult": {
+        "type": "object", "required": ["removed", "skipped"], "not": {"required": ["kind"]},
+        "properties": {
+          "removed": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/components/schemas/Sha256"}},
+          "skipped": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/components/schemas/Sha256"}}
+        }
+      }
+    }
+  }
+}

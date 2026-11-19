@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Offline fixture tool: export an already verified, pinned single encoded file."""
+import argparse
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+MAGIC = {b"HGN1": "hgn", b"GGUF": "gguf"}
+ADAPTERS = {"hgn": "ggml_in_hgn.py", "gguf": "hgn_in_gguf.py"}
+MAX_INPUT = 64 * 1024 * 1024
+
+
+def format_of(path):
+    with path.open("rb") as stream:
+        magic = stream.read(4)
+    if magic not in MAGIC:
+        raise ValueError("not an HGN or GGUF artifact")
+    return MAGIC[magic]
+
+
+def snapshot(source, path, expected):
+    digest = hashlib.sha256()
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    with os.fdopen(os.open(source, flags), "rb") as src, path.open("xb") as dst:
+        st = os.fstat(src.fileno())
+        if not stat.S_ISREG(st.st_mode) or not 0 < st.st_size <= MAX_INPUT:
+            raise ValueError("expected a regular, nonempty input at most 64 MiB")
+        remaining = st.st_size
+        while remaining:
+            chunk = src.read(min(1 << 20, remaining))
+            if not chunk:
+                raise ValueError("input truncated")
+            dst.write(chunk)
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if src.read(1) or digest.hexdigest() != expected:
+            raise ValueError("encoded input digest mismatch")
+    path.chmod(0o400)
+
+
+def export(args):
+    dest = args.destination
+    if not re.fullmatch("[0-9a-f]{64}", args.encoded_sha256):
+        raise ValueError("expected lowercase SHA-256 of verified input")
+    if os.path.lexists(dest):
+        raise ValueError("destination already exists")
+    with tempfile.TemporaryDirectory(prefix=".exact-export-", dir=dest.parent) as tmp:
+        src = Path(tmp) / "source"
+        snapshot(args.source, src, args.encoded_sha256)
+        origin = format_of(src)
+        if origin == args.to:
+            output = src
+            proof = "identical-file"
+        else:
+            named = src.with_suffix("." + origin)
+            src.rename(named)
+            output = Path(tmp) / ("export." + args.to)
+            adapter = Path(__file__).resolve().parent / "cross_container" / ADAPTERS[args.to]
+            if not adapter.is_file():
+                raise ValueError("versioned reader/writer not installed")
+            for op in ("pack", "verify"):
+                subprocess.run([sys.executable, "-B", adapter, op, named, output],
+                               check=True, stdout=sys.stderr)
+            if format_of(output) != args.to:
+                raise ValueError("adapter returned wrong container")
+            proof = "adapter-verified"
+        with output.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        if proof == "identical-file" and digest != args.encoded_sha256:
+            raise ValueError("output digest mismatch")
+        # link, not replace: simultaneous exports cannot overwrite one another.
+        os.link(output, dest)
+        return dict(encoded_sha256=args.encoded_sha256, output_sha256=digest,
+                    source_format=origin, format=args.to, verification=proof,
+                    runtime_tested=False)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--encoded-sha256", required=True)
+    parser.add_argument("--to", required=True, choices=["hgn", "gguf"])
+    parser.add_argument("source", type=Path)
+    parser.add_argument("destination", type=Path)
+    args = parser.parse_args()
+    try:
+        print(json.dumps(export(args)))
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        parser.exit(1, f"exact-export: {exc}\n")
+
+
+if __name__ == "__main__":
+    main()

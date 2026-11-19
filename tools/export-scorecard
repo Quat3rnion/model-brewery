@@ -1,0 +1,124 @@
+#!/usr/bin/env -S bun --no-install
+
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
+import { buildScorecard } from '../web/src/lib/benchmark';
+import { newestFirst } from '../web/src/lib/format';
+import { obj } from '../web/src/lib/reports';
+import type { JobDetail } from '../web/src/lib/types';
+
+const MAX_FILES = 256;
+const MIB = 1024 * 1024;
+const MAX_FILE_BYTES = 16 * MIB;
+const MAX_TOTAL_BYTES = 64 * MIB;
+const usage = 'Usage: tools/export-scorecard [--] DETAIL.json [DETAIL.json ...]';
+const states = new Set(['queued', 'running', 'succeeded', 'failed', 'cancelled']);
+const jobId = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const utf8 = new TextDecoder('utf-8', { fatal: true });
+
+function readDetail(path: string, remaining: number): { detail: JobDetail; bytes: number } {
+  // Opening nonblocking lets us reject a FIFO without waiting for a writer.
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error('expected a regular file');
+    if (stat.size > MAX_FILE_BYTES) throw new Error(`file is larger than ${MAX_FILE_BYTES / MIB} MiB`);
+    if (stat.size > remaining) throw new Error(`inputs exceed ${MAX_TOTAL_BYTES / MIB} MiB in total`);
+
+    // Probe one extra byte so a file that grows during the read cannot bypass
+    // the size limit or look like a complete export after truncation.
+    const buffer = Buffer.allocUnsafe(stat.size + 1);
+    let bytes = 0;
+    while (bytes < buffer.length) {
+      const read = readSync(fd, buffer, bytes, buffer.length - bytes, null);
+      if (read === 0) break;
+      bytes += read;
+    }
+    if (bytes !== stat.size) throw new Error('file size changed during the read');
+
+    let data: unknown;
+    try {
+      data = JSON.parse(utf8.decode(buffer.subarray(0, bytes)));
+    } catch {
+      throw new Error('expected valid UTF-8 JSON');
+    }
+    const detail = obj(data);
+    validateDetail(detail);
+    return { detail, bytes };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function validateDetail(j: Record<string, unknown> | null): asserts j is JobDetail {
+  if (!j) throw new Error('expected one job detail object');
+  if (typeof j.id !== 'string' || j.id.length !== 36 || !jobId.test(j.id))
+    throw new Error('invalid job ID (expected a controller UUID)');
+  if (j.kind !== 'benchmark' && j.kind !== 'evaluate') throw new Error('expected a benchmark or evaluate job');
+  if (typeof j.state !== 'string' || !states.has(j.state)) throw new Error('invalid job state');
+  // List/state responses contain has_result but never events. Detail
+  // responses always contain events and omit result when there is none.
+  if (!Array.isArray(j.events)) throw new Error('missing events array; use GET /api/jobs/{id}, not a job summary');
+  if (typeof j.has_result !== 'boolean' || j.has_result !== Object.hasOwn(j, 'result'))
+    throw new Error('has_result must agree with the presence of result');
+  if (!Array.isArray(j.input_ids) || j.input_ids.some((id) => typeof id !== 'string' || !id))
+    throw new Error('invalid input_ids');
+  if (j.options !== undefined && !obj(j.options)) throw new Error('invalid options');
+  for (const field of ['host', 'requested_host', 'error']) {
+    const value = j[field];
+    if (value != null && typeof value !== 'string') throw new Error(`invalid ${field}`);
+  }
+  for (const field of ['created_at', 'finished_at']) {
+    const value = j[field];
+    if (value != null && (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0))
+      throw new Error(`invalid ${field}`);
+  }
+}
+
+function main(args: string[]) {
+  if (args.length === 1 && args[0] === '--help') {
+    console.log(`${usage}
+Read unmodified GET /api/jobs/{id} JSON for benchmark and evaluate jobs.
+Requires Bun on PATH; no package installation or network access.
+Limits: ${MAX_FILES} local regular files, ${MAX_FILE_BYTES / MIB} MiB per file, ${MAX_TOTAL_BYTES / MIB} MiB total.
+Writes one scorecard to stdout. Host display names are not in job details.`);
+    return;
+  }
+  const paths: string[] = [];
+  let options = true;
+  for (const arg of args) {
+    if (options && arg === '--') options = false;
+    else if (options && arg.startsWith('-')) throw new Error(`unknown option ${JSON.stringify(arg)}\n${usage}`);
+    else paths.push(arg);
+  }
+  if (paths.length === 0 || paths.length > MAX_FILES)
+    throw new Error(`expected 1–${MAX_FILES} job detail files\n${usage}`);
+
+  const seen = new Set<string>();
+  const benchmark: JobDetail[] = [];
+  const evaluate: JobDetail[] = [];
+  let remaining = MAX_TOTAL_BYTES;
+  for (const path of paths) {
+    try {
+      const { detail, bytes } = readDetail(path, remaining);
+      if (seen.has(detail.id)) throw new Error(`duplicate job ID ${detail.id}`);
+      seen.add(detail.id);
+      remaining -= bytes;
+      (detail.kind === 'benchmark' ? benchmark : evaluate).push(detail);
+    } catch (error) {
+      // Bun/Node filesystem errors can include the raw path; quote it once.
+      const problem = (error as NodeJS.ErrnoException).code ?? (error as Error).message;
+      throw new Error(`${JSON.stringify(path)}: ${problem}`);
+    }
+  }
+
+  const pairs = (jobs: JobDetail[]) => newestFirst(jobs).map((job) => ({ summary: job, detail: job }));
+  const card = buildScorecard(pairs(benchmark), pairs(evaluate), [], new Date().toISOString());
+  console.log(JSON.stringify(card));
+}
+
+try {
+  main(process.argv.slice(2));
+} catch (error) {
+  console.error(`export-scorecard: ${(error as Error).message}`);
+  process.exitCode = 1;
+}

@@ -1,0 +1,51 @@
+#!/usr/bin/env -S python3 -EBs
+"""BetterBench's bounded single-stream decode profile on its chat corpus."""
+
+import json
+from pathlib import Path
+from statistics import median
+
+from _adapter import AdapterError, main, metric, run_cli
+
+NAME, VERSION, PROTOCOL = "betterbench", "0.6.1", "betterbench-decode-chat-v1"
+PASSES = 4
+
+
+def run(base, model):
+    # Avoid non-standard top_k in requests to OpenAI-compatible endpoints.
+    with Path("betterbench-config.json").open("x") as config:
+        json.dump({"top_k": None, "timeout_s": 60}, config)
+    data = run_cli(NAME, VERSION, [
+        "run", f"--endpoint={base}", f"--model={model}", "--decode",
+        "--categories", "chat", f"--passes={PASSES}", "--warmup=1", "--greedy",
+        "--config=betterbench-config.json", "--no-update-check",
+        "--out=raw.json", "--no-html",
+    ])
+    if data["schema"] != 2 or data["betterbench_version"] != VERSION:
+        raise AdapterError("unknown BetterBench report format")
+    rows = data["single_stream"]["chat"]
+    if len(rows) != PASSES or any(row.get("ok") is not True for row in rows):
+        raise AdapterError("not all measured BetterBench streams succeeded")
+    # This upstream otherwise estimates completion_tokens from SSE updates.
+    # Do not label that tokens/s, or silently report only the fastest streams.
+    if any(type(row.get("completion_tokens")) is not int
+           or row["completion_tokens"] < 2
+           or type(row.get("n_chunks")) is not int or row["n_chunks"] < 2
+           or row.get("finish_reason") not in ("stop", "length")
+           for row in rows):
+        raise AdapterError("each stream needs multiple updates, reported usage, and a completion")
+
+    metrics = []
+    for field, name, unit, direction in (
+        ("ttft_ms", "ttft_p50", "ms", "lower"),
+        ("decode_tps", "decode_tps_p50", "tokens/s", "higher"),
+    ):
+        values = [metric(name, row[field], unit, direction)["value"] for row in rows]
+        if min(values) <= 0:
+            raise AdapterError(f"upstream reported a nonpositive {field}")
+        metrics.append(metric(name, median(values), unit, direction))
+    return {"metrics": metrics, "samples": len(rows)}
+
+
+if __name__ == "__main__":
+    main(NAME, VERSION, PROTOCOL, run)

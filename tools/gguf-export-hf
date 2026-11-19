@@ -1,0 +1,422 @@
+#!/usr/bin/python3
+"""Inspect safetensors or export a bounded, audited HF checkpoint to floating GGUF."""
+import argparse
+import ctypes
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import resource
+import shutil
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+
+COMMIT = "184f6536024668e8908ab8c86033d56708e62b40"
+CODE_SHA = "fdb7c0fd39b826727012ba3cd9031818dde766b3b7dc4cc400e67f551a2ca35d"
+MIB = 1 << 20
+MAX_EXPORT = 512 * MIB
+MAX_HEADER = 16 * MIB
+DTYPE = {"BF16": 2, "F16": 2, "F32": 4, "I64": 8}
+ASSETS = frozenset("config.json tokenizer.json tokenizer_config.json chat_template.jinja merges.txt "
+                   "generation_config.json vocab.json preprocessor_config.json video_preprocessor_config.json "
+                   "special_tokens_map.json added_tokens.json processor_config.json".split())
+INDEX = "model.safetensors.index.json"
+EXP = {"Qwen4ExpForConditionalGeneration", "Qwen4ExpForCausalLM"}
+
+
+def need(check, reason):
+    if not check:
+        raise ValueError(reason)
+
+
+def pairs(items):
+    out = {}
+    for key, value in items:
+        need(key not in out, f"duplicate key: {key}")
+        out[key] = value
+    return out
+
+
+def decode(raw):
+    def bad(value):
+        raise ValueError(f"invalid JSON number: {value}")
+    return json.loads(raw, object_pairs_hook=pairs, parse_constant=bad)
+
+
+def read_json(path):
+    with path.open("rb") as src:
+        raw = src.read(MAX_HEADER + 1)
+    need(len(raw) <= MAX_HEADER, f"oversized JSON: {path.name}")
+    result = decode(raw)
+    need(isinstance(result, dict), f"expected JSON object: {path.name}")
+    return result
+
+
+def stamp(path):
+    s = path.lstat()
+    need(stat.S_ISREG(s.st_mode) and s.st_nlink == 1, f"expected non-aliased regular file: {path.name}")
+    return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+
+
+def headers(path, size):
+    with path.open("rb") as file:
+        raw = file.read(8)
+        need(len(raw) == 8, f"truncated safetensors length: {path.name}")
+        length, = struct.unpack("<Q", raw)
+        need(0 < length <= min(MAX_HEADER, size - 8), f"invalid safetensors header: {path.name}")
+        header = decode(file.read(length))
+    need(isinstance(header, dict), "invalid safetensors header object")
+    meta = header.pop("__metadata__", {})
+    need(isinstance(meta, dict) and all(isinstance(v, str) for v in meta.values()), "invalid safetensors metadata")
+    need(0 < len(header) <= 32768, "invalid safetensors tensor count")
+    spans = []
+    tensors = {}
+    for name, entry in header.items():
+        need(re.fullmatch(r"[A-Za-z0-9_.]{1,255}", name), "invalid tensor name")
+        need(isinstance(entry, dict) and set(entry) == {"dtype", "shape", "data_offsets"}, f"invalid tensor descriptor: {name}")
+        shape, dtype, offset = entry["shape"], entry["dtype"], entry["data_offsets"]
+        need(isinstance(shape, list) and 0 < len(shape) <= 5
+             and all(type(x) is int and 0 < x < 1 << 40 for x in shape), f"invalid tensor shape: {name}")
+        need(isinstance(offset, list) and len(offset) == 2 and all(type(x) is int for x in offset),
+             f"invalid tensor offsets: {name}")
+        start, end = offset
+        need(dtype in DTYPE and 0 <= start < end <= size - length - 8
+             and end - start == math.prod(shape) * DTYPE[dtype], f"invalid tensor bytes or dtype: {name}")
+        spans.append((start, end))
+        tensors[name] = (dtype, shape)
+    end = 0
+    for start, stop in sorted(spans):
+        need(start == end, f"gaps or overlapping tensor payload: {path.name}")
+        end = stop
+    need(end == size - length - 8, f"unaccounted bytes in {path.name}")
+    return tensors
+
+
+def inventory(source):
+    files = {}
+    for path in source.iterdir():
+        need(len(files) < 512, "too many source files")
+        need(path.name in ASSETS or path.name == INDEX or re.fullmatch(r"[A-Za-z0-9_.-]+\.safetensors", path.name),
+             f"unexpected source file (only flat safetensors and allowed metadata): {path.name}")
+        files[path.name] = stamp(path)
+    need("config.json" in files, "missing config.json")
+    shards = {name for name in files if name.endswith(".safetensors")}
+    need(bool(shards), "missing safetensors")
+    declared = read_json(source / INDEX).get("weight_map") if INDEX in files else None
+    need((isinstance(declared, dict) and declared and all(isinstance(v, str) for v in declared.values())
+          and set(declared.values()) == shards)
+         or (INDEX not in files and shards == {"model.safetensors"}), "invalid or missing shard index")
+    config = read_json(source / "config.json")
+    # Never accept source-provided Python dispatch, even if local-only.
+    for name in files.keys() & ASSETS:
+        need(files[name][2] <= MAX_HEADER, f"oversized asset: {name}")
+        if name in ("config.json", "tokenizer_config.json", "processor_config.json"):
+            metadata = config if name == "config.json" else read_json(source / name)
+            need("auto_map" not in metadata and "custom_pipelines" not in metadata, f"remote code metadata: {name}")
+    names = {}
+    tensors = {}
+    for file in sorted(shards):
+        read = headers(source / file, files[file][2])
+        need(not tensors.keys() & read.keys(), "duplicate tensor across shards")
+        need(len(tensors) + len(read) <= 32768, "too many source tensors")
+        names.update(dict.fromkeys(read, file))
+        tensors.update(read)
+    need(declared is None or declared == names, "index/header tensor inventory mismatch")
+    return files, config, tensors
+
+
+def qwen2(config, tensors):
+    def integer(name, maximum):
+        value = config.get(name)
+        need(type(value) is int and 0 < value <= maximum, f"unsupported Qwen2 {name}")
+        return value
+
+    n = integer("num_hidden_layers", 64)
+    hidden = integer("hidden_size", 8192)
+    heads = integer("num_attention_heads", 128)
+    kv = integer("num_key_value_heads", heads)
+    ffn = integer("intermediate_size", 32768)
+    vocab = integer("vocab_size", 262144)
+    need(hidden % heads == heads % kv == 0 and not config.get("tie_word_embeddings", False),
+         "only untied dense Qwen2 with integral head sizes is supported")
+    head_dim = hidden // heads
+    need(config.get("model_type") == "qwen2" and config.get("head_dim", head_dim) == head_dim
+         and not any(config.get(key) for key in ("quantization_config", "vision_config", "rope_scaling")),
+         "unsupported Qwen2 configuration")
+    expected = {}
+
+    def add(hf, gguf, shape):
+        expected[hf] = (gguf, shape)
+
+    add("model.embed_tokens.weight", "token_embd.weight", [vocab, hidden])
+    add("model.norm.weight", "output_norm.weight", [hidden])
+    add("lm_head.weight", "output.weight", [vocab, hidden])
+    for i in range(n):
+        for suffix, gguf, shape in [
+            ("input_layernorm.weight", "attn_norm.weight", [hidden]),
+            ("post_attention_layernorm.weight", "ffn_norm.weight", [hidden]),
+            ("self_attn.o_proj.weight", "attn_output.weight", [hidden, hidden]),
+            ("mlp.gate_proj.weight", "ffn_gate.weight", [ffn, hidden]),
+            ("mlp.up_proj.weight", "ffn_up.weight", [ffn, hidden]),
+            ("mlp.down_proj.weight", "ffn_down.weight", [hidden, ffn]),
+        ]:
+            add(f"model.layers.{i}.{suffix}", f"blk.{i}.{gguf}", shape)
+        for part, width in [("q", hidden), ("k", kv * head_dim), ("v", kv * head_dim)]:
+            add(f"model.layers.{i}.self_attn.{part}_proj.weight", f"blk.{i}.attn_{part}.weight", [width, hidden])
+            add(f"model.layers.{i}.self_attn.{part}_proj.bias", f"blk.{i}.attn_{part}.bias", [width])
+    need(expected.keys() == tensors.keys(), "unsupported Qwen2 tensor inventory (missing or additional tensors)")
+    for name, (_, shape) in expected.items():
+        dtype, actual = tensors[name]
+        need(dtype in ("BF16", "F16", "F32") and shape == actual, f"Qwen2 tensor mismatch: {name}")
+    return {gguf: dims[::-1] for gguf, dims in expected.values()}
+
+
+def inspect(source, outtype):
+    files, config, tensors = inventory(source)
+    architectures = config.get("architectures")
+    need(isinstance(architectures, list) and len(architectures) == 1 and isinstance(architectures[0], str),
+         "expected one local HF architecture")
+    arch = architectures[0]
+    roles = {"text": 0}
+    for name in tensors:
+        role = ("projector" if name.startswith(("model.visual.", "visual.")) else
+                "mtp" if name.startswith("mtp.") else
+                "engram" if ".ple_embedding." in name else "text")
+        roles[role] = roles.get(role, 0) + 1
+    total = sum(s[2] for s in files.values())
+    report = {"kind": "inspect", "architecture": arch, "outtype": outtype, "source_tensors": len(tensors),
+              "input_bytes": total, "required_roles": sorted(roles), "role_tensor_counts": roles,
+              "export_supported": False, "llama_cpp_commit": COMMIT, "tensor_payloads_read": False,
+              "export_runtime_checked": False}
+    if arch in EXP:
+        report["reason"] = "Qwen4Exp sidecar coverage (projector, embedded MTP and merged engram) is not proven"
+    elif arch != "Qwen2ForCausalLM":
+        report["reason"] = "architecture has no audited offline tensor mapping"
+    elif set(roles) != {"text"} or total > MAX_EXPORT:
+        report["reason"] = "only text and at most 512 MiB of input are admitted"
+    else:
+        report["expected_gguf_tensors"] = qwen2(config, tensors)
+        if not {"tokenizer.json", "tokenizer_config.json"} <= files.keys():
+            report["reason"] = "local tokenizer.json and tokenizer_config.json are required"
+        else:
+            tok = read_json(source / "tokenizer_config.json")
+            need(tok.get("tokenizer_class") in ("Qwen2Tokenizer", "Qwen2TokenizerFast"), "unsupported tokenizer class")
+            tokenizer = read_json(source / "tokenizer.json").get("model")
+            need(isinstance(tokenizer, dict) and tokenizer.get("type") == "BPE"
+                 and isinstance(tokenizer.get("vocab"), dict) and bool(tokenizer["vocab"]),
+                 "expected local Qwen2 BPE vocabulary")
+            report["export_supported"] = True
+    return report, files
+
+
+def copy_pinned(root, target):
+    def git(*args):
+        return subprocess.check_output(
+            ["/usr/bin/git", "-C", str(root), *args],
+            env={"PATH": "/usr/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+                 "GIT_OPTIONAL_LOCKS": "0"}, timeout=15, text=True,
+        ).strip()
+    need(git("rev-parse", "HEAD") == COMMIT, "llama.cpp checkout is not at the pinned revision")
+    names = git("ls-tree", "-r", "--name-only", COMMIT, "--", "convert_hf_to_gguf.py",
+                "conversion", "gguf-py/gguf").splitlines()
+    names = [name for name in names if name.endswith(".py")]
+    need(len(names) == 124, "llama.cpp Python inventory differs")
+    digest = hashlib.sha256()
+    for name in sorted(names):
+        src = root / name
+        need(src.resolve(strict=True) == src and stamp(src)[2] <= 4 * MIB, "invalid pinned exporter file")
+        raw = src.read_bytes()
+        digest.update(name.encode() + b"\0" + hashlib.sha256(raw).digest())
+        dst = target / name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(raw)
+    need(digest.hexdigest() == CODE_SHA, "llama.cpp Python files differ from pin")
+
+
+def gguf_inventory(path, outtype, expected):
+    size = stamp(path)[2]
+    with path.open("rb") as f:
+        def raw(n):
+            need(n <= 16 * MIB and f.tell() + n <= min(size, 64 * MIB),
+                 "GGUF metadata exceeds bounds")
+            data = f.read(n)
+            need(len(data) == n, "truncated GGUF metadata")
+            return data
+
+        def u32():
+            return struct.unpack("<I", raw(4))[0]
+
+        def u64():
+            return struct.unpack("<Q", raw(8))[0]
+
+        def string():
+            return raw(u64()).decode("utf-8")
+
+        scalar = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+
+        def value(kind):
+            if kind == 8:
+                return string()
+            if kind == 9:
+                item, count = u32(), u64()
+                need(count <= 1_000_000 and item in {*scalar, 8}, "invalid GGUF array")
+                if item in scalar:
+                    raw(scalar[item] * count)
+                else:
+                    for _ in range(count):
+                        string()
+                return None
+            need(kind in scalar, "unsupported GGUF metadata type")
+            return int.from_bytes(raw(scalar[kind]), "little")
+
+        need(raw(4) == b"GGUF" and u32() == 3, "expected GGUF v3")
+        count, meta = u64(), u64()
+        need(count == len(expected) and meta <= 1024, "unexpected GGUF tensor or metadata count")
+        props = {}
+        for _ in range(meta):
+            key = string()
+            need(key not in props, "duplicate GGUF metadata key")
+            kind = u32()
+            props[key] = (kind, value(kind))
+        need(props.get("general.architecture") == (8, "qwen2"), "incorrect GGUF architecture")
+        need(props.get("general.file_type") == (4, 32 if outtype == "bf16" else 1),
+             "incorrect GGUF file type")
+        need(props.get("tokenizer.ggml.model") == (8, "gpt2")
+             and props.get("tokenizer.ggml.tokens", (None,))[0] == 9, "missing GGUF tokenizer")
+        need(not any(k.startswith("split.") for k in props), "split output is unsupported")
+        align = props.get("general.alignment", (4, 32))
+        need(align[0] == 4 and align[1] == 32, "unexpected GGUF alignment")
+        spans = []
+        types = {}
+        for _ in range(count):
+            name, rank = string(), u32()
+            need(name in expected and name not in types and rank == len(expected[name]), "unexpected GGUF tensor")
+            dims = [u64() for _ in range(rank)]
+            dtype, offset = u32(), u64()
+            wanted = 0 if rank == 1 else (30 if outtype == "bf16" else 1)
+            need(dims == expected[name] and dtype == wanted and offset % 32 == 0,
+                 f"GGUF tensor shape/type/alignment mismatch: {name}")
+            end = offset + math.prod(dims) * (4 if dtype == 0 else 2)
+            spans.append((offset, end))
+            types[name] = {"shape": dims, "ggml_type": dtype}
+        start = (f.tell() + 31) & ~31
+        end = 0
+        for offset, stop in sorted(spans):
+            need(offset == (end + 31) & ~31, "GGUF tensor gap or overlap")
+            end = stop
+        need(size - start in {end, (end + 31) & ~31}, "GGUF payload size mismatch")
+    return types
+
+
+def export(source, output, report, files):
+    need(report["export_supported"], report.get("reason", "unsupported source"))
+    need(output.is_absolute() and output.parent.resolve(strict=True) == output.parent
+         and output.name not in ("", ".", "..") and not os.path.lexists(output),
+         "output must be a fresh canonical absolute directory")
+    need(not output.is_relative_to(source), "output overlaps source")
+    # Both the converter spool and final GGUF may widen F16/BF16 vectors to F32.
+    # Count the known output tensor bytes twice, plus room for metadata.
+    fp_bytes = sum(math.prod(dims) * (4 if len(dims) == 1 else 2)
+                   for dims in report["expected_gguf_tensors"].values())
+    required = 2 * fp_bytes + 128 * MIB
+    need(shutil.disk_usage(output.parent).free >= required, f"need {required} bytes of scratch space")
+    python = Path(os.environ.get("BREWERY_GGUF_PYTHON", "/usr/bin/python3"))
+    llama = Path(os.environ.get("BREWERY_LLAMA_CPP", "/arboretum/llama.cpp"))
+    need(python.is_absolute() and python.is_file() and llama.is_absolute() and llama.resolve(strict=True) == llama,
+         "invalid operator Python or llama.cpp path")
+    with tempfile.TemporaryDirectory(prefix=".gguf-stage-", dir=output.parent) as tmp:
+        scratch = Path(tmp)
+        code, work, final = (scratch / n for n in ("code", "work", "final"))
+        work.mkdir()
+        final.mkdir()
+        copy_pinned(llama, code)
+        command = ["/usr/bin/bwrap", "--unshare-all", "--die-with-parent", "--new-session",
+                   "--ro-bind", "/usr", "/usr", "--symlink", "usr/lib", "/lib",
+                   "--symlink", "usr/lib", "/lib64", "--proc", "/proc", "--dev", "/dev",
+                   "--ro-bind", str(code), "/exporter", "--dir", "/input",
+                   "--bind", str(work), "/work", "--chdir", "/work"]
+        # Expose only inventoried filenames. In particular a new pickle or
+        # local Python module added to the source cannot enter this namespace.
+        for name in sorted(files):
+            need(stamp(source / name) == files[name], f"source changed: {name}")
+            command += ["--ro-bind", str(source / name), f"/input/{name}"]
+        if not python.is_relative_to("/usr"):
+            runtime = python.parent.parent
+            need(runtime not in map(Path, ("/", "/home", "/opt", "/arboretum", "/mnt", "/usr/local"))
+                 and not runtime.is_relative_to(source) and not source.is_relative_to(runtime),
+                 "Python must be inside a dedicated operator runtime")
+            command += ["--ro-bind", str(runtime), str(runtime)]
+            resolved = python.resolve(strict=True)
+            need(resolved.is_relative_to(runtime) or resolved.is_relative_to("/usr"), "Python symlink leaves runtime")
+        bootstrap = (
+            "import runpy,sys,torch; "
+            "assert torch.version.cuda is None and torch.version.hip is None, 'CPU-only torch required'; "
+            "import transformers; original=transformers.AutoTokenizer.from_pretrained; "
+            "transformers.AutoTokenizer.from_pretrained=classmethod(lambda cls,*a,**k:"
+            "original(*a,**dict(k,trust_remote_code=False,local_files_only=True))); "
+            "sys.path.insert(0,'/exporter'); sys.argv=sys.argv[1:]; "
+            "runpy.run_path(sys.argv[0],run_name='__main__')"
+        )
+        command += ["--", str(python), "-I", "-B", "-c", bootstrap,
+                    "/exporter/convert_hf_to_gguf.py", "--disable-mistral-community-chat-template",
+                    "--use-temp-file", "--outfile", "/work/model.gguf", "--outtype", report["outtype"], "/input"]
+        env = {"PATH": "/usr/bin", "HOME": "/work", "TMPDIR": "/work", "HF_HOME": "/work",
+               "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1",
+               "CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "2", "OPENBLAS_NUM_THREADS": "2"}
+
+        def limits():
+            resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_EXPORT * 2 + 64 * MIB,) * 2)
+            resource.setrlimit(resource.RLIMIT_AS, (6 << 30,) * 2)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+
+        # Keep exporter stdout separate from the adapter's receipt.
+        subprocess.run(command, env=env, stdin=subprocess.DEVNULL, stdout=sys.stderr,
+                       check=True, timeout=600, preexec_fn=limits)
+        need({p.name: stamp(p) for p in source.iterdir()} == files, "source changed during export")
+        model = work / "model.gguf"
+        inventory_out = gguf_inventory(model, report["outtype"], report["expected_gguf_tensors"])
+        with model.open("rb") as f:
+            sha256 = hashlib.file_digest(f, "sha256").hexdigest()
+            os.fsync(f.fileno())
+        size = stamp(model)[2]
+        model.rename(final / model.name)
+        # Atomic and no-clobber, including a destination appearing during conversion.
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.renameat2(-100, os.fsencode(final), -100, os.fsencode(output), 1):
+            err = ctypes.get_errno()
+            raise OSError(err, os.strerror(err), str(output))
+    return {**report, "kind": "export", "tensor_payloads_read": True, "export_runtime_checked": True,
+            "exporter_sha256": CODE_SHA,
+            "artifact": {"path": str(output / "model.gguf"), "sha256": sha256, "bytes": size},
+            "gguf_inventory": inventory_out}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("operation", choices=("inspect", "export"))
+    parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--outtype", choices=("bf16", "f16"), default="bf16")
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    if (args.operation == "export") != (args.output is not None):
+        parser.error("--output is required for export only")
+    try:
+        source = args.source
+        need(source.is_absolute() and source.resolve(strict=True) == source and source.is_dir(),
+             "source must be an absolute canonical directory")
+        report, files = inspect(source, args.outtype)
+        need({p.name: stamp(p) for p in source.iterdir()} == files, "source changed during inspection")
+        if args.operation == "export":
+            report = export(source, args.output, report, files)
+        print(json.dumps(report, sort_keys=True, allow_nan=False))
+    except (OSError, ValueError, TypeError, RecursionError, subprocess.SubprocessError) as err:
+        sys.exit(f"HF GGUF export blocked: {err}")
+
+
+if __name__ == "__main__":
+    main()
