@@ -56,7 +56,11 @@ impl Dispatcher {
         };
         let payload = envelope.map(serde_json::to_vec).transpose()?;
         let backend = if job.host == backend_hf::ID {
-            Some(self.backend.as_ref().ok_or("Backend downloader is unavailable")?)
+            Some(
+                self.backend
+                    .as_ref()
+                    .ok_or("Backend downloader is unavailable")?,
+            )
         } else {
             None
         };
