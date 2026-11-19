@@ -1654,6 +1654,11 @@ against the pinned Hub manifest before it adds the model to the Library.
 For gated public models, the long-lived Hub token is not sent to the Xet
 content service; the downloader uses a short-lived read ticket.
 
+To edit a downloaded SafeTensors model, select **Edit weights** on its Library
+entry. The backend uses its local CPU editor; no transfer or second Library
+registration is needed. **Apply** creates a new revision after review. It
+does not change the downloaded file.
+
 ## Weight edit tools (fixtures only)
 
 Use `weight_edit.py` and `weight_tune.py` to propose changes to individual

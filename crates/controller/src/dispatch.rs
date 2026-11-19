@@ -66,9 +66,11 @@ impl Dispatcher {
         };
         let mut command = Command::new(backend.map_or(&self.command, |lane| &lane.dispatch));
         if let Some(lane) = backend {
-            command
-                .env_clear()
-                .env("BREWERY_DISPATCH_CONFIG", &lane.dispatch_config);
+            command.env_clear().env(
+                "BREWERY_DISPATCH_CONFIG",
+                lane.config_for(&job.kind)
+                    .ok_or("Backend executor unavailable for this operation")?,
+            );
         }
         let mut child = command
             .args([action, &job.host, &job.id])
@@ -148,7 +150,13 @@ pub async fn run(app: Arc<App>, dispatch: Dispatcher) -> Result<(), Error> {
         let mut store = app.store.lock().expect("store lock");
         let mut running = store.by_state(State::Running)?;
         for job in &mut running {
-            if job.host == backend_hf::ID && dispatch.backend.is_none() {
+            if job.host == backend_hf::ID
+                && dispatch
+                    .backend
+                    .as_ref()
+                    .and_then(|lane| lane.config_for(&job.kind))
+                    .is_none()
+            {
                 job.state = if job.cancel_requested {
                     State::Cancelled
                 } else {

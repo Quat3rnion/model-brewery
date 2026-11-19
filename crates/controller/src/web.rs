@@ -437,6 +437,11 @@ async fn add_model(
         return Ok(response);
     }
     let model = request.validate().map_err(ApiError::bad)?;
+    if model.host == crate::backend_hf::ID {
+        return Err(ApiError::bad(
+            "backend files are registered only by verified jobs",
+        ));
+    }
     if !app
         .effective_hosts()
         .map_err(ApiError::storage)?
@@ -538,6 +543,31 @@ async fn add_job(
             .ok_or_else(|| ApiError::bad("a destination host is required"))?
     };
     let host = host.to_owned();
+    if inputs
+        .iter()
+        .any(|model| model.host == crate::backend_hf::ID)
+    {
+        if host != crate::backend_hf::ID
+            || !matches!(
+                request.kind.as_str(),
+                "weight_inspect" | "weight_propose" | "weight_apply"
+            )
+            || inputs.len() != 1
+        {
+            return Err(ApiError::bad("backend files require a local weight job"));
+        }
+        if !store
+            .backend_publication(&inputs[0])
+            .map_err(ApiError::storage)?
+        {
+            return Err(ApiError::bad("backend input has no verified publication"));
+        }
+        if !crate::weights::is_safetensors(&inputs[0].kind) {
+            return Err(ApiError::bad(
+                "backend editing requires SafeTensors or an indexed Hugging Face checkpoint",
+            ));
+        }
+    }
     if host != "auto" || request.kind != "convert" {
         let entry = app
             .hosts

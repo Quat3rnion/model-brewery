@@ -21,6 +21,7 @@ const DISK_RESERVE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 pub struct Lane {
     pub dispatch: PathBuf,
     pub dispatch_config: PathBuf,
+    pub edit_config: Option<PathBuf>,
     local: Value,
 }
 
@@ -51,9 +52,53 @@ impl Lane {
         let token = credentials.join("token");
         let config = root.join("worker.json");
         let dispatch_config = root.join("dispatch.json");
+        let editor = executable(dir, "BREWERY_HF_WEIGHT_EDIT", "brewery-weight-edit");
+        let edit_config = if let Some(editor) = &editor {
+            let edit_root = root.join("editor");
+            private_dir(&edit_root)?;
+            let config = root.join("editor.json");
+            brewery_worker::atomic(
+                &config,
+                &json!({
+                    "root":edit_root,"engine":engine,"disk_reserve_bytes":DISK_RESERVE_BYTES,
+                    "backend_weight_download_root":worker_root,
+                    "engine_env":{
+                        "BREWERY_WEIGHT_EDIT":editor,
+                        "BREWERY_WEIGHT_VISUAL":"1",
+                        "BREWERY_WEIGHT_SAFETENSORS":"1",
+                        "BREWERY_WEIGHT_SAFETENSORS_VERIFY_BYTES":"67108864",
+                        "BREWERY_CPU_THREADS":"2",
+                        "OPENBLAS_NUM_THREADS":"2","OMP_NUM_THREADS":"2","MKL_NUM_THREADS":"2",
+                        "PYTHONNOUSERSITE":"1"
+                    }
+                }),
+            )?;
+            let dispatch = root.join("editor-dispatch.json");
+            brewery_worker::atomic(
+                &dispatch,
+                &json!({
+                    "hosts":{ID:{"local":true,"worker":worker,"config":config}}
+                }),
+            )?;
+            Some(dispatch)
+        } else {
+            None
+        };
         let capabilities = KINDS
             .iter()
-            .map(|&kind| (kind.into(), json!(kind == "hf_download")))
+            .map(|&kind| {
+                (
+                    kind.into(),
+                    json!(
+                        kind == "hf_download"
+                            || (editor.is_some()
+                                && matches!(
+                                    kind,
+                                    "weight_inspect" | "weight_propose" | "weight_apply"
+                                ))
+                    ),
+                )
+            })
             .collect::<serde_json::Map<String, Value>>();
         let local = json!({
             "name": "Backend downloads",
@@ -63,6 +108,9 @@ impl Lane {
             "config": config,
             "hf_token_file": token
         });
+        let mut local = local;
+        local["capabilities"]["weight_visual"] = json!(editor.is_some());
+        local["capabilities"]["weight_safetensors"] = json!(editor.is_some());
         brewery_worker::atomic(
             &config,
             &json!({
@@ -76,6 +124,7 @@ impl Lane {
         Ok(Some(Self {
             dispatch,
             dispatch_config,
+            edit_config,
             local,
         }))
     }
@@ -86,6 +135,14 @@ impl Lane {
 
     pub fn local_config(&self) -> &Value {
         &self.local
+    }
+
+    pub fn config_for(&self, kind: &str) -> Option<&Path> {
+        match kind {
+            "hf_download" => Some(&self.dispatch_config),
+            "weight_inspect" | "weight_propose" | "weight_apply" => self.edit_config.as_deref(),
+            _ => None,
+        }
     }
 }
 

@@ -33,6 +33,7 @@ struct Config {
     pinned_publication: Option<publication::Pin>,
     managed_settings: Option<operational::Policy>,
     hf_download: Option<hf_download::Config>,
+    backend_weight_download_root: Option<PathBuf>,
 }
 fn reserve() -> u64 {
     1024 * 1024 * 1024
@@ -70,6 +71,19 @@ impl Config {
                     && cfg.source_roots.is_empty()
                     && cfg.engine_env.is_empty(),
                 "Hugging Face downloads require a dedicated worker"
+            );
+        }
+        if let Some(root) = &cfg.backend_weight_download_root {
+            operational::private_root(root)?;
+            ensure!(
+                cfg.hf_download.is_none()
+                    && cfg.source_roots.is_empty()
+                    && cfg.admission.is_none()
+                    && cfg.pinned_publication.is_none()
+                    && cfg.managed_settings.is_none()
+                    && !root.starts_with(&cfg.root)
+                    && !cfg.root.starts_with(root),
+                "invalid dedicated backend editor configuration"
             );
         }
         Ok((cfg, path))
@@ -196,6 +210,10 @@ impl Worker {
     }
 
     fn source(&self, p: &Path) -> Result<(PathBuf, PathBuf)> {
+        ensure!(
+            self.cfg.backend_weight_download_root.is_none(),
+            "backend editing requires an exact verified publication"
+        );
         if let Ok(p) = cache::authorized(p, &self.cfg.source_roots) {
             let root = self
                 .cfg
@@ -236,6 +254,81 @@ impl Worker {
         bail!("input outside allowed source roots")
     }
 
+    // The backend editor cannot read arbitrary paths through ordinary source
+    // RPCs. An approved input names exactly one successful job publication.
+    fn backend_weight_source(&self, input: &Input) -> Result<(PathBuf, String)> {
+        let invalid = "backend input is not a verified publication";
+        ensure!(input.host == "backend-hf", "{invalid}");
+        let download_jobs = self
+            .cfg
+            .backend_weight_download_root
+            .as_ref()
+            .context(invalid)?
+            .join("jobs");
+        let (record_root, expected_kind, rel) =
+            if let Ok(rel) = input.path.strip_prefix(&download_jobs) {
+                ensure!(weight_source::supports(&input.kind), "{invalid}");
+                (&download_jobs, "hf_download", rel)
+            } else {
+                let rel = input.path.strip_prefix(&self.jobs).context(invalid)?;
+                let expected = match input.kind.as_str() {
+                    "hf" | "safetensors" => "weight_apply",
+                    "weight-edit-proposal" => "weight_propose",
+                    _ => bail!("{invalid}"),
+                };
+                (&self.jobs, expected, rel)
+            };
+        let mut components = rel.components();
+        let producer = components
+            .next()
+            .and_then(|p| p.as_os_str().to_str())
+            .context(invalid)?;
+        token(producer)?;
+        ensure!(
+            components.next().is_some_and(|p| p.as_os_str() == "work"),
+            "{invalid}"
+        );
+        let work = record_root.join(producer).join("work");
+        let receipt: Record = decode(cache::regular(
+            &record_root.join(producer).join("state.json"),
+        )?)?;
+        ensure!(
+            receipt.action == "start"
+                && receipt.reply.state == "succeeded"
+                && !receipt.cancel
+                && receipt.job.is_some_and(|j| j.kind == expected_kind),
+            "{invalid}"
+        );
+        let result = receipt.reply.result.as_ref().context(invalid)?;
+        let artifact = &result["artifact"];
+        ensure!(
+            (expected_kind == "weight_propose" || result["verified"] == true)
+                && result["kind"] == expected_kind
+                && artifact["kind"] == input.kind
+                && artifact["path"].as_str().map(Path::new) == Some(input.path.as_path()),
+            "{invalid}"
+        );
+        let leaf = match (expected_kind, input.kind.as_str()) {
+            ("hf_download", "hf") => work.join("download"),
+            ("hf_download", "safetensors") => {
+                let spec = hf_download::Spec::parse(&json!({
+                    "repo_id":result["repo_id"],"revision":result["revision"],"filename":result["filename"]
+                }))?;
+                work.join("download").join(spec.filename.context(invalid)?)
+            }
+            ("weight_apply", "hf") => work.join("edited.hf"),
+            ("weight_apply", "safetensors") => work.join("edited.safetensors"),
+            ("weight_propose", "weight-edit-proposal") => work.join("weight-proposal.json"),
+            _ => bail!("{invalid}"),
+        };
+        ensure!(leaf.as_os_str() == input.path.as_os_str(), "{invalid}");
+        let digest = artifact["sha256"]
+            .as_str()
+            .filter(|s| is_digest(s))
+            .context(invalid)?;
+        Ok((cache::authorized(&input.path, &[leaf])?, digest.into()))
+    }
+
     fn prepare(&self, id: &str, action: String, job: Job) -> Result<Reply> {
         token(&job.kind)?;
         ensure!(
@@ -262,6 +355,29 @@ impl Worker {
                 );
             }
             return Ok(r.reply);
+        }
+        if self.cfg.backend_weight_download_root.is_some()
+            && !(action == "start"
+                && job.prompt.is_none()
+                && job.options.get("packed").is_none()
+                && job
+                    .inputs
+                    .first()
+                    .is_some_and(|i| weight_source::supports(&i.kind))
+                && match job.kind.as_str() {
+                    "weight_inspect" | "weight_propose" => job.inputs.len() == 1,
+                    "weight_apply" => {
+                        job.inputs.len() == 2 && job.inputs[1].kind == "weight-edit-proposal"
+                    }
+                    _ => false,
+                })
+        {
+            return self.record_prepare(
+                id,
+                action,
+                job,
+                Reply::error("unsupported backend weight job"),
+            );
         }
         if job.kind == "hf_download" {
             let reply = if self.cfg.hf_download.is_none() {
@@ -450,6 +566,10 @@ impl Worker {
             !native_safe || provided.is_none(),
             "SafeTensors weight jobs require a direct local source"
         );
+        ensure!(
+            self.cfg.backend_weight_download_root.is_none() || provided.is_none(),
+            "backend weight jobs do not accept staged inputs"
+        );
         let mut pinned = false;
         let (bundle, cached) = if let Some(b) = provided {
             b.validate()?;
@@ -504,9 +624,20 @@ impl Worker {
                 pinned = true;
                 bundle
             } else {
-                let (p, boundary) = self
-                    .source(&input.path)
-                    .context("Source input unavailable")?;
+                let (p, boundary, expected) = if self.cfg.backend_weight_download_root.is_some() {
+                    let (p, digest) = self.backend_weight_source(&input)?;
+                    let boundary = if input.kind == "hf" {
+                        p.clone()
+                    } else {
+                        p.parent().context("backend input has no parent")?.into()
+                    };
+                    (p, boundary, Some(digest))
+                } else {
+                    let (p, boundary) = self
+                        .source(&input.path)
+                        .context("Source input unavailable")?;
+                    (p, boundary, None)
+                };
                 if weight_hgn {
                     ensure!(
                         fs::symlink_metadata(&p)?.is_file()
@@ -557,6 +688,8 @@ impl Worker {
                         )?;
                         weight_source::bounded_inventory(&p, &input.kind, limit)?;
                         limit
+                    } else if expected.is_some() {
+                        4 << 20
                     } else {
                         u64::MAX
                     };
@@ -572,6 +705,19 @@ impl Worker {
                         d.root.starts_with(&boundary),
                         "bundle outside the configured source root"
                     );
+                    if let Some(expected) = expected {
+                        let digest = if d.bundle.entry == "." {
+                            &d.bundle.digest
+                        } else {
+                            &d.bundle
+                                .files
+                                .iter()
+                                .find(|f| f.path == d.bundle.entry)
+                                .context("backend publication member missing")?
+                                .sha256
+                        };
+                        ensure!(*digest == expected, "backend publication hash changed");
+                    }
                     d.bundle
                 }
             };

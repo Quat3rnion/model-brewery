@@ -97,6 +97,21 @@ impl Store {
     pub fn model(&self, id: &str) -> Result<Option<Model>> {
         read_one(&self.conn, "SELECT body FROM models WHERE id = ?", id)
     }
+    pub fn backend_publication(&self, model: &Model) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM jobs
+             WHERE state='succeeded' AND result IS NOT NULL
+               AND json_extract(body,'$.host')=?1
+               AND json_extract(body,'$.kind') IN ('hf_download','weight_apply')
+               AND json_extract(body,'$.cancel_requested')=0
+               AND json_extract(result,'$.verified')=1
+               AND json_extract(result,'$.library_model_id')=?2
+               AND json_extract(result,'$.artifact.path')=?3
+               AND json_extract(result,'$.artifact.kind')=?4)",
+            params![crate::backend_hf::ID, model.id, model.path, model.kind],
+            |row| row.get(0),
+        )?)
+    }
     pub fn models(&self) -> Result<Vec<Model>> {
         read_list(&self.conn, "SELECT body FROM models ORDER BY rowid", [])
     }

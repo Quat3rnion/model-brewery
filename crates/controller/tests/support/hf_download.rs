@@ -11,6 +11,7 @@ fn backend_downloads_without_a_configured_worker() {
         ("BREWERY_HF_WORKER", companion.clone()),
         ("BREWERY_HF_ENGINE", companion.clone()),
         ("BREWERY_HF_HFR", companion.clone()),
+        ("BREWERY_HF_WEIGHT_EDIT", companion.clone()),
         ("BREWERY_HF_DISPATCH", companion),
     ]);
     let job = app.enqueue(json!({"kind":"hf_download","options":{"repo_id":"example/model"}}));
@@ -25,6 +26,27 @@ fn backend_downloads_without_a_configured_worker() {
     assert_eq!(
         fs::read_to_string(app.path("dispatch.json")).unwrap(),
         r#"{"hosts":{}}"#
+    );
+    let state = app.json("GET", "/api/state", None, 200);
+    assert_eq!(state["hosts"][0]["capabilities"]["weight_inspect"], true);
+    assert_eq!(state["hosts"][0]["capabilities"]["weight_tune"], false);
+    let model = &job["result"]["library_model_id"];
+    app.json(
+        "POST",
+        "/api/jobs",
+        Some(json!({
+            "kind":"weight_inspect","input_ids":[model],
+            "options":{"mode":"inventory","offset":0,"limit":16}
+        })),
+        201,
+    );
+    app.json(
+        "POST",
+        "/api/models",
+        Some(json!({
+            "host":"backend-hf","kind":"safetensors","path":"/private/not-a-publication.safetensors"
+        })),
+        400,
     );
 }
 
