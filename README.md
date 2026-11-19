@@ -246,8 +246,8 @@ worker environment applies to jobs that run on that worker.
 | `BREWERY_EVAL` | engine | Path of `brewery-eval`. |
 | `BREWERY_ALLOW_GPU_LOAD` | eval | Set to `1` to let `generate` and `evaluate` start an isolated Halogen load. Without it, those jobs fail. |
 | `BREWERY_HALOGEN_IMAGE_ID` | eval | Full local image ID, `sha256:` and 64 hex digits. Get it from `docker image inspect`. A tag is not accepted. |
-| `BREWERY_BASELINE_CONFIG` | eval | Absolute path of the baseline endpoint JSON file. |
-| `BREWERY_BASELINE_TOKEN_*` | eval | Bearer token for an endpoint. The endpoint entry names the variable. |
+| `BREWERY_BASELINE_CONFIG` | eval | Absolute path of the reference endpoint JSON file. |
+| `BREWERY_BASELINE_TOKEN_*` | eval | Bearer token for a configured reference endpoint. |
 
 Each file retains its ordinary SHA-256 checksum. A single file uses one
 reader. Set the thread limit in the worker process environment on each
@@ -273,26 +273,41 @@ endpoint identity contract. Use [Managed benchmarks](#managed-benchmarks) for
 
 ### Baseline endpoints
 
-A baseline is the score of the exact BF16 source checkpoint. Use a results
-file, or name an endpoint that you configure. The endpoint file maps an ID to
-an entry:
+Use `options.baseline_source` to compare with a configured live endpoint.
+The endpoint can serve a different source or precision from the candidate.
+Its `source_sha256` identifies the reference model, not the candidate.
+The endpoint file maps an ID to an entry:
 
 ```json
 {
-  "bf16-source": {
-    "url": "https://baseline.example/v1/completions",
+  "int8-reference": {
+    "url": "https://reference.example/v1/completions",
     "model": "model-name-as-the-endpoint-reports-it",
-    "source_sha256": "<64 hex digits of the source checkpoint identity>",
+    "source_sha256": "<64 lowercase hex digits of the reference source>",
     "runtime_id": "runtime-1",
-    "bearer_env": "BREWERY_BASELINE_TOKEN_BF16"
+    "precision": "int8",
+    "bearer_env": "BREWERY_BASELINE_TOKEN_REFERENCE"
   }
 }
 ```
 
-Rules that the evaluator enforces: the URL uses `https`, or `http` on
-loopback only. The path is exactly `/v1/completions`. The endpoint must reply
-with `X-Brewery-Source-Sha256` and `X-Brewery-Runtime-Id` headers that match
-the entry. The evaluator follows no redirects and uses no proxy.
+The URL must use `https`, or `http` on `127.0.0.1` or `[::1]`. The path must
+be exactly `/v1/completions`. On each row, the endpoint must return
+`X-Brewery-Source-Sha256` and `X-Brewery-Runtime-Id` headers that match this
+entry. Its response `model` must also match the entry. The evaluator follows
+no redirects and uses no proxy.
+
+These checks compare the endpoint's replies with operator configuration.
+They do not verify the served weights or precision. The optional `precision`
+value is a descriptive label. Ordinary comparisons do not require the same
+source or precision as the candidate.
+
+Worker **Settings** can save optional `precision`, but cannot mark a reference
+as BF16-attested. A trusted evaluator endpoint configuration can set
+`bf16_attested: true` only with `precision: "bf16"` and a non-synthetic
+endpoint. The evaluator reports `attested_bf16_same_source` only when this
+endpoint's source hash also matches the candidate. This operator assertion
+does not replace the separate BF16 release checks below.
 
 ## Job flow
 
@@ -345,8 +360,10 @@ It does not retry a running job that it cannot check.
   Check the workflow `state`, not only `artifact_model_id`.
 - Each stage writes its own record. A `succeeded` workflow means that all four
   jobs passed. It does not show generation quality, GSM8K quality or release
-  qualification. To check quality, run `generate`, and `evaluate` against a
-  `baseline`, as separate jobs.
+  qualification. To check quality, run `generate` and `evaluate`.
+  Evaluation scores the candidate without a reference by default.
+  Add an optional reference to compare scores. A comparison is not a release
+  qualification.
 
 The individual `inspect`, `plan`, `convert` and `verify` jobs remain for
 diagnosis. Use them to run or repeat one stage. Do not use them for a normal
@@ -497,7 +514,7 @@ Three statements have different strength. Do not mix them.
 | --- | --- | --- |
 | **Predicted size** (`size.predicted_bytes`) | The base size of the catalog plus the signed deltas of the changed tensors. The deltas come from the layout of the catalog, with the companion tensors that change with each choice. | A layout estimate. It is not a measured output. |
 | **Custom file check** (`verify` of the workflow) | The native tool checks that the recipe and the output match: the plan, the manifest and the main container. It also checks source provenance, payload integrity and decoded values. | Proves that the file was made as the saved recipe says. |
-| **Runtime accuracy and quality** | Not measured by saving, converting or verifying. | **Unproven.** Run `generate`, `evaluate` and a `baseline` as separate jobs, and compare. Even then it is not a release qualification. |
+| **Runtime accuracy and quality** | Not measured by saving, converting or verifying. | **Unproven.** Run `generate` and `evaluate`. Evaluation scores the candidate by default. Add a reference only to compare scores. A comparison is not a release qualification. |
 
 The engine writes `custom_profile` in the result with the name, the revision,
 the catalog digest, the architecture, the base, the recipe digest and
@@ -641,7 +658,7 @@ the export in a transient file.
 ### Model kinds
 
 `gguf`, `hf` (alias `bf16-checkpoint`), `hgn`, `brewery-bundle`, `hgn-v2`,
-`ht43`, `gsm8k-baseline`, `gsm8k-predictions`, `assets`, `imatrix`, `ngram`,
+`ht43`, `gsm8k-baseline`, `gsm8k-evaluation`, `gsm8k-predictions`, `assets`, `imatrix`, `ngram`,
 `vision`, `mtp`.
 
 ### Job rules
@@ -658,8 +675,8 @@ options as `convert`, and `decode_backend` for `verify`.
 | `plan`, `convert` | As `inspect`, plus `seed`, `threads`, `ht_beam`. Extra inputs by index: `assets`, `ngram`, `vision`, `mtp`; see [Conversion components](#conversion-components). `convert` always writes a new `converted` directory. |
 | `verify` | The checkpoint and the converted `hgn` bundle (second input), then optional component inputs, selected from index 2. Option: `decode_backend`. |
 | `generate` | One HGN bundle directory with `manifest.json`, a prompt of at most 16384 bytes, and optional `max_tokens` (1 to 512, default 128). |
-| `evaluate` | One HGN bundle directory. Add a `gsm8k-baseline` file or `options.baseline_source`, not both. You cannot change the prompts or the token limit. |
-| `baseline` | A `gsm8k-baseline` or `gsm8k-predictions` file, or `options.baseline_source`. |
+| `evaluate` | One HGN bundle directory. It scores the candidate by default. Optionally add one `gsm8k-baseline`, `gsm8k-evaluation` or `gsm8k-predictions` reference file, or set `options.baseline_source`, but not both. You cannot change the prompts or token limit. |
+| `baseline` | One `gsm8k-baseline`, `gsm8k-evaluation` or `gsm8k-predictions` file, or `options.baseline_source`. |
 | `transfer`, `transfer_preview` | A destination `host` and one or more inputs. |
 | `cache_cleanup` | A target `host`, no inputs. Option: `bundle_sha256`. |
 | `benchmark` | A target `host`, no inputs. Options: `benchmark_target` and `benchmarks` (1 to 8 distinct IDs). See [Managed benchmarks](#managed-benchmarks). |
@@ -954,9 +971,12 @@ A release needs all of these:
    workbench. Keep independent evidence of GPU conversion for all six runs.
 6. **Quality.** One qualified Halogen host runs generation and the full
    GSM8K protocol for each distinct bundle. Reuse a result only if the model,
-   all sidecars, assets, runtime, and protocol match. Each artifact must
-   score no more than two percentage points below its source. Without a
-   matching baseline, quality stays unvalidated.
+   all sidecars, assets, runtime, and protocol match. For release
+   qualification, compare each full-split score with the score from its exact
+   BF16 source checkpoint. The candidate must be no more than two percentage
+   points lower. Ordinary precision-neutral references support diagnostics
+   only. Without matching BF16 source evidence, release quality is not
+   established.
 
 All six paths and both profiles must pass. Development subsets never qualify
 a release. Use the [operator matrix guide](qualification/release_matrix.md)
@@ -1005,11 +1025,35 @@ used the GPU, and does not replace independent review or file verification.
 
 ### GSM8K protocol
 
-The protocol ID is `gsm8k-zero-shot-raw-v1`. The test split of
+The protocol ID is `gsm8k-zero-shot-raw-v1`. The full test split of
 `openai/grade-school-math` at revision
-`3101c7d5072418e28b9008a6636bde82a006892c` is embedded in `crates/eval`. The
-token limit is 512. Greedy decoding is used. A source results file must hold
-per-question answers and the matching protocol and checkpoint.
+`3101c7d5072418e28b9008a6636bde82a006892c` is embedded in `crates/eval`.
+It has 1,319 rows and SHA-256
+`3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14`.
+The evaluator processes every row in dataset order. It fixes the prompt,
+temperature at zero, and token limit at 512. Candidate generation uses greedy
+decoding. It rejects prompt, token-limit and subset overrides.
+
+The prompt for each row is:
+
+```text
+Solve the following math word problem. Show your reasoning and put the final numeric answer on the last line as #### <number>.
+
+Question: <question>
+Answer:
+```
+
+The evaluator scores the last nonblank line that begins with `####`.
+It normalizes signed decimals and valid thousands grouping. Missing or invalid
+answers get zero credit. A source results file must hold all per-question
+answers, its source SHA-256, and the matching dataset and protocol identities.
+
+Every `evaluate` result includes the candidate `score`, `identity`, and
+`gsm8k-evaluation` artifact. Without a reference, `baseline_score`,
+`baseline_identity`, `comparison`, and `reference_scope` are null. With a
+reference, the result also includes its score and identity, plus per-question
+comparison data. Ordinary references have scope `diagnostic`. That comparison
+does not qualify a release.
 
 ### Qualification commands
 
@@ -1351,8 +1395,9 @@ before applying them. The policy still controls what can run.
 - **Suites.** The operator enables suites from the approved catalog only. The
   catalog lists the adapter programs. The operator cannot add a program.
 - **Baseline endpoints.** These are off unless worker policy allows them. Each
-  one needs the SHA-256 of the exact BF16 source checkpoint and a runtime ID,
-  as well as an endpoint of the same kind.
+  one needs the SHA-256 of the reference model served and a runtime ID, as well
+  as an endpoint of the same kind. Optional `precision` is descriptive only.
+  Settings cannot mark a reference as BF16-attested.
 - **Evaluation.** The switch can be on only if the worker policy allows it,
   `BREWERY_ALLOW_GPU_LOAD` is `1` on the worker and
   `BREWERY_HALOGEN_IMAGE_ID` holds a pinned image. The page cannot turn on

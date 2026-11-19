@@ -17,20 +17,35 @@ are no options.
 - `generate`: one qualified HGN bundle directory and one prompt.
   `max_tokens` is 1–512, default 128. The result contains `text`, a
   prompt and decoding `protocol`, and a load `identity`.
-- `baseline`: one `gsm8k-baseline` or `gsm8k-predictions` file, **or**
-  no inputs and `options.baseline_source` with an operator-configured ID.
-- `evaluate`: one HGN bundle directory, optionally followed by one
-  `gsm8k-baseline` file. `options.baseline_source` can replace that second
-  input to run a live BF16 baseline. Without a baseline, the result has
-  no comparison or quality verdict.
+- `baseline`: one `gsm8k-baseline`, `gsm8k-predictions`, or
+  `gsm8k-evaluation` file, **or** no inputs and `options.baseline_source`
+  with an operator-configured ID.
+- `evaluate`: one HGN bundle directory. It scores the candidate without a
+  reference by default. Optionally add one `gsm8k-baseline`,
+  `gsm8k-predictions`, or `gsm8k-evaluation` file, or set
+  `options.baseline_source`, but not both.
 
 Both GSM8K jobs use every row in dataset order. They do not accept prompt,
 token-budget, or subset overrides. Results include `dataset`, `protocol_id`,
 `score`, `identity`, and `artifact` (`kind`, absolute `path`, `sha256`, and
-`bytes`). Evaluation adds `baseline_identity`, `baseline_score`, and
-`comparison` when matched. An inline endpoint baseline also returns
-`baseline_artifact` for reuse. `synthetic_fixture: true` is available only
-for direct test jobs. Synthetic outputs are not release evidence.
+`bytes`). An `evaluate` result always scores the candidate and writes a
+`gsm8k-evaluation` artifact. Its `baseline_identity`, `baseline_score`,
+`comparison`, and `reference_scope` fields are null without a reference.
+With a reference, the result includes its identity and score, a per-question
+comparison, and its scope. Only an endpoint reference also writes
+`baseline_artifact` for reuse; otherwise that field is null. `baseline`
+writes a scored `gsm8k-baseline` artifact.
+
+An imported `gsm8k-evaluation` artifact contains predictions, not a trusted
+score. The evaluator checks and scores its predictions again. References must
+match the pinned dataset, protocol, row IDs, and question digests. Their source
+and precision do not need to match the candidate. Ordinary comparisons have
+scope `diagnostic`; the scope is null without a reference. Precision from an
+imported file is descriptive only. The evaluator does not copy an imported
+BF16 attestation or endpoint identity claim.
+
+`synthetic_fixture: true` is available only for direct test jobs. Synthetic
+outputs are not release evidence.
 
 ## Pinned test set and scoring
 
@@ -40,23 +55,37 @@ is vendored verbatim under the MIT license in `data/`. Its revision is
 `3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14`.
 The evaluator checks the full digest and the 1,319-row count before scoring.
 
-Protocol `gsm8k-zero-shot-raw-v1` sends one non-streaming raw completion per
-question to `/v1/completions`, at temperature zero with `n: 1` and
-`max_tokens: 512`. The exact prompt is in `src/gsm8k.rs`. Only the last
-nonblank line, beginning with `####`, is scored. Normalization accepts
-signed decimal notation and valid thousands grouping. Missing or invalid
-answers get zero credit. The candidate passes the two-percentage-point
-gate if `100 * (candidate_correct - baseline_correct) >= -2 * total`.
-The rounded accuracy in basis points is display only. Changed answers
-are listed by one-based row ID; two unparsed answers count as unchanged.
+The evaluator processes all 1,319 rows in dataset order. It rejects prompt,
+token-limit, and subset overrides. It uses this prompt for each question:
+
+```text
+Solve the following math word problem. Show your reasoning and put the final numeric answer on the last line as #### <number>.
+
+Question: <question>
+Answer:
+```
+
+It generates one completion per question with temperature zero and a
+512-token limit. Only the last nonblank line, beginning with `####`, is
+scored. Normalization accepts signed decimal notation and valid thousands
+grouping. Missing or invalid answers get zero credit. The rounded accuracy
+in basis points is for display only.
+
+With a reference, `comparison` reports `changed_answers`,
+`changed_answer_ids`, `delta_correct`, and `within_two_percentage_points`.
+Changed answer IDs are one-based. Two unparsed answers count as unchanged.
+The flag is true when
+`100 * (candidate_correct - reference_correct) >= -2 * total`. It is
+diagnostic for ordinary references, not a release verdict.
 
 Prediction artifacts use `brewery-gsm8k-predictions-v1` with
 `source_sha256`, `dataset_sha256`, `protocol_id`, `synthetic`, `provenance`,
 and `predictions: [{id, question_sha256, text}, ...]`. Each question
 digest is SHA-256 of the decoded UTF-8 `question` field, not the JSONL line.
-Real imports require object provenance from the operator; import identity
-records the immutable file digest and does not re-emit arbitrary metadata.
-An import is not an independent attestation of how the model was served.
+Real imports require object provenance from the operator. The evaluator
+records the immutable file digest and does not copy arbitrary metadata. It may
+keep a valid `precision` label as descriptive data. An import does not attest
+how the model was served.
 
 ## Operator configuration
 
@@ -81,28 +110,47 @@ Halogen up to 30 seconds to exit before it sends `SIGKILL`. An abrupt
 cancel can leave a stopped container on disk. Its ID is in stderr.
 Do not launch on a busy host; see `halogen-proof` memory requirements.
 
-For live BF16 baselines set `BREWERY_BASELINE_CONFIG` to a private JSON
-file on the worker. Example entry:
+For live reference endpoints, set `BREWERY_BASELINE_CONFIG` to a private JSON
+file on the worker. The endpoint's `source_sha256` identifies its own model,
+not the candidate. Example entry:
 
 ```json
 {
-  "bf16-source": {
-    "url": "https://baseline.example/v1/completions",
-    "model": "bf16-checkpoint",
+  "int8-reference": {
+    "url": "https://reference.example/v1/completions",
+    "model": "model-name-as-the-endpoint-reports-it",
     "source_sha256": "<64 lowercase hex characters>",
     "runtime_id": "sha256:<pinned runtime identity>",
-    "bearer_env": "BREWERY_BASELINE_TOKEN_BF16"
+    "precision": "int8",
+    "bearer_env": "BREWERY_BASELINE_TOKEN_REFERENCE"
   }
 }
 ```
 
-The endpoint must serve the exact BF16 source under that model name and
-return `X-Brewery-Source-Sha256` and `X-Brewery-Runtime-Id` on every
-response. These are operator assertions checked against the config, not
-attestation from an unaffiliated service. HTTPS is required except for
-loopback test fixtures. The client follows no redirects, uses no proxy,
-and rejects a source mismatch before using the baseline for comparison.
-Job data cannot set a URL. URLs and authorization values are not recorded.
+The URL path must be exactly `/v1/completions`. The endpoint must return
+`X-Brewery-Source-Sha256` and
+`X-Brewery-Runtime-Id` that match its configuration on every response.
+The response `model` must also match. These values identify the reference
+endpoint, not the candidate. The evaluator checks them on all 1,319 rows.
+Use `https`, except for `http` on `127.0.0.1` or `[::1]`. The client follows
+no redirects and uses no proxy. Job data cannot set a URL. URLs and
+authorization values are not recorded.
+
+Each request asks for one non-streaming raw completion. It sends the
+configured `model`, `temperature: 0`, `n: 1`, and `max_tokens: 512`. The
+response must contain one choice and a `finish_reason` of `stop` or `length`.
+Settings can set optional `precision`, but cannot set `bf16_attested`.
+Imported precision labels and endpoint headers do not independently prove
+model precision or source.
+
+For the separate release gate, only a trusted direct endpoint configuration
+can set `bf16_attested: true`, with `precision: "bf16"` and a non-synthetic
+endpoint. The evaluator marks `attested_bf16_same_source` only when that
+reference has the candidate's source hash. This flag is an operator assertion.
+Release qualification still requires the exact BF16 source, the pinned full
+protocol, and independent review of endpoint evidence. Ordinary
+precision-neutral comparisons do not satisfy this gate.
+
 The loopback endpoint fixture sets `"synthetic": true` in its config and
 uses `options.synthetic_fixture: true`.
 
