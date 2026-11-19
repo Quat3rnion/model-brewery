@@ -193,6 +193,64 @@ def qwen2(config, tensors):
     return {gguf: dims[::-1] for gguf, dims in expected.values()}
 
 
+def gpt2(config, tensors):
+    def integer(key, maximum):
+        value = config.get(key)
+        need(type(value) is int and 0 < value <= maximum, f"invalid GPT-2 {key}")
+        return value
+
+    h = integer("n_embd", 4096)
+    n = integer("n_layer", 64)
+    heads = integer("n_head", 128)
+    ctx = integer("n_ctx", 8192)
+    vocab = integer("vocab_size", 262144)
+    eps = config.get("layer_norm_epsilon")
+    need(config.get("model_type") == "gpt2" and h % heads == 0
+         and type(eps) in (int, float) and 0 < eps < 1
+         and integer("n_positions", 8192) == ctx, "unsupported GPT-2 dimensions or normalization")
+    inner = config.get("n_inner")
+    need(inner is None or (type(inner) is int and inner == 4 * h), "unsupported GPT-2 n_inner (requires 4 * n_embd)")
+    need(config.get("activation_function") == "gelu_new"
+         and config.get("scale_attn_weights", True) is True
+         and all(config.get(k, False) is False for k in
+                 ("scale_attn_by_inverse_layer_idx", "reorder_and_upcast_attn", "add_cross_attention", "is_encoder_decoder"))
+         and not any(config.get(k) for k in ("vision_config", "quantization_config", "pruned_heads")),
+         "unsupported GPT-2 runtime semantics")
+    tied = config.get("tie_word_embeddings")
+    need(type(tied) is bool, "GPT-2 tie_word_embeddings must be declared explicitly")
+    expected = {}
+
+    def add(src, dest, shape, transposed=False):
+        # The pinned GPT-2 exporter transposes Conv1D weights before the
+        # GGUF writer reverses tensor dimensions. Other tensors just reverse.
+        expected[src] = (dest, shape, shape if transposed else shape[::-1])
+
+    add("transformer.wte.weight", "token_embd.weight", [vocab, h])
+    add("transformer.wpe.weight", "position_embd.weight", [ctx, h])
+    for suffix in ("weight", "bias"):
+        add(f"transformer.ln_f.{suffix}", f"output_norm.{suffix}", [h])
+    need(not tied or "lm_head.weight" not in tensors, "ambiguous explicit lm_head with GPT-2 tied embeddings")
+    if not tied:
+        add("lm_head.weight", "output.weight", [vocab, h])
+    for i in range(n):
+        for src, dest in (("ln_1", "attn_norm"), ("ln_2", "ffn_norm")):
+            for suffix in ("weight", "bias"):
+                add(f"transformer.h.{i}.{src}.{suffix}", f"blk.{i}.{dest}.{suffix}", [h])
+        for src, dest, dims in (
+            ("attn.c_attn", "attn_qkv", [h, 3 * h]), ("attn.c_proj", "attn_output", [h, h]),
+            ("mlp.c_fc", "ffn_up", [h, 4 * h]), ("mlp.c_proj", "ffn_down", [4 * h, h]),
+        ):
+            add(f"transformer.h.{i}.{src}.weight", f"blk.{i}.{dest}.weight", dims, transposed=True)
+            add(f"transformer.h.{i}.{src}.bias", f"blk.{i}.{dest}.bias", dims[1:])
+    missing, extra = expected.keys() - tensors.keys(), tensors.keys() - expected.keys()
+    need(not missing, f"missing GPT-2 tensor: {min(missing, default='')}")
+    need(not extra, f"unknown GPT-2 tensor: {min(extra, default='')}")
+    for name, (_, shape, _) in expected.items():
+        dtype, dims = tensors[name]
+        need(dtype in ("F32", "F16", "BF16") and dims == shape, f"GPT-2 tensor shape or dtype mismatch: {name}")
+    return {dest: dims for dest, _, dims in expected.values()}
+
+
 def qwen4exp(arch, config, tensors, shard_names):
     """Plan the pinned converter's Flash-Next tensor profile, not runtime admission.
 
@@ -470,9 +528,12 @@ def qwen4exp(arch, config, tensors, shard_names):
 def inspect(source, outtype, paths=None):
     files, config, tensors, shard_names = inventory(source, paths)
     architectures = config.get("architectures")
-    need(isinstance(architectures, list) and len(architectures) == 1 and isinstance(architectures[0], str),
-         "expected one local HF architecture")
-    arch = architectures[0]
+    if "architectures" not in config and config.get("model_type") == "gpt2":
+        arch = None
+    else:
+        need(isinstance(architectures, list) and len(architectures) == 1 and isinstance(architectures[0], str),
+             "expected one local HF architecture")
+        arch = architectures[0]
     roles = {"text": 0}
     for name in tensors:
         role = ("projector" if name.startswith(("model.visual.", "visual.")) else
@@ -492,21 +553,38 @@ def inspect(source, outtype, paths=None):
             counts[role] = counts.get(role, 0) + 1
         report.update(source_coverage_plan=plan, required_roles=sorted(counts), role_tensor_counts=counts,
                       reason="Qwen4Exp sidecar coverage is planned from headers only; export is not proven")
-    elif arch != "Qwen2ForCausalLM":
+    elif arch in (None, "GPT2Model"):
+        report["reason"] = ("GPT-2 GGUF requires an explicit GPT2LMHeadModel architecture; "
+                            "an undeclared or bare transformer does not establish a language-model head")
+    elif arch not in ("Qwen2ForCausalLM", "GPT2LMHeadModel"):
         report["reason"] = "architecture has no audited offline tensor mapping"
     elif set(roles) != {"text"} or total > MAX_EXPORT:
         report["reason"] = "only text and at most 512 MiB of input are admitted"
     else:
-        report["expected_gguf_tensors"] = qwen2(config, tensors)
+        is_gpt2 = arch == "GPT2LMHeadModel"
+        report["expected_gguf_tensors"] = (gpt2 if is_gpt2 else qwen2)(config, tensors)
         if not {"tokenizer.json", "tokenizer_config.json"} <= files.keys():
             report["reason"] = "local tokenizer.json and tokenizer_config.json are required"
         else:
             tok = read_json(paths["tokenizer_config.json"] if paths else source / "tokenizer_config.json")
-            need(tok.get("tokenizer_class") in ("Qwen2Tokenizer", "Qwen2TokenizerFast"), "unsupported tokenizer class")
-            tokenizer = read_json(paths["tokenizer.json"] if paths else source / "tokenizer.json").get("model")
-            need(isinstance(tokenizer, dict) and tokenizer.get("type") == "BPE"
-                 and isinstance(tokenizer.get("vocab"), dict) and bool(tokenizer["vocab"]),
-                 "expected local Qwen2 BPE vocabulary")
+            family = "GPT2" if is_gpt2 else "Qwen2"
+            tokenizer_class = tok.get("tokenizer_class")
+            need(tokenizer_class in (family + "Tokenizer", family + "TokenizerFast")
+                 or (is_gpt2 and "tokenizer_class" not in tok),
+                 "unsupported tokenizer class")
+            schema = read_json(paths["tokenizer.json"] if paths else source / "tokenizer.json")
+            tokenizer = schema.get("model")
+            need(isinstance(tokenizer, dict) and isinstance(tokenizer.get("vocab"), dict) and bool(tokenizer["vocab"])
+                 and (tokenizer.get("type") == "BPE" or
+                      (is_gpt2 and "type" not in tokenizer and isinstance(tokenizer.get("merges"), list))),
+                  f"expected local {family} BPE vocabulary")
+            if is_gpt2:
+                pre = schema.get("pre_tokenizer")
+                need(isinstance(pre, dict) and pre.get("type") == "ByteLevel", "expected GPT-2 ByteLevel pre-tokenizer")
+                ids = tokenizer["vocab"].values()
+                need(all(type(i) is int for i in ids) and len(ids) == config["vocab_size"]
+                     and set(ids) == set(range(config["vocab_size"])), "GPT-2 BPE vocabulary does not match model dimensions")
+                report["tokenizer_compatibility_checked"] = False
             report["export_supported"] = True
     return report, files
 
@@ -535,7 +613,12 @@ def copy_pinned(root, target):
     need(digest.hexdigest() == CODE_SHA, "llama.cpp Python files differ from pin")
 
 
-def gguf_inventory(path, outtype, expected):
+def output_tensor_type(name, dims, outtype, arch):
+    return 0 if len(dims) == 1 or (arch == "gpt2" and name == "position_embd.weight") else (
+        30 if outtype == "bf16" else 1)
+
+
+def gguf_inventory(path, outtype, expected, arch="qwen2"):
     size = stamp(path)[2]
     with path.open("rb") as f:
         def raw(n):
@@ -580,7 +663,7 @@ def gguf_inventory(path, outtype, expected):
             need(key not in props, "duplicate GGUF metadata key")
             kind = u32()
             props[key] = (kind, value(kind))
-        need(props.get("general.architecture") == (8, "qwen2"), "incorrect GGUF architecture")
+        need(props.get("general.architecture") == (8, arch), "incorrect GGUF architecture")
         need(props.get("general.file_type") == (4, 32 if outtype == "bf16" else 1),
              "incorrect GGUF file type")
         need(props.get("tokenizer.ggml.model") == (8, "gpt2")
@@ -595,7 +678,7 @@ def gguf_inventory(path, outtype, expected):
             need(name in expected and name not in types and rank == len(expected[name]), "unexpected GGUF tensor")
             dims = [u64() for _ in range(rank)]
             dtype, offset = u32(), u64()
-            wanted = 0 if rank == 1 else (30 if outtype == "bf16" else 1)
+            wanted = output_tensor_type(name, dims, outtype, arch)
             need(dims == expected[name] and dtype == wanted and offset % 32 == 0,
                  f"GGUF tensor shape/type/alignment mismatch: {name}")
             end = offset + math.prod(dims) * (4 if dtype == 0 else 2)
@@ -618,8 +701,9 @@ def export(source, output, report, files, paths, assets):
     need(not output.is_relative_to(source) and not (assets and output.is_relative_to(assets)), "output overlaps source")
     # Both the converter spool and final GGUF may widen F16/BF16 vectors to F32.
     # Count the known output tensor bytes twice, plus room for metadata.
-    fp_bytes = sum(math.prod(dims) * (4 if len(dims) == 1 else 2)
-                   for dims in report["expected_gguf_tensors"].values())
+    arch = "gpt2" if report["architecture"] == "GPT2LMHeadModel" else "qwen2"
+    fp_bytes = sum(math.prod(dims) * (4 if output_tensor_type(name, dims, report["outtype"], arch) == 0 else 2)
+                   for name, dims in report["expected_gguf_tensors"].items())
     required = 2 * fp_bytes + 128 * MIB
     need(shutil.disk_usage(output.parent).free >= required, f"need {required} bytes of scratch space")
     python = Path(os.environ.get("BREWERY_GGUF_PYTHON", "/usr/bin/python3"))
@@ -676,7 +760,7 @@ def export(source, output, report, files, paths, assets):
                        check=True, timeout=600, preexec_fn=limits)
         need({n: stamp(p) for n, p in selected_paths(source, assets).items()} == files, "source changed during export")
         model = work / "model.gguf"
-        inventory_out = gguf_inventory(model, report["outtype"], report["expected_gguf_tensors"])
+        inventory_out = gguf_inventory(model, report["outtype"], report["expected_gguf_tensors"], arch)
         with model.open("rb") as f:
             sha256 = hashlib.file_digest(f, "sha256").hexdigest()
             os.fsync(f.fileno())
@@ -687,7 +771,8 @@ def export(source, output, report, files, paths, assets):
         if libc.renameat2(-100, os.fsencode(final), -100, os.fsencode(output), 1):
             err = ctypes.get_errno()
             raise OSError(err, os.strerror(err), str(output))
-    return {**report, "kind": "export", "tensor_payloads_read": True, "export_runtime_checked": True,
+    return {**report, **({"tokenizer_compatibility_checked": True} if arch == "gpt2" else {}),
+            "kind": "export", "tensor_payloads_read": True, "export_runtime_checked": True,
             "exporter_sha256": CODE_SHA,
             "artifact": {"path": str(output / "model.gguf"), "sha256": sha256, "bytes": size},
             "gguf_inventory": inventory_out}
