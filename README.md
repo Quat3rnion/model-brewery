@@ -406,9 +406,12 @@ Qwen3.8 Flash-Next layout. The converter documentation has its full rules.
 - **HGN source:** The converter uses the components that the bundle holds.
   It needs an input for each missing component.
 
-The Convert page says "From the checkpoint, if it has one". It does not know
-if the checkpoint has the component. Read `result.components` after a job to
-see what was used.
+On the Convert page, select a source checkpoint to see its component choices.
+The checkpoint is the default; you do not need to register its embedded
+components separately. The form uses saved job reports to identify components.
+If no report confirms a role, the form does not claim it is present. To
+override a role, select a separate Library entry. After conversion, read
+`result.components` to see what the worker reports using.
 
 **Replace a component of an HF source.** This works only on a host that
 reports `capabilities.convert_components: true` in `GET /api/state`. The

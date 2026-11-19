@@ -8,15 +8,15 @@
   import { buildGgufConversion, imatrixRequired, IMATRIX_KIND, type GgufCatalog } from '../lib/gguf';
   import { shortRev } from '../lib/profiles';
   import ModelSelect from './ModelSelect.svelte';
+  import ComponentPicker from './ComponentPicker.svelte';
   import HostSelect from './HostSelect.svelte';
   import Submit from './Submit.svelte';
   import type { ConversionBody } from '../lib/conversion';
 
-  let { catalog }: { catalog: GgufCatalog } = $props();
+  let { catalog, source=$bindable('') }: { catalog: GgufCatalog; source?:string } = $props();
   const hosts = $derived(brewery.state?.hosts ?? []);
   const models = $derived(brewery.state?.models ?? []);
 
-  let source = $state('');
   let choice = $state(''); // 'preset:<id>' | 'rev:<hex>'
   let imatrix = $state('');
   let host = $state('');
@@ -40,6 +40,7 @@
   const target = $derived(hosts.find((h) => h.id === (host || src?.host)));
   const blockers = $derived.by(() => {
     const out = [...built.problems];
+    if (src && src.kind!=='hf' && src.kind!=='gguf') out.push('GGUF output requires a Hugging Face checkpoint or GGUF input.');
     if (choice.startsWith('rev:') && !rev) out.push('The chosen GGUF profile revision is no longer listed.');
     if (target) {
       const g = capability(target, 'gguf_output');
@@ -80,6 +81,7 @@
       </span>
     </div>
   </div>
+  {#if src}<ComponentPicker source={src} idPrefix="gg-comp" gguf />{/if}
   <div class="grid-2">
     {#if needsImatrix}
       <ModelSelect bind:value={imatrix} kinds={[IMATRIX_KIND]} label="Importance matrix (imatrix)" hint="Required by the IQ types in this choice. Register the .imatrix file in Library; it must match the source model." id="gg-imatrix" />

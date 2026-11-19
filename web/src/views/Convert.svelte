@@ -159,7 +159,7 @@
     </header>
     {#if outFormat === 'gguf'}
     <div class="body">
-      {#if profileStore.gguf}<GgufConvert catalog={profileStore.gguf} />
+      {#if profileStore.gguf}<GgufConvert catalog={profileStore.gguf} bind:source={form.source} />
       {:else if profileStore.ggufStatus === 'unavailable'}<p class="note warn">This controller does not offer GGUF output.</p>
       {:else if profileStore.status === 'loading' || profileStore.status === 'idle'}<p class="muted">Loading GGUF types…</p>
       {:else}<p class="note bad" role="alert">The GGUF catalog could not be loaded.</p>{/if}
@@ -202,7 +202,7 @@
         </div>
       </div>
 
-      <ComponentPicker bind:value={form.extras} source={wfSource} idPrefix="wf-comp" />
+      {#if wfSource}<ComponentPicker bind:value={form.extras} source={wfSource} idPrefix="wf-comp" />{/if}
       <Advanced changed={optsChangedWf}>
         <div class="grid-3">
           {#each ['ht_backend', 'i4r_backend', 'q4cp_backend'] as const as key (key)}
