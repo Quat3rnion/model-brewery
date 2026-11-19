@@ -2,6 +2,7 @@ use anyhow::{Context, Result, ensure};
 pub mod hf_download;
 pub mod operational;
 pub mod resources;
+pub mod source_grants;
 pub mod weight_source;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

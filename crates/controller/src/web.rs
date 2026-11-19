@@ -688,6 +688,16 @@ async fn add_job(
             "no eligible worker for the requested job options".into(),
         ));
     }
+    if job.local_edit {
+        job.directory_revision = app
+            .editor_grants(&job, &envelope)
+            .map_err(ApiError::storage)?
+            .ok_or(ApiError(
+                StatusCode::CONFLICT,
+                "A model directory is not authorized for this editor".into(),
+            ))?
+            .revision;
+    }
     store
         .enqueue(&job, &envelope, submission.as_ref())
         .map_err(ApiError::storage)?;

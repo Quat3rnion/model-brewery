@@ -18,7 +18,10 @@ struct Test {
 
 impl Test {
     fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("brewery-admin-")
+            .tempdir()
+            .unwrap();
         for (name, value) in [
             ("catalog.json", json!({"workers":{"candidate":{"ssh_alias":"fixture-ssh",
                 "runtimes":{"evaluator":{"label":"Evaluator","capabilities":["evaluate"]}}}}}).to_string()),
@@ -271,10 +274,13 @@ fn enabled_local_editor_uses_private_route_and_drains_on_disable() {
     let original = json!({"root":root.join("ordinary"),"source_roots":[sources],"engine":"/usr/bin/false",
         "engine_env":{"BREWERY_EXPECTED_SOURCE_SHA256":"qualification-pin"}});
     fs::write(&config, original.to_string()).unwrap();
+    let eval_config = root.join("eval-worker.json");
+    fs::write(&eval_config, r#"{"source_roots":[]}"#).unwrap();
     fs::write(
         root.join("dispatch.json"),
         json!({"hosts":{"existing":{
-        "local":true,"worker":"/usr/bin/false","config":config}}})
+        "local":true,"worker":"/usr/bin/false","config":config},
+        "local-eval":{"local":true,"worker":"/usr/bin/false","config":eval_config}}})
         .to_string(),
     )
     .unwrap();
@@ -304,6 +310,31 @@ printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","w
     assert_eq!(status, 200);
     assert_eq!(initial["hosts"][0]["weight_editor"]["available"], true);
     assert_eq!(initial["hosts"][0]["weight_editor"]["enabled"], false);
+    let eval = initial["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["id"] == "local-eval")
+        .unwrap();
+    assert_eq!(eval["model_directories"]["available"], true);
+    let (status, plan) = t.request(
+        "/api/admin/model-directories/plan",
+        "",
+        Some(json!({
+            "worker":"local-eval","revision":0,"action":"add","path":sources
+        })),
+    );
+    assert_eq!(status, 200, "{plan}");
+    assert_eq!(plan["worker"], "local-eval");
+    assert_eq!(plan["path"], json!(sources));
+    assert_eq!(eval["weight_editor"]["available"], false);
+    let reason = eval["weight_editor"]["reason"].as_str().unwrap();
+    assert!(reason.contains("no approved model directory"), "{reason}");
+    let (denied, error) = t.admin(Some(
+        json!({"action":"set_weight_editor","worker":"local-eval","revision":0,"enabled":true}),
+    ));
+    assert_eq!(denied, 409);
+    assert_eq!(error["error"], reason);
     let (status, source) = t.request(
         "/api/models",
         "",
@@ -354,6 +385,92 @@ printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","w
         false
     );
     assert_eq!(t.request("/api/jobs", "", Some(req)).0, 409);
+
+    let grant = |action, revision, path: &std::path::Path| {
+        t.request(
+            "/api/admin/model-directories/plan",
+            "",
+            Some(json!({
+                "worker":"local-eval","revision":revision,"action":action,"path":path
+            })),
+        )
+    };
+    let confirm = |plan: &Value| {
+        t.request("/api/admin/model-directories/confirm", "", Some(json!({
+        "worker":plan["worker"],"revision":plan["revision"],"confirmation":plan["confirmation"]
+    })))
+    };
+    assert_eq!(grant("add", 0, std::path::Path::new("/etc")).0, 400);
+    assert_eq!(grant("add", 0, &t.root.path().join("state")).0, 400);
+    assert_eq!(confirm(&plan).0, 200);
+    assert_eq!(confirm(&plan).0, 409);
+    let eval = |state: Value| {
+        state["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["id"] == "local-eval")
+            .unwrap()
+            .clone()
+    };
+    let saved = eval(t.admin(None).1);
+    assert_eq!(saved["model_directories"]["granted"], json!([sources]));
+    assert_eq!(saved["weight_editor"]["enabled"], false);
+    assert_eq!(saved["weight_editor"]["available"], true);
+    assert_eq!(
+        t.admin(Some(
+            json!({"action":"set_weight_editor","worker":"local-eval",
+        "revision":1,"enabled":true})
+        ))
+        .0,
+        200
+    );
+    let model_path = sources.join("test.gguf");
+    fs::write(&model_path, "fixture").unwrap();
+    let (status, model) = t.request(
+        "/api/models",
+        "",
+        Some(json!({
+            "host":"local-eval","kind":"gguf","path":model_path
+        })),
+    );
+    assert_eq!(status, 201, "{model}");
+    let request = json!({"kind":"weight_inspect","input_ids":[model["id"]],
+        "options":{"mode":"inventory","offset":0,"limit":4}});
+    fs::write(t.root.path().join("hold"), "").unwrap();
+    let (status, running) = t.request("/api/jobs", "", Some(request.clone()));
+    assert_eq!(status, 201, "{running}");
+    let poll = |id: &Value, field, expected: &str| {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let path = format!("/api/jobs/{}", id.as_str().unwrap());
+        loop {
+            let (_, row) = t.request(&path, "", None);
+            if row[field] == expected {
+                return row;
+            }
+            assert!(Instant::now() < deadline, "{row}");
+            sleep(Duration::from_millis(15));
+        }
+    };
+    poll(&running["id"], "progress", "worker progress");
+    let (status, queued) = t.request("/api/jobs", "", Some(request.clone()));
+    assert_eq!(status, 201, "{queued}");
+    assert_eq!(queued["state"], "queued");
+    let (status, revoke) = grant("remove", 2, &sources);
+    assert_eq!(status, 200, "{revoke}");
+    assert_eq!(confirm(&revoke).0, 200);
+    assert_eq!(t.request("/api/jobs", "", Some(request.clone())).0, 409);
+    fs::remove_file(t.root.path().join("hold")).unwrap();
+    poll(&running["id"], "state", "succeeded");
+    poll(&queued["id"], "state", "failed");
+    t.stop();
+    t.launch();
+    assert_eq!(
+        eval(t.admin(None).1)["model_directories"]["granted"],
+        json!([])
+    );
+    assert_eq!(t.request("/api/jobs", "", Some(request)).0, 409);
+    assert_eq!(fs::read_to_string(model_path).unwrap(), "fixture");
 }
 
 #[test]

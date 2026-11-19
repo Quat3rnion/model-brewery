@@ -91,10 +91,15 @@ impl Dispatcher {
             backend.map_or(&self.command, |lane| &lane.dispatch)
         });
         if let Some(lane) = local {
+            let config = if job.directory_revision.is_some() {
+                lane.job_config(&job.id)
+            } else {
+                lane.config.clone()
+            };
             command
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
-                .env("BREWERY_DISPATCH_CONFIG", &lane.config);
+                .env("BREWERY_DISPATCH_CONFIG", config);
         } else if let Some(lane) = backend {
             command.env_clear().env(
                 "BREWERY_DISPATCH_CONFIG",
@@ -291,6 +296,39 @@ fn allocate(app: &App) -> Result<Vec<Job>, Error> {
             continue;
         };
         job.host = host.id.clone();
+        if job.local_edit {
+            let Some(access) = app
+                .editor_grants(&job, &envelope)?
+                .filter(|access| access.revision == job.directory_revision)
+            else {
+                job.state = State::Failed;
+                job.progress = "Model directory access changed before dispatch".into();
+                job.error =
+                    Some("Review the current model directory access and submit a new job".into());
+                store.update(&mut job, None)?;
+                continue;
+            };
+            if access.revision.is_some() {
+                let lane = app
+                    .local_edit
+                    .get(&job.host)
+                    .ok_or("local editor unavailable")?;
+                if lane
+                    .snapshot(
+                        &job.host,
+                        &job.id,
+                        &access.grants,
+                        &app.local_edit.protected,
+                    )
+                    .is_err()
+                {
+                    job.state = State::Failed;
+                    job.progress = "Cannot pin model directory access for this job".into();
+                    store.update(&mut job, None)?;
+                    continue;
+                }
+            }
+        }
         job.pool_slot = pool_slot;
         job.host_slot = pool_slot.then_some(slot);
         job.dispatch_resources = if job.local_edit {

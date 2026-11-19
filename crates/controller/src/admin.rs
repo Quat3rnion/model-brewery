@@ -31,6 +31,8 @@ use tokio::{io::AsyncWriteExt, process::Command, sync::Semaphore, time::timeout}
 
 #[path = "infra_policy.rs"]
 mod infra_policy;
+#[path = "model_directories.rs"]
+mod model_directories;
 
 const INSTALL_UNAVAILABLE: &str =
     "Installation requires an operator-configured helper and a pinned, pre-staged runtime";
@@ -350,7 +352,8 @@ impl Admin {
         let db = Connection::open(path)?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS admin_policy(worker TEXT PRIMARY KEY, alias TEXT NOT NULL, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, body TEXT NOT NULL, outcome TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS infra_host_policy(worker TEXT PRIMARY KEY, body TEXT NOT NULL);")?;
+            CREATE TABLE IF NOT EXISTS infra_host_policy(worker TEXT PRIMARY KEY, body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS infra_directory_plan(worker TEXT PRIMARY KEY, body TEXT NOT NULL);")?;
         Ok(Some(Self {
             catalog,
             db: Mutex::new(db),
@@ -457,7 +460,8 @@ impl Admin {
             host_rows.push(json!({"id":host.id,"name":host.name,"revision":host_policy.revision,
                 "paused":host_policy.paused,"draining":host_policy.paused && busy.contains(&host.id),
                 "disabled_jobs":host_policy.disabled_jobs,"installed_jobs":infra_policy::job_kinds(&installed),
-                "weight_editor":editor_view(host, &configured, effective.as_ref(), &app.local_edit),
+                "weight_editor":editor_view(host, &configured, effective.as_ref(), &app.local_edit, &host_policy),
+                "model_directories":model_directories::view(&app.local_edit, &host.id, &host_policy),
                 "resources":host_policy.resources,"resource_bounds":host.resource_bounds,
                 "effective_resources":effective.as_ref().unwrap_or(host).effective_resources(),
                 "allowed_jobs":effective.as_ref().map_or_else(Vec::new, infra_policy::job_kinds)}));
@@ -504,6 +508,27 @@ impl Admin {
 }
 
 impl App {
+    pub(crate) fn editor_grants(
+        &self,
+        job: &crate::domain::Job,
+        envelope: &crate::domain::Envelope,
+    ) -> Result<Option<model_directories::Access>, Error> {
+        let lane = self
+            .local_edit
+            .get(&job.host)
+            .ok_or("local editor unavailable")?;
+        let admin = self.admin.as_ref().ok_or("administration unavailable")?;
+        let db = admin.db.lock().map_err(|_| "admin storage unavailable")?;
+        let policy = infra_policy::Policy::load(&db, &job.host)?;
+        Ok(model_directories::access(
+            &self.local_edit,
+            lane,
+            job,
+            envelope,
+            &policy,
+        ))
+    }
+
     // A durable allocation may reconnect after its host has started draining.
     // Keep immutable and legacy admission checks without applying new job policy.
     pub(crate) fn effective_hosts_for_allocated(&self) -> Result<Vec<Host>, Error> {
@@ -515,17 +540,23 @@ impl App {
     }
 }
 
-fn editor_available(host: &Host, lanes: &crate::local_edit::Lanes) -> bool {
-    lanes.get(&host.id).is_some()
+fn editor_available(
+    host: &Host,
+    lanes: &crate::local_edit::Lanes,
+    policy: &infra_policy::Policy,
+) -> bool {
+    lanes
+        .get(&host.id)
+        .is_some_and(|lane| !lane.configured.is_empty() || !policy.model_directories.is_empty())
         || (host.id == crate::backend_hf::ID && host.capabilities["weight_inspect"])
 }
 
 fn apply_editor(host: &mut Host, policy: &infra_policy::Policy, lanes: &crate::local_edit::Lanes) {
     match policy.weight_editor {
-        Some(true) if lanes.get(&host.id).is_some() => {
+        Some(true) if editor_available(host, lanes, policy) && lanes.get(&host.id).is_some() => {
             lanes.get(&host.id).expect("prepared lane").advertise(host);
         }
-        Some(true) if editor_available(host, lanes) => {}
+        Some(true) if editor_available(host, lanes, policy) => {}
         Some(_) => crate::local_edit::disable(host),
         None => {}
     }
@@ -536,8 +567,9 @@ fn editor_view(
     configured: &Host,
     effective: Option<&Host>,
     lanes: &crate::local_edit::Lanes,
+    policy: &infra_policy::Policy,
 ) -> Value {
-    let available = editor_available(host, lanes);
+    let available = editor_available(host, lanes, policy);
     let enabled = configured.capabilities["weight_inspect"]
         || configured.capabilities["weight_propose"]
         || configured.capabilities["weight_tune"]
@@ -553,9 +585,17 @@ fn editor_view(
         .collect();
     let mut row = json!({"available":available,"enabled":enabled,"capabilities":capabilities});
     if !available {
-        row["reason"] = json!("No verified local CPU editor is available for this worker");
+        row["reason"] = json!(editor_reason(lanes, &host.id));
     }
     row
+}
+
+fn editor_reason(lanes: &crate::local_edit::Lanes, id: &str) -> &'static str {
+    if lanes.get(id).is_some() {
+        "The editor is installed, but this worker has no approved model directory."
+    } else {
+        lanes.unavailable_reason(id)
+    }
 }
 
 fn enabled(policy: &Policy, id: &str, runtime: &Runtime) -> bool {
@@ -588,10 +628,13 @@ fn policy(db: &Connection, host: &Host, entry: &Worker) -> Result<Policy, Error>
 }
 
 pub fn router() -> Router<Arc<App>> {
-    Router::new().route("/admin/state", get(state)).route(
-        "/admin/actions",
-        post(change).layer(DefaultBodyLimit::max(4096)),
-    )
+    Router::new()
+        .merge(model_directories::router())
+        .route("/admin/state", get(state))
+        .route(
+            "/admin/actions",
+            post(change).layer(DefaultBodyLimit::max(4096)),
+        )
 }
 
 fn configured(app: &App) -> ApiResult<&Admin> {
@@ -676,10 +719,8 @@ async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
                     current.resources = *resources;
                 }
                 Action::SetWeightEditor { enabled, .. } => {
-                    if !editor_available(host, &app.local_edit) {
-                        return Err(ApiError::conflict(
-                            "No verified local CPU editor is installed for this worker",
-                        ));
+                    if !editor_available(host, &app.local_edit, &current) {
+                        return Err(ApiError::conflict(editor_reason(&app.local_edit, id)));
                     }
                     current.weight_editor = Some(*enabled);
                 }
@@ -822,7 +863,7 @@ impl Admin {
     }
 }
 
-fn record_audit(tx: &Connection, action: &Action, outcome: &str) -> ApiResult<()> {
+fn record_audit(tx: &Connection, action: &impl Serialize, outcome: &str) -> ApiResult<()> {
     let at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

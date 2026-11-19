@@ -429,6 +429,32 @@
         }
       }
     },
+    "/api/admin/model-directories/plan": {
+      "post": {
+        "operationId": "planModelDirectory",
+        "summary": "Validate a local editor directory change",
+        "description": "Validates an absolute path on the selected local editor host without granting access. Only managed grants, not configured roots, can be replaced or removed.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ModelDirectoryChange"}}}},
+        "responses": {
+          "200": {"description": "Reviewed host, revision, action and path, plus confirmation ID.", "content": {"application/json": {"schema": {"allOf": [{"$ref": "#/components/schemas/ModelDirectoryChange"}, {"type": "object", "required": ["confirmation"], "properties": {"confirmation": {"$ref": "#/components/schemas/Id"}}}]}}}},
+          "400": {"description": "Invalid or protected directory."}, "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"}, "409": {"description": "Stale revision or unsupported host."}
+        }
+      }
+    },
+    "/api/admin/model-directories/confirm": {
+      "post": {
+        "operationId": "confirmModelDirectory",
+        "summary": "Commit the reviewed local editor directory change",
+        "description": "Revalidates the directory identity and commits against the host revision. Does not enable weight editing or grant access to ordinary worker jobs, SSH workers, or backend-hf.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["worker", "revision", "confirmation"], "properties": {"worker": {"$ref": "#/components/schemas/HostId"}, "revision": {"type": "integer", "minimum": 0}, "confirmation": {"$ref": "#/components/schemas/Id"}}}}}},
+        "responses": {
+          "200": {"description": "Updated infrastructure state.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AdminState"}}}},
+          "400": {"description": "Invalid confirmation request."}, "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"}, "409": {"description": "Stale review, changed directory or unsupported host."}
+        }
+      }
+    },
     "/api/admin/state": {
       "get": {
         "operationId": "getAdminState",
@@ -1199,9 +1225,24 @@
         "properties": {"concurrency": {"$ref": "#/components/schemas/AdminResourceRange"}, "cpu_threads": {"$ref": "#/components/schemas/AdminResourceRange"},
           "min_free_ram_bytes": {"$ref": "#/components/schemas/AdminResourceRange"}, "disk_reserve_bytes": {"$ref": "#/components/schemas/AdminResourceRange"}}
       },
+      "ModelDirectoryChange": {
+        "type": "object", "required": ["worker", "revision", "action", "path"],
+        "properties": {"worker": {"$ref": "#/components/schemas/HostId"}, "revision": {"type": "integer", "minimum": 0},
+          "action": {"enum": ["add", "replace", "remove"]}, "path": {"$ref": "#/components/schemas/AbsoluteWorkerPath"},
+          "previous_path": {"$ref": "#/components/schemas/AbsoluteWorkerPath"}},
+        "if": {"properties": {"action": {"const": "replace"}}},
+        "then": {"required": ["previous_path"]}, "else": {"not": {"required": ["previous_path"]}}
+      },
+      "AdminModelDirectories": {
+        "type": "object", "additionalProperties": false, "required": ["available", "configured", "granted"],
+        "properties": {"available": {"type": "boolean"}, "reason": {"type": "string"},
+          "configured": {"type": "array", "items": {"$ref": "#/components/schemas/AbsoluteWorkerPath"}},
+          "granted": {"type": "array", "items": {"$ref": "#/components/schemas/AbsoluteWorkerPath"}}}
+      },
       "AdminHostPolicy": {
         "type": "object", "required": ["id", "name", "revision", "paused", "draining", "disabled_jobs", "installed_jobs", "allowed_jobs", "resources", "effective_resources", "resource_bounds", "weight_editor"],
         "properties": {"id": {"$ref": "#/components/schemas/HostId"}, "name": {"$ref": "#/components/schemas/Name"},
+          "model_directories": {"$ref": "#/components/schemas/AdminModelDirectories"},
           "revision": {"type": "integer", "minimum": 0}, "paused": {"type": "boolean"}, "draining": {"type": "boolean"},
           "weight_editor": {"type": "object", "required": ["available", "enabled", "capabilities"], "properties": {
             "available": {"type": "boolean", "description": "A verified editor is available for this control."},

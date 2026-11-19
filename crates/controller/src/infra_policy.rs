@@ -16,6 +16,8 @@ pub(super) struct Policy {
     pub resources: Limits,
     #[serde(default)]
     pub weight_editor: Option<bool>,
+    #[serde(default)]
+    pub model_directories: Vec<brewery_worker::source_grants::SourceGrant>,
 }
 
 impl Policy {

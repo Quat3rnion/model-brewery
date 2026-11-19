@@ -183,6 +183,16 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
         (job.kind == "hf_download") == download.is_some(),
         "Worker is not configured for this operation"
     );
+    // Resolve and supervise are different processes. Do not hand off a newly
+    // replaced grant root just because the earlier resolution succeeded.
+    let _source_guard = if !w.cfg.source_grants.is_empty()
+        && let Some(input) = job.inputs.first()
+        && w.source(&input.path).is_err()
+    {
+        w.editor_grant("start", job, 0, input)?
+    } else {
+        None
+    };
     let work = base.join("work");
     fs::create_dir(&work)?;
     let jobfile = base.join("engine-input.json");

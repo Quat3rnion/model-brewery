@@ -167,6 +167,8 @@ pub struct Job {
     pub dispatch_resources: brewery_worker::resources::Limits,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub local_edit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_revision: Option<u64>,
     pub state: State,
     pub progress: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -855,6 +857,7 @@ impl NewJob {
             host_slot: None,
             dispatch_resources: Default::default(),
             local_edit: false,
+            directory_revision: None,
             input_ids: self.input_ids,
             options: self.options,
             prompt_id: self.prompt_id,

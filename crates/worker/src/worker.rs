@@ -24,6 +24,11 @@ struct Config {
     root: PathBuf,
     #[serde(default)]
     source_roots: Vec<PathBuf>,
+    #[serde(default)]
+    source_grants: Vec<source_grants::SourceGrant>,
+    source_grant_host: Option<String>,
+    #[serde(default)]
+    source_grant_protected: Vec<PathBuf>,
     engine: PathBuf,
     admission: Option<PathBuf>,
     #[serde(default = "reserve")]
@@ -52,6 +57,32 @@ impl Config {
             .context("set BREWERY_WORKER_CONFIG")?
             .canonicalize()?;
         let cfg: Config = load(&path)?;
+        if !cfg.source_grants.is_empty() {
+            let host = cfg
+                .source_grant_host
+                .as_deref()
+                .context("Missing source grant host")?;
+            token(host)?;
+            let md = fs::symlink_metadata(&path)?;
+            ensure!(
+                md.is_file()
+                    && md.uid() == unsafe { libc::geteuid() }
+                    && md.mode() & 0o022 == 0
+                    && cfg.source_grants.len() <= 128
+                    && cfg.source_grants.iter().all(|grant| grant.host == host)
+                    && cfg.admission.is_none()
+                    && cfg.pinned_publication.is_none()
+                    && cfg.managed_settings.is_none()
+                    && cfg.hf_download.is_none()
+                    && cfg.backend_weight_download_root.is_none()
+                    && cfg.backend_weight_calibration_root.is_none()
+                    && !cfg
+                        .engine_env
+                        .contains_key("BREWERY_EXPECTED_SOURCE_SHA256")
+                    && env::var_os("BREWERY_EXPECTED_SOURCE_SHA256").is_none(),
+                "Source grants require a trusted local editor config without other execution policies"
+            );
+        }
         if let Some(bounds) = &cfg.resource_bounds {
             bounds.check_ranges()?;
         }
@@ -337,6 +368,53 @@ impl Worker {
             }
         }
         bail!("input outside allowed source roots")
+    }
+
+    // Grants are separate from regular roots on purpose. Do not let Describe,
+    // Read, suggestions, staging or secondary inputs consult this list.
+    fn editor_grant(
+        &self,
+        action: &str,
+        job: &Job,
+        index: usize,
+        input: &Input,
+    ) -> Result<Option<(&Path, File)>> {
+        let grant = self
+            .cfg
+            .source_grants
+            .iter()
+            .filter(|grant| input.path.starts_with(&grant.path))
+            .max_by_key(|grant| grant.path.components().count());
+        let Some(grant) = grant else {
+            return Ok(None);
+        };
+        let host = self
+            .cfg
+            .source_grant_host
+            .as_deref()
+            .context("Missing source grant host")?;
+        ensure!(
+            action == "start" && index == 0 && weight_source::job(&job.kind) && input.host == host,
+            "Source input unavailable"
+        );
+        let mut protected = self.cfg.source_grant_protected.clone();
+        protected.extend([
+            self.cfg.root.clone(),
+            self.cfg.engine.clone(),
+            self.cfg_path.clone(),
+        ]);
+        protected.extend(
+            self.cfg
+                .engine_env
+                .values()
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute()),
+        );
+        let dir = source_grants::editor_input(host, grant, &input.path, &input.kind, &protected)
+            .map_err(|_| {
+                anyhow::anyhow!("Source input unavailable; check the model directory grant")
+            })?;
+        Ok(Some((&grant.path, dir)))
     }
 
     // The backend editor cannot read arbitrary paths through ordinary source
@@ -771,6 +849,22 @@ impl Worker {
                     && original.path.as_os_str() == pin.source.as_os_str()
             });
             let count = job.inputs.len();
+            // Static roots retain their original policy, including where they
+            // overlap a managed grant. Only consult grants as a fallback.
+            let static_source = if self.cfg.backend_weight_download_root.is_none() && pin.is_none()
+            {
+                self.source(&input.path).ok()
+            } else {
+                None
+            };
+            let grant = if static_source.is_none()
+                && self.cfg.backend_weight_download_root.is_none()
+                && pin.is_none()
+            {
+                self.editor_grant(&r.action, job, index, &input)?
+            } else {
+                None
+            };
             let bundle = if let Some(pin) = pin {
                 ensure!(
                     input.path.as_os_str() == pin.source.as_os_str(),
@@ -795,11 +889,12 @@ impl Worker {
                         p.parent().context("backend input has no parent")?.into()
                     };
                     (p, boundary, Some(digest))
-                } else {
-                    let (p, boundary) = self
-                        .source(&input.path)
-                        .context("Source input unavailable")?;
+                } else if let Some((p, boundary)) = static_source {
                     (p, boundary, None)
+                } else if let Some((boundary, _)) = &grant {
+                    (input.path.clone(), boundary.to_path_buf(), None)
+                } else {
+                    bail!("Source input unavailable");
                 };
                 if weight_hgn {
                     ensure!(
@@ -900,6 +995,11 @@ impl Worker {
                     d.bundle
                 }
             };
+            if grant.is_some() {
+                // The hashing and optional immutable proof must not turn a
+                // changed directory into a newly approved source.
+                self.editor_grant(&r.action, job, index, &input)?;
+            }
             guard = Some(self.state_lock()?);
             r = self.pending(id)?;
             (bundle, true)

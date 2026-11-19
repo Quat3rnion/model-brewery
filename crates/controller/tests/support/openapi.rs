@@ -78,6 +78,16 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("put", "/api/settings/{host}/hf-token", "setHfToken"),
         ("delete", "/api/settings/{host}/hf-token", "removeHfToken"),
         ("get", "/api/admin/state", "getAdminState"),
+        (
+            "post",
+            "/api/admin/model-directories/plan",
+            "planModelDirectory",
+        ),
+        (
+            "post",
+            "/api/admin/model-directories/confirm",
+            "confirmModelDirectory",
+        ),
         ("post", "/api/admin/actions", "applyAdminAction"),
         ("get", "/api/admin/ssh-hosts", "listSshHosts"),
         ("post", "/api/admin/ssh-hosts", "createSshHost"),

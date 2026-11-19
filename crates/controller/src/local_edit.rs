@@ -29,11 +29,17 @@ const EDIT: &[&str] = &["weight_inspect", "weight_propose", "weight_apply"];
 pub struct Lanes {
     pub dispatch: PathBuf,
     lanes: BTreeMap<String, Lane>,
+    reasons: BTreeMap<String, &'static str>,
+    pub protected: Vec<PathBuf>,
 }
 
 pub struct Lane {
     pub config: PathBuf,
     pub capabilities: BTreeMap<String, bool>,
+    pub configured: Vec<PathBuf>,
+    pub root: PathBuf,
+    worker: PathBuf,
+    worker_config: Value,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +58,15 @@ impl Lanes {
         let Some(hosts) = config.and_then(|v| v["hosts"].as_object()) else {
             return Ok(result);
         };
+        for (id, profile) in hosts {
+            if profile["local"] == true {
+                result.reasons.insert(id.clone(), if profile["config"].is_string() {
+                    "The controller could not verify the local editor package. Check its dispatcher, worker, engine and editor helper."
+                } else {
+                    "No local worker configuration is defined for this host."
+                });
+            }
+        }
         if !hosts
             .values()
             .any(|host| host["local"] == true && host["config"].is_string())
@@ -90,6 +105,58 @@ impl Lanes {
         };
         let dir = data.canonicalize()?.join("local-edit");
         let assets = dist.canonicalize().or_else(|_| std::path::absolute(dist))?;
+        result.protected = vec![
+            data.canonicalize()?,
+            assets.clone(),
+            dispatch.clone(),
+            worker.clone(),
+            engine.clone(),
+            helper.clone(),
+        ];
+        result.protected.extend(tuner.iter().cloned());
+        for key in [
+            "BREWERY_DISPATCH_CONFIG",
+            "BREWERY_ADMIN_CATALOG",
+            "BREWERY_ADMIN_RUNTIME_HELPER",
+            "XDG_CONFIG_HOME",
+        ] {
+            result.protected.extend(
+                env::var_os(key)
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_absolute()),
+            );
+        }
+        for profile in hosts.values().filter(|profile| profile["local"] == true) {
+            for key in ["worker", "config", "hf_token_file"] {
+                result.protected.extend(
+                    profile[key]
+                        .as_str()
+                        .map(PathBuf::from)
+                        .filter(|p| p.is_absolute()),
+                );
+            }
+            if let Some(original) = profile["config"]
+                .as_str()
+                .and_then(|p| trusted_config(Path::new(p)))
+            {
+                for value in [
+                    &original["root"],
+                    &original["engine"],
+                    &original["admission"],
+                    &original["pinned_publication"]["receipt"],
+                    &original["managed_settings"]["catalog"],
+                    &original["hf_download"]["token_file"],
+                    &original["backend_weight_download_root"],
+                ] {
+                    result.protected.extend(
+                        value
+                            .as_str()
+                            .map(PathBuf::from)
+                            .filter(|p| p.is_absolute()),
+                    );
+                }
+            }
+        }
         if dir.starts_with(assets) {
             return Err("local editor storage must be outside served assets".into());
         }
@@ -106,9 +173,23 @@ impl Lanes {
                 continue;
             };
             let Some(original) = trusted_config(Path::new(path)) else {
+                result.reasons.insert(
+                    id.clone(),
+                    "The local worker configuration could not be read and verified.",
+                );
                 continue;
             };
             let Some(roots) = source_roots(&original, &dir) else {
+                let reason = if original["source_roots"].is_null()
+                    || original["source_roots"]
+                        .as_array()
+                        .is_some_and(Vec::is_empty)
+                {
+                    "The editor is installed, but this worker has no approved model directory."
+                } else {
+                    "The editor is installed, but the configured model directories did not pass validation."
+                };
+                result.reasons.insert(id.clone(), reason);
                 continue;
             };
             // The original executor is never reused or reconfigured.
@@ -153,13 +234,11 @@ impl Lanes {
                     engine_env[name] = json!(value);
                 }
             }
-            brewery_worker::atomic(
-                &config,
-                &json!({
-                    "root":root,"engine":engine,"source_roots":roots,"engine_env":engine_env,
-                    "disk_reserve_bytes":original["disk_reserve_bytes"].as_u64().unwrap_or(1 << 30)
-                }),
-            )?;
+            let worker_config = json!({
+                "root":root,"engine":engine,"source_roots":roots,"engine_env":engine_env,
+                "disk_reserve_bytes":original["disk_reserve_bytes"].as_u64().unwrap_or(1 << 30)
+            });
+            brewery_worker::atomic(&config, &worker_config)?;
             let dispatch = lane_dir.join("dispatch.json");
             brewery_worker::atomic(
                 &dispatch,
@@ -188,6 +267,10 @@ impl Lanes {
                 Lane {
                     config: dispatch,
                     capabilities,
+                    configured: roots,
+                    root,
+                    worker: worker.clone(),
+                    worker_config,
                 },
             );
         }
@@ -197,9 +280,47 @@ impl Lanes {
     pub fn get(&self, id: &str) -> Option<&Lane> {
         self.lanes.get(id)
     }
+
+    pub fn unavailable_reason(&self, id: &str) -> &'static str {
+        if id == crate::backend_hf::ID {
+            return "The backend download worker could not verify its editor package.";
+        }
+        self.reasons.get(id).copied().unwrap_or(
+            "This worker has no controller-managed local editor. Use the host that owns the model in Library.",
+        )
+    }
 }
 
 impl Lane {
+    pub fn job_config(&self, id: &str) -> PathBuf {
+        self.config
+            .with_file_name(format!("grant-{id}-dispatch.json"))
+    }
+
+    pub fn snapshot(
+        &self,
+        host: &str,
+        id: &str,
+        grants: &[brewery_worker::source_grants::SourceGrant],
+        protected: &[PathBuf],
+    ) -> Result<(), Error> {
+        let config = self
+            .config
+            .with_file_name(format!("grant-{id}-worker.json"));
+        let mut worker_config = self.worker_config.clone();
+        worker_config["source_grant_host"] = json!(host);
+        worker_config["source_grants"] = json!(grants);
+        worker_config["source_grant_protected"] = json!(protected);
+        brewery_worker::atomic(&config, &worker_config)?;
+        brewery_worker::atomic(
+            &self.job_config(id),
+            &json!({
+                "hosts":{host:{"local":true,"worker":self.worker,"config":config}}
+            }),
+        )?;
+        Ok(())
+    }
+
     pub fn advertise(&self, host: &mut Host) {
         host.local_edit = true;
         for (cap, enabled) in &self.capabilities {
@@ -296,8 +417,11 @@ fn trusted_config(path: &Path) -> Option<Value> {
 }
 
 fn source_roots(config: &Value, state: &Path) -> Option<Vec<PathBuf>> {
+    if config["source_roots"].is_null() {
+        return Some(Vec::new());
+    }
     let values = config["source_roots"].as_array()?;
-    if values.is_empty() || values.len() > 64 {
+    if values.len() > 64 {
         return None;
     }
     values
