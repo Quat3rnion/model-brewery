@@ -184,6 +184,15 @@ impl Identity {
         Ok(id)
     }
 
+    // weight_manifest stores the HF directory stamp before its sorted member stamps.
+    pub(crate) fn check_open_weight_member(&self, index: usize, file: &File) -> Result<()> {
+        ensure!(
+            self.stamps[index + usize::from(!self.entry)].1 == Stamp::new(&file.metadata()?),
+            "SafeTensors member changed before sandbox pin"
+        );
+        Ok(())
+    }
+
     pub fn with_added_file(mut self, root: &Path, name: &str) -> Result<Self> {
         ensure!(
             !self.entry && !self.files.iter().any(|f| f.path == name),

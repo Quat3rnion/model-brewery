@@ -83,10 +83,29 @@ fn real_safetensors_and_indexed_hf_apply_publish_complete_independent_outputs() 
     use brewery_worker::{tree_digest, Entry};
     let root = tempfile::tempdir().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
-    python_helpers(root.path());
+    if let Some(packaged) = std::env::var_os("BREWERY_TEST_PACKAGED_WEIGHT_RUNTIME") {
+        for (launcher, name) in [
+            ("brewery-weight-edit", "edit"),
+            ("brewery-weight-tune", "tune"),
+        ] {
+            // The packaged launcher resolves assets relative to its installed name.
+            // The test wrappers only forward the isolated fixture's arguments.
+            let target = Path::new(&packaged).join(launcher);
+            let path = root.path().join(name);
+            fs::write(
+                &path,
+                format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", target.display()),
+            )
+            .unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    } else {
+        python_helpers(root.path());
+    }
     let tensor = "layer.weight";
     let mut config_bytes = b"{\"model_type\":\"fixture\"}\n".to_vec();
-    config_bytes.resize((1 << 20) + 1, b' ');
+    // Exceeds the unproven snapshot budget while staying small enough for CI.
+    config_bytes.resize((64 << 20) + 1, b' ');
     let index_name = "model.safetensors.index.json";
     let shard_name = "model-00001-of-00002.safetensors";
     let neighbor_name = "model-00002-of-00002.safetensors";

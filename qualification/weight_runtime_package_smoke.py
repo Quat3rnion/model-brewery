@@ -1,8 +1,10 @@
 """Verify a pinned, reproducible install and the real helper sandbox."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
+import struct
 import subprocess
 from tempfile import mkdtemp
 
@@ -13,10 +15,65 @@ PACKAGER = ["/usr/bin/python3", "-IB", REPO / "tools/brewery-weight-runtime.py"]
 ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
 
 
-def command(args, *, cwd=None, env=ENV, ok=True):
-    p = subprocess.run(args, cwd=cwd, env=env, text=True, capture_output=True, timeout=25)
+def command(args, *, cwd=None, env=ENV, ok=True, pass_fds=()):
+    p = subprocess.run(args, cwd=cwd, env=env, text=True, capture_output=True,
+                       timeout=25, pass_fds=pass_fds)
     assert (p.returncode == 0) == ok, (args, p.returncode, p.stderr)
     return p.stdout.strip()
+
+
+def pinned_source_smoke(edit, root):
+    work = root / ".weight-safetensors-pin-smoke"
+    work.mkdir()
+    host = root / "host-source"
+    host.mkdir()
+    source = host / "original.safetensors"
+    head = b'{"layer.weight":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}'
+    head += b" " * (-len(head) % 8)
+    original = struct.pack("<Q", len(head)) + head + struct.pack("<f", 7)
+    source.write_bytes(original)
+    digest = hashlib.sha256(original).hexdigest()
+    manifest = work / "source-manifest.json"
+    save(manifest, [{"path": source.name, "bytes": len(original),
+                     "sha256": digest, "chunk_sha256": [digest]}])
+    fixture = "/weight-source/source.safetensors"
+    pin = ["--source-sha256", digest]
+    proof = ["--source-manifest", manifest]
+    args = ["inspect", fixture, *pin, "--tensor=layer.weight", "--index=[0]", *proof]
+    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        saved = host / "saved.safetensors"
+        source.rename(saved)
+        source.write_bytes(original[:-4] + struct.pack("<f", 6))
+
+        def run(rest, leaf=source.name, member_fd=fd, **kwargs):
+            return command([edit, "--pinned-safetensors", "1", str(member_fd), leaf, "--", *rest],
+                           cwd=work, pass_fds=(member_fd,), **kwargs)
+
+        assert json.loads(run(args))["value"] == 7
+        run(args, leaf="../original.safetensors", ok=False)
+        run(args, leaf="not-in-manifest.safetensors", ok=False)
+        writable = os.open(saved, os.O_RDWR)
+        try:
+            run(args, member_fd=writable, ok=False)
+        finally:
+            os.close(writable)
+
+        save(work / "request.json", [{"tensor": "layer.weight", "index": [0],
+                                      "op": "set", "value": 8}])
+        proposal = json.loads(run(["propose", fixture, "request.json", *pin, *proof]))
+        save(work / "proposal.json", proposal)
+        apply = ["apply", fixture, "proposal.json"]
+        run([*apply, "/weight-source/shadow.safetensors", *proof], ok=False)
+        out = work / "edited.safetensors"
+        run([*apply, out, *proof])
+        expected = original[:-4] + struct.pack("<f", 8)
+        assert out.read_bytes() == expected
+        run([*apply, out, *proof], ok=False)
+        assert out.read_bytes() == expected
+        assert saved.read_bytes() == original
+    finally:
+        os.close(fd)
 
 
 def main():
@@ -48,7 +105,8 @@ def main():
     for path, jobs in expectations.items():
         status = json.loads(command([path, "--capabilities"]))
         assert status == {"schema": "brewery.weight-runtime.v1", "jobs": jobs,
-                          "formats": ["gguf", "hgn", "safetensors", "hf"], "visual": True, "packed": True}
+                          "formats": ["gguf", "hgn", "safetensors", "hf"], "visual": True,
+                          "packed": True, "proof_source_fds": True}
 
     work = root / ".weight-gguf-smoke"
     work.mkdir()
@@ -79,13 +137,15 @@ def main():
     proposal = json.loads(command(tune_args, cwd=work, env=env))
     assert [(e["index"], e["after"]) for e in proposal["edits"]] == [([0, 0], 2), ([1, 1], 3)]
     assert source.read_bytes() == original
+    pinned_source_smoke(edit, root)
 
     tampered = b / "brewery-weight-runtime/weight_edit.py"
     tampered.chmod(0o600)
     tampered.write_text("raise RuntimeError('untrusted helper loaded')\n")
     command([b / edit.name, "--capabilities"], ok=False)
     print(json.dumps({"dependency_sha256": pin, "manifest_sha256": manifest,
-                      "reproducible": True, "tamper_rejected": True, "outside_source_rejected": True}))
+                      "reproducible": True, "tamper_rejected": True, "outside_source_rejected": True,
+                      "readonly_pinned_member": True, "pinned_apply_no_clobber": True}))
 
 
 if __name__ == "__main__":

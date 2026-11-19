@@ -360,6 +360,7 @@ pub(crate) fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let scratch = if native_safe {
         tempfile::Builder::new()
             .prefix(safetensors::SCRATCH_PREFIX)
+            .permissions(fs::Permissions::from_mode(0o700))
             .tempdir_in(cwd)?
     } else if source_kind == "gguf" {
         tempfile::Builder::new()
@@ -383,9 +384,6 @@ pub(crate) fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             )
         })
         .transpose()?;
-    let source_path = safe_source
-        .as_ref()
-        .map_or_else(|| Path::new(source_name), |s| s.path.as_path());
     for ((input, id), (_, name, limit)) in job
         .inputs
         .iter()
@@ -430,6 +428,15 @@ pub(crate) fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         .env("HIP_VISIBLE_DEVICES", "")
         .env("ROCR_VISIBLE_DEVICES", "");
     child_budget(&mut cmd, child_threads(None)?.min(4));
+    let source_path = if let Some(source) = &safe_source {
+        if source.has_proof() && supports_source_pins(&executable, work, &stamp)? {
+            source.pin_for_sandbox(&mut cmd, &ids[0], source_kind == "hf")?
+        } else {
+            source.path.as_path()
+        }
+    } else {
+        Path::new(source_name)
+    };
     let out = work.join(output_name);
     let input_proposal = match &mode {
         Mode::Inspect(v) => {
@@ -893,6 +900,24 @@ fn publish(
     phase.advance(1);
     phase.finish();
     Ok(id.artifact(target, kind))
+}
+
+fn supports_source_pins(executable: &Path, work: &Path, stamp: &integrity::Stamp) -> Result<bool> {
+    let mut probe = Command::new(executable);
+    probe.current_dir(work).env_clear().arg("--capabilities");
+    stamp.check(executable)?;
+    let result = capture(&mut probe, work, true, false, 0);
+    stamp.check(executable)?;
+    let Ok((stdout, _)) = result else {
+        return Ok(false); // Existing operator-provided direct helpers have no capability probe.
+    };
+    let receipt = serde_json::from_slice::<Value>(&stdout).unwrap_or(Value::Null);
+    let packaged = receipt["schema"] == "brewery.weight-runtime.v1";
+    ensure!(
+        !packaged || receipt["proof_source_fds"] == true,
+        "packaged SafeTensors source proofs require a runtime with Bubblewrap --ro-bind-fd"
+    );
+    Ok(packaged)
 }
 
 fn capture(

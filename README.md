@@ -1784,10 +1784,15 @@ the pinned manifest and import the helpers inside the sandbox before reporting
 capabilities. A previous wrapper that cannot answer `--capabilities` is not
 accepted as a ready runtime. Installation does not enable any host policy.
 
-Jobs expose only their private staged work directory to the helper. The
-sandbox has no host network, model roots, or credential store. If Bubblewrap
-or unprivileged user namespaces are unavailable, the helper fails closed. This
-package is for local workers, not the SSH worker installer.
+Jobs expose their private staged work directory to the helper. For an
+operator-verified SafeTensors source, the package requires Bubblewrap with
+`--ro-bind-fd`. The launcher reports this support as `proof_source_fds` and
+mounts only the checked manifest members read-only. It does not mount the
+source directory or its parent. Reviewed apply still checks the full SHA-256
+of each source member before it publishes a new output. The sandbox has no
+host network or credential store. If Bubblewrap or unprivileged user
+namespaces are unavailable, the helper fails closed. This package is for
+local workers, not the SSH worker installer.
 
 ## Weight edit tools (fixtures only)
 

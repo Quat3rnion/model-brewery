@@ -5,8 +5,15 @@ use sha2::{Digest, Sha256};
 use std::{
     env, fs,
     io::{Read, Write},
-    os::unix::fs::OpenOptionsExt,
+    os::{
+        fd::AsRawFd,
+        unix::{
+            fs::{MetadataExt, OpenOptionsExt},
+            process::CommandExt,
+        },
+    },
     path::{Path, PathBuf},
+    process::Command,
 };
 
 pub(super) const SCRATCH_PREFIX: &str = ".weight-safetensors-";
@@ -16,7 +23,7 @@ pub(super) const DISK_RESERVE: &str = "BREWERY_WEIGHT_SAFETENSORS_DISK_RESERVE_B
 pub(super) struct Source {
     pub path: PathBuf,
     // For verity, measured descriptors stay open across all helper reads.
-    _proof: Option<Proof>,
+    proof: Option<Proof>,
 }
 
 impl Source {
@@ -144,10 +151,64 @@ impl Source {
             "SafeTensors helper manifest too large"
         );
         id.check()?;
-        Ok(Self {
-            path,
-            _proof: proof,
-        })
+        Ok(Self { path, proof })
+    }
+
+    pub fn has_proof(&self) -> bool {
+        self.proof.is_some()
+    }
+
+    pub fn pin_for_sandbox(
+        &self,
+        cmd: &mut Command,
+        id: &Identity,
+        hf: bool,
+    ) -> Result<&'static Path> {
+        let proof = self
+            .proof
+            .as_ref()
+            .context("missing SafeTensors source proof")?;
+        let mut pins = Vec::new();
+        cmd.arg("--pinned-safetensors")
+            .arg(id.files.len().to_string());
+        for (index, entry) in id.files.iter().enumerate() {
+            let path = if hf {
+                self.path.join(&entry.path)
+            } else {
+                self.path.clone()
+            };
+            let file = weight_source::open_regular(&path)?;
+            id.check_open_weight_member(index, &file)?;
+            if let Proof::Verity(verified) = proof {
+                let meta = file.metadata()?;
+                let measured = &verified.measured[index];
+                ensure!(
+                    (meta.dev(), meta.ino()) == (measured.device, measured.inode),
+                    "SafeTensors member differs from measured inode"
+                );
+            }
+            cmd.arg(file.as_raw_fd().to_string()).arg(&entry.path);
+            pins.push(file);
+        }
+        id.check()?;
+        cmd.arg("--");
+        // Only these read-only pins leave CLOEXEC, only in the helper child.
+        // Bubblewrap consumes and closes them before starting the editor.
+        unsafe {
+            cmd.pre_exec(move || {
+                for file in &pins {
+                    if libc::fcntl(file.as_raw_fd(), libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        Ok(Path::new(if hf {
+            "/weight-source/source.hf"
+        } else {
+            "/weight-source/source.safetensors"
+        }))
     }
 }
 

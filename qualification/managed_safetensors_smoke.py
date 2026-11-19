@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import struct
+import subprocess
 import tempfile
 import time
 from urllib.error import HTTPError
@@ -17,6 +18,8 @@ SHARD = "model-00001-of-00002.safetensors"
 SECOND = "model-00002-of-00002.safetensors"
 INDEX = "model.safetensors.index.json"
 ORIGINAL = (1, 2, 3, 4)
+PROOF_ASSET = "proof-fixture.bin"
+PROOF_ASSET_BYTES = (64 << 20) + 1
 
 
 def bf16(values):
@@ -66,8 +69,8 @@ def describe(path):
     for file in files:
         info = file.stat()
         assert not file.is_symlink() and file.is_file() and info.st_nlink == 1, file
-        assert info.st_size < 8192, file
         name = file.relative_to(path).as_posix() if path.is_dir() else ""
+        assert info.st_size < 8192 or (name == PROOF_ASSET and info.st_size == PROOF_ASSET_BYTES), file
         snapshot[name] = (file.read_bytes(), (info.st_dev, info.st_ino))
     if path.is_dir():
         assert not any(p.is_dir() for p in path.rglob("*"))
@@ -99,7 +102,8 @@ def standard_read(path, kind):
 
 def run(root, args, kind):
     root.mkdir(mode=0o700)
-    inputs = setup(root, args.bin_dir.resolve(strict=True), args.gguf_python.resolve(strict=True))
+    bins = args.bin_dir.resolve(strict=True)
+    inputs = setup(root, bins, args.gguf_python.resolve(strict=True))
     for name in ("dispatch.json", "worker.json"):
         config = root / name
         data = json.loads(config.read_bytes())
@@ -114,8 +118,31 @@ def run(root, args, kind):
     original = fixture(kind)
     write_fixture(source, original)
     write_fixture(other, fixture(kind, (9, 2, 3, 4)))
-    source_before = describe(source)
+    if args.packaged_proof:
+        for helper in ("edit", "tune"):
+            launcher = bins / f"brewery-weight-{helper}"
+            capability = json.loads(subprocess.check_output([launcher, "--capabilities"], timeout=15))
+            assert capability["proof_source_fds"] is True
+        with (source / PROOF_ASSET).open("xb") as asset:
+            asset.truncate(PROOF_ASSET_BYTES)
+        original[PROOF_ASSET] = bytes(PROOF_ASSET_BYTES)
     pin = digest(original)
+    source_before = describe(source)
+    index_pin = None
+    if args.packaged_proof:
+        receipt, chunk_index = root / "fixture-publication.json", root / "fixture-chunk-index.json"
+        save(receipt, {"schema": "model-brewery.source-publication.v1", "model_dir": str(source),
+                       "files": {n: {"size": len(data), "sha256": sha256(data).hexdigest()}
+                                 for n, data in sorted(original.items())}})
+        built = subprocess.check_output([bins / "brewery-worker", "build-weight-chunk-index",
+                                         receipt, pin, chunk_index], timeout=20)
+        index_pin = json.loads(built)["ok"]["sha256"]
+        assert index_pin == sha256(chunk_index.read_bytes()).hexdigest()
+        worker = root / "worker.json"
+        config = json.loads(worker.read_bytes())
+        config["engine_env"].update(BREWERY_WEIGHT_CHUNK_INDEX=str(chunk_index),
+                                    BREWERY_WEIGHT_CHUNK_INDEX_SHA256=index_pin)
+        save(worker, config)
     save(inputs / "cal.json", {"activations": [[1, 0], [0, 1]], "targets": [[2, 3], [2, 3]]})
     save(inputs / "held.json", {"activations": [[1, 1], [2, -1]], "targets": [[3, 7], [0, 2]]})
 
@@ -143,7 +170,7 @@ def run(root, args, kind):
                 return error.code
             raise AssertionError(f"{label}: accepted")
 
-        def job(label, job_kind, ids, options):
+        def job(label, job_kind, ids, options, expected="succeeded"):
             ident = post(job_kind, ids, options)["id"]
             deadline = time.monotonic() + 20
             while True:
@@ -153,7 +180,7 @@ def run(root, args, kind):
                 assert time.monotonic() < deadline, (label, ident)
                 time.sleep(0.1)
             save(root / f"{label}.json", row)
-            assert row["state"] == "succeeded", (label, row)
+            assert row["state"] == expected, (label, row)
             return row
 
         state = http("state")
@@ -206,6 +233,19 @@ def run(root, args, kind):
         refuse("wrong-source", lambda: post("weight_apply", [other_id], approve), (400,))
         refuse("unreviewed", lambda: post("weight_apply", [source_id], {**approve, "reviewed": False}), (400,))
 
+        if args.packaged_proof:
+            asset = source / PROOF_ASSET
+            with asset.open("r+b") as stream:
+                stream.seek(-1, os.SEEK_END)
+                stream.write(b"X")
+            tile("untouched-sidecar-not-read", source_id, pin, ORIGINAL)
+            failed = job("corrupt-sidecar-apply", "weight_apply", [source_id], approve, expected="failed")
+            assert not (root / "worker/jobs" / failed["id"] / "work/edited.hf").exists()
+            assert http("state")["models"] == initial_models
+            with asset.open("r+b") as stream:
+                stream.seek(-1, os.SEEK_END)
+                stream.write(b"\0")
+
         outputs = {}
         for label, review, edits, values in (
             ("manual", manual, [([0, 1], 2, 2.5)], (1, 2.5, 3, 4)),
@@ -228,6 +268,8 @@ def run(root, args, kind):
             assert output == root / "worker/jobs" / final["id"] / f"work/edited.{kind}"
             actual = describe(output)
             expected = fixture(kind, values)
+            if args.packaged_proof:
+                expected[PROOF_ASSET] = original[PROOF_ASSET]
             assert {name: data for name, (data, _) in actual.items()} == expected
             assert not {inode for _, inode in actual.values()} & {inode for _, inode in source_before.values()}
             output_pin = digest(expected)
@@ -239,11 +281,20 @@ def run(root, args, kind):
                     {"path": name, "bytes": len(data), "sha256": sha256(data).hexdigest()}
                     for name, data in sorted(expected.items())]
             assert describe(source) == source_before
-            tile(f"{label}-reuse-tile", model["id"], output_pin, values)
+            if not args.packaged_proof:
+                # Scaled outputs need their own independent proof before sparse reopening.
+                tile(f"{label}-reuse-tile", model["id"], output_pin, values)
             outputs[label] = {"path": str(output), "sha256": output_pin,
                               "standard_reader": standard_read(output, kind), "job_id": final["id"]}
         assert len(http("state")["models"]) == len(initial_models) + 2
-        return {"format": kind, "source": str(source), "source_sha256": pin, "outputs": outputs}
+        summary = {"format": kind, "source": str(source), "source_sha256": pin, "outputs": outputs}
+        if args.packaged_proof:
+            summary.update(chunk_index_sha256=index_pin, source_bytes=sum(map(len, original.values())),
+                           untouched_corruption_rejected=True,
+                           launch_sha256={n: sha256((bins / n).read_bytes()).hexdigest() for n in (
+                               "brewery", "brewery-dispatch", "brewery-worker", "brewery-engine",
+                               "brewery-weight-edit", "brewery-weight-tune")})
+        return summary
 
 
 if __name__ == "__main__":
@@ -254,7 +305,11 @@ if __name__ == "__main__":
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--expect-old", action="store_true")
     mode.add_argument("--no-cap", action="store_true")
+    mode.add_argument("--packaged-proof", action="store_true",
+                      help="Run scaled indexed HF with the real offline package and worker chunk proof")
     args = parser.parse_args()
+    if args.packaged_proof and args.format not in (None, ["hf"]):
+        parser.error("--packaged-proof requires indexed HF")
     for key in tuple(os.environ):
         if key.startswith("BREWERY_"):
             del os.environ[key]
@@ -262,6 +317,7 @@ if __name__ == "__main__":
     os.environ["TMPDIR"] = "/arboretum"
     root = Path(tempfile.mkdtemp(prefix="managed-safetensors.", dir="/arboretum"))
     print(f"Scratch evidence: {root}", flush=True)
-    report = [run(root / kind, args, kind) for kind in (args.format or ("safetensors", "hf"))]
+    formats = args.format or (("hf",) if args.packaged_proof else ("safetensors", "hf"))
+    report = [run(root / kind, args, kind) for kind in formats]
     save(root / "summary.json", report)
     print(json.dumps(report))
