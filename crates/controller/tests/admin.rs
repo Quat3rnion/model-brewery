@@ -293,7 +293,7 @@ fn enabled_local_editor_uses_private_route_and_drains_on_disable() {
             "editor-HELPER",
             r#"#!/bin/sh
 test "$1" = --capabilities || exit 1
-printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","weight_propose","weight_apply"],"formats":["gguf","hf","safetensors"],"visual":true,"packed":false}'
+printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","weight_propose","weight_apply"],"formats":["gguf","hf","safetensors"],"visual":true,"packed":false,"proof_source_fds":true}'
 "#,
         ),
     ] {

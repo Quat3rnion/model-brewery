@@ -50,6 +50,9 @@ pub(crate) struct Receipt {
     pub formats: BTreeSet<String>,
     pub visual: bool,
     pub packed: bool,
+    // Negotiated by the engine at invocation, not a permission to read sources.
+    #[serde(default, rename = "proof_source_fds")]
+    _proof_source_fds: bool,
 }
 
 impl Lanes {
