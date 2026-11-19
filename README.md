@@ -662,9 +662,10 @@ SafeTensors for two declared architectures: Qwen2 (`Qwen2ForCausalLM`) and
 GPT-2 (`GPT2LMHeadModel`). Both support only dense inputs up to 512 MiB, with
 exact tensor names and shapes and BF16, F16 or F32 tensors. Qwen2 must be
 untied, use `model_type: qwen2`, and include a local Qwen2 tokenizer. GPT-2
-must use `model_type: gpt2`, declare `GPT2LMHeadModel`, and state
-`tie_word_embeddings`. An untied GPT-2 input also needs `lm_head.weight` and a
-local GPT-2 tokenizer that passes the pinned exporter checks. HF input must be
+must use `model_type: gpt2`, declare `GPT2LMHeadModel`, and set
+`tie_word_embeddings` to true or false. It requires a local GPT-2 tokenizer
+that passes the pinned exporter checks. An untied GPT-2 input also needs
+`lm_head.weight`. HF input must be
 a flat indexed snapshot or one `model.safetensors` file. Standalone input must
 be one `.safetensors` file plus the registered `assets` directory described
 above. Extra, quantized or sidecar tensors are refused. The exporter emits one
