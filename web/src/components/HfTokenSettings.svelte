@@ -42,12 +42,21 @@
       // The secret lives only in the uncontrolled field and the outbound request.
       const pending = fetch(`/api/settings/${serviceId}/hf-token`, {
         ...policy, method: remove ? 'DELETE' : 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: remove ? '{}' : JSON.stringify({ token: field.value }),
+        body: remove ? '{}' : JSON.stringify({ token: field.value.trim() }),
       });
       clear();
       const r = await pending;
       if (!r.ok) {
-        error = r.status === 409 ? 'The downloader is busy or unavailable. Refresh the token status before retrying.' : 'The controller did not accept the token change.';
+        const advice: Record<number, string> = {
+          400: 'Check the request. For a save, paste only the token and try again.',
+          401: 'Sign in to the workbench again, then retry.',
+          403: 'Access denied. Open Settings from the workbench address and check that you have permission to change token settings.',
+          404: 'Ask your administrator to check that the built-in downloader is available.',
+          409: 'The downloader is busy or unavailable. Check Jobs, then refresh the token status before retrying.',
+          422: 'The controller could not process the request. Reload Settings and try again.',
+          503: 'Ask your administrator to check the downloader’s token storage and its write permissions.',
+        };
+        error = `HTTP ${r.status}: ${advice[r.status] ?? 'Refresh the token status. If the problem persists, report this HTTP status to your administrator.'}`;
         return; // Never display a response body: an upstream error could echo input.
       }
       const data = await r.json();
