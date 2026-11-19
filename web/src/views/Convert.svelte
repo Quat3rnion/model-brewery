@@ -2,8 +2,8 @@
   import Advanced from '../components/Advanced.svelte';
   import { brewery } from '../lib/store.svelte';
   import { Submitter } from '../lib/submit.svelte';
-  import { BUNDLE_KINDS, CONVERT_SOURCE_KINDS, capability } from '../lib/format';
-  import { CONVERT_ENUMS, buildConvertJob, poolHosts, type ConvertForm, type ConvertStep } from '../lib/convert';
+  import { CONVERT_SOURCE_KINDS, capability } from '../lib/format';
+  import { CONVERT_ENUMS, VERIFY_OUTPUT_KINDS, buildConvertJob, poolHosts, type ConvertForm, type ConvertStep } from '../lib/convert';
   import HostSelect from '../components/HostSelect.svelte';
   import ModelSelect from '../components/ModelSelect.svelte';
   import Submit from '../components/Submit.svelte';
@@ -303,7 +303,7 @@
       <div class="grid-2">
         <ModelSelect bind:value={form.source} kinds={CONVERT_SOURCE_KINDS} label="Source checkpoint" hint="Same source as above." />
         {#if step === 'verify'}
-          <ModelSelect bind:value={form.bundle} kinds={BUNDLE_KINDS} label="Bundle to verify" exclude={form.source ? [form.source] : []} />
+          <ModelSelect bind:value={form.bundle} kinds={VERIFY_OUTPUT_KINDS} label="Bundle to verify" hint="Choose the output registered as kind hgn." exclude={form.source ? [form.source] : []} />
         {:else}
           <div class="field">
             {#if step === 'convert' && form.anyHost}

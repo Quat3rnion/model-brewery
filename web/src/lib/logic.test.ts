@@ -34,6 +34,11 @@ describe('converter requests', () => {
     expect(r.job?.input_ids).toEqual(['src', 'out', 'assets']);
     expect(r.job?.options).toEqual({ decode_backend: 'cuda', assets: 2 });
   });
+  it.each(['brewery-bundle', 'hgn-v2', 'ht43'])('does not submit a manual verify for output kind %s', (kind) => {
+    const r = buildConvertJob('verify', form({ bundle: 'alias' }), [...models, { ...models[2], id: 'alias', kind }]);
+    expect(r.job).toBeNull();
+    expect(r.problems.join(' ')).toMatch(/hgn/i);
+  });
   it('rejects out-of-range numbers and disallowed backends', () => {
     expect(buildConvertJob('convert', form({ threads: 65 }), models).problems).toContain('Threads must be 1 to 64.');
     expect(buildConvertJob('convert', form({ ht_beam: 257 }), models).problems).toContain('HT beam must be 1 to 256.');

@@ -1,5 +1,7 @@
 import type { Host, Model, NewJob } from './types';
-import { BUNDLE_KINDS, CONVERT_SOURCE_KINDS, EXTRA_INPUT_KINDS } from './format';
+import { CONVERT_SOURCE_KINDS, EXTRA_INPUT_KINDS } from './format';
+
+export const VERIFY_OUTPUT_KINDS: ReadonlySet<string> = new Set(['hgn']);
 
 export type ConvertStep = 'inspect' | 'plan' | 'convert' | 'verify';
 type Extra = (typeof EXTRA_INPUT_KINDS)[number];
@@ -48,7 +50,7 @@ export function buildConvertJob(step: ConvertStep, f: ConvertForm, models: Model
   if (step === 'verify') {
     const bundle = models.find((m) => m.id === f.bundle);
     if (!bundle) problems.push('Select the bundle to verify.');
-    else if (!BUNDLE_KINDS.has(bundle.kind)) problems.push('The second input must be an HGN bundle.');
+    else if (!VERIFY_OUTPUT_KINDS.has(bundle.kind)) problems.push('The output must be registered as kind hgn.');
     else if (bundle.id === f.source) problems.push('Select a bundle that is not the source.');
     if (f.bundle) input_ids.push(f.bundle);
     if (f.decode_backend) options.decode_backend = f.decode_backend;
