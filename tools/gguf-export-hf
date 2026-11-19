@@ -64,7 +64,8 @@ def stamp(path):
 
 
 def headers(path, size):
-    with path.open("rb") as file:
+    # Buffered reads could prefetch bytes past the header into the tensor payload.
+    with path.open("rb", buffering=0) as file:
         raw = file.read(8)
         need(len(raw) == 8, f"truncated safetensors length: {path.name}")
         length, = struct.unpack("<Q", raw)
@@ -85,7 +86,7 @@ def headers(path, size):
         need(isinstance(offset, list) and len(offset) == 2 and all(type(x) is int for x in offset),
              f"invalid tensor offsets: {name}")
         start, end = offset
-        need(dtype in DTYPE and 0 <= start < end <= size - length - 8
+        need(isinstance(dtype, str) and dtype in DTYPE and 0 <= start < end <= size - length - 8
              and end - start == math.prod(shape) * DTYPE[dtype], f"invalid tensor bytes or dtype: {name}")
         spans.append((start, end))
         tensors[name] = (dtype, shape)
@@ -143,7 +144,7 @@ def inventory(source, paths=None):
         names.update(dict.fromkeys(read, file))
         tensors.update(read)
     need(declared is None or declared == names, "index/header tensor inventory mismatch")
-    return files, config, tensors
+    return files, config, tensors, names
 
 
 def qwen2(config, tensors):
@@ -192,8 +193,282 @@ def qwen2(config, tensors):
     return {gguf: dims[::-1] for gguf, dims in expected.values()}
 
 
+def qwen4exp(arch, config, tensors, shard_names):
+    """Plan the pinned converter's Flash-Next tensor profile, not runtime admission.
+
+    Recipe axes use source order. Output dimensions use GGML order.
+    """
+    conditional = arch == "Qwen4ExpForConditionalGeneration"
+    text = config.get("text_config", config)
+    need(isinstance(text, dict) and text.get("model_type") in ("qwen4_exp_text", "qwen4_exp"),
+         "invalid Qwen4Exp text_config")
+    need(not any(c.get("quantization_config") or c.get("tie_word_embeddings") for c in (config, text))
+         and not text.get("attention_bias") and not text.get("mtp_use_dedicated_embeddings")
+         and text.get("output_gate_type", "sigmoid") == "sigmoid",
+         "unsupported Qwen4Exp configuration (requires floating, untied, unbiased Flash-Next)")
+
+    def integer(obj, key, maximum=1 << 20, minimum=1):
+        value = obj.get(key)
+        need(type(value) is int and minimum <= value <= maximum, f"invalid Qwen4Exp {key}")
+        return value
+
+    def prefix(candidates, anchor):
+        present = [p for p in candidates if p + anchor in tensors]
+        need(len(present) == 1,
+             f"expected one Qwen4Exp source for {anchor}: {', '.join(p + anchor for p in candidates)}")
+        return present[0]
+
+    lm = prefix(("model.language_model.", "model."), "embed_tokens.weight")
+    h = integer(text, "hidden_size")
+    vocab = integer(text, "vocab_size")
+    hc, rank = integer(text, "hc_count", 64), integer(text, "hc_lowrank")
+    wide = hc * h
+    n = integer(text, "num_hidden_layers", 256)
+    qheads = integer(text, "num_attention_heads", 256)
+    kvheads = integer(text, "num_key_value_heads", qheads)
+    head = integer(text, "head_dim")
+    need(qheads % kvheads == 0, "invalid Qwen4Exp attention head counts")
+    layers = text.get("layer_types")
+    need(isinstance(layers, list) and len(layers) == n
+         and all(x in ("full_attention", "linear_attention") for x in layers), "invalid Qwen4Exp layer_types")
+    mtp_config = text.get("mtp")
+    need(type(text.get("mtp_num_hidden_layers")) is int and text["mtp_num_hidden_layers"] == 1
+         and isinstance(mtp_config, dict) and type(mtp_config.get("num_hidden_layers")) is int
+         and mtp_config["num_hidden_layers"] == 1 and mtp_config.get("layer_types") == ["full_attention"],
+         "only one integrated full-attention Qwen4Exp MTP block is supported")
+    ixheads = integer(text, "indexer_n_heads", 256)
+    ixhead = integer(text, "indexer_head_dim")
+    integer(text, "indexer_budget")
+    integer(text, "indexer_compress_ratio")
+    integer(text, "indexer_kv_heads", 1)
+    experts = integer(text, "num_experts")
+    integer(text, "num_experts_per_tok", experts)
+    ffn = integer(text, "moe_intermediate_size")
+    shared = integer(text, "shared_expert_intermediate_size")
+
+    sources = {}
+    model = {"gguf_architecture": "qwen4exp", "tensors": {}, "metadata": {}}
+    artifacts = {"model": model}
+    target = model["tensors"]
+    role = "text"
+
+    def source(name, shape=None, dtype=None):
+        need(name in tensors, f"missing Qwen4Exp {role} tensor: {name}")
+        actual_dtype, actual_shape = tensors[name]
+        need(actual_dtype == dtype if dtype else actual_dtype in ("BF16", "F16", "F32"),
+             f"Qwen4Exp tensor {name}: expected {dtype or 'floating dtype'}, got {actual_dtype}")
+        need(shape is None or actual_shape == shape, f"Qwen4Exp tensor {name}: expected shape {shape}, got {actual_shape}")
+        sources[name] = {"file": shard_names[name], "shape": actual_shape, "dtype": actual_dtype, "role": role}
+        return actual_shape
+
+    def op(kind, **parameters):
+        return {"op": kind, **parameters}
+
+    def emit(out, shape, names, *ops):
+        need(out not in target, f"duplicate Qwen4Exp GGUF tensor: {out}")
+        target[out] = {"role": role, "gguf_dimensions": shape[::-1], "sources": names,
+                       "operations": list(ops) or [op("copy")]}
+
+    def one(name, out, shape, *ops, dims=None):
+        source(name, shape)
+        emit(out, shape if dims is None else dims, [name], *ops)
+
+    plus_one = op("add", value=1)
+
+    def hc_mix(src, out, injection=False):
+        one(src + "hc_norm.weight", out + "_norm.weight", [wide], plus_one)
+        one(src + "input_mix_weight_down.weight", out + "_down.weight", [rank, wide])
+        one(src + "input_mix_weight_up.weight", out + "_up.weight", [wide, rank])
+        if injection:
+            one(src + "block_inject_weight.weight", out + "_inject.weight", [hc, wide])
+
+    def block(src, bid, layer_type):
+        out = f"blk.{bid}."
+        hc_mix(src + "attn_hyper_connection.", out + "hc_attn", injection=True)
+        hc_mix(src + "mlp_hyper_connection.", out + "hc_ffn", injection=True)
+        mlp = src + "mlp."
+        for name, dest, shape in (
+            ("gate.weight", "ffn_gate_inp", [experts, h]),
+            ("experts.down_proj", "ffn_down_exps", [experts, h, ffn]),
+            ("shared_expert_gate.weight", "ffn_gate_inp_shexp", [1, h]),
+            ("shared_expert.gate_proj.weight", "ffn_gate_shexp", [shared, h]),
+            ("shared_expert.up_proj.weight", "ffn_up_shexp", [shared, h]),
+            ("shared_expert.down_proj.weight", "ffn_down_shexp", [h, shared]),
+        ):
+            one(mlp + name, out + dest + ".weight", shape)
+        gate_up = mlp + "experts.gate_up_proj"
+        source(gate_up, [experts, 2 * ffn, h])
+        for name, offset in (("gate", 0), ("up", ffn)):
+            emit(out + f"ffn_{name}_exps.weight", [experts, ffn, h], [gate_up],
+                 op("slice", axis=1, start=offset, length=ffn))
+
+        if layer_type == "full_attention":
+            a = src + "self_attn."
+            one(a + "q_proj.weight", out + "attn_q.weight", [2 * qheads * head, h])
+            one(a + "k_proj.weight", out + "attn_k.weight", [kvheads * head, h])
+            one(a + "v_proj.weight", out + "attn_v.weight", [kvheads * head, h])
+            one(a + "o_proj.weight", out + "attn_output.weight", [h, qheads * head])
+            for part in ("q", "k"):
+                one(a + part + "_norm.weight", out + f"attn_{part}_norm.weight", [head], plus_one)
+                one(a + f"indexer.{part}_layernorm.weight", out + f"indexer.{part}_norm.weight", [ixhead], plus_one)
+            qk = a + "indexer.index_qk_proj.weight"
+            ixq = ixheads * ixhead
+            source(qk, [ixq + ixhead, h])
+            for part, start, length in (("q", 0, ixq), ("k", ixq, ixhead)):
+                emit(out + f"indexer.{part}_proj.weight", [length, h], [qk],
+                     op("slice", axis=0, start=start, length=length))
+            return
+
+        a = src + "linear_attn."
+        kh = integer(text, "linear_num_key_heads", 256)
+        vh = integer(text, "linear_num_value_heads", 256)
+        kd = integer(text, "linear_key_head_dim")
+        vd = integer(text, "linear_value_head_dim")
+        kernel = integer(text, "linear_conv_kernel_dim", minimum=2)
+        need(vh % kh == 0, "invalid Qwen4Exp linear attention head counts")
+        qk, v = 2 * kh * kd, vh * vd
+
+        def reorder(axis, width, start=0):
+            if kh == vh:
+                return ()
+            return (op("grouped_to_tiled_value_heads", axis=axis, start=start, key_heads=kh,
+                       value_heads_per_key=vh // kh, head_width=width),)
+
+        one(a + "in_proj_qkv.weight", out + "attn_qkv.weight", [qk + v, h], *reorder(0, vd, qk))
+        one(a + "in_proj_z.weight", out + "attn_gate.weight", [v, h], *reorder(0, vd))
+        one(a + "in_proj_a.weight", out + "ssm_alpha.weight", [vh, h], *reorder(0, 1))
+        one(a + "in_proj_b.weight", out + "ssm_beta.weight", [vh, h], *reorder(0, 1))
+        one(a + "A_log", out + "ssm_a", [vh], *reorder(0, 1), op("negative_exp"))
+        one(a + "dt_bias", out + "ssm_dt.bias", [vh], *reorder(0, 1))
+        one(a + "conv1d.weight", out + "ssm_conv1d.weight", [qk + v, 1, kernel],
+            op("squeeze", axis=1), *reorder(0, vd, qk), dims=[qk + v, kernel])
+        one(a + "norm.weight", out + "ssm_norm.weight", [vd])
+        one(a + "out_proj.weight", out + "ssm_out.weight", [h, v], *reorder(1, vd))
+
+    one(lm + "embed_tokens.weight", "token_embd.weight", [vocab, h])
+    one("lm_head.weight", "output.weight", [vocab, h])
+    hc_mix(lm + "hyper_connection_mixer.", "output_hc")
+    for bid, layer in enumerate(layers):
+        block(lm + f"layers.{bid}.", bid, layer)
+
+    role = "mtp"
+    block("mtp.layers.0.", n, "full_attention")
+    nextn = f"blk.{n}.nextn."
+    fc = ["mtp.fc_embedding.weight", "mtp.fc_hidden.weight"]
+    for name in fc:
+        source(name, [h, h])
+    emit(nextn + "eh_proj.weight", [h, 2 * h], fc, op("concat", axis=1))
+    one("mtp.pre_fc_norm_embedding.weight", nextn + "enorm.weight", [h], plus_one)
+    one("mtp.pre_fc_norm_hidden.weight", nextn + "hnorm.weight", [wide], plus_one)
+    hc_mix("mtp.hyper_connection_mixer.", nextn + "hc_head")
+
+    role = "engram"
+    ple_layers = text.get("ple_layer_ids")
+    need(isinstance(ple_layers, list) and len(ple_layers) == 1 and type(ple_layers[0]) is int
+         and 1 <= ple_layers[0] <= n, "expected one 1-based Qwen4Exp PLE layer in the trunk")
+    ple_layer = ple_layers[0] - 1
+    engram = lm + f"layers.{ple_layer}.ple."
+    out = f"blk.{ple_layer}.ple_"
+    ngram = integer(text, "ngram_size", 64, minimum=2)
+    ple_heads = (ngram - 1) * integer(text, "heads_per_ngram", 256)
+    ple_embed = integer(text, "ple_embed_dim")
+    kernel = integer(text, "ple_conv_kernel_size", minimum=2)
+    need(ple_embed % ple_heads == 0, "Qwen4Exp PLE embedding width must be divisible by its head count")
+    eos = text.get("eos_token_id")
+    need((type(eos) is int and 0 <= eos < vocab) or
+         (isinstance(eos, list) and eos and all(type(x) is int and 0 <= x < vocab for x in eos)),
+         "invalid Qwen4Exp PLE eos_token_id")
+    one(engram + "key_proj.weight", out + "key.weight", [wide, ple_embed])
+    one(engram + "value_proj.weight", out + "value.weight", [h, ple_embed])
+    for norm in ("key", "query", "conv"):
+        one(engram + f"norm_{norm}.weight", out + f"norm_{norm}.weight", [wide], plus_one)
+    one(engram + "conv1d.weight", out + "conv1d.weight", [wide, 1, kernel],
+        op("squeeze", axis=1), dims=[wide, kernel])
+    row_width = ple_embed // ple_heads
+    table = engram + "ple_embedding.ngram_embedding."
+    parts = [table + f"shard_{i}.weight" for i in range(integer(text, "split_ngram_parts", 512))]
+    actual_parts = {name.removeprefix(table) for name in tensors if name.startswith(table)}
+    expected_parts = {name.removeprefix(table) for name in parts}
+    missing, extra = expected_parts - actual_parts, actual_parts - expected_parts
+    if missing or extra:
+        issues = ([f"missing {min(missing)}"] if missing else []) + ([f"unexpected {min(extra)}"] if extra else [])
+        raise ValueError("Qwen4Exp engram shards must be contiguous and complete: " + "; ".join(issues))
+    rows = 0
+    for name in parts:
+        shape = source(name)
+        need(len(shape) == 2 and shape[1] == row_width,
+             f"Qwen4Exp engram shard {name}: expected rank 2 and row width {row_width}, got {shape}")
+        rows += shape[0]
+    emit("per_layer_token_embd.weight", [rows, row_width], parts,
+         op("cast", dtype="F32"), op("concat", axis=0))
+    # Qwen4ExpTextModel reads hash constants directly as Python ints, and
+    # GGUFWriter.add_ple_* writes them as ARRAY<UINT64>, not as float tensors.
+    for name, key, count in (
+        ("layer_multipliers", "layer_multipliers", ngram),
+        ("ngram_heads_offsets", "head_offsets", ple_heads),
+        ("ngram_heads_vocab_sizes", "head_vocab_sizes", ple_heads),
+    ):
+        name = engram + "ple_embedding." + name
+        source(name, [count], "I64")
+        model["metadata"]["qwen4exp.ple." + key] = {
+            "role": role, "sources": [name], "gguf_type": "ARRAY<UINT64>", "element_count": count,
+            "operations": [op("exact_integer_values", require_nonnegative=True)], "values_checked": False,
+        }
+
+    vision = config.get("vision_config")
+    if conditional:
+        role = "projector"
+        need(isinstance(vision, dict) and not config.get("language_model_only")
+             and vision.get("deepstack_visual_indexes", []) == [],
+             "only Qwen4Exp vision with no deepstack is supported")
+        integer(config, "image_token_id", vocab - 1, minimum=0)
+        vis = prefix(("model.visual.", "visual."), "patch_embed.proj.weight")
+        size = integer(vision, "hidden_size")
+        depth = integer(vision, "depth", 256)
+        need(size % integer(vision, "num_heads", size) == 0, "invalid Qwen4Exp vision head counts")
+        need(integer(vision, "out_hidden_size") == h, "Qwen4Exp projector output must match text hidden_size")
+        ff = integer(vision, "intermediate_size")
+        p = integer(vision, "patch_size")
+        channels = integer(vision, "in_channels")
+        merge = integer(vision, "spatial_merge_size", 64)
+        merged = size * merge * merge
+        integer(vision, "temporal_patch_size", 2, minimum=2)
+        target = {}
+        artifacts["mmproj"] = {"gguf_architecture": "clip", "vision_projector_type": "qwen3vl_merger",
+                               "tensors": target, "metadata": {}}
+        patch = vis + "patch_embed.proj.weight"
+        source(patch, [size, channels, 2, p, p])
+        for index, suffix in enumerate((".weight", ".weight.1")):
+            emit("v.patch_embd" + suffix, [size, channels, p, p], [patch], op("select", axis=2, index=index))
+        one(vis + "patch_embed.proj.bias", "v.patch_embd.bias", [size])
+        one(vis + "pos_embed.weight", "v.position_embd.weight", [integer(vision, "num_position_embeddings"), size])
+
+        def pair(src, dest, shape):
+            one(src + ".weight", dest + ".weight", shape)
+            one(src + ".bias", dest + ".bias", shape[:1])
+
+        pair(vis + "merger.norm", "v.post_ln", [size])
+        pair(vis + "merger.linear_fc1", "mm.0", [merged, merged])
+        pair(vis + "merger.linear_fc2", "mm.2", [h, merged])
+        for bid in range(depth):
+            src = vis + f"blocks.{bid}."
+            out = f"v.blk.{bid}."
+            for name, dest, shape in (
+                ("attn.qkv", "attn_qkv", [3 * size, size]), ("attn.proj", "attn_out", [size, size]),
+                ("mlp.linear_fc1", "ffn_up", [ff, size]), ("mlp.linear_fc2", "ffn_down", [size, ff]),
+                ("norm1", "ln1", [size]), ("norm2", "ln2", [size]),
+            ):
+                pair(src + name, out + dest, shape)
+    else:
+        need(vision is None, "unexpected vision_config for Qwen4ExpForCausalLM")
+
+    extra = tensors.keys() - sources.keys()
+    need(not extra, f"unknown Qwen4Exp source tensor: {min(extra, default='')}")
+    return {"schema_version": 1, "scope": "safetensors_header_coverage", "sources": sources, "artifacts": artifacts}
+
+
 def inspect(source, outtype, paths=None):
-    files, config, tensors = inventory(source, paths)
+    files, config, tensors, shard_names = inventory(source, paths)
     architectures = config.get("architectures")
     need(isinstance(architectures, list) and len(architectures) == 1 and isinstance(architectures[0], str),
          "expected one local HF architecture")
@@ -210,7 +485,13 @@ def inspect(source, outtype, paths=None):
               "export_supported": False, "llama_cpp_commit": COMMIT, "tensor_payloads_read": False,
               "export_runtime_checked": False}
     if arch in EXP:
-        report["reason"] = "Qwen4Exp sidecar coverage (projector, embedded MTP and merged engram) is not proven"
+        plan = qwen4exp(arch, config, tensors, shard_names)
+        counts = {}
+        for entry in plan["sources"].values():
+            role = entry["role"]
+            counts[role] = counts.get(role, 0) + 1
+        report.update(source_coverage_plan=plan, required_roles=sorted(counts), role_tensor_counts=counts,
+                      reason="Qwen4Exp sidecar coverage is planned from headers only; export is not proven")
     elif arch != "Qwen2ForCausalLM":
         report["reason"] = "architecture has no audited offline tensor mapping"
     elif set(roles) != {"text"} or total > MAX_EXPORT:
