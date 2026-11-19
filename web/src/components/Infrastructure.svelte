@@ -4,6 +4,9 @@
   import { adminActionAllowed, parseAdminState, type AdminAction, type AdminState } from '../lib/admin';
   import { formatTime } from '../lib/format';
   import { brewery } from '../lib/store.svelte';
+  import type { PolicyAction } from '../lib/host-policy';
+  import HostPolicy from './HostPolicy.svelte';
+  import SshHosts from './SshHosts.svelte';
   import Badge from '../components/Badge.svelte';
 
   let st = $state<AdminState | null>(null);
@@ -11,6 +14,8 @@
   let error = $state<string | null>(null);
   let busy = $state<string | null>(null);
   let actionError = $state<string | null>(null);
+  let hostId = $state('');
+  const policy = $derived(st?.hosts?.find(h => h.id === hostId) ?? st?.hosts?.[0]);
   let confirmDeactivate = $state<string | null>(null);
 
   async function load() {
@@ -46,7 +51,7 @@
     return () => { cancelAnimationFrame(frame); window.removeEventListener('hashchange', focusSection); };
   });
 
-  async function act(a: AdminAction, label: string) {
+  async function act(a: AdminAction | PolicyAction, label: string) {
     if (!st || busy || status !== 'ok') return;
     busy = label;
     actionError = null;
@@ -58,7 +63,7 @@
       void brewery.refresh();
     } catch (e) {
       if (e instanceof ApiError && [401,403].includes(e.status)) handle(e);
-      else actionError = `${label}: ${errorText(e)}`;
+      else actionError = `${label}: ${errorText(e)}${e instanceof ApiError && e.status === 409 ? ' Refresh infrastructure and review the latest settings before retrying.' : ''}`;
     } finally {
       busy = null;
     }
@@ -69,8 +74,9 @@
 <section class="stack" aria-labelledby="infrastructure">
   <div class="head">
     <h2 id="infrastructure" tabindex="-1">Infrastructure</h2>
-    <p class="muted small">Manage worker enrollment, runtimes and conversion pool membership. The audit log records changes.</p>
+    <p class="muted small">Review admission and resource limits for each host. Manage worker enrollment, runtimes and conversion pool membership. The audit log records changes.</p>
   </div>
+  <SshHosts />
   <div><button type="button" class="btn small" onclick={load} disabled={!!busy || status === 'loading'}>Refresh infrastructure</button></div>
     {#if status === 'loading' && !st}<p class="muted">Loading…</p>{/if}
     {#if status === 'unavailable'}<p class="note warn">Infrastructure settings unavailable: {error}</p>{/if}
@@ -78,9 +84,22 @@
     {#if actionError}<p class="note bad" role="alert">{actionError}</p>{/if}
 
     {#if st && status === 'ok'}
+      <section class="panel" aria-labelledby="host-policy-h">
+        <header><h3 id="host-policy-h">Host policies</h3></header>
+        <div class="body stack">
+          {#if policy && st.hosts}
+            <div class="field"><label for="infra-policy-host">Defined host</label>
+              <select id="infra-policy-host" class="input" value={policy.id} disabled={!!busy} onchange={e=>hostId=e.currentTarget.value}>
+                {#each st.hosts as h (h.id)}<option value={h.id}>{h.name} · {h.id}</option>{/each}
+              </select>
+            </div>
+            {#key `${policy.id}:${policy.revision}`}<HostPolicy host={policy} busy={!!busy} save={act} />{/key}
+          {:else}<p class="muted small">{st.hosts ? 'No defined hosts reported.' : 'This controller did not report editable host policies.'}</p>{/if}
+        </div>
+      </section>
       <section class="panel" aria-labelledby="wk-h">
-        <header><h2 id="wk-h">Workers</h2></header>
-        {#if st.workers.length === 0}<p class="empty">No workers.</p>{/if}
+        <header><h3 id="wk-h">Runtime enrollment</h3></header>
+        {#if st.workers.length === 0}<p class="empty">No workers in the runtime enrollment catalog.</p>{/if}
         <ul class="workers">
           {#each st.workers as w (w.id)}
             <li class="w">

@@ -167,7 +167,7 @@
   {:else if status === 'error'}
     <div class="note bad" role="alert"><p>Settings could not be loaded: {loadError}</p><button type="button" class="btn small" onclick={() => load()}>Retry</button></div>
   {:else if saved.length === 0}
-    <p class="empty panel">The controller reports no workers.</p>
+    <p class="empty panel">No benchmark or evaluation worker settings reported.</p>
   {:else}
     <div class="layout">
       <nav class="hosts panel" aria-label="Workers">

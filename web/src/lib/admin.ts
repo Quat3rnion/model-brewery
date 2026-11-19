@@ -1,3 +1,4 @@
+import { parseHostPolicies, type HostPolicy } from './host-policy';
 import { obj } from './reports';
 
 export type AdminAction =
@@ -30,6 +31,7 @@ export interface AdminWorker {
 }
 
 export interface AdminState {
+  hosts: HostPolicy[] | null;
   workers: AdminWorker[];
   audit: { id: string; at: number | null; action: string; worker: string | null; runtime: string | null; allow_pool: boolean | null; outcome: string | null }[];
   /** Capabilities the backend does not implement, with its reason. Shown, never offered as controls. */
@@ -44,6 +46,7 @@ export function parseAdminState(v: unknown): AdminState | null {
   if (!o || !Array.isArray(o.workers)) return null;
   const UNAVAILABLE: Record<string, string> = { install_runtime: 'Install a runtime', host_provisioning: 'Provision a host', resource_controls: 'Other resource controls' };
   return {
+    hosts: parseHostPolicies(o.hosts),
     workers: o.workers
       .map(obj)
       .filter((w): w is Record<string, unknown> => !!w && typeof w.id === 'string')
