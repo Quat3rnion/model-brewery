@@ -34,6 +34,7 @@ struct Config {
     managed_settings: Option<operational::Policy>,
     hf_download: Option<hf_download::Config>,
     backend_weight_download_root: Option<PathBuf>,
+    backend_weight_calibration_root: Option<PathBuf>,
     resource_bounds: Option<resources::Bounds>,
 }
 fn reserve() -> u64 {
@@ -88,6 +89,19 @@ impl Config {
                     && !root.starts_with(&cfg.root)
                     && !cfg.root.starts_with(root),
                 "invalid dedicated backend editor configuration"
+            );
+        }
+        if let Some(root) = &cfg.backend_weight_calibration_root {
+            operational::private_root(root)?;
+            ensure!(
+                cfg.backend_weight_download_root
+                    .as_ref()
+                    .is_some_and(
+                        |downloads| !root.starts_with(downloads) && !downloads.starts_with(root)
+                    )
+                    && !root.starts_with(&cfg.root)
+                    && !cfg.root.starts_with(root),
+                "invalid backend calibration root"
             );
         }
         Ok((cfg, path))
@@ -330,6 +344,34 @@ impl Worker {
     fn backend_weight_source(&self, input: &Input) -> Result<(PathBuf, String)> {
         let invalid = "backend input is not a verified publication";
         ensure!(input.host == "backend-hf", "{invalid}");
+        if input.kind == "weight-calibration" {
+            let root = self
+                .cfg
+                .backend_weight_calibration_root
+                .as_ref()
+                .context(invalid)?;
+            let digest = input
+                .path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .filter(|s| is_digest(s))
+                .context(invalid)?;
+            ensure!(
+                input.path.as_os_str() == root.join(format!("{digest}.json")).as_os_str(),
+                "{invalid}"
+            );
+            let path = cache::authorized(&input.path, std::slice::from_ref(root))?;
+            let meta = fs::symlink_metadata(&path)?;
+            use std::os::unix::fs::MetadataExt;
+            ensure!(
+                meta.is_file()
+                    && meta.uid() == unsafe { libc::geteuid() }
+                    && meta.nlink() == 1
+                    && meta.mode() & 0o7777 == 0o400,
+                "{invalid}"
+            );
+            return Ok((path, digest.into()));
+        }
         let download_jobs = self
             .cfg
             .backend_weight_download_root
@@ -338,13 +380,16 @@ impl Worker {
             .join("jobs");
         let (record_root, expected_kind, rel) =
             if let Ok(rel) = input.path.strip_prefix(&download_jobs) {
-                ensure!(weight_source::supports(&input.kind), "{invalid}");
+                ensure!(
+                    weight_source::supports(&input.kind) || input.kind == "gguf",
+                    "{invalid}"
+                );
                 (&download_jobs, "hf_download", rel)
             } else {
                 let rel = input.path.strip_prefix(&self.jobs).context(invalid)?;
                 let expected = match input.kind.as_str() {
-                    "hf" | "safetensors" => "weight_apply",
-                    "weight-edit-proposal" => "weight_propose",
+                    "hf" | "safetensors" | "gguf" => "weight_apply",
+                    "weight-edit-proposal" => "proposal",
                     _ => bail!("{invalid}"),
                 };
                 (&self.jobs, expected, rel)
@@ -363,25 +408,32 @@ impl Worker {
         let receipt: Record = decode(cache::regular(
             &record_root.join(producer).join("state.json"),
         )?)?;
+        let producer_kind = receipt
+            .job
+            .as_ref()
+            .map(|j| j.kind.as_str())
+            .context(invalid)?;
         ensure!(
             receipt.action == "start"
                 && receipt.reply.state == "succeeded"
                 && !receipt.cancel
-                && receipt.job.is_some_and(|j| j.kind == expected_kind),
+                && (producer_kind == expected_kind
+                    || (expected_kind == "proposal"
+                        && matches!(producer_kind, "weight_propose" | "weight_tune"))),
             "{invalid}"
         );
         let result = receipt.reply.result.as_ref().context(invalid)?;
         let artifact = &result["artifact"];
         ensure!(
-            (expected_kind == "weight_propose" || result["verified"] == true)
-                && result["kind"] == expected_kind
+            (expected_kind == "proposal" || result["verified"] == true)
+                && result["kind"] == producer_kind
                 && artifact["kind"] == input.kind
                 && artifact["path"].as_str().map(Path::new) == Some(input.path.as_path()),
             "{invalid}"
         );
         let leaf = match (expected_kind, input.kind.as_str()) {
             ("hf_download", "hf") => work.join("download"),
-            ("hf_download", "safetensors") => {
+            ("hf_download", "safetensors" | "gguf") => {
                 let spec = hf_download::Spec::parse(&json!({
                     "repo_id":result["repo_id"],"revision":result["revision"],"filename":result["filename"]
                 }))?;
@@ -389,7 +441,8 @@ impl Worker {
             }
             ("weight_apply", "hf") => work.join("edited.hf"),
             ("weight_apply", "safetensors") => work.join("edited.safetensors"),
-            ("weight_propose", "weight-edit-proposal") => work.join("weight-proposal.json"),
+            ("weight_apply", "gguf") => work.join("edited.gguf"),
+            ("proposal", "weight-edit-proposal") => work.join("weight-proposal.json"),
             _ => bail!("{invalid}"),
         };
         ensure!(leaf.as_os_str() == input.path.as_os_str(), "{invalid}");
@@ -455,13 +508,20 @@ impl Worker {
         if self.cfg.backend_weight_download_root.is_some()
             && !(action == "start"
                 && job.prompt.is_none()
-                && job.options.get("packed").is_none()
                 && job
                     .inputs
                     .first()
-                    .is_some_and(|i| weight_source::supports(&i.kind))
+                    .is_some_and(|i| weight_source::supports(&i.kind) || i.kind == "gguf")
                 && match job.kind.as_str() {
                     "weight_inspect" | "weight_propose" => job.inputs.len() == 1,
+                    "weight_tune" => {
+                        self.cfg.backend_weight_calibration_root.is_some()
+                            && job.inputs.len() == 3
+                            && job.inputs[1..]
+                                .iter()
+                                .all(|i| i.kind == "weight-calibration")
+                            && job.inputs[1].path != job.inputs[2].path
+                    }
                     "weight_apply" => {
                         job.inputs.len() == 2 && job.inputs[1].kind == "weight-edit-proposal"
                     }
@@ -767,20 +827,25 @@ impl Worker {
                     Some((index, count)),
                 );
                 let proof = if native_safe {
-                    self.cfg
-                        .engine_env
-                        .get(weight_source::PUBLICATION)
-                        .map(|receipt| {
-                            weight_source::publication(&p, &input.kind, Path::new(receipt))
-                        })
-                        .transpose()
-                        .context("SafeTensors immutable publication invalid")?
-                        .flatten()
+                    weight_source::proof(&p, &input.kind, |key| {
+                        self.cfg.engine_env.get(key).map(std::ffi::OsString::from)
+                    })
+                    .context("SafeTensors immutable publication invalid")?
                 } else {
                     None
                 };
                 if let Some(proof) = proof {
-                    proof.bundle
+                    let bundle = proof.bundle();
+                    let digest = if bundle.entry == "." {
+                        &bundle.digest
+                    } else {
+                        &bundle.files[0].sha256
+                    };
+                    ensure!(
+                        expected.as_ref().is_none_or(|pin| pin == digest),
+                        "SafeTensors proof does not match the registered publication digest"
+                    );
+                    bundle.clone()
                 } else {
                     let max_bytes = if native_safe {
                         let limit = weight_source::verify_limit(
@@ -792,13 +857,24 @@ impl Worker {
                         weight_source::bounded_inventory(&p, &input.kind, limit)?;
                         limit
                     } else if expected.is_some() {
-                        4 << 20
+                        match input.kind.as_str() {
+                            "weight-calibration" => 256 << 10,
+                            "gguf" => 32 << 20,
+                            _ => 4 << 20,
+                        }
                     } else {
                         u64::MAX
                     };
+                    // An exact backend download is one file, including if
+                    // its name resembles a split GGUF; never open siblings.
+                    let describe_kind = if expected.is_some() && input.kind == "gguf" {
+                        "safetensors"
+                    } else {
+                        &input.kind
+                    };
                     let d = cache::describe_bounded(
                         &p,
-                        &input.kind,
+                        describe_kind,
                         &boundary,
                         "hash_input",
                         &mut progress,
@@ -1230,6 +1306,11 @@ fn main() {
             [op, id] if op == "supervise" => {
                 process::supervise(&Worker::open()?, id)?;
                 Ok(None)
+            }
+            [op, receipt, tree, output] if op == "build-weight-chunk-index" => {
+                let sha256 =
+                    weight_source::build_chunk_index(Path::new(receipt), tree, Path::new(output))?;
+                Ok(Some(json!({"sha256": sha256})))
             }
             _ => bail!("usage: brewery-worker rpc"),
         }

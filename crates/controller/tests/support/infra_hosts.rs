@@ -109,6 +109,38 @@ fn provisioning_requires_verified_key_confirmed_plan_and_busy_checks() {
     fs::remove_file(app.path("substitute")).unwrap();
     let installed = app.json("POST", &action, Some(confirm), 200);
     assert_eq!(installed["status"], "installed");
+    // The installed worker must be manageable from Settings without restarting
+    // the controller or enrolling it for evaluation.
+    let settings = app.json("GET", "/api/settings", None, 200);
+    let worker = settings["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["id"] == "reader")
+        .expect("Settings must include an installed SSH worker");
+    assert_eq!(worker["evaluation"]["status"], "not_enrolled");
+    assert_eq!(worker["management"]["available"], true);
+    assert_eq!(
+        worker["management"]["href"],
+        "#/settings/infrastructure?host=reader"
+    );
+    let state_url = worker["management"]["state_url"].as_str().unwrap();
+    let action_url = worker["management"]["action_url"].as_str().unwrap();
+    let management = app.json("GET", state_url, None, 200);
+    let policy = management["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|worker| worker["id"] == "reader")
+        .unwrap();
+    let resources = json!({"action":"set_host_resources","worker":"reader",
+        "revision":policy["revision"],"resources":{"cpu_threads":2}});
+    app.json("POST", action_url, Some(resources.clone()), 200);
+    app.json("POST", action_url, Some(resources), 409);
+    let invalid_eval = json!({"revision":0,"evaluation_enabled":true,
+        "benchmark_targets":[],"baseline_endpoints":[],"enabled_suites":[]});
+    let rejected = app.json("PUT", "/api/settings/reader", Some(invalid_eval), 409);
+    assert!(rejected["error"].as_str().unwrap().contains("not enrolled"));
     app.stop();
     app.launch_with(&env);
     let state = app.json("GET", "/api/state", None, 200);

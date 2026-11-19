@@ -7,11 +7,26 @@ fn backend_downloads_without_a_configured_worker() {
     let mut app = Fixture::new();
     fs::write(app.path("dispatch.json"), r#"{"hosts":{}}"#).unwrap();
     let companion = app.path("dispatch");
+    let edit = app.path("weight-edit");
+    let tune = app.path("weight-tune");
+    for (path, jobs) in [
+        (
+            &edit,
+            json!(["weight_inspect", "weight_propose", "weight_apply"]),
+        ),
+        (&tune, json!(["weight_tune"])),
+    ] {
+        let receipt = json!({"schema":"brewery.weight-runtime.v1","jobs":jobs,
+            "formats":["hf","safetensors","gguf"],"visual":true,"packed":true});
+        fs::write(path, format!("#!/bin/sh\nprintf '%s\\n' '{receipt}'\n")).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     app.launch_with(&[
         ("BREWERY_HF_WORKER", companion.clone()),
         ("BREWERY_HF_ENGINE", companion.clone()),
         ("BREWERY_HF_HFR", companion.clone()),
-        ("BREWERY_HF_WEIGHT_EDIT", companion.clone()),
+        ("BREWERY_HF_WEIGHT_EDIT", edit),
+        ("BREWERY_HF_WEIGHT_TUNE", tune),
         ("BREWERY_HF_DISPATCH", companion),
     ]);
     let job = app.enqueue(json!({"kind":"hf_download","options":{"repo_id":"example/model"}}));
@@ -29,7 +44,29 @@ fn backend_downloads_without_a_configured_worker() {
     );
     let state = app.json("GET", "/api/state", None, 200);
     assert_eq!(state["hosts"][0]["capabilities"]["weight_inspect"], true);
-    assert_eq!(state["hosts"][0]["capabilities"]["weight_tune"], false);
+    assert_eq!(state["hosts"][0]["capabilities"]["weight_tune"], true);
+    assert_eq!(state["hosts"][0]["capabilities"]["weight_packed"], true);
+    let calibration = app.json(
+        "POST",
+        "/api/models/weight-calibration",
+        Some(json!({"name":"Train","activations":[[1,0],[0,1]],"targets":[[2,3],[2,3]]})),
+        201,
+    );
+    assert_eq!(calibration["host"], "backend-hf");
+    assert_eq!(calibration["kind"], "weight-calibration");
+    for bad in [
+        json!({"name":"Ragged","activations":[[1],[1,2]],"targets":[[2],[2]]}),
+        json!({"name":"Misaligned","activations":[[1],[2]],"targets":[[2]]}),
+        json!({"name":"Forged","activations":[[1]],"targets":[[2]],"path":"/private/token"}),
+    ] {
+        app.json("POST", "/api/models/weight-calibration", Some(bad), 400);
+    }
+    app.json(
+        "POST",
+        "/api/models/weight-calibration",
+        Some(json!({"name":"Not independent","activations":[[1,0],[0,1]],"targets":[[2,3],[2,3]]})),
+        409,
+    );
     let model = &job["result"]["library_model_id"];
     app.json(
         "POST",

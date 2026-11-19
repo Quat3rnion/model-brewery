@@ -70,6 +70,12 @@ impl Test {
         if root.join("catalog.json").exists() {
             command.env("BREWERY_ADMIN_CATALOG", root.join("catalog.json"));
         }
+        for name in ["DISPATCH", "WORKER", "ENGINE", "HELPER", "TUNER"] {
+            command.env(
+                format!("BREWERY_LOCAL_EDIT_{name}"),
+                root.join(format!("editor-{name}")),
+            );
+        }
         let mut child = command.spawn().unwrap();
         let until = Instant::now() + Duration::from_secs(4);
         self.addr = loop {
@@ -230,6 +236,124 @@ fn defined_hosts_have_revisioned_policy_without_catalog_workers() {
     assert_eq!(resumed["paused"], false);
     assert_eq!(resumed["revision"], 3);
     assert_eq!(resumed["resources"]["cpu_threads"], 2);
+}
+
+#[test]
+fn local_weight_editor_requires_an_installed_executor() {
+    let mut t = Test::new();
+    t.launch();
+    let (status, state) = t.admin(None);
+    assert_eq!(status, 200);
+    let row = state["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|host| host["id"] == "existing")
+        .unwrap();
+    assert_eq!(row["weight_editor"]["available"], false);
+    assert_eq!(
+        t.admin(Some(
+            json!({"action":"set_weight_editor","worker":"existing",
+        "revision":0,"enabled":true})
+        ))
+        .0,
+        409
+    );
+}
+
+#[test]
+fn enabled_local_editor_uses_private_route_and_drains_on_disable() {
+    let mut t = Test::new();
+    let root = t.root.path();
+    let sources = root.join("sources");
+    fs::create_dir(&sources).unwrap();
+    let config = root.join("local-worker.json");
+    let original = json!({"root":root.join("ordinary"),"source_roots":[sources],"engine":"/usr/bin/false",
+        "engine_env":{"BREWERY_EXPECTED_SOURCE_SHA256":"qualification-pin"}});
+    fs::write(&config, original.to_string()).unwrap();
+    fs::write(
+        root.join("dispatch.json"),
+        json!({"hosts":{"existing":{
+        "local":true,"worker":"/usr/bin/false","config":config}}})
+        .to_string(),
+    )
+    .unwrap();
+    fs::remove_file(root.join("catalog.json")).unwrap();
+    for (name, script) in [
+        ("editor-DISPATCH", include_str!("support/dispatch.py")),
+        ("editor-WORKER", "#!/bin/sh\nexit 1\n"),
+        ("editor-ENGINE", "#!/bin/sh\nexit 1\n"),
+        (
+            "editor-HELPER",
+            r#"#!/bin/sh
+test "$1" = --capabilities || exit 1
+printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","weight_propose","weight_apply"],"formats":["gguf","hf","safetensors"],"visual":true,"packed":false}'
+"#,
+        ),
+    ] {
+        let file = root.join(name);
+        fs::write(&file, script).unwrap();
+        fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::write(root.join("hold"), "").unwrap();
+    fs::write(root.join("weight-fixture"), "").unwrap();
+    let source_path = sources.join("checkpoint");
+    t.launch();
+    let toggle = |revision, enabled| json!({"action":"set_weight_editor","worker":"existing","revision":revision,"enabled":enabled});
+    let (status, initial) = t.admin(None);
+    assert_eq!(status, 200);
+    assert_eq!(initial["hosts"][0]["weight_editor"]["available"], true);
+    assert_eq!(initial["hosts"][0]["weight_editor"]["enabled"], false);
+    let (status, source) = t.request(
+        "/api/models",
+        "",
+        Some(json!({"host":"existing","kind":"hf","path":source_path})),
+    );
+    assert_eq!(status, 201, "{source}");
+    let req = json!({"kind":"weight_inspect","input_ids":[source["id"]],"options":{"mode":"inventory","offset":0,"limit":4}});
+    assert_eq!(t.request("/api/jobs", "", Some(req.clone())).0, 409);
+    let (status, enabled) = t.admin(Some(toggle(0, true)));
+    assert_eq!(status, 200, "{enabled}");
+    assert_eq!(
+        enabled["hosts"][0]["weight_editor"]["capabilities"]["weight_tune"],
+        false
+    );
+    assert_eq!(
+        enabled["hosts"][0]["weight_editor"]["capabilities"]["weight_safetensors"],
+        true
+    );
+    assert_eq!(enabled["audit"][0]["action"], "set_weight_editor");
+    let (status, job) = t.request("/api/jobs", "", Some(req.clone()));
+    assert_eq!(status, 201, "{job}");
+    let path = format!("/api/jobs/{}", job["id"].as_str().unwrap());
+    let wait = |progress: &str| {
+        let until = Instant::now() + Duration::from_secs(4);
+        loop {
+            let (_, row) = t.request(&path, "", None);
+            if row["state"] == progress || row["progress"] == progress {
+                return row;
+            }
+            assert!(Instant::now() < until, "{row}");
+            sleep(Duration::from_millis(15));
+        }
+    };
+    wait("worker progress");
+    assert_eq!(t.admin(Some(toggle(0, false))).0, 409);
+    assert_eq!(t.admin(Some(toggle(1, false))).0, 200);
+    assert_eq!(t.request("/api/jobs", "", Some(req.clone())).0, 409);
+    fs::remove_file(t.root.path().join("hold")).unwrap();
+    assert_eq!(wait("succeeded")["result"]["source_format"], "hf");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(config).unwrap()).unwrap(),
+        original
+    );
+    t.stop();
+    t.launch();
+    assert_eq!(
+        t.admin(None).1["hosts"][0]["weight_editor"]["enabled"],
+        false
+    );
+    assert_eq!(t.request("/api/jobs", "", Some(req)).0, 409);
 }
 
 #[test]

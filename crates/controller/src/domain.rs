@@ -165,6 +165,8 @@ pub struct Job {
         skip_serializing_if = "brewery_worker::resources::Limits::is_empty"
     )]
     pub dispatch_resources: brewery_worker::resources::Limits,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_edit: bool,
     pub state: State,
     pub progress: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -319,6 +321,8 @@ impl From<&Job> for Event {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Host {
+    #[serde(skip)]
+    pub local_edit: bool,
     pub id: String,
     pub name: String,
     pub capabilities: BTreeMap<String, bool>,
@@ -569,6 +573,7 @@ impl Host {
             }
         }
         Ok(Self {
+            local_edit: false,
             id: id.into(),
             name,
             capabilities,
@@ -685,6 +690,7 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
             .filter(|host| {
                 host.id == job.host
                     && !host.scheduling_paused
+                    && (!crate::weights::is_kind(&job.kind) || host.local_edit == job.local_edit)
                     && host.capabilities[&job.kind]
                     && (!needs_hgn || host.capabilities["weight_hgn"])
                     && (!needs_safetensors || host.capabilities["weight_safetensors"])
@@ -848,6 +854,7 @@ impl NewJob {
             pool_slot: false,
             host_slot: None,
             dispatch_resources: Default::default(),
+            local_edit: false,
             input_ids: self.input_ids,
             options: self.options,
             prompt_id: self.prompt_id,

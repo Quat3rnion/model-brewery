@@ -130,6 +130,31 @@
         }
       }
     },
+    "/api/models/weight-calibration": {
+      "post": {
+        "operationId": "registerWeightCalibration",
+        "summary": "Upload one calibration or held-out matrix batch for backend-hf tuning",
+        "description": "Provide numeric matrices, not a server file path. Both must be rectangular, contain finite values and have equal row counts. Register distinct batches for calibration and held-out evaluation. Creating a Library entry does not start tuning.",
+        "requestBody": {
+          "required": true, "x-brewery-max-body-bytes": 262144,
+          "content": {"application/json": {"schema": {
+            "type": "object", "additionalProperties": false, "required": ["name", "activations", "targets"],
+            "properties": {"name": {"$ref": "#/components/schemas/Name"},
+              "activations": {"$ref": "#/components/schemas/WeightCalibrationMatrix"},
+              "targets": {"$ref": "#/components/schemas/WeightCalibrationMatrix"}}
+          }}}
+        },
+        "responses": {
+          "201": {"description": "Verified batch registered on backend-hf.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Model"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"description": "Tuning is unavailable, the batch is already registered, or the storage limit was reached.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
     "/api/models": {
       "post": {
         "operationId": "createModel",
@@ -295,7 +320,7 @@
       "get": {
         "operationId": "getSettings",
         "summary": "Read the operational settings of every worker",
-        "description": "Returns one entry for each configured worker. A worker that the operator did not enrol for managed settings has managed false, ready false and a reason. The values are the saved settings and the worker policy. ready means that the worker policy, the suite catalog and the saved settings can be read and are valid. It does not mean that a model endpoint is running.",
+        "description": "Lists defined hosts, including installed SSH workers. Use management to find each host's revisioned admission and resource controls. evaluation describes only the benchmark and evaluation configuration; lack of evaluation enrollment does not lock the host. Neither field establishes that a particular model can be edited.",
         "responses": {
           "200": {
             "description": "The settings of all workers.",
@@ -309,7 +334,7 @@
     "/api/settings/{host}": {
       "put": {
         "operationId": "putSettings",
-        "summary": "Replace the operational settings of one managed worker",
+        "summary": "Replace one worker's evaluation configuration",
         "description": "Replaces the whole settings object of an enrolled local worker. The controller checks the body against the worker policy and the suite catalog, then writes it to the private state directory of the worker before it answers. Saving starts no job and does not test an endpoint. The saved revision is the request revision plus one. Send the revision that you read from getSettings. Another save in the meantime, or a stale revision, returns 409: read again, then decide. The save also returns 409 if the host has a queued or running job, or a job with host auto. The effect on getState is immediate: capabilities and the lists of targets, suites and baseline sources follow the saved settings. There is no new event kind. The body has no secrets and no API key. This route uses the same access as job creation.",
         "parameters": [{"name": "host", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/HostId"}, "description": "Configured worker ID."}],
         "requestBody": {
@@ -420,7 +445,7 @@
       "post": {
         "operationId": "applyAdminAction",
         "summary": "Apply one administration action",
-        "description": "Changes controller policy using normal Settings access. set_host_policy controls pause and disables installed job kinds; set_host_resources replaces the resource limits within the advertised bounds. Both use the host policy revision. Legacy catalog lifecycle and runtime actions remain separate; changing policy does not change SSH trust.",
+        "description": "Changes controller policy using normal Settings access. set_host_policy controls pause and restricts jobs; set_host_resources replaces bounded resource overrides. set_weight_editor enables or disables a verified editor without changing the model, installing software or granting other job permissions. These actions use the host policy revision. Legacy catalog lifecycle and SSH trust are separate.",
         "requestBody": {
           "required": true,
           "x-brewery-max-body-bytes": 4096,
@@ -1040,12 +1065,25 @@
       },
       "HostSettings": {
         "type": "object",
-        "required": ["id", "name", "managed", "ready", "approved_ports", "evaluation_allowed", "baseline_allowed", "approved_suites", "revision", "benchmark_targets", "enabled_suites", "baseline_endpoints", "evaluation_enabled"],
+        "required": ["id", "name", "management", "evaluation", "managed", "ready", "approved_ports", "evaluation_allowed", "baseline_allowed", "approved_suites", "revision", "benchmark_targets", "enabled_suites", "baseline_endpoints", "evaluation_enabled"],
         "properties": {
           "id": {"$ref": "#/components/schemas/HostId"}, "name": {"type": "string"},
-          "managed": {"type": "boolean", "description": "True if the operator enrolled this worker in the dispatch file. Only an enrolled local worker can be saved."},
-          "ready": {"type": "boolean", "description": "True if the worker policy, the suite catalog and the saved settings are valid. Not a check of any endpoint."},
-          "reason": {"type": "string", "description": "Why ready is false."},
+          "management": {
+            "type": "object", "required": ["href", "available", "state_url", "action_url", "actions"],
+            "properties": {
+              "href": {"type": "string", "description": "Browser route to this host's Infrastructure settings."},
+              "available": {"type": "boolean"}, "reason": {"type": "string"},
+              "state_url": {"const": "/api/admin/state"}, "action_url": {"const": "/api/admin/actions"},
+              "actions": {"type": "array", "items": {"type": "string"}}
+            }
+          },
+          "evaluation": {
+            "type": "object", "required": ["status"],
+            "properties": {"status": {"enum": ["managed", "not_enrolled", "unavailable"]}, "reason": {"type": "string"}}
+          },
+          "managed": {"type": "boolean", "description": "Evaluation enrollment only. Does not describe host management or weight editing."},
+          "ready": {"type": "boolean", "description": "True if evaluation policy, suite catalog and saved evaluation settings are valid. Not a check of any endpoint."},
+          "reason": {"type": "string", "description": "Evaluation configuration status, not a host-wide restriction."},
           "approved_ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "description": "Loopback ports that the operator approved for this worker."},
           "evaluation_allowed": {"type": "boolean", "description": "True only if worker policy, GPU load permission and the pinned image allow generate and evaluate. Set by the operator, not by this API."},
           "baseline_allowed": {"type": "boolean", "description": "False unless worker policy allows managed baseline endpoints."},
@@ -1122,7 +1160,17 @@
         "properties": {"action": {"const": "set_resource_policy"}, "worker": {"$ref": "#/components/schemas/AdminToken"}, "allow_pool": {"type": "boolean"}}
       },
       "AdminAction": {
-        "oneOf": [{"$ref": "#/components/schemas/AdminWorkerAction"}, {"$ref": "#/components/schemas/AdminRuntimeAction"}, {"$ref": "#/components/schemas/AdminPolicyAction"}, {"$ref": "#/components/schemas/AdminHostPolicyAction"}, {"$ref": "#/components/schemas/AdminHostResourcesAction"}]
+        "oneOf": [{"$ref": "#/components/schemas/AdminWorkerAction"}, {"$ref": "#/components/schemas/AdminRuntimeAction"}, {"$ref": "#/components/schemas/AdminPolicyAction"}, {"$ref": "#/components/schemas/AdminHostPolicyAction"}, {"$ref": "#/components/schemas/AdminHostResourcesAction"}, {"$ref": "#/components/schemas/AdminWeightEditorAction"}]
+      },
+      "WeightCalibrationMatrix": {
+        "type": "array", "minItems": 1, "maxItems": 1024,
+        "items": {"type": "array", "minItems": 1, "maxItems": 16384, "items": {"type": "number"}}
+      },
+      "AdminWeightEditorAction": {
+        "description": "Enable the installed CPU editor for a local source host, or disable weight editing there. The host policy revision must match. Disabling blocks new jobs; allocated jobs finish on their original executor. This action does not grant access to new source directories.",
+        "type": "object", "additionalProperties": false, "required": ["action", "worker", "revision", "enabled"],
+        "properties": {"action": {"const": "set_weight_editor"}, "worker": {"$ref": "#/components/schemas/HostId"},
+          "revision": {"type": "integer", "minimum": 0}, "enabled": {"type": "boolean"}}
       },
       "AdminJobKinds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/components/schemas/JobKind"}},
       "AdminHostPolicyAction": {
@@ -1152,9 +1200,15 @@
           "min_free_ram_bytes": {"$ref": "#/components/schemas/AdminResourceRange"}, "disk_reserve_bytes": {"$ref": "#/components/schemas/AdminResourceRange"}}
       },
       "AdminHostPolicy": {
-        "type": "object", "required": ["id", "name", "revision", "paused", "draining", "disabled_jobs", "installed_jobs", "allowed_jobs", "resources", "effective_resources", "resource_bounds"],
+        "type": "object", "required": ["id", "name", "revision", "paused", "draining", "disabled_jobs", "installed_jobs", "allowed_jobs", "resources", "effective_resources", "resource_bounds", "weight_editor"],
         "properties": {"id": {"$ref": "#/components/schemas/HostId"}, "name": {"$ref": "#/components/schemas/Name"},
           "revision": {"type": "integer", "minimum": 0}, "paused": {"type": "boolean"}, "draining": {"type": "boolean"},
+          "weight_editor": {"type": "object", "required": ["available", "enabled", "capabilities"], "properties": {
+            "available": {"type": "boolean", "description": "A verified editor is available for this control."},
+            "enabled": {"type": "boolean", "description": "Editor configured, independent of admission restrictions."},
+            "reason": {"type": "string"}, "capabilities": {"type": "object", "additionalProperties": {"type": "boolean"},
+              "description": "Effective host capabilities, not evidence that a particular file or tensor is editable."}
+          }},
           "disabled_jobs": {"$ref": "#/components/schemas/AdminJobKinds"}, "installed_jobs": {"$ref": "#/components/schemas/AdminJobKinds"},
           "allowed_jobs": {"$ref": "#/components/schemas/AdminJobKinds"}, "resources": {"$ref": "#/components/schemas/AdminResourceLimits"},
           "effective_resources": {"$ref": "#/components/schemas/AdminResourceLimits"}, "resource_bounds": {"$ref": "#/components/schemas/AdminResourceBounds"}}

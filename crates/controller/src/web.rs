@@ -52,6 +52,10 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
             post(suggest_paths).layer(DefaultBodyLimit::max(32 * 1024)),
         )
         .route("/models", post(add_model))
+        .route(
+            "/models/weight-calibration",
+            post(crate::backend_calibration::register),
+        )
         .route("/models/{id}", delete(delete_model))
         .route("/prompts", post(add_prompt))
         .route("/jobs", post(add_job))
@@ -250,9 +254,12 @@ async fn state(State(app): State<Shared>) -> Result<Json<Value>> {
 
 async fn get_settings(State(app): State<Shared>) -> Result<Json<Value>> {
     let _store = app.store.lock().map_err(ApiError::storage)?;
-    Ok(Json(
-        json!({"hosts":app.hosts.iter().map(|host| app.settings.view(host)).collect::<Vec<_>>()}),
-    ))
+    let hosts = app.defined_hosts().map_err(ApiError::storage)?;
+    let views: Vec<_> = hosts
+        .iter()
+        .map(|host| app.settings.view(host, app.admin.is_some()))
+        .collect();
+    Ok(Json(json!({"hosts": views})))
 }
 
 async fn put_settings(
@@ -264,14 +271,14 @@ async fn put_settings(
     let Json(settings) =
         payload.map_err(|error| ApiError(error.status(), "invalid settings request".into()))?;
     let store = app.store.lock().map_err(ApiError::storage)?;
-    let host = app
-        .hosts
+    let hosts = app.defined_hosts().map_err(ApiError::storage)?;
+    let host = hosts
         .iter()
         .find(|host| host.id == id)
         .ok_or_else(|| ApiError::not_found("host"))?;
     if let Some(admin) = &app.admin
         && !admin
-            .effective_hosts(std::slice::from_ref(host))
+            .effective_hosts(std::slice::from_ref(host), &app.local_edit)
             .map_err(ApiError::storage)?
             .iter()
             .any(|active| active.id == id)
@@ -287,15 +294,17 @@ async fn put_settings(
             "worker has queued or running jobs".into(),
         ));
     }
-    let view = app.settings.put(host, settings).map_err(|err| match err {
-        PutError::Locked => ApiError(StatusCode::CONFLICT, "worker settings are locked".into()),
-        PutError::NotReady => ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "worker settings unavailable".into(),
-        ),
-        PutError::Conflict => ApiError(StatusCode::CONFLICT, "settings revision conflict".into()),
-        PutError::Invalid(error) => ApiError::bad(error),
-    })?;
+    let view = app
+        .settings
+        .put(host, settings, app.admin.is_some())
+        .map_err(|err| match err {
+            PutError::NotEnrolled(reason) => ApiError(StatusCode::CONFLICT, reason.into()),
+            PutError::NotReady(reason) => ApiError(StatusCode::SERVICE_UNAVAILABLE, reason.into()),
+            PutError::Conflict => {
+                ApiError(StatusCode::CONFLICT, "settings revision conflict".into())
+            }
+            PutError::Invalid(error) => ApiError::bad(error),
+        })?;
     Ok(Json(json!(view)))
 }
 
@@ -562,9 +571,10 @@ async fn add_job(
         if host != crate::backend_hf::ID
             || !matches!(
                 request.kind.as_str(),
-                "weight_inspect" | "weight_propose" | "weight_apply"
+                "weight_inspect" | "weight_propose" | "weight_apply" | "weight_tune"
             )
-            || inputs.len() != 1
+            || inputs.len() != if request.kind == "weight_tune" { 3 } else { 1 }
+            || inputs.iter().any(|m| m.host != crate::backend_hf::ID)
         {
             return Err(ApiError::bad("backend files require a local weight job"));
         }
@@ -574,9 +584,23 @@ async fn add_job(
         {
             return Err(ApiError::bad("backend input has no verified publication"));
         }
-        if !crate::weights::is_safetensors(&inputs[0].kind) {
+        if !matches!(inputs[0].kind.as_str(), "gguf" | "hf" | "safetensors") {
             return Err(ApiError::bad(
-                "backend editing requires SafeTensors or an indexed Hugging Face checkpoint",
+                "backend editing requires GGUF, SafeTensors or an indexed Hugging Face checkpoint",
+            ));
+        }
+        if !app.backend_edit_formats.contains(&inputs[0].kind) {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "backend editor does not support this model format".into(),
+            ));
+        }
+        if inputs[1..]
+            .iter()
+            .any(|m| !crate::backend_calibration::is_managed(app.backend_calibration.as_deref(), m))
+        {
+            return Err(ApiError::bad(
+                "backend tuning requires registered calibration inputs",
             ));
         }
     }
@@ -627,7 +651,13 @@ async fn add_job(
         ),
         (None, prompt) => prompt.clone(),
     };
-    let (job, mut envelope) = request.build(host, inputs, prompt).map_err(ApiError::bad)?;
+    let (mut job, mut envelope) = request.build(host, inputs, prompt).map_err(ApiError::bad)?;
+    let hosts = app.effective_hosts().map_err(ApiError::storage)?;
+    if crate::weights::is_kind(&job.kind) {
+        job.local_edit = hosts
+            .iter()
+            .any(|entry| entry.id == job.host && entry.local_edit);
+    }
     if job.kind == "weight_apply" {
         let prior_id = job.options["proposal_job_id"]
             .as_str()
@@ -637,6 +667,11 @@ async fn add_job(
             .map_err(ApiError::storage)?
             .ok_or_else(|| ApiError::not_found("proposal job"))?;
         let saved = store.envelope(prior_id).map_err(ApiError::storage)?;
+        if prior.local_edit != job.local_edit {
+            return Err(ApiError::bad(
+                "make a new proposal on the current weight editor",
+            ));
+        }
         let result = store
             .job_result(prior_id)
             .map_err(ApiError::storage)?
@@ -647,7 +682,6 @@ async fn add_job(
         envelope.inputs.push(proposal);
         envelope.options = checks.as_object().expect("apply checks").clone();
     }
-    let hosts = app.effective_hosts().map_err(ApiError::storage)?;
     if candidates(&job, &envelope, &hosts).is_empty() {
         return Err(ApiError(
             StatusCode::CONFLICT,

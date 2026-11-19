@@ -58,6 +58,8 @@ fn run_configured(
         .env("BREWERY_WEIGHT_PACKED", if packed { "1" } else { "0" })
         .env_remove("BREWERY_EXPECTED_SOURCE_SHA256")
         .env_remove("BREWERY_WEIGHT_SAFETENSORS_PUBLICATION")
+        .env_remove("BREWERY_WEIGHT_CHUNK_INDEX")
+        .env_remove("BREWERY_WEIGHT_CHUNK_INDEX_SHA256")
         .env_remove("BREWERY_WEIGHT_SAFETENSORS_VERIFY_BYTES")
         .env_remove("BREWERY_WEIGHT_SAFETENSORS_DISK_RESERVE_BYTES")
         .envs(env.iter().copied())
@@ -80,9 +82,11 @@ fn run_configured(
 fn real_safetensors_and_indexed_hf_apply_publish_complete_independent_outputs() {
     use brewery_worker::{tree_digest, Entry};
     let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     python_helpers(root.path());
     let tensor = "layer.weight";
-    let config_bytes = b"{\"model_type\":\"fixture\"}\n";
+    let mut config_bytes = b"{\"model_type\":\"fixture\"}\n".to_vec();
+    config_bytes.resize((1 << 20) + 1, b' ');
     let index_name = "model.safetensors.index.json";
     let shard_name = "model-00001-of-00002.safetensors";
     let neighbor_name = "model-00002-of-00002.safetensors";
@@ -97,12 +101,14 @@ fn real_safetensors_and_indexed_hf_apply_publish_complete_independent_outputs() 
         bytes
     };
     for kind in ["safetensors", "hf"] {
+        let chunks = root.path().join("chunks.json");
+        let mut chunks_sha = None;
         let original = encode(tensor, [1., 2., 3., 4.]);
         let neighbor = encode("neighbor.weight", [5., 6., 7., 8.]);
         let path = root.path().join(format!("fixture.{kind}"));
         let (source, original_path) = if kind == "hf" {
             fs::create_dir(&path).unwrap();
-            fs::write(path.join("config.json"), config_bytes).unwrap();
+            fs::write(path.join("config.json"), &config_bytes).unwrap();
             fs::write(
                 path.join(index_name),
                 json!({
@@ -127,6 +133,22 @@ fn real_safetensors_and_indexed_hf_apply_publish_complete_independent_outputs() 
                 .collect::<Vec<_>>();
             let tree = tree_digest(&files);
             let bytes = files.iter().map(|i| i.bytes).sum::<u64>();
+            let receipt = root.path().join("published.json");
+            let members: serde_json::Map<String, Value> = files
+                .iter()
+                .map(|f| (f.path.clone(), json!({"size":f.bytes,"sha256":f.sha256})))
+                .collect();
+            fs::write(
+                &receipt,
+                json!({
+                    "schema":"model-brewery.source-publication.v1","model_dir":path,"files":members
+                })
+                .to_string(),
+            )
+            .unwrap();
+            chunks_sha = Some(
+                brewery_worker::weight_source::build_chunk_index(&receipt, &tree, &chunks).unwrap(),
+            );
             (
                 json!({"kind":"hf","host":"fixture","path":path,"sha256":tree,"bundle_sha256":tree,
                 "bytes":bytes,"files":files}),
@@ -139,10 +161,14 @@ fn real_safetensors_and_indexed_hf_apply_publish_complete_independent_outputs() 
             (source, path.clone())
         };
         let source_only = std::slice::from_ref(&source);
-        let safe_env = &[
-            ("BREWERY_WEIGHT_SAFETENSORS", "1"),
-            ("BREWERY_WEIGHT_SAFETENSORS_VERIFY_BYTES", "67108864"),
-        ];
+        let mut safe_env = vec![("BREWERY_WEIGHT_SAFETENSORS", "1")];
+        if let Some(pin) = &chunks_sha {
+            safe_env.push(("BREWERY_WEIGHT_CHUNK_INDEX", chunks.to_str().unwrap()));
+            safe_env.push(("BREWERY_WEIGHT_CHUNK_INDEX_SHA256", pin.as_str()));
+        } else {
+            safe_env.push(("BREWERY_WEIGHT_SAFETENSORS_VERIFY_BYTES", "67108864"));
+        }
+        let safe_env = safe_env.as_slice();
         let execute = |stage, inputs: &[Value], opts, env: &[(&str, &str)]| {
             run_configured(root.path(), stage, inputs, opts, false, false, env)
         };
@@ -215,22 +241,15 @@ fn real_safetensors_and_indexed_hf_apply_publish_complete_independent_outputs() 
         let rejected = execute("weight_apply", &apply_inputs, stale, safe_env);
         assert!(!rejected.status.success() && rejected.stdout.is_empty());
         assert!(String::from_utf8_lossy(&rejected.stderr).contains("approved source or proposal"));
-        let no_space = execute(
-            "weight_apply",
-            &apply_inputs,
-            approved.clone(),
-            &[
-                safe_env[0],
-                safe_env[1],
-                (
-                    "BREWERY_WEIGHT_SAFETENSORS_DISK_RESERVE_BYTES",
-                    "1000000000000000",
-                ),
-            ],
-        );
+        let mut disk_env = safe_env.to_vec();
+        disk_env.push((
+            "BREWERY_WEIGHT_SAFETENSORS_DISK_RESERVE_BYTES",
+            "1000000000000000",
+        ));
+        let no_space = execute("weight_apply", &apply_inputs, approved.clone(), &disk_env);
         assert!(!no_space.status.success() && no_space.stdout.is_empty());
         assert!(String::from_utf8_lossy(&no_space.stderr).contains("insufficient disk"));
-        let applied = success("weight_apply", &apply_inputs, approved);
+        let applied = success("weight_apply", &apply_inputs, approved.clone());
         assert_eq!(applied["verified"], true);
         assert_eq!(applied["proposal_sha256"], apply_inputs[1]["sha256"]);
         assert_eq!(applied["inputs"][0]["files"], source["files"]);
@@ -256,7 +275,32 @@ fn real_safetensors_and_indexed_hf_apply_publish_complete_independent_outputs() 
             output.into()
         };
         assert_eq!(fs::read(&leaf).unwrap(), encode(tensor, [1., 6., 3., 4.]));
-        assert_eq!(fs::read(original_path).unwrap(), original);
+        assert_eq!(fs::read(&original_path).unwrap(), original);
+        if kind == "hf" {
+            let tile = json!({"mode":"tile","tensor":tensor,"origin":[0,0],"shape":[2,2],"source_sha256":source["sha256"]});
+            let mut changed_asset = config_bytes.clone();
+            *changed_asset.last_mut().unwrap() = b'X';
+            fs::write(path.join("config.json"), changed_asset).unwrap();
+            // The untouched second asset chunk is not needed to authenticate a
+            // tensor tile, but apply must reverify the entire original.
+            assert_eq!(
+                success("weight_inspect", source_only, tile.clone())["report"]["values"],
+                json!([[1., 2.], [3., 4.]])
+            );
+            let refused = execute("weight_apply", &apply_inputs, approved, safe_env);
+            assert!(!refused.status.success() && refused.stdout.is_empty());
+            fs::write(path.join("config.json"), &config_bytes).unwrap();
+            let mut changed_weight = original.clone();
+            *changed_weight.last_mut().unwrap() ^= 1;
+            fs::write(original_path, changed_weight).unwrap();
+            let refused = execute("weight_inspect", source_only, tile.clone(), safe_env);
+            assert!(!refused.status.success() && refused.stdout.is_empty());
+            fs::write(&chunks, b"{}").unwrap();
+            let refused = execute("weight_inspect", source_only, tile, safe_env);
+            assert!(
+                String::from_utf8_lossy(&refused.stderr).contains("chunk index SHA-256 mismatch")
+            );
+        }
     }
 }
 

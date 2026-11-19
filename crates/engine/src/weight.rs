@@ -1,8 +1,8 @@
-use crate::{bounded, child_budget, child_threads, converter, integrity, progress::Progress, Job};
-use anyhow::{bail, ensure, Context, Result};
+use crate::{Job, bounded, child_budget, child_threads, converter, integrity, progress::Progress};
+use anyhow::{Context, Result, bail, ensure};
 use brewery_worker::weight_source;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
@@ -360,6 +360,14 @@ pub(crate) fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let scratch = if native_safe {
         tempfile::Builder::new()
             .prefix(safetensors::SCRATCH_PREFIX)
+            .tempdir_in(cwd)?
+    } else if source_kind == "gguf" {
+        tempfile::Builder::new()
+            .prefix(".weight-gguf-")
+            .tempdir_in(cwd)?
+    } else if source_kind == "hgn" {
+        tempfile::Builder::new()
+            .prefix(".weight-hgn-")
             .tempdir_in(cwd)?
     } else {
         tempfile::tempdir_in(cwd)?

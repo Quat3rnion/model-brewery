@@ -1,6 +1,6 @@
 use crate::{converter, integrity::Identity, Input};
 use anyhow::{ensure, Context, Result};
-use brewery_worker::weight_source::{self, Verified};
+use brewery_worker::weight_source::{self, Proof};
 use sha2::{Digest, Sha256};
 use std::{
     env, fs,
@@ -15,8 +15,8 @@ pub(super) const DISK_RESERVE: &str = "BREWERY_WEIGHT_SAFETENSORS_DISK_RESERVE_B
 
 pub(super) struct Source {
     pub path: PathBuf,
-    // The measured descriptors stay open across all helper reads.
-    _proof: Option<Verified>,
+    // For verity, measured descriptors stay open across all helper reads.
+    _proof: Option<Proof>,
 }
 
 impl Source {
@@ -39,13 +39,13 @@ impl Source {
                 .is_none_or(|host| host == &input.host),
             "SafeTensors weight jobs require a direct local source"
         );
-        let proof = weight_source::configured_publication(&input.path, &input.kind)?;
+        let proof = weight_source::proof(&input.path, &input.kind, |key| env::var_os(key))?;
         let needed = if let Some(proof) = &proof {
+            let bundle = proof.bundle();
             ensure!(
-                proof.bundle.digest == id.bundle_sha256
-                    && proof.bundle.files.len() == id.files.len()
-                    && proof
-                        .bundle
+                bundle.digest == id.bundle_sha256
+                    && bundle.files.len() == id.files.len()
+                    && bundle
                         .files
                         .iter()
                         .zip(&id.files)
@@ -90,7 +90,7 @@ impl Source {
             .open(work.join("source-manifest.json"))?;
         let path = match &proof {
             Some(verified) => {
-                serde_json::to_writer(&manifest, &verified.measured)?;
+                verified.write_manifest(&manifest)?;
                 input.path.clone()
             }
             None => {
@@ -140,7 +140,7 @@ impl Source {
             }
         };
         ensure!(
-            manifest.metadata()?.len() <= weight_source::LIMIT,
+            manifest.metadata()?.len() <= weight_source::CHUNK_INDEX_LIMIT,
             "SafeTensors helper manifest too large"
         );
         id.check()?;

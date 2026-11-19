@@ -22,11 +22,13 @@ pub struct Lane {
     pub dispatch: PathBuf,
     pub dispatch_config: PathBuf,
     pub edit_config: Option<PathBuf>,
+    pub calibration: Option<PathBuf>,
+    pub edit_formats: std::collections::BTreeSet<String>,
     local: Value,
 }
 
 impl Lane {
-    pub fn prepare(data: &Path, dist: &Path) -> Result<Option<Self>, Error> {
+    pub async fn prepare(data: &Path, dist: &Path) -> Result<Option<Self>, Error> {
         let installed = env::current_exe()?;
         let dir = installed
             .parent()
@@ -52,27 +54,73 @@ impl Lane {
         let token = credentials.join("token");
         let config = root.join("worker.json");
         let dispatch_config = root.join("dispatch.json");
-        let editor = executable(dir, "BREWERY_HF_WEIGHT_EDIT", "brewery-weight-edit");
-        let edit_config = if let Some(editor) = &editor {
+        let editor = if let Some(path) =
+            executable(dir, "BREWERY_HF_WEIGHT_EDIT", "brewery-weight-edit")
+        {
+            crate::local_edit::probe(&path, &["weight_inspect", "weight_propose", "weight_apply"])
+                .await
+                .map(|caps| (path, caps))
+        } else {
+            None
+        };
+        let edit_formats = editor
+            .as_ref()
+            .map(|(_, caps)| {
+                caps.formats
+                    .iter()
+                    .filter(|name| matches!(name.as_str(), "gguf" | "hf" | "safetensors"))
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let editor = editor.filter(|_| !edit_formats.is_empty());
+        let tuner = if let (Some((_, edit)), Some(path)) = (
+            &editor,
+            executable(dir, "BREWERY_HF_WEIGHT_TUNE", "brewery-weight-tune"),
+        ) {
+            crate::local_edit::probe(&path, &["weight_tune"])
+                .await
+                .filter(|tune| {
+                    edit_formats.is_subset(&tune.formats)
+                        && (!edit.visual || tune.visual)
+                        && (!edit.packed || !edit_formats.contains("gguf") || tune.packed)
+                })
+                .map(|_| path)
+        } else {
+            None
+        };
+        let visual = editor.as_ref().is_some_and(|(_, caps)| caps.visual);
+        let packed = editor
+            .as_ref()
+            .is_some_and(|(_, caps)| caps.packed && edit_formats.contains("gguf"));
+        let safetensors = edit_formats.contains("hf") || edit_formats.contains("safetensors");
+        let calibration = tuner.as_ref().map(|_| root.join("calibration"));
+        if let Some(path) = &calibration {
+            private_dir(path)?;
+        }
+        let edit_config = if let Some((editor, _)) = &editor {
             let edit_root = root.join("editor");
             private_dir(&edit_root)?;
             let config = root.join("editor.json");
-            brewery_worker::atomic(
-                &config,
-                &json!({
-                    "root":edit_root,"engine":engine,"disk_reserve_bytes":DISK_RESERVE_BYTES,
-                    "backend_weight_download_root":worker_root,
-                    "engine_env":{
-                        "BREWERY_WEIGHT_EDIT":editor,
-                        "BREWERY_WEIGHT_VISUAL":"1",
-                        "BREWERY_WEIGHT_SAFETENSORS":"1",
-                        "BREWERY_WEIGHT_SAFETENSORS_VERIFY_BYTES":"67108864",
-                        "BREWERY_CPU_THREADS":"2",
-                        "OPENBLAS_NUM_THREADS":"2","OMP_NUM_THREADS":"2","MKL_NUM_THREADS":"2",
-                        "PYTHONNOUSERSITE":"1"
-                    }
-                }),
-            )?;
+            let mut options = json!({
+                "root":edit_root,"engine":engine,"disk_reserve_bytes":DISK_RESERVE_BYTES,
+                "backend_weight_download_root":worker_root,
+                "engine_env":{
+                    "BREWERY_WEIGHT_EDIT":editor,
+                    "BREWERY_WEIGHT_PACKED": if packed {"1"} else {"0"},
+                    "BREWERY_WEIGHT_VISUAL": if visual {"1"} else {"0"},
+                    "BREWERY_WEIGHT_SAFETENSORS": if safetensors {"1"} else {"0"},
+                    "BREWERY_WEIGHT_SAFETENSORS_VERIFY_BYTES":"67108864",
+                    "BREWERY_CPU_THREADS":"2",
+                    "OPENBLAS_NUM_THREADS":"2","OMP_NUM_THREADS":"2","MKL_NUM_THREADS":"2",
+                    "PYTHONNOUSERSITE":"1"
+                }
+            });
+            if let Some(tuner) = &tuner {
+                options["engine_env"]["BREWERY_WEIGHT_TUNE"] = json!(tuner);
+                options["backend_weight_calibration_root"] = json!(calibration);
+            }
+            brewery_worker::atomic(&config, &options)?;
             let dispatch = root.join("editor-dispatch.json");
             brewery_worker::atomic(
                 &dispatch,
@@ -91,6 +139,7 @@ impl Lane {
                     kind.into(),
                     json!(
                         kind == "hf_download"
+                            || (kind == "weight_tune" && tuner.is_some())
                             || (editor.is_some()
                                 && matches!(
                                     kind,
@@ -109,8 +158,9 @@ impl Lane {
             "hf_token_file": token
         });
         let mut local = local;
-        local["capabilities"]["weight_visual"] = json!(editor.is_some());
-        local["capabilities"]["weight_safetensors"] = json!(editor.is_some());
+        local["capabilities"]["weight_visual"] = json!(visual);
+        local["capabilities"]["weight_safetensors"] = json!(safetensors);
+        local["capabilities"]["weight_packed"] = json!(packed);
         brewery_worker::atomic(
             &config,
             &json!({
@@ -125,6 +175,8 @@ impl Lane {
             dispatch,
             dispatch_config,
             edit_config,
+            calibration,
+            edit_formats,
             local,
         }))
     }
@@ -141,6 +193,7 @@ impl Lane {
         match kind {
             "hf_download" => Some(&self.dispatch_config),
             "weight_inspect" | "weight_propose" | "weight_apply" => self.edit_config.as_deref(),
+            "weight_tune" if self.calibration.is_some() => self.edit_config.as_deref(),
             _ => None,
         }
     }

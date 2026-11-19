@@ -29,10 +29,58 @@ struct Profile {
     settings: Settings,
 }
 
+enum ProfileError {
+    NotEnrolled,
+    Unavailable(&'static str),
+}
+
+#[derive(Serialize)]
+struct Management {
+    href: String,
+    available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+    state_url: &'static str,
+    action_url: &'static str,
+    actions: &'static [&'static str],
+}
+
+impl Management {
+    fn for_host(host: &Host, available: bool) -> Self {
+        Self {
+            // Host IDs use only ASCII letters, digits, '.', '_' and '-'.
+            href: format!("#/settings/infrastructure?host={}", host.id),
+            available,
+            reason: (!available).then_some("Infrastructure administration is not configured"),
+            state_url: "/api/admin/state",
+            action_url: "/api/admin/actions",
+            actions: &["set_host_policy", "set_host_resources"],
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EvaluationStatus {
+    Managed,
+    NotEnrolled,
+    Unavailable,
+}
+
+#[derive(Serialize)]
+struct Evaluation {
+    status: EvaluationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+}
+
 #[derive(Serialize)]
 pub struct View<'a> {
     id: &'a str,
     name: &'a str,
+    management: Management,
+    evaluation: Evaluation,
+    // Compatibility fields describe evaluation settings only, not host management.
     managed: bool,
     ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,8 +94,8 @@ pub struct View<'a> {
 }
 
 pub enum PutError {
-    Locked,
-    NotReady,
+    NotEnrolled(&'static str),
+    NotReady(&'static str),
     Conflict,
     Invalid(String),
 }
@@ -85,16 +133,27 @@ impl Managed {
         self.entries.contains_key(id)
     }
 
-    fn profile(&self, id: &str) -> Option<Profile> {
-        let path = self.entries.get(id)?.as_ref()?;
-        let config: WorkerConfig = operational::read(path).ok()?;
+    fn profile(&self, id: &str) -> Result<Profile, ProfileError> {
+        let path = self
+            .entries
+            .get(id)
+            .ok_or(ProfileError::NotEnrolled)?
+            .as_ref()
+            .ok_or(ProfileError::Unavailable(
+                "Managed evaluation requires a local worker with an absolute config path",
+            ))?;
+        let config: WorkerConfig = operational::read(path).map_err(|_| {
+            ProfileError::Unavailable("Check that the local worker config is readable and valid")
+        })?;
         if config.pinned_publication.is_some()
             || config
                 .engine_env
                 .contains_key("BREWERY_EXPECTED_SOURCE_SHA256")
             || std::env::var_os("BREWERY_EXPECTED_SOURCE_SHA256").is_some()
         {
-            return None;
+            return Err(ProfileError::Unavailable(
+                "Source-pinned workers cannot use managed evaluation settings; use a separate worker",
+            ));
         }
         // One managed alias per private config root; aliases would evade busy
         // checking. Separate workers must have disjoint state roots.
@@ -103,14 +162,24 @@ impl Managed {
                 && let Ok(other) = operational::read::<WorkerConfig>(path)
                 && (other.root.starts_with(&config.root) || config.root.starts_with(&other.root))
             {
-                return None;
+                return Err(ProfileError::Unavailable(
+                    "Managed evaluation requires a separate private state root for each worker",
+                ));
             }
         }
-        let policy = config.managed_settings?;
-        let catalog = policy.load_catalog().ok()?;
+        let policy = config.managed_settings.ok_or(ProfileError::Unavailable(
+            "Add a managed evaluation policy to the local worker config",
+        ))?;
+        let catalog = policy.load_catalog().map_err(|_| {
+            ProfileError::Unavailable("Check the worker policy's approved ports and suite catalog")
+        })?;
         let eval_ready = operational::eval_ready(&policy, &config.engine_env);
-        let settings = Settings::load(&config.root).ok()?;
-        Some(Profile {
+        let settings = Settings::load(&config.root).map_err(|_| {
+            ProfileError::Unavailable(
+                "Check the worker's private state root and saved evaluation settings",
+            )
+        })?;
+        Ok(Profile {
             root: config.root,
             policy,
             catalog,
@@ -119,13 +188,24 @@ impl Managed {
         })
     }
 
-    pub fn view<'a>(&self, host: &'a Host) -> View<'a> {
-        let managed = self.enrolled(&host.id);
+    pub fn view<'a>(&self, host: &'a Host, management_available: bool) -> View<'a> {
+        let management = Management::for_host(host, management_available);
         match self.profile(&host.id) {
-            Some(profile) => View {
+            Ok(profile) => View {
                 id: &host.id,
                 name: &host.name,
-                managed,
+                management,
+                evaluation: Evaluation {
+                    status: EvaluationStatus::Managed,
+                    reason: if !profile.policy.evaluation_allowed {
+                        Some("Evaluation and generation are disabled by the worker policy")
+                    } else if !profile.eval_ready {
+                        Some("Ask the operator to configure GPU loading and pin a Halogen image")
+                    } else {
+                        None
+                    },
+                },
+                managed: true,
                 ready: true,
                 reason: None,
                 approved_ports: profile.policy.allowed_ports,
@@ -139,30 +219,48 @@ impl Managed {
                     .collect(),
                 settings: profile.settings,
             },
-            None => View {
-                id: &host.id,
-                name: &host.name,
-                managed,
-                ready: false,
-                reason: Some(if managed {
-                    "Worker policy or suite catalog unavailable"
-                } else {
-                    "Worker settings are locked"
-                }),
-                approved_ports: Vec::new(),
-                evaluation_allowed: false,
-                baseline_allowed: false,
-                approved_suites: Vec::new(),
-                settings: Settings::default(),
-            },
+            Err(error) => {
+                let (status, managed, reason) = match error {
+                    ProfileError::NotEnrolled => (
+                        EvaluationStatus::NotEnrolled,
+                        false,
+                        not_enrolled_reason(&host.id),
+                    ),
+                    ProfileError::Unavailable(reason) => {
+                        (EvaluationStatus::Unavailable, true, reason)
+                    }
+                };
+                View {
+                    id: &host.id,
+                    name: &host.name,
+                    management,
+                    evaluation: Evaluation {
+                        status,
+                        reason: Some(reason),
+                    },
+                    managed,
+                    ready: false,
+                    reason: Some(reason),
+                    approved_ports: Vec::new(),
+                    evaluation_allowed: false,
+                    baseline_allowed: false,
+                    approved_suites: Vec::new(),
+                    settings: Settings::default(),
+                }
+            }
         }
     }
 
-    pub fn put<'a>(&self, host: &'a Host, mut replacement: Settings) -> Result<View<'a>, PutError> {
-        if !self.enrolled(&host.id) {
-            return Err(PutError::Locked);
-        }
-        let profile = self.profile(&host.id).ok_or(PutError::NotReady)?;
+    pub fn put<'a>(
+        &self,
+        host: &'a Host,
+        mut replacement: Settings,
+        management_available: bool,
+    ) -> Result<View<'a>, PutError> {
+        let profile = self.profile(&host.id).map_err(|error| match error {
+            ProfileError::NotEnrolled => PutError::NotEnrolled(not_enrolled_reason(&host.id)),
+            ProfileError::Unavailable(reason) => PutError::NotReady(reason),
+        })?;
         if replacement.revision != profile.settings.revision {
             return Err(PutError::Conflict);
         }
@@ -173,10 +271,12 @@ impl Managed {
             .revision
             .checked_add(1)
             .ok_or(PutError::Conflict)?;
-        replacement
-            .save(&profile.root)
-            .map_err(|_| PutError::NotReady)?;
-        Ok(self.view(host))
+        replacement.save(&profile.root).map_err(|_| {
+            PutError::NotReady(
+                "Could not save evaluation settings; check the worker's private state root",
+            )
+        })?;
+        Ok(self.view(host, management_available))
     }
 
     pub fn effective(&self, hosts: &[Host]) -> Vec<Host> {
@@ -191,7 +291,7 @@ impl Managed {
                 host.benchmark_targets.clear();
                 host.benchmarks.clear();
                 host.baseline_sources.clear();
-                if let Some(profile) = self.profile(&host.id)
+                if let Ok(profile) = self.profile(&host.id)
                     && profile
                         .settings
                         .validate(&profile.policy, &profile.catalog, profile.eval_ready)
@@ -237,6 +337,14 @@ impl Managed {
                 host
             })
             .collect()
+    }
+}
+
+fn not_enrolled_reason(id: &str) -> &'static str {
+    if id == crate::backend_hf::ID {
+        "The backend worker does not run evaluation; select an evaluation worker"
+    } else {
+        "This worker is not enrolled for managed evaluation; ask the operator to configure an eligible local worker"
     }
 }
 

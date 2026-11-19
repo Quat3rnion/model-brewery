@@ -14,6 +14,8 @@ pub(super) struct Policy {
     pub disabled_jobs: BTreeSet<String>,
     #[serde(default)]
     pub resources: Limits,
+    #[serde(default)]
+    pub weight_editor: Option<bool>,
 }
 
 impl Policy {

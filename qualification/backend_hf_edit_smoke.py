@@ -22,6 +22,8 @@ from urllib.request import Request
 
 import managed_hfr_smoke as hf
 from managed_safetensors_smoke import ORIGINAL, SHARD, TENSOR, describe, digest, fixture
+from managed_weight_smoke import matrix
+from managed_packed_weight_smoke import fixture as packed_fixture
 
 HOST = "backend-hf"
 EDITED = (1, 2.5, 3, 4)
@@ -50,7 +52,7 @@ def edit_case(smoke, lane, kind):
     source = lane / "worker/jobs" / download["id"] / "work/download"
     if filename:
         source /= filename
-    expected = fixture("hf")
+    expected = dict(hf.FILES)
     if filename:
         expected = {"": expected[filename]}
     source_pin = digest(expected)
@@ -94,7 +96,7 @@ def edit_case(smoke, lane, kind):
     models = smoke.models()
     revised = models[edited_id]
     output = lane / "editor/jobs" / applied["id"] / "work" / f"edited.{kind}"
-    expected = fixture("hf", EDITED)
+    expected = {**hf.FILES, **fixture("hf", EDITED)}
     if filename:
         expected = {"": expected[filename]}
     output_pin = digest(expected)
@@ -160,20 +162,87 @@ def refuse_paths(smoke, lane):
     return results
 
 
+def gguf_case(smoke, lane, packed):
+    label = "packed" if packed else "float"
+    filename = f"{label}.gguf"
+    source = submit(smoke, f"{label}-download", "hf_download",
+                    {"repo_id": hf.REPO, "filename": filename})
+    source_pin = source["result"]["artifact"]["sha256"]
+    original_path = Path(source["result"]["artifact"]["path"])
+    original = hf.FILES[filename]
+    source_id = source["result"]["library_model_id"]
+    if packed:
+        one = [1] + [0] * 31
+        two = [0] * 16 + [1] + [0] * 15
+        train = ([one, two], [[1], [1.5]])
+        held = ([[a+b for a, b in zip(one, two)]], [[0]])
+        indices = [[0, 0], [0, 16]]
+        expected = packed_fixture("Q8_0", (2, 3))
+    else:
+        train = ([[1, 0], [0, 1]], [[2, 3], [2, 3]])
+        held = ([[1, 1], [2, -1]], [[3, 7], [0, 2]])
+        indices = [[0, 0], [1, 1]]
+        expected = matrix((2, 2, 3, 3))
+    data = [smoke.call("models/weight-calibration",
+                       {"name": f"{label}-{n}", "activations": batch[0], "targets": batch[1]},
+                       status=201) for n, batch in (("train", train), ("held", held))]
+    tuning = {"tensor": TENSOR, "indices": indices, "max_update": 1.5,
+              "source_sha256": source_pin}
+    if packed:
+        tuning["packed"] = True
+    tune = submit(smoke, f"{label}-tune", "weight_tune", tuning,
+                  [source_id, data[0]["id"], data[1]["id"]])
+    r = tune["result"]
+    for key, model in zip(("calibration_sha256", "held_out_sha256"), data):
+        expected_pin = Path(model["path"]).stem
+        hf.need(r["report"]["tune"][key] == expected_pin, "tune did not bind calibration bytes")
+    other = next(m["id"] for m in smoke.models().values() if m["kind"] == "safetensors")
+    smoke.call("jobs", {"kind": "weight_apply", "options": {
+        "proposal_job_id": tune["id"], "reviewed": True}, "input_ids": [other]}, status=400)
+    applied = submit(smoke, f"{label}-apply", "weight_apply",
+                     {"proposal_job_id": tune["id"], "reviewed": True}, [source_id])
+    result = applied["result"]
+    revision = Path(result["artifact"]["path"])
+    hf.need(revision == lane / "editor/jobs" / applied["id"] / "work/edited.gguf"
+            and original_path.read_bytes() == original
+            and revision.read_bytes() == expected and result["artifact"]["kind"] == "gguf"
+            and result["inputs"][1]["sha256"] == r["artifact"]["sha256"]
+            and (not packed or result["proposal_sha256"] == r["artifact"]["sha256"]),
+            "reviewed GGUF apply did not publish exactly the expected native bytes")
+    opts = {"mode": "tile", "tensor": TENSOR, "origin": [0, 0], "shape": [1, 2],
+            "source_sha256": result["artifact"]["sha256"]}
+    if packed:
+        opts["packed"] = True
+    submit(smoke, f"{label}-reopen", "weight_inspect", opts, [result["library_model_id"]])
+    return {"tune": tune["id"], "apply": applied["id"], "revision": result["library_model_id"]}
+
+
 def run(root, args):
     for name in ("home", "tmp", "web"):
         (root / name).mkdir()
-    editor = root / "brewery-weight-edit"
-    command = ["/usr/bin/env", f"PYTHONPATH={args.gguf_python}", sys.executable,
-               "-B", str(REPO_ROOT / "tools/weight_edit.py")]
-    editor.write_text(f'#!/bin/sh\nexec {shlex.join(command)} "$@"\n')
-    editor.chmod(0o700)
+    for kind, jobs in (("edit", ["weight_inspect", "weight_propose", "weight_apply"]),
+                       ("tune", ["weight_tune"])):
+        helper = root / f"brewery-weight-{kind}"
+        packaged = args.bin_dir / helper.name
+        if packaged.is_file():
+            helper.symlink_to(packaged)
+            continue
+        command = ["/usr/bin/env", f"PYTHONPATH={args.gguf_python}", sys.executable,
+                   "-B", str(REPO_ROOT / f"tools/weight_{kind}.py")]
+        receipt = json.dumps({"schema": "brewery.weight-runtime.v1", "jobs": jobs,
+                              "formats": ["gguf", "hf", "safetensors"], "visual": True, "packed": True})
+        helper.write_text(f'#!/bin/sh\nif [ "$1" = --capabilities ]; then printf \'%s\\n\' {shlex.quote(receipt)}; exit; fi\n'
+                          f'exec {shlex.join(command)} "$@"\n')
+        helper.chmod(0o700)
     # Do not add regular workers or expose any host-local model path.
     hf.save(root / "dispatch.json", {"hosts": {}})
+    helpers = [(root / f"brewery-weight-{kind}").resolve(strict=True) for kind in ("edit", "tune")]
     env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(root / "home"),
            "TMPDIR": str(root / "tmp"), "BREWERY_WEB_DIST": str(root / "web"),
-           "BREWERY_HF_HFR": str(args.hfr), "BREWERY_HF_WEIGHT_EDIT": str(editor)}
-    hf.FILES = fixture("hf")
+           "BREWERY_HF_HFR": str(args.hfr), "BREWERY_HF_WEIGHT_EDIT": str(helpers[0]),
+           "BREWERY_HF_WEIGHT_TUNE": str(helpers[1])}
+    hf.FILES = {**fixture("hf"), "float.gguf": matrix(ORIGINAL),
+                "packed.gguf": packed_fixture("Q8_0", (0, 0))}
     with hf.hub(root) as server, hf.controller(root, args.bin_dir, env) as url:
         server.holds[hf.REPO][1].set()
         smoke = hf.Smoke(root, url, server)
@@ -184,7 +253,7 @@ def run(root, args):
         caps = state["hosts"][0]["capabilities"]
         hf.need(all(caps.get(k) is True for k in ("hf_download", "weight_inspect", "weight_propose",
                                                  "weight_apply", "weight_safetensors"))
-                and caps.get("weight_tune") is False, "needs integrated local editor build")
+                and caps.get("weight_tune") is True, "needs integrated local editor build")
         lane = root / "controller" / HOST
         config = lane / "worker.json"
         policy = json.loads(config.read_text())
@@ -194,6 +263,7 @@ def run(root, args):
         hf.save(config, policy)
         hf.need(policy["root"] == str(lane / "worker"), "unexpected backend worker root")
         results = {kind: edit_case(smoke, lane, kind) for kind in ("hf", "safetensors")}
+        results.update(gguf_float=gguf_case(smoke, lane, False), gguf_packed=gguf_case(smoke, lane, True))
         results["untrusted_paths"] = refuse_paths(smoke, lane)
         hf.save(root / "final-state.json", smoke.call("state"))
         hf.need(not any(row["credential"] for row in server.requests), "fixture received credentials")

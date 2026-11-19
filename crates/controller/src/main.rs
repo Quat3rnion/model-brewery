@@ -1,4 +1,5 @@
 mod admin;
+mod backend_calibration;
 mod backend_hf;
 mod conversion;
 mod dispatch;
@@ -9,6 +10,7 @@ mod hf_download;
 mod hf_tokens;
 mod idempotency;
 mod infra_hosts;
+mod local_edit;
 mod profiles;
 mod settings;
 mod store;
@@ -37,7 +39,10 @@ struct App {
     settings: settings::Managed,
     hf_tokens: hf_tokens::Store,
     backend_download: bool,
+    backend_calibration: Option<PathBuf>,
+    backend_edit_formats: std::collections::BTreeSet<String>,
     pub admin: Option<admin::Admin>,
+    local_edit: Arc<local_edit::Lanes>,
     ssh_hosts: Arc<infra_hosts::Registry>,
     suggestions: suggestions::PathSuggestions,
     feed_subscribers: Arc<tokio::sync::Semaphore>,
@@ -53,7 +58,7 @@ impl App {
     fn effective_hosts(&self) -> Result<Vec<Host>, Error> {
         let hosts = self.settings.effective(&self.defined_hosts()?);
         match &self.admin {
-            Some(admin) => admin.effective_hosts(&hosts),
+            Some(admin) => admin.effective_hosts(&hosts, &self.local_edit),
             None => Ok(hosts),
         }
     }
@@ -91,17 +96,26 @@ async fn main() -> Result<(), Error> {
         .unwrap_or_default();
     let dist = env_path("BREWERY_WEB_DIST", "web/dist");
     let store = Store::open(&data)?;
+    let local_edit = Arc::new(
+        local_edit::Lanes::prepare(&data, &dist, config_value.as_ref())
+            .await
+            .unwrap_or_else(|_| {
+                eprintln!("Local CPU editor storage is unavailable");
+                local_edit::Lanes::default()
+            }),
+    );
     let ssh_hosts = Arc::new(infra_hosts::Registry::open(&data, config_value.as_ref())?);
     let mut dispatcher = Dispatcher {
         command: env_path("BREWERY_DISPATCH", "brewery-dispatch"),
         backend: None,
+        local_edit: local_edit.clone(),
         ssh_hosts: ssh_hosts.clone(),
         launch_timeout: Duration::from_secs(env_num("BREWERY_DISPATCH_TIMEOUT_SECS", 21600)?),
         poll: Duration::from_millis(env_num("BREWERY_POLL_MS", 1000)?.max(25)),
     };
     let admin = admin::Admin::from_env(&data, &hosts, config.as_deref(), &dispatcher.command)?;
     let mut hf_tokens = hf_tokens::Store::from_config(config_value.as_ref(), &dist);
-    match backend_hf::Lane::prepare(&data, &dist) {
+    match backend_hf::Lane::prepare(&data, &dist).await {
         Ok(Some(lane)) => {
             hosts.push(lane.host()?);
             hf_tokens.add_local(backend_hf::ID, lane.local_config());
@@ -116,7 +130,17 @@ async fn main() -> Result<(), Error> {
         settings: settings::Managed::from_config(config_value.as_ref()),
         hf_tokens,
         backend_download: dispatcher.backend.is_some(),
+        backend_calibration: dispatcher
+            .backend
+            .as_ref()
+            .and_then(|lane| lane.calibration.clone()),
+        backend_edit_formats: dispatcher
+            .backend
+            .as_ref()
+            .map(|lane| lane.edit_formats.clone())
+            .unwrap_or_default(),
         admin,
+        local_edit,
         ssh_hosts,
         suggestions: suggestions::PathSuggestions::new(dispatcher.command.clone()),
         feed_subscribers: Arc::new(tokio::sync::Semaphore::new(feed::SUBSCRIBERS)),

@@ -18,6 +18,7 @@ const SHORT_RPC: Duration = Duration::from_secs(30);
 pub struct Dispatcher {
     pub command: PathBuf,
     pub backend: Option<backend_hf::Lane>,
+    pub local_edit: Arc<crate::local_edit::Lanes>,
     pub ssh_hosts: Arc<crate::infra_hosts::Registry>,
     pub launch_timeout: Duration,
     pub poll: Duration,
@@ -75,8 +76,26 @@ impl Dispatcher {
         } else {
             None
         };
-        let mut command = Command::new(backend.map_or(&self.command, |lane| &lane.dispatch));
-        if let Some(lane) = backend {
+        let local = if job.local_edit {
+            Some(
+                self.local_edit
+                    .get(&job.host)
+                    .ok_or("Local CPU editor is unavailable")?,
+            )
+        } else {
+            None
+        };
+        let mut command = Command::new(if local.is_some() {
+            &self.local_edit.dispatch
+        } else {
+            backend.map_or(&self.command, |lane| &lane.dispatch)
+        });
+        if let Some(lane) = local {
+            command
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("BREWERY_DISPATCH_CONFIG", &lane.config);
+        } else if let Some(lane) = backend {
             command.env_clear().env(
                 "BREWERY_DISPATCH_CONFIG",
                 lane.config_for(&job.kind)
@@ -130,8 +149,8 @@ impl Dispatcher {
             .await
             .map_err(|_| format!("{action} timed out"))??;
         if !status.success() {
-            if backend.is_some() {
-                return Err(format!("Backend download helper {action} failed ({status})").into());
+            if backend.is_some() || local.is_some() {
+                return Err(format!("Independent executor {action} failed ({status})").into());
             }
             let text = serde_json::from_slice::<Value>(&stdout)
                 .ok()
@@ -169,19 +188,20 @@ pub async fn run(app: Arc<App>, dispatch: Dispatcher) -> Result<(), Error> {
         let mut store = app.store.lock().expect("store lock");
         let mut running = store.by_state(State::Running)?;
         for job in &mut running {
-            if job.host == backend_hf::ID
+            if (job.host == backend_hf::ID
                 && dispatch
                     .backend
                     .as_ref()
                     .and_then(|lane| lane.config_for(&job.kind))
-                    .is_none()
+                    .is_none())
+                || (job.local_edit && dispatch.local_edit.get(&job.host).is_none())
             {
                 job.state = if job.cancel_requested {
                     State::Cancelled
                 } else {
                     State::Failed
                 };
-                job.progress = "Backend downloader is unavailable after restart".into();
+                job.progress = "Independent executor is unavailable after restart".into();
                 job.progress_detail = None;
                 job.error = None;
                 store.update(job, None)?;
@@ -273,7 +293,11 @@ fn allocate(app: &App) -> Result<Vec<Job>, Error> {
         job.host = host.id.clone();
         job.pool_slot = pool_slot;
         job.host_slot = pool_slot.then_some(slot);
-        job.dispatch_resources = host.resources.for_job(&job.kind);
+        job.dispatch_resources = if job.local_edit {
+            Default::default()
+        } else {
+            host.resources.for_job(&job.kind)
+        };
         if !pool_slot {
             job.dispatch_resources.concurrency = None;
         }
@@ -310,7 +334,15 @@ async fn drive(app: &App, dispatch: &Dispatcher, job: Job, recovered: bool) -> R
             .job(&job.id)?
             .ok_or("active job disappeared")?;
         if launch && !current.cancel_requested && !interrupt {
-            let hosts = app.effective_hosts_for_allocated()?;
+            let mut hosts = app.effective_hosts_for_allocated()?;
+            if job.local_edit
+                && let Some((host, lane)) = hosts
+                    .iter_mut()
+                    .find(|h| h.id == job.host)
+                    .zip(dispatch.local_edit.get(&job.host))
+            {
+                lane.advertise(host);
+            }
             let allowed = candidates(&job, &envelope, &hosts)
                 .iter()
                 .any(|h| h.id == job.host)

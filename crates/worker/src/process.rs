@@ -251,7 +251,12 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
             .first()
             .is_some_and(|i| weight_source::supports(&i.kind))
     {
-        for key in [weight_source::PUBLICATION, weight_source::VERIFY_BYTES] {
+        for key in [
+            weight_source::PUBLICATION,
+            weight_source::VERIFY_BYTES,
+            weight_source::CHUNK_INDEX,
+            weight_source::CHUNK_INDEX_SHA256,
+        ] {
             if !w.cfg.engine_env.contains_key(key) {
                 command.env_remove(key);
             }

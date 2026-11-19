@@ -132,6 +132,11 @@ enum Action {
         revision: u64,
         resources: Limits,
     },
+    SetWeightEditor {
+        worker: String,
+        revision: u64,
+        enabled: bool,
+    },
 }
 
 impl Action {
@@ -145,7 +150,8 @@ impl Action {
             | Self::InstallRuntime { worker, .. }
             | Self::SetResourcePolicy { worker, .. }
             | Self::SetHostPolicy { worker, .. }
-            | Self::SetHostResources { worker, .. } => worker,
+            | Self::SetHostResources { worker, .. }
+            | Self::SetWeightEditor { worker, .. } => worker,
         }
     }
 }
@@ -376,21 +382,33 @@ impl Admin {
         Ok(Some(host))
     }
 
-    pub fn effective_hosts(&self, hosts: &[Host]) -> Result<Vec<Host>, Error> {
-        self.hosts_with_policy(hosts, true)
+    pub fn effective_hosts(
+        &self,
+        hosts: &[Host],
+        lanes: &crate::local_edit::Lanes,
+    ) -> Result<Vec<Host>, Error> {
+        self.hosts_with_policy(hosts, Some(lanes))
     }
 
     fn hosts_with_policy(
         &self,
         hosts: &[Host],
-        apply_scheduling: bool,
+        lanes: Option<&crate::local_edit::Lanes>,
     ) -> Result<Vec<Host>, Error> {
         let db = self.db.lock().map_err(|_| "admin storage unavailable")?;
         let mut effective = Vec::new();
         for host in hosts {
-            if let Some(mut host) = self.legacy_host(&db, host.clone())? {
-                if apply_scheduling {
-                    infra_policy::Policy::load(&db, &host.id)?.restrict(&mut host)?;
+            let mut host = host.clone();
+            let policy = lanes
+                .map(|lanes| {
+                    let policy = infra_policy::Policy::load(&db, &host.id)?;
+                    apply_editor(&mut host, &policy, lanes);
+                    Ok::<_, Error>(policy)
+                })
+                .transpose()?;
+            if let Some(mut host) = self.legacy_host(&db, host)? {
+                if let Some(policy) = policy {
+                    policy.restrict(&mut host)?;
                 }
                 effective.push(host);
             }
@@ -426,13 +444,20 @@ impl Admin {
         let mut workers = Vec::new();
         for host in &hosts {
             let host_policy = infra_policy::Policy::load(&db, &host.id)?;
-            let mut effective = self.legacy_host(&db, operational[&host.id].clone())?;
+            let mut installed = host.clone();
+            if let Some(lane) = app.local_edit.get(&host.id) {
+                lane.advertise(&mut installed);
+            }
+            let mut configured = operational[&host.id].clone();
+            apply_editor(&mut configured, &host_policy, &app.local_edit);
+            let mut effective = self.legacy_host(&db, configured.clone())?;
             if let Some(effective) = &mut effective {
                 host_policy.restrict(effective)?;
             }
             host_rows.push(json!({"id":host.id,"name":host.name,"revision":host_policy.revision,
                 "paused":host_policy.paused,"draining":host_policy.paused && busy.contains(&host.id),
-                "disabled_jobs":host_policy.disabled_jobs,"installed_jobs":infra_policy::job_kinds(host),
+                "disabled_jobs":host_policy.disabled_jobs,"installed_jobs":infra_policy::job_kinds(&installed),
+                "weight_editor":editor_view(host, &configured, effective.as_ref(), &app.local_edit),
                 "resources":host_policy.resources,"resource_bounds":host.resource_bounds,
                 "effective_resources":effective.as_ref().unwrap_or(host).effective_resources(),
                 "allowed_jobs":effective.as_ref().map_or_else(Vec::new, infra_policy::job_kinds)}));
@@ -484,10 +509,53 @@ impl App {
     pub(crate) fn effective_hosts_for_allocated(&self) -> Result<Vec<Host>, Error> {
         let hosts = self.settings.effective(&self.defined_hosts()?);
         match &self.admin {
-            Some(admin) => admin.hosts_with_policy(&hosts, false),
+            Some(admin) => admin.hosts_with_policy(&hosts, None),
             None => Ok(hosts),
         }
     }
+}
+
+fn editor_available(host: &Host, lanes: &crate::local_edit::Lanes) -> bool {
+    lanes.get(&host.id).is_some()
+        || (host.id == crate::backend_hf::ID && host.capabilities["weight_inspect"])
+}
+
+fn apply_editor(host: &mut Host, policy: &infra_policy::Policy, lanes: &crate::local_edit::Lanes) {
+    match policy.weight_editor {
+        Some(true) if lanes.get(&host.id).is_some() => {
+            lanes.get(&host.id).expect("prepared lane").advertise(host);
+        }
+        Some(true) if editor_available(host, lanes) => {}
+        Some(_) => crate::local_edit::disable(host),
+        None => {}
+    }
+}
+
+fn editor_view(
+    host: &Host,
+    configured: &Host,
+    effective: Option<&Host>,
+    lanes: &crate::local_edit::Lanes,
+) -> Value {
+    let available = editor_available(host, lanes);
+    let enabled = configured.capabilities["weight_inspect"]
+        || configured.capabilities["weight_propose"]
+        || configured.capabilities["weight_tune"]
+        || configured.capabilities["weight_apply"];
+    let capabilities: BTreeMap<_, _> = crate::local_edit::CAPS
+        .iter()
+        .map(|&cap| {
+            (
+                cap,
+                effective.is_some_and(|host| !host.scheduling_paused && host.capabilities[cap]),
+            )
+        })
+        .collect();
+    let mut row = json!({"available":available,"enabled":enabled,"capabilities":capabilities});
+    if !available {
+        row["reason"] = json!("No verified local CPU editor is available for this worker");
+    }
+    row
 }
 
 fn enabled(policy: &Policy, id: &str, runtime: &Runtime) -> bool {
@@ -563,8 +631,9 @@ async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
         )
     })?;
     let id = action.worker();
-    if let Action::SetHostPolicy { revision, .. } | Action::SetHostResources { revision, .. } =
-        &action
+    if let Action::SetHostPolicy { revision, .. }
+    | Action::SetHostResources { revision, .. }
+    | Action::SetWeightEditor { revision, .. } = &action
     {
         {
             // Serialize against queue allocation and admission.
@@ -586,7 +655,11 @@ async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
                     disabled_jobs,
                     ..
                 } => {
-                    current.disabled_jobs = infra_policy::validate_jobs(host, disabled_jobs)
+                    let mut installed = host.clone();
+                    if let Some(lane) = app.local_edit.get(id) {
+                        lane.advertise(&mut installed);
+                    }
+                    current.disabled_jobs = infra_policy::validate_jobs(&installed, disabled_jobs)
                         .ok_or(ApiError(StatusCode::BAD_REQUEST, "Disabled jobs must be distinct and within the installed worker capabilities"))?;
                     current.paused = *paused;
                 }
@@ -601,6 +674,14 @@ async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
                             )
                         })?;
                     current.resources = *resources;
+                }
+                Action::SetWeightEditor { enabled, .. } => {
+                    if !editor_available(host, &app.local_edit) {
+                        return Err(ApiError::conflict(
+                            "No verified local CPU editor is installed for this worker",
+                        ));
+                    }
+                    current.weight_editor = Some(*enabled);
                 }
                 _ => unreachable!(),
             }

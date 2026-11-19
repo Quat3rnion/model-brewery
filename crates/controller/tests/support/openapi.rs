@@ -58,6 +58,11 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/events", "streamEvents"),
         ("post", "/api/suggestions/paths", "suggestPaths"),
         ("post", "/api/models", "createModel"),
+        (
+            "post",
+            "/api/models/weight-calibration",
+            "registerWeightCalibration",
+        ),
         ("delete", "/api/models/{id}", "deleteModel"),
         ("post", "/api/prompts", "createPrompt"),
         ("post", "/api/jobs", "createJob"),

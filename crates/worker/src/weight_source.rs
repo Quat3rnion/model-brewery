@@ -3,7 +3,6 @@ use crate::{Bundle, Entry, absolute, decode_limited, is_digest, relative, tree_d
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
-    env,
     ffi::CString,
     fs,
     os::{
@@ -12,6 +11,9 @@ use std::{
     },
     path::{Path, PathBuf},
 };
+
+mod chunks;
+pub use chunks::{CHUNK_INDEX, CHUNK_INDEX_LIMIT, CHUNK_INDEX_SHA256, build_chunk_index};
 
 pub const GATE: &str = "BREWERY_WEIGHT_SAFETENSORS";
 pub const PUBLICATION: &str = "BREWERY_WEIGHT_SAFETENSORS_PUBLICATION";
@@ -235,9 +237,45 @@ pub fn publication(path: &Path, kind: &str, receipt: &Path) -> Result<Option<Ver
     }))
 }
 
-pub fn configured_publication(path: &Path, kind: &str) -> Result<Option<Verified>> {
-    match env::var_os(PUBLICATION) {
-        Some(receipt) => publication(path, kind, Path::new(&receipt)),
+pub enum Proof {
+    Verity(Verified),
+    Chunks(chunks::Index),
+}
+
+impl Proof {
+    pub fn bundle(&self) -> &Bundle {
+        match self {
+            Self::Verity(proof) => &proof.bundle,
+            Self::Chunks(proof) => &proof.bundle,
+        }
+    }
+
+    pub fn write_manifest(&self, writer: impl std::io::Write) -> Result<()> {
+        match self {
+            Self::Verity(proof) => serde_json::to_writer(writer, &proof.measured)?,
+            Self::Chunks(proof) => serde_json::to_writer(writer, &proof.files)?,
+        }
+        Ok(())
+    }
+}
+
+pub fn proof(
+    path: &Path,
+    kind: &str,
+    configured: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<Option<Proof>> {
+    match (configured(CHUNK_INDEX), configured(CHUNK_INDEX_SHA256)) {
+        (Some(index), Some(digest)) => {
+            let digest = digest.to_str().context("invalid chunk index SHA-256")?;
+            if let Some(proof) = chunks::verified(path, kind, Path::new(&index), digest)? {
+                return Ok(Some(Proof::Chunks(proof)));
+            }
+        }
+        (None, None) => {}
+        _ => anyhow::bail!("SafeTensors chunk index requires an operator-pinned SHA-256"),
+    }
+    match configured(PUBLICATION) {
+        Some(receipt) => Ok(publication(path, kind, Path::new(&receipt))?.map(Proof::Verity)),
         None => Ok(None),
     }
 }
