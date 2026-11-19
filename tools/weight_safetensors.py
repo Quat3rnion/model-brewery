@@ -17,6 +17,7 @@ import tempfile
 INDEX = "model.safetensors.index.json"
 HEADER = 4 << 20
 METADATA = 16 << 20
+MANIFEST = 64 << 20
 UNPROVEN_BYTES = 64 << 20
 MAX_BYTES = 2 << 40
 MAX_MEMBERS = 16384
@@ -133,10 +134,10 @@ class Tensor:
     start: int
 
 
-def parse_header(fd, member, size, budget):
-    length, = struct.unpack("<Q", read_at(fd, 0, 8))
+def parse_header(read, member, size, budget):
+    length, = struct.unpack("<Q", read(0, 8))
     need(2 <= length <= min(HEADER, budget, size - 8), "SafeTensors header exceeds bounds")
-    raw = read_at(fd, 8, length)
+    raw = read(8, length)
     need(raw.startswith(b"{") and raw.endswith((b"}", b" ")), "invalid SafeTensors header")
     header = parse_json(raw)
     need(isinstance(header, dict), "invalid SafeTensors header object")
@@ -172,7 +173,7 @@ def read_manifest(path):
     with open_path(path, OPEN_FILE) as fd:
         meta = os.fstat(fd)
         need(stat.S_ISREG(meta.st_mode) and meta.st_nlink == 1 and meta.st_uid == os.geteuid()
-             and meta.st_mode & 0o077 == 0 and 0 < meta.st_size <= HEADER,
+             and meta.st_mode & 0o077 == 0 and 0 < meta.st_size <= MANIFEST,
              "expected a private source manifest file")
         raw = read_at(fd, 0, meta.st_size)
         need(stamp(meta) == stamp(os.fstat(fd)), "source manifest changed during read")
@@ -181,8 +182,9 @@ def read_manifest(path):
     entries = {}
     previous = ""
     for row in rows:
+        fields = {"path", "bytes", "sha256"}
         need(isinstance(row, dict) and set(row) in (
-            {"path", "bytes", "sha256"}, {"path", "bytes", "sha256", "device", "inode"}),
+            fields, fields | {"device", "inode"}, fields | {"chunk_sha256"}),
             "invalid source manifest entry")
         name, length, sha = row["path"], row["bytes"], row["sha256"]
         need(pathsafe(name) and name > previous and type(length) is int and 0 <= length <= MAX_BYTES
@@ -191,6 +193,11 @@ def read_manifest(path):
         if "inode" in row:
             need(all(type(row[k]) is int and row[k] >= 0 for k in ("device", "inode"))
                  and row["inode"] > 0, "invalid source inode proof")
+        if "chunk_sha256" in row:
+            chunks = row["chunk_sha256"]
+            need(isinstance(chunks, list) and len(chunks) == (length + CHUNK - 1) // CHUNK
+                 and all(isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h) for h in chunks),
+                 "invalid source chunk SHA-256 list")
         entries[name] = row
         previous = name
     return entries
@@ -230,13 +237,22 @@ class Files:
                      "SafeTensors source size or inode differs from proof")
         else:
             entries = {}
-        unproven = [name for name in self.names if "inode" not in entries.get(name, {})]
+        # Chunk hashes are trusted only for manifests issued by the worker
+        # from an operator-pinned index bound to the full source identity.
+        self.chunks = {name: entry["chunk_sha256"] for name, entry in entries.items()
+                       if "chunk_sha256" in entry}
+        self._verified_chunk = None
+        unproven = [name for name in self.names
+                    if name not in self.chunks and "inode" not in entries.get(name, {})]
         need(sum(self.stat[n].st_size for n in unproven) <= UNPROVEN_BYTES,
-             "large SafeTensors source requires operator-verified immutable inode manifest")
+              "large SafeTensors source requires operator-verified immutable inode manifest "
+              "or authenticated chunk manifest")
         self.hashes = {}
         for name in self.names:
             entry = entries.get(name)
-            if entry is not None and "inode" in entry:
+            if name in self.chunks:
+                self.hashes[name] = entry["sha256"]
+            elif entry is not None and "inode" in entry:
                 with self.open_member(name) as fd:
                     try:
                         check_verity(fd)
@@ -301,8 +317,7 @@ class Files:
         if self.directory:
             size = self.stat[INDEX].st_size
             need(0 < size <= HEADER, "indexed HF weight map exceeds bounds")
-            with self.open_member(INDEX) as fd:
-                index = parse_json(read_at(fd, 0, size))
+            index = parse_json(self.range(INDEX, 0, size))
             mapping = index.get("weight_map") if isinstance(index, dict) else None
             need(isinstance(mapping, dict) and 0 < len(mapping) <= MAX_TENSORS,
                  "invalid indexed HF weight map")
@@ -316,7 +331,10 @@ class Files:
         tensors, total, budget = {}, 0, METADATA - (size if mapping is not None else 0)
         for name in shards:
             with self.open_member(name) as fd:
-                data, length, payload = parse_header(fd, name, self.stat[name].st_size, budget)
+                def read(offset, count):
+                    return self._read_member(fd, name, offset, count)
+
+                data, length, payload = parse_header(read, name, self.stat[name].st_size, budget)
             need(len(tensors) + len(data) <= MAX_TENSORS, "SafeTensors tensor count exceeds bounds")
             need(not tensors.keys() & data.keys(), "duplicate indexed SafeTensors tensor")
             tensors.update(data)
@@ -338,7 +356,30 @@ class Files:
 
     def range(self, member, offset, count):
         with self.open_member(member) as fd:
+            return self._read_member(fd, member, offset, count)
+
+    def _read_member(self, fd, member, offset, count):
+        size = self.stat[member].st_size
+        need(0 <= offset <= size and 0 <= count <= size - offset, "invalid SafeTensors read range")
+        if member not in self.chunks or count == 0:
             return read_at(fd, offset, count)
+        end = offset + count
+        pieces = []
+        for block in range(offset // CHUNK, (end - 1) // CHUNK + 1):
+            start = block * CHUNK
+            key = (member, block)
+            cached = self._verified_chunk
+            if cached is not None and cached[0] == key:
+                raw = cached[1]
+            else:
+                raw = read_at(fd, start, min(CHUNK, size - start))
+                need(hashlib.sha256(raw).hexdigest() == self.chunks[member][block],
+                     f"SafeTensors chunk SHA-256 mismatch: {member} chunk {block}")
+                # Keep only the last verified immutable buffer. Headers and
+                # adjacent tile cells can reuse it without another disk read.
+                self._verified_chunk = (key, raw)
+            pieces.append(raw[max(0, offset - start):end - start])
+        return b"".join(pieces)
 
     def _write_member(self, name, dest, patches):
         digest, changed = hashlib.sha256(), hashlib.sha256()

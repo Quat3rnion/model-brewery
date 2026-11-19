@@ -11,6 +11,7 @@ import tempfile
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
+CHUNK = 1 << 20
 
 
 def tensor_file(name, dtype, payload, shape):
@@ -50,6 +51,82 @@ class SafeTensors(unittest.TestCase):
         path = self.root / name
         path.write_text(json.dumps(value))
         return path
+
+    def chunk_manifest(self, materials):
+        manifest = self.doc("chunks", [
+            {"path": name, "bytes": len(raw), "sha256": sha(raw),
+             "chunk_sha256": [sha(raw[i:i + CHUNK]) for i in range(0, len(raw), CHUNK)]}
+            for name, raw in sorted(materials.items())
+        ])
+        manifest.chmod(0o600)
+        return manifest
+
+    def test_chunk_manifest_reads_cross_chunk_tile_and_rejects_corruption(self):
+        source = self.root / "source.safetensors"
+        raw = tensor_file("layer.weight", "F32", struct.pack("<2f", 3., 4.), [1, 2])
+        head = raw[8:-8]
+        # Put the two selected cells on opposite sides of the chunk boundary.
+        raw = struct.pack("<Q", CHUNK - 12) + head.ljust(CHUNK - 12, b" ") + raw[-8:]
+        source.write_bytes(raw)
+        manifest = self.chunk_manifest({source.name: raw})
+        args = ("--source-sha256", sha(raw), "--source-manifest", manifest)
+        tile = ("tile", source, *args, "--tensor", "layer.weight", "--origin", "[0,0]",
+                "--shape", "[1,2]")
+        self.assertEqual(self.cli(*tile)["values"], [[3., 4.]])
+        # Tune consumes the entire matrix in one range across the boundary.
+        cal = self.doc("calibration", {"activations": [[1, 0], [0, 1]], "targets": [[4], [4]]})
+        held = self.doc("held-out", {"activations": [[1, 1]], "targets": [[8]]})
+        tune = (source, *args, "--tensor", "layer.weight", "--indices", "[[0,0]]",
+                "--max-update", 1, "--calibration", cal, "--held-out", held)
+        self.assertEqual(self.cli(*tune, tool="weight_tune.py")["edits"][0]["after"], 4.)
+        source.write_bytes(raw[:-1] + bytes([raw[-1] ^ 1]))
+        # The second chunk is not needed for inventory but is needed for the tile.
+        self.assertEqual(self.cli("inventory", source, *args, "--offset", 0, "--limit", 1)
+                         ["tensors"][0]["name"], "layer.weight")
+        self.assertIn("chunk SHA-256 mismatch", self.cli(*tile, ok=False))
+        self.assertIn("chunk SHA-256 mismatch", self.cli(*tune, tool="weight_tune.py", ok=False))
+
+    def test_chunk_manifest_authenticates_index_and_apply_still_hashes_unread_sidecars(self):
+        source, original = self.indexed()
+        manifest = self.chunk_manifest(original)
+        args = ("--source-sha256", pin_dir(source), "--source-manifest", manifest)
+        inventory = ("inventory", source, *args, "--offset", 0, "--limit", 10)
+        index_name = "model.safetensors.index.json"
+        index = source / index_name
+        # This is still valid JSON with exactly the same mapping and length.
+        index.write_bytes(original[index_name].replace(b": ", b":\t"))
+        self.assertIn(f"chunk SHA-256 mismatch: {index_name}", self.cli(*inventory, ok=False))
+        index.write_bytes(original[index_name])
+        self.assertEqual(self.cli(*inventory)["total"], 2)
+
+        request = self.doc("request", [{"tensor": "layer.weight", "index": [0, 0],
+                                       "op": "set", "value": 2.0}])
+        approved = self.doc("approved", self.cli("propose", source, *args, request))
+        out = self.root / "revision"
+        apply = ("apply", source, "--source-manifest", manifest, approved, out)
+        sidecar = source / "engram.dat"
+        sidecar.write_bytes(b"Exact sidecar")
+        self.assertIn("source changed since verified manifest", self.cli(*apply, ok=False))
+        self.assertFalse(out.exists())
+        sidecar.write_bytes(original[sidecar.name])
+        self.assertEqual(self.cli(*apply)["output_sha256"], pin_dir(out))
+        self.assertEqual((out / sidecar.name).read_bytes(), original[sidecar.name])
+
+    def test_chunk_manifest_rejects_wrong_count_bad_hex_and_mixed_member_proofs(self):
+        source = self.root / "source.safetensors"
+        raw = tensor_file("layer.weight", "F32", struct.pack("<f", 3.), [1])
+        source.write_bytes(raw)
+        manifest = self.chunk_manifest({source.name: raw})
+        valid, = json.loads(manifest.read_bytes())
+        inventory = ("inventory", source, "--source-sha256", sha(raw), "--source-manifest",
+                     manifest, "--offset", 0, "--limit", 1)
+        for field in ([], [sha(raw)] * 2, [sha(raw).upper()], [1], None):
+            with self.subTest(chunks=field):
+                manifest.write_text(json.dumps([{**valid, "chunk_sha256": field}]))
+                self.assertIn("invalid source chunk SHA-256 list", self.cli(*inventory, ok=False))
+        st = source.stat()
+        manifest.write_text(json.dumps([{**valid, "device": st.st_dev, "inode": st.st_ino}]))
+        self.assertIn("invalid source manifest entry", self.cli(*inventory, ok=False))
 
     def test_standalone_preserves_all_other_bytes_and_dtype(self):
         source = self.root / "source.safetensors"
