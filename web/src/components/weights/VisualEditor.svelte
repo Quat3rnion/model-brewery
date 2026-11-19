@@ -7,7 +7,6 @@
   import { SvelteMap } from 'svelte/reactivity';
   import TensorMap from './TensorMap.svelte';
   import HeatGrid from './HeatGrid.svelte';
-  import ModelSelect from '../ModelSelect.svelte';
   import Submit from '../Submit.svelte';
   import JobState from '../JobState.svelte';
   import { brewery } from '../../lib/store.svelte';
@@ -42,6 +41,8 @@
     canVisual,
     canPropose,
     canTune,
+    calibrationId,
+    heldOutId,
     proposeReason,
     tuneReason,
     mode = $bindable('manual'),
@@ -51,6 +52,8 @@
     canVisual: boolean;
     canPropose: boolean;
     canTune: boolean;
+    calibrationId: string;
+    heldOutId: string;
     proposeReason: string | null;
     tuneReason: string | null;
     mode?: 'manual' | 'auto';
@@ -335,8 +338,6 @@
     return cap;
   });
   const maxUpdate = $derived(maxText.trim() ? parseMaxUpdate(maxText) : ({ ok: true, value: maxFromSlider(maxIdx) } as const));
-  let calibrationId = $state('');
-  let heldOutId = $state('');
   const tuneSub = new Submitter();
   const sameHost = (id: string) => models.find((m) => m.id === id)?.host === source.host;
   const tuneBlockers = $derived.by(() => {
@@ -351,6 +352,7 @@
     if (!maxUpdate.ok) out.push(maxUpdate.error);
     if (!calibrationId) out.push('Select a calibration split.');
     if (!heldOutId) out.push('Select a held-out split.');
+    else if (heldOutId === calibrationId) out.push('Use a different entry for the held-out split.');
     if ((calibrationId && !sameHost(calibrationId)) || (heldOutId && !sameHost(heldOutId))) out.push(`Both splits must be on ${hostName(brewery.state?.hosts ?? [], source.host)}.`);
     return out;
   });
@@ -368,7 +370,7 @@
 </script>
 
 {#if !canVisual}
-  <p class="note warn small">The visual editor needs <span class="mono">weight_inspect</span> and <span class="mono">weight_visual</span> on {hostName(brewery.state?.hosts ?? [], source.host)}. {#if source.kind !== 'gguf'}Ask an operator to enable visual reads to check which tensors are editable.{:else}Use text entry below, or ask an operator to enable visual reads on the worker.{/if}</p>
+  <p class="note warn small">The visual editor needs <code>weight_inspect</code> and <code>weight_visual</code> on {hostName(brewery.state?.hosts ?? [], source.host)}. Check these capabilities in <a href="#/settings/infrastructure?host={encodeURIComponent(source.host)}">worker settings</a>.{#if source.kind === 'gguf'} You can also use text entry below.{/if}</p>
 {:else}
   <div class="ve stack">
     <!-- 1. Tensors -->
@@ -571,10 +573,6 @@
               <label for="vw-max-x">Exact limit (optional)</label>
               <input id="vw-max-x" class="input mono" bind:value={maxText} inputmode="decimal" autocomplete="off" spellcheck="false" placeholder={String(maxFromSlider(maxIdx))} aria-invalid={!maxUpdate.ok} />
             </div>
-          </div>
-          <div class="grid-2">
-            <ModelSelect bind:value={calibrationId} kinds={['weight-calibration']} label="Calibration split (fitting)" id="vw-cal" exclude={heldOutId ? [heldOutId] : []} />
-            <ModelSelect bind:value={heldOutId} kinds={['weight-calibration']} label="Held-out split (measurement only)" id="vw-held" exclude={calibrationId ? [calibrationId] : []} />
           </div>
         {/if}
       </section>

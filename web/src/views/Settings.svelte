@@ -155,7 +155,7 @@
   <div class="head">
     <h1 tabindex="-1">Settings</h1>
     <p class="muted small">
-      Benchmark targets, suites and GSM8K setup for each worker. Saving stores the configuration on the controller and never starts a job. A worker is ready only when the controller reports it; the saved form alone does not make it ready.
+      Select a host to manage weight editing, admission policy and resource limits. Evaluation settings are separate.
       <a href="#/settings/infrastructure">Infrastructure controls and audit log</a>
     </p>
   </div>
@@ -176,7 +176,7 @@
             <li>
               <button type="button" class="hb" aria-current={h.id === selectedId ? 'true' : undefined} onclick={() => select(h.id)}>
                 <span class="hn">{h.name ?? h.id}</span>
-                <Badge tone={h.ready ? 'ok' : h.managed ? 'warn' : 'muted'} label={h.ready ? 'Ready' : h.managed ? 'Not ready' : 'Not managed'} />
+                <span class="xs muted">{h.id}</span>
               </button>
             </li>
           {/each}
@@ -185,8 +185,16 @@
 
       {#if draft && savedHost}
         <div class="stack">
+          <section class="panel" aria-labelledby="host-mgmt-h">
+            <header><h2 id="host-mgmt-h">Manage {savedHost.name ?? savedHost.id}</h2></header>
+            <div class="body stack">
+              {#if savedHost.managementAvailable === false}<p class="note warn">{savedHost.managementReason ?? 'The controller does not permit changes on this host.'}</p>{/if}
+              <div class="row"><a class="btn" href="#/settings/infrastructure?host={encodeURIComponent(savedHost.id)}&section=weights">Weight editing settings</a>
+                <a class="btn" href="#/settings/infrastructure?host={encodeURIComponent(savedHost.id)}&section=policy">Admission and resource limits</a></div>
+            </div>
+          </section>
           <section class="panel" aria-labelledby="rd-h">
-            <header><h2 id="rd-h">Readiness of {savedHost.name ?? savedHost.id}</h2><span class="xs muted">Revision {savedHost.revision}</span></header>
+            <header><h2 id="rd-h">Evaluation readiness</h2><span class="xs muted">Revision {savedHost.revision}</span></header>
             <div class="body stack">
               <p class="small">
                 <Badge tone={savedHost.ready ? 'ok' : 'warn'} label={savedHost.ready ? 'Configuration ready' : 'Configuration not ready'} />
@@ -207,11 +215,11 @@
             </div>
           </section>
 
-          {#if !savedHost.managed}
-            <p class="note info">{savedHost.reason ?? 'The controller does not manage this worker.'} Its configuration cannot be edited from the browser.</p>
+          {#if savedHost.evaluationStatus !== 'managed'}
+            <p class="note info">Evaluation configuration: {savedHost.evaluationReason ?? 'No approved evaluator is enrolled for this worker.'}</p>
           {:else}
           <form class="panel" aria-labelledby="ed-h" onsubmit={save} novalidate>
-            <header><h2 id="ed-h">Configuration</h2></header>
+            <header><h2 id="ed-h">Evaluation configuration</h2></header>
             <fieldset class="body stack plain" disabled={saving}>
               {@render endpointList('Benchmark targets', 'benchmarkTargets', 'OpenAI-compatible endpoints that benchmark runs send requests to.')}
 
@@ -241,7 +249,7 @@
                 <ul class="note warn xs probs" aria-label="Problems to fix before saving">{#each problems as p (p)}<li>{p}</li>{/each}</ul>
               {/if}
               <div class="row">
-                <button type="submit" class="btn primary" disabled={!dirty || problems.length > 0 || saving}>{saving ? 'Saving…' : 'Save configuration'}</button>
+                <button type="submit" class="btn primary" disabled={!dirty || problems.length > 0 || saving}>{saving ? 'Saving…' : 'Save evaluation settings'}</button>
                 <button type="button" class="btn ghost" disabled={!dirty || saving} onclick={reset}>Discard changes</button>
                 {#if !dirty}<span class="xs muted">No unsaved changes.</span>{/if}
               </div>

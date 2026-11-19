@@ -8,6 +8,7 @@
   import CancelButton from '../components/CancelButton.svelte';
   import WeightReport from '../components/weights/WeightReport.svelte';
   import VisualEditor from '../components/weights/VisualEditor.svelte';
+  import CalibrationSplit from '../components/weights/CalibrationSplit.svelte';
   import { brewery } from '../lib/store.svelte';
   import { errorText } from '../lib/api';
   import { Submitter } from '../lib/submit.svelte';
@@ -173,6 +174,7 @@
   let tuneMax = $state('');
   let calibrationId = $state('');
   let heldOutId = $state('');
+  $effect(() => { void sourceId; calibrationId = ''; heldOutId = ''; });
   let tuneTouched = $state(false);
   const tuneParsed = $derived({ t: parseTensor(tuneTensor), c: parseCoordinates(tuneCoords), m: parseMaxUpdate(tuneMax) });
   const coordCount = $derived(tuneCoords.split('\n').filter((l) => l.trim()).length);
@@ -296,6 +298,7 @@
         {#if caps.weight_inspect.allowed && formatAllowed}
           <p class="xs muted">Visual reads: {visual.allowed ? 'enabled' : sentence(visual.reason ?? 'not enabled')}</p>
         {/if}
+        <a class="small" href="#/settings/infrastructure?host={encodeURIComponent(source.host)}">Settings for {hostName(hosts, source.host)}</a>
         {#if !WEIGHT_KINDS.some((k) => caps[k].allowed)}
           <p class="xs muted">{sentence(caps.weight_propose.reason ?? 'Weight editing is not enabled on this host.')} An operator enables each job kind on the worker.</p>
         {/if}
@@ -314,8 +317,23 @@
 
     <div class="body stack">
       {#if source}
+        {#if mode === 'auto'}
+          {#key source.id}
+            <h3>Calibration and held-out data</h3>
+            <p class="small muted">Choose two different splits on {hostName(hosts, source.host)}. Use one to fit the selected tensor and one to measure its error. Their activation rows must not overlap.</p>
+            {#if source.host === 'backend-hf' && caps.weight_tune.allowed && !sourceHost?.scheduling_paused}
+              <p class="xs muted">Selecting a JSON file uploads it to this worker’s Library. Each file must be at most 256 KiB and contain two numeric matrices: <code>activations</code> and <code>targets</code>. Use one activation and target row per example (up to 1,024 examples).</p>
+            {:else if source.host !== 'backend-hf'}
+              <p class="xs muted">To add a split, register its path as a <code>weight-calibration</code> entry for this host in the <a href="#/library">Library</a>.</p>
+            {/if}
+            <div class="grid-2">
+              <CalibrationSplit host={sourceHost} label="Calibration split (fitting)" bind:value={calibrationId} other={heldOutId} />
+              <CalibrationSplit host={sourceHost} label="Held-out split (measurement only)" bind:value={heldOutId} other={calibrationId} />
+            </div>
+          {/key}
+        {/if}
         {#if !formatAllowed}
-          <p class="note warn">{safe ? 'SafeTensors' : 'Native HGN'} editing is unavailable on {hostName(hosts, source.host)}. {sentence(native.reason ?? 'This source host is not enrolled.')} Required capability: <code>{safe ? 'weight_safetensors' : 'weight_hgn'}</code>.</p>
+          <p class="note warn">{safe ? 'SafeTensors' : 'Native HGN'} editing is unavailable on {hostName(hosts, source.host)}. {sentence(native.reason ?? 'This source host is not enrolled.')} Check <code>{safe ? 'weight_safetensors' : 'weight_hgn'}</code> in <a href="#/settings/infrastructure?host={encodeURIComponent(source.host)}">worker settings</a>.</p>
         {:else}
         {#key source.id}
         <VisualEditor
@@ -323,6 +341,8 @@
           {canVisual}
           canPropose={caps.weight_propose.allowed}
           canTune={caps.weight_tune.allowed}
+          {calibrationId}
+          {heldOutId}
           proposeReason={caps.weight_propose.reason}
           tuneReason={caps.weight_tune.reason}
           bind:mode
@@ -450,10 +470,6 @@
           <label for="w-tune-c">Selected weights</label>
           <textarea id="w-tune-c" class="input mono" rows="5" bind:value={tuneCoords} spellcheck="false" aria-describedby="w-tune-c-hint" aria-invalid={tuneTouched && !tuneParsed.c.ok} placeholder={'0, 3\n0, 4\n7, 12'}></textarea>
           <span class="hint" id="w-tune-c-hint">One <span class="mono">row, column</span> pair per line, zero-based. <span class="num">{coordCount}</span> of {MAX_COORDINATES}.{#if tuneCoords.trim() && !tuneParsed.c.ok} <span class="ferr">{tuneParsed.c.error}</span>{/if}</span>
-        </div>
-        <div class="grid-2">
-          <ModelSelect bind:value={calibrationId} kinds={['weight-calibration']} label="Calibration split (fitting)" id="w-cal" exclude={heldOutId ? [heldOutId] : []} />
-          <ModelSelect bind:value={heldOutId} kinds={['weight-calibration']} label="Held-out split (measurement only)" id="w-held" exclude={calibrationId ? [calibrationId] : []} />
         </div>
         <p class="xs muted">The worker refuses splits whose activation rows overlap, files over 8 MiB or 1,024 rows, and proposals that do not lower the calibration error.</p>
         {#if tuneSub.error}<p class="note bad" role="alert">{tuneSub.error}</p>{/if}

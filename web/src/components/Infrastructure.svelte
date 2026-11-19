@@ -5,6 +5,7 @@
   import { formatTime } from '../lib/format';
   import { brewery } from '../lib/store.svelte';
   import type { PolicyAction } from '../lib/host-policy';
+  import WeightEditorSettings from './WeightEditorSettings.svelte';
   import HostPolicy from './HostPolicy.svelte';
   import SshHosts from './SshHosts.svelte';
   import Badge from '../components/Badge.svelte';
@@ -15,7 +16,11 @@
   let busy = $state<string | null>(null);
   let actionError = $state<string | null>(null);
   let hostId = $state('');
-  const policy = $derived(st?.hosts?.find(h => h.id === hostId) ?? st?.hosts?.[0]);
+  let focusTarget = $state('');
+  $effect(() => {
+    if (status === 'ok' && focusTarget && policy) { const id=focusTarget; focusTarget=''; requestAnimationFrame(()=>document.getElementById(id)?.focus()); }
+  });
+  const policy = $derived(hostId ? st?.hosts?.find(h => h.id === hostId) : st?.hosts?.[0]);
   let confirmDeactivate = $state<string | null>(null);
 
   async function load() {
@@ -44,6 +49,11 @@
   onMount(() => {
     void load();
     const focusSection = () => {
+      const [section,q] = window.location.hash.split('?');
+      if (section === '#/settings/infrastructure' && q) {
+        const params=new URLSearchParams(q); hostId=params.get('host') ?? '';
+        focusTarget=params.get('section')==='policy' ? 'host-policy-h' : 'weight-settings-h';
+      }
       if (window.location.hash === '#/settings/infrastructure') document.getElementById('infrastructure')?.focus();
     };
     const frame = requestAnimationFrame(focusSection);
@@ -85,7 +95,7 @@
 
     {#if st && status === 'ok'}
       <section class="panel" aria-labelledby="host-policy-h">
-        <header><h3 id="host-policy-h">Host policies</h3></header>
+        <header><h3 tabindex="-1" id="host-policy-h">Host policies</h3></header>
         <div class="body stack">
           {#if policy && st.hosts}
             <div class="field"><label for="infra-policy-host">Defined host</label>
@@ -93,8 +103,8 @@
                 {#each st.hosts as h (h.id)}<option value={h.id}>{h.name} · {h.id}</option>{/each}
               </select>
             </div>
-            {#key `${policy.id}:${policy.revision}`}<HostPolicy host={policy} busy={!!busy} save={act} />{/key}
-          {:else}<p class="muted small">{st.hosts ? 'No defined hosts reported.' : 'This controller did not report editable host policies.'}</p>{/if}
+            {#key `${policy.id}:${policy.revision}`}<WeightEditorSettings host={policy} busy={!!busy} save={act} /><HostPolicy host={policy} busy={!!busy} save={act} />{/key}
+          {:else}<p class="muted small">{hostId && st.hosts ? `The selected host (${hostId}) is not defined here. Open Settings to choose another host.` : st.hosts ? 'No defined hosts reported.' : 'This controller did not report editable host policies.'}</p>{/if}
         </div>
       </section>
       <section class="panel" aria-labelledby="wk-h">

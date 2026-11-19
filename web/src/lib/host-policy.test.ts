@@ -17,3 +17,9 @@ describe('all-host policy', () => {
     expect(resourceValues(host, { cpu_threads: '9' })).toBeNull();
   });
 });
+
+it('does not offer an enable action without an explicit verified editor receipt', () => {
+  expect(parseHostPolicies([{...row,weight_editor:{enabled:false,capabilities:{}}}])?.[0].weightEditor).toBeNull();
+  const receipt={available:true,enabled:false,capabilities:{weight_inspect:false}};
+  expect(parseHostPolicies([{...row,weight_editor:receipt}])?.[0].weightEditor).toEqual(receipt);
+});

@@ -23,6 +23,10 @@ export interface HostSettings {
   id: string;
   name: string | null;
   managed: boolean;
+  managementAvailable: boolean | null;
+  managementReason: string | null;
+  evaluationStatus: 'managed'|'not_enrolled'|'unavailable';
+  evaluationReason:string|null;
   ready: boolean;
   reason: string | null;
   revision: number;
@@ -61,6 +65,10 @@ export function parseHost(v: unknown): HostSettings | null {
     id: o.id,
     name: str(o.name),
     managed: o.managed === true,
+    managementAvailable: typeof obj(o.management)?.available === 'boolean' ? obj(o.management)!.available as boolean : null,
+    managementReason: str(obj(o.management)?.reason),
+    evaluationStatus: obj(o.evaluation)?.status === 'managed' ? 'managed' : obj(o.evaluation)?.status === 'not_enrolled' ? 'not_enrolled' : o.evaluation ? 'unavailable' : o.managed === true ? 'managed' : 'not_enrolled',
+    evaluationReason: str(obj(o.evaluation)?.reason) ?? str(o.reason),
     ready: o.ready === true,
     reason: str(o.reason),
     revision: typeof o.revision === 'number' && Number.isInteger(o.revision) ? o.revision : 0,

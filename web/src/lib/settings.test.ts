@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildPut, endpointProblem, idProblem, parseSettings, validateHost, effectiveReadiness, type HostSettings } from './settings';
+import { buildPut, endpointProblem, idProblem, parseHost, parseSettings, validateHost, effectiveReadiness, type HostSettings } from './settings';
 import { adminActionAllowed, parseAdminState } from './admin';
 
 const raw = {
@@ -190,4 +190,9 @@ it('resolves old infrastructure bookmarks to the normal Settings view', async ()
   const { parse } = await import('./route.svelte');
   expect(parse('#/admin').view).toBe('settings');
   expect(parse('#/settings/infrastructure').view).toBe('settings');
+});
+
+it('separates host management from evaluator enrollment, including for remote hosts', () => {
+  const h=parseHost({id:'ssh-cpu', managed:false, management:{available:true}, evaluation:{status:'not_enrolled',reason:'No approved evaluator.'}})!;
+  expect(h.managementAvailable).toBe(true); expect(h.evaluationStatus).toBe('not_enrolled'); expect(h.evaluationReason).toBe('No approved evaluator.');
 });

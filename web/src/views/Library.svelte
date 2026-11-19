@@ -264,7 +264,11 @@
                     </div>
                   {:else}
                     {#if WEIGHT_SOURCES.includes(m.kind)}<a class="btn ghost small" href="#/weights?source={encodeURIComponent(m.id)}" aria-label="Edit weights of {modelLabel(m)}">Edit weights</a>{/if}
-                    {#if isSafeSource(m.kind) && hosts.find(h => h.id === m.host)?.capabilities?.weight_safetensors !== true}<div class="muted xs">SafeTensors editing not enabled on this host.</div>{/if}
+                    {#if WEIGHT_SOURCES.includes(m.kind)}
+                      {@const worker = hosts.find(h => h.id === m.host)}
+                      {#if isSafeSource(m.kind) && !worker?.capabilities?.weight_safetensors}<div class="muted xs">SafeTensors editing is not enabled here.</div>{/if}
+                      <a class="xs" href="#/settings/infrastructure?host={encodeURIComponent(m.host)}">Settings for {hostName(hosts, m.host)}</a>
+                    {/if}
                     <button
                       type="button"
                       class="btn ghost small"
