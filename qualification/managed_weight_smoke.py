@@ -31,12 +31,17 @@ def setup(root, bins, gguf_python):
     inputs.mkdir(mode=0o700)
     (root / "worker").mkdir(mode=0o700)
     environment = {"BREWERY_CPU_THREADS": "2", "BREWERY_WEIGHT_VISUAL": "1"}
+    packaged = [bins / f"brewery-weight-{kind}" for kind in ("edit", "tune")]
+    if any(p.exists() for p in packaged) and not all(p.is_file() for p in packaged):
+        raise ValueError("incomplete packaged weight runtime")
     for kind in ("edit", "tune"):
-        helper = root / f"python-weight-{kind}"
-        command = ["/usr/bin/env", f"PYTHONPATH={gguf_python}", "/usr/bin/python3", "-B",
-                   str(REPO / "tools" / f"weight_{kind}.py")]
-        helper.write_text(f"#!/bin/sh\nexec {shlex.join(command)} \"$@\"\n")
-        helper.chmod(0o700)
+        helper = bins / f"brewery-weight-{kind}"
+        if not helper.is_file():
+            helper = root / f"python-weight-{kind}"
+            command = ["/usr/bin/env", f"PYTHONPATH={gguf_python}", "/usr/bin/python3", "-B",
+                       str(REPO / "tools" / f"weight_{kind}.py")]
+            helper.write_text(f"#!/bin/sh\nexec {shlex.join(command)} \"$@\"\n")
+            helper.chmod(0o700)
         environment[f"BREWERY_WEIGHT_{kind.upper()}"] = str(helper)
     save(root / "worker.json", {"root": str(root / "worker"), "source_roots": [str(inputs)],
                                  "engine": str(bins / "brewery-engine"), "engine_env": environment})

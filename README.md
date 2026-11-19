@@ -1326,8 +1326,8 @@ It does not accept arbitrary commands.
 
 | Section | What it does |
 | --- | --- |
-| **Evaluation settings** (`/api/settings`) | Saves benchmark targets, benchmark suites, baseline endpoints and the evaluation switch of an enrolled worker. |
-| **Infrastructure** (`/api/admin/*`) | Sets host admission and adjustable resource policy, manages catalog runtime actions, and defines SSH hosts for confirmed user-level worker installation. |
+| **Worker settings** (`/api/settings`) | Lists each defined host and links to its controls. For workers with an evaluation policy, it also saves benchmark targets, suites, baseline endpoints and the evaluation switch. |
+| **Infrastructure** (`/api/admin/*`) | Controls weight editing, job admission and supported resource limits for the selected host. It also manages catalog runtimes and SSH definitions. |
 
 Both sections use the same API request protections.
 Infrastructure has no second admin key.
@@ -1383,14 +1383,16 @@ decide. A save also returns `409` while the host has a queued or running job,
 or a job with host `auto`. The worker checks the settings again when a job
 starts.
 
-### Which workers can be managed
+### Which workers can save evaluation settings
 
-The operator of the infrastructure enrols a worker. The page cannot do this.
+Every defined host has its own Infrastructure settings, including the backend
+download host and installed SSH hosts. Select **Weight editing settings** or
+**Admission and resource limits** for that host. You do not need an evaluator
+to pause a host or configure a supported weight editor.
 
-- It is a **local** worker with an absolute `config` path. An SSH worker
-  cannot be managed. A worker that is not enrolled shows `Worker settings
-  are locked`. An SSH worker that is marked managed shows `Worker policy or
-  suite catalog unavailable`.
+The following prerequisites apply only to the evaluation form:
+
+- The evaluation worker is **local** and has an absolute `config` path.
 - The dispatch entry has `"managed_settings": true`. The controller reads the
   dispatch file when it starts, so restart the controller after a change.
 - The worker file has a `managed_settings` object with `catalog`,
@@ -1401,9 +1403,9 @@ The operator of the infrastructure enrols a worker. The page cannot do this.
   `executable`, a `version` and a `protocol`. The executable must be a
   regular executable file. It holds at most 32 suites.
 - A worker that pins a source (`pinned_publication` or
-  `BREWERY_EXPECTED_SOURCE_SHA256`) cannot be managed. Its settings stay
-  `Worker policy or suite catalog unavailable`. Two managed workers cannot
-  share or nest their `root` directories.
+  `BREWERY_EXPECTED_SOURCE_SHA256`) cannot save evaluation settings.
+  This protects its qualification configuration. Two managed evaluation
+  workers cannot share or nest their `root` directories.
 
 ```json
 {
@@ -1747,10 +1749,45 @@ against the pinned Hub manifest before it adds the model to the Library.
 For gated public models, the long-lived Hub token is not sent to the Xet
 content service; the downloader uses a short-lived read ticket.
 
-To edit a downloaded SafeTensors model, select **Edit weights** on its Library
-entry. The backend uses its local CPU editor; no transfer or second Library
-registration is needed. **Apply** creates a new revision after review. It
-does not change the downloaded file.
+To edit a downloaded GGUF, SafeTensors, or indexed Hugging Face checkpoint,
+select **Edit weights** on its Library entry. The backend uses its local CPU
+editor. No transfer or second Library registration is necessary. Packed GGUF
+edits support Q4_0 and Q8_0.
+
+For **Tune**, upload two separate JSON batches containing `activations` and
+`targets`: one for calibration and one for held-out evaluation. Each upload
+has a 256 KiB limit. Select both Library entries in the editor. On other
+local workers, register both JSON files from that worker's approved source
+roots instead. **Apply** creates a new revision in the source format after
+review. It does not change the downloaded file.
+
+## Package the local CPU weight runtime
+
+Use the packager from the same source release as the controller, dispatcher,
+worker and engine. Prepare a new private release directory with those binaries.
+The build host must have `/usr/bin/python3`, NumPy, PyYAML, Bubblewrap and a
+trusted `gguf-py` checkout. Record the dependency fingerprint from the approved
+build inputs; pass that pinned value at install time:
+
+```sh
+/usr/bin/python3 -I -B tools/brewery-weight-runtime.py fingerprint \
+  --gguf-python "$GGUF_PY"
+/usr/bin/python3 -I -B tools/brewery-weight-runtime.py install \
+  --bin-dir "$RELEASE_BIN" --gguf-python "$GGUF_PY" --dependency-sha256 "$APPROVED_SHA256"
+```
+
+The install command prints the asset manifest SHA-256. Keep
+`brewery-weight-edit`, `brewery-weight-tune`, and `brewery-weight-runtime/`
+together beside the controller. The package uses the target system's Python
+ABI and shared libraries; build it on a compatible host. The launchers verify
+the pinned manifest and import the helpers inside the sandbox before reporting
+capabilities. A previous wrapper that cannot answer `--capabilities` is not
+accepted as a ready runtime. Installation does not enable any host policy.
+
+Jobs expose only their private staged work directory to the helper. The
+sandbox has no host network, model roots, or credential store. If Bubblewrap
+or unprivileged user namespaces are unavailable, the helper fails closed. This
+package is for local workers, not the SSH worker installer.
 
 ## Weight edit tools (fixtures only)
 
