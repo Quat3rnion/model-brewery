@@ -6,6 +6,8 @@
   import { brewery } from '../lib/store.svelte';
   import type { PolicyAction } from '../lib/host-policy';
   import WeightEditorSettings from './WeightEditorSettings.svelte';
+  import ModelDirectories from './ModelDirectories.svelte';
+  import { directoryReceipt, type DirectoryChange } from '../lib/model-directories';
   import HostPolicy from './HostPolicy.svelte';
   import SshHosts from './SshHosts.svelte';
   import Badge from '../components/Badge.svelte';
@@ -16,7 +18,9 @@
   let busy = $state<string | null>(null);
   let actionError = $state<string | null>(null);
   let hostId = $state('');
+  let directoryStatus = $state<{host:string;message:string;error?:boolean}|null>(null);
   let focusTarget = $state('');
+  let mounted = false;
   $effect(() => {
     if (status === 'ok' && focusTarget && policy) { const id=focusTarget; focusTarget=''; requestAnimationFrame(()=>document.getElementById(id)?.focus()); }
   });
@@ -47,19 +51,40 @@
     }
   }
   onMount(() => {
+    mounted = true;
     void load();
     const focusSection = () => {
       const [section,q] = window.location.hash.split('?');
       if (section === '#/settings/infrastructure' && q) {
         const params=new URLSearchParams(q); hostId=params.get('host') ?? '';
-        focusTarget=params.get('section')==='policy' ? 'host-policy-h' : 'weight-settings-h';
+        focusTarget=params.get('section')==='directories' ? 'model-directories-h' : params.get('section')==='policy' ? 'host-policy-h' : 'weight-settings-h';
       }
       if (window.location.hash === '#/settings/infrastructure') document.getElementById('infrastructure')?.focus();
     };
     const frame = requestAnimationFrame(focusSection);
     window.addEventListener('hashchange', focusSection);
-    return () => { cancelAnimationFrame(frame); window.removeEventListener('hashchange', focusSection); };
+    return () => { mounted = false; cancelAnimationFrame(frame); window.removeEventListener('hashchange', focusSection); };
   });
+
+  async function saveDirectory(change:DirectoryChange) {
+    if (busy || !policy?.directories?.available || policy.id !== change.worker || policy.revision !== change.revision) return false;
+    busy='directory';
+    directoryStatus={host:change.worker,message:'Checking the directory change…'};
+    try {
+      const receipt=directoryReceipt(await api.planDirectory(change),change);
+      if (!mounted || !receipt || policy?.id!==change.worker || policy.revision!==change.revision) throw new Error('The validation did not match the reviewed change. Refresh infrastructure before trying again.');
+      const result=parseAdminState(await api.confirmDirectory({worker:change.worker, revision:change.revision, confirmation:receipt.confirmation}));
+      if (!result?.hosts?.some(h=>h.id===change.worker && h.revision>change.revision)) throw new Error('Refresh infrastructure to check whether the change was saved.');
+      st=result;
+      directoryStatus={host:change.worker,message:`Directory change saved for ${change.worker}.`};
+      focusTarget='model-directories-h';
+      void brewery.refresh();
+      return true;
+    } catch(e) {
+      directoryStatus={host:change.worker,error:true,message:`${errorText(e)}${e instanceof ApiError && e.status===409 ? ' Refresh infrastructure, review the current paths, then save again.' : ''}`};
+      return false;
+    } finally { busy=null; }
+  }
 
   async function act(a: AdminAction | PolicyAction, label: string) {
     if (!st || busy || status !== 'ok') return;
@@ -103,7 +128,12 @@
                 {#each st.hosts as h (h.id)}<option value={h.id}>{h.name} · {h.id}</option>{/each}
               </select>
             </div>
-            {#key `${policy.id}:${policy.revision}`}<WeightEditorSettings host={policy} busy={!!busy} save={act} /><HostPolicy host={policy} busy={!!busy} save={act} />{/key}
+            {#key `${policy.id}:${policy.revision}`}
+              <WeightEditorSettings host={policy} policies={st.hosts} busy={!!busy} save={act} />
+              <ModelDirectories host={policy} busy={!!busy} save={saveDirectory} />
+              {#if directoryStatus?.host===policy.id}<p class="note small" class:bad={directoryStatus.error} role={directoryStatus.error?'alert':'status'}>{directoryStatus.message}</p>{/if}
+              <HostPolicy host={policy} busy={!!busy} save={act} />
+            {/key}
           {:else}<p class="muted small">{hostId && st.hosts ? `The selected host (${hostId}) is not defined here. Open Settings to choose another host.` : st.hosts ? 'No defined hosts reported.' : 'This controller did not report editable host policies.'}</p>{/if}
         </div>
       </section>

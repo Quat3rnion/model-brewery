@@ -1,4 +1,5 @@
 import { obj } from './reports';
+import { readDirectories, type Directories } from './model-directories';
 
 export const limits = {
   concurrency: 'Concurrent jobs',
@@ -13,6 +14,7 @@ function readWeightEditor(raw:unknown):WeightEditorPolicy|null {
   return {available:w.available, enabled:w.enabled, capabilities:caps as Record<string,boolean>, ...(typeof w.reason === 'string' ? {reason:w.reason} : {})};
 }
 export interface HostPolicy {
+  directories:Directories|null;
   weightEditor:WeightEditorPolicy|null;
   id: string; name: string; revision: number; paused: boolean; draining: boolean;
   installed_jobs: string[]; allowed_jobs: string[]; disabled_jobs: string[];
@@ -44,7 +46,7 @@ export function parseHostPolicies(value: unknown): HostPolicy[] | null {
     const resources = numbers(h.resources);
     // Complete replacement must not drop a newer server's unknown overrides.
     const resourceEditable = !!obj(h.resources) && Object.keys(obj(h.resources)!).every(k => Object.hasOwn(bounds,k) && Object.hasOwn(resources,k));
-    out.push({weightEditor:readWeightEditor(h.weight_editor), id:h.id, name:typeof h.name === 'string' ? h.name : h.id, revision:h.revision, paused:h.paused, draining:h.draining,
+    out.push({directories:readDirectories(h.model_directories),weightEditor:readWeightEditor(h.weight_editor), id:h.id, name:typeof h.name === 'string' ? h.name : h.id, revision:h.revision, paused:h.paused, draining:h.draining,
       installed_jobs:installed, allowed_jobs:h.allowed_jobs, disabled_jobs:h.disabled_jobs, resource_bounds:bounds,
       resources, effective_resources:numbers(h.effective_resources), resourceEditable});
   }
