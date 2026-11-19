@@ -177,3 +177,18 @@ it('rejects an HF inventory whose reported source format differs from the regist
   expect(readInventory(receipt,'safetensors')).toBeNull();
   expect(readInventory(receipt,'hf')?.tensors.map(blockedReason)).toEqual([null,'I64 is not editable.']);
 });
+
+it('opens inventory-listed native keys without widening GGUF or HGN names', () => {
+  const long = 'model.language_model.hyper_connection_mixer.input_mix_weight_down.weight';
+  const keys = [long, '-with / spaces', 'x'.repeat(95), 'x'.repeat(96), '__metadata__', 'bad\n', 'é'];
+  const rows = keys.map(name => ({ name, shape: [2, 2], dtype: 'BF16', editable: true }));
+  for (const kind of ['hf', 'safetensors']) {
+    const reasons = readInventory(inv(rows, {source_format: kind}), kind)?.tensors.map(blockedReason);
+    expect(reasons?.slice(0, 3)).toEqual([null, null, null]);
+    expect(reasons?.slice(3).every(r => r?.includes('does not accept'))).toBe(true);
+  }
+  for (const kind of ['gguf', 'hgn']) {
+    const page = readInventory(inv(rows, {source_format: kind}));
+    expect(page?.tensors.map(t => blockedReason(t) === null)).toEqual([false, false, false, false, true, false, false]);
+  }
+});

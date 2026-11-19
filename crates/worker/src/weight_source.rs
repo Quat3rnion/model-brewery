@@ -26,6 +26,25 @@ pub fn supports(kind: &str) -> bool {
     matches!(kind, "hf" | "safetensors")
 }
 
+/// Match the native SafeTensors parser's logical key rule, not a path rule.
+pub fn native_tensor_name(name: &str) -> bool {
+    (1..=95).contains(&name.len())
+        && name != "__metadata__"
+        && name.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
+}
+
+pub fn tensor_name(name: &str, native_safe: bool) -> bool {
+    if native_safe {
+        return native_tensor_name(name);
+    }
+    (1..=63).contains(&name.len())
+        && !name.starts_with('.')
+        && !name.contains("..")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
 pub fn job(kind: &str) -> bool {
     matches!(
         kind,

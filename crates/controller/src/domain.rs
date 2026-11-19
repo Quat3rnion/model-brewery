@@ -819,7 +819,7 @@ impl NewJob {
                         "all weight inputs must be registered on the destination worker".into(),
                     );
                 }
-                crate::weights::options(&self.kind, &Value::Object(self.options.clone()))?;
+                crate::weights::options(&self.kind, main, &Value::Object(self.options.clone()))?;
                 if crate::weights::is_safetensors(main) && crate::weights::is_packed(&self.options)
                 {
                     return Err(

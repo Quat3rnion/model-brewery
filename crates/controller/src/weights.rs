@@ -2,6 +2,7 @@ use crate::{
     domain::{Envelope, Job, Model, NewModel, id},
     profiles::valid_revision,
 };
+use brewery_worker::weight_source;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,15 +18,10 @@ pub fn is_safetensors(kind: &str) -> bool {
     matches!(kind, "safetensors" | "hf")
 }
 
-fn tensor(value: &Value) -> bool {
-    value.as_str().is_some_and(|s| {
-        !s.is_empty()
-            && s.len() <= 63
-            && !s.starts_with('.')
-            && !s.contains("..")
-            && s.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-    })
+fn tensor(value: &Value, native_safe: bool) -> bool {
+    value
+        .as_str()
+        .is_some_and(|s| weight_source::tensor_name(s, native_safe))
 }
 
 fn index(value: &Value, rank: Option<usize>) -> bool {
@@ -49,7 +45,7 @@ pub fn is_packed(options: &Map<String, Value>) -> bool {
     options.get("packed").and_then(Value::as_bool) == Some(true)
 }
 
-fn inspect_options(value: &Value, count: usize, has_pin: bool) -> bool {
+fn inspect_options(value: &Value, count: usize, has_pin: bool, native_safe: bool) -> bool {
     match value["mode"].as_str() {
         Some("inventory") => {
             count == 3 + usize::from(has_pin)
@@ -67,7 +63,7 @@ fn inspect_options(value: &Value, count: usize, has_pin: bool) -> bool {
             let rank = shape.len();
             count == 5
                 && has_pin
-                && tensor(&value["tensor"])
+                && tensor(&value["tensor"], native_safe)
                 && (1..=4).contains(&rank)
                 && index(&value["origin"], Some(rank))
                 && shape.iter().enumerate().all(|(axis, n)| {
@@ -81,11 +77,12 @@ fn inspect_options(value: &Value, count: usize, has_pin: bool) -> bool {
                     n.as_u64().is_some_and(|n| (1..=limit).contains(&n))
                 })
         }
-        _ => count == 2 && tensor(&value["tensor"]) && index(&value["index"], None),
+        _ => count == 2 && tensor(&value["tensor"], native_safe) && index(&value["index"], None),
     }
 }
 
-pub fn options(kind: &str, value: &Value) -> Result<(), String> {
+pub fn options(kind: &str, source_kind: &str, value: &Value) -> Result<(), String> {
+    let native_safe = weight_source::supports(source_kind);
     let packed = value.get("packed");
     if packed.is_some_and(|v| v != true || kind == "weight_apply") {
         return Err(format!("invalid {kind} packed option"));
@@ -96,7 +93,7 @@ pub fn options(kind: &str, value: &Value) -> Result<(), String> {
         return Err("invalid source_sha256".into());
     }
     let valid = match kind {
-        "weight_inspect" => inspect_options(value, count, has_pin),
+        "weight_inspect" => inspect_options(value, count, has_pin, native_safe),
         "weight_propose" => {
             count == 1 + usize::from(has_pin)
                 && value["edits"].as_array().is_some_and(|edits| {
@@ -104,7 +101,7 @@ pub fn options(kind: &str, value: &Value) -> Result<(), String> {
                     (1..=256).contains(&edits.len())
                         && edits.iter().all(|e| {
                             e.as_object().is_some_and(|e| e.len() == 4)
-                                && tensor(&e["tensor"])
+                                && tensor(&e["tensor"], native_safe)
                                 && index(&e["index"], None)
                                 && matches!(e["op"].as_str(), Some("set" | "delta"))
                                 && number(&e["value"])
@@ -114,7 +111,7 @@ pub fn options(kind: &str, value: &Value) -> Result<(), String> {
         }
         "weight_tune" => {
             count == 3 + usize::from(has_pin)
-                && tensor(&value["tensor"])
+                && tensor(&value["tensor"], native_safe)
                 && value["max_update"]
                     .as_f64()
                     .is_some_and(|n| n.is_finite() && n > 0.)

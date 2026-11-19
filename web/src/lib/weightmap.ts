@@ -17,8 +17,9 @@ import type { JobSummary, NewJob } from './types';
 export const INVENTORY_PAGE = 128;
 export const TILE = 32;
 export const TILE_1D = 1024;
-/** Controller limit for tensor names in requests. */
-export const MAX_REQUEST_NAME = 63;
+/** Tensor request limits in bytes; the accepted characters are ASCII. */
+const MAX_LEGACY_NAME = 63;
+const MAX_SAFE_NAME = 95;
 export const DTYPES = ['F32', 'F16', 'BF16'] as const;
 export type Dtype = (typeof DTYPES)[number];
 
@@ -71,6 +72,7 @@ export interface TensorInfo {
   shape: number[];
   dtype: string;
   reason?: string;
+  sourceFormat?: string;
   elements: number;
   /** Position in the file (inventory order). */
   order: number;
@@ -103,6 +105,7 @@ export function readInventory(result: unknown, expectedFormat?: string): Invento
       ? (typeof t.reason === 'string' && t.reason) || 'The worker did not confirm that this tensor is editable.'
       : !isDtype(t.dtype) && !(isPacked(t.dtype) && t.editable === true) ? 'No verified code-step editor for this encoding.' : undefined;
     tensors.push({ name: t.name, shape: t.shape, dtype: t.dtype, reason, elements,
+      sourceFormat: typeof r.source_format === 'string' ? r.source_format : undefined,
       order: (offset as number) + i, role: roleOf(t.name), layer: layerOf(t.name) });
   }
   return { source_sha256: r.source_sha256, offset: offset as number, total: total as number, next_offset: next_offset as number | null, tensors };
@@ -111,7 +114,12 @@ export function readInventory(result: unknown, expectedFormat?: string): Invento
 /** Why a tensor cannot be opened, or null. */
 export function blockedReason(t: TensorInfo): string | null {
   if (t.reason) return t.reason;
-  if (t.name.length > MAX_REQUEST_NAME || !/^[A-Za-z0-9._-]+$/.test(t.name) || t.name.startsWith('.') || t.name.includes('..'))
+  const native = t.sourceFormat === 'hf' || t.sourceFormat === 'safetensors';
+  const valid = native
+    ? t.name.length <= MAX_SAFE_NAME && t.name !== '__metadata__' && !/[^\x20-\x7e]/.test(t.name)
+    : t.name.length <= MAX_LEGACY_NAME && !/[^A-Za-z0-9._-]/.test(t.name)
+      && !t.name.startsWith('.') && !t.name.includes('..');
+  if (!t.name || !valid)
     return 'The controller does not accept this tensor name in a request.';
   return null;
 }

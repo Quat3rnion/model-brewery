@@ -10,7 +10,7 @@ import tempfile
 import time
 from urllib.error import HTTPError
 
-from managed_weight_smoke import HOST, TENSOR, controller, request, save, setup
+from managed_weight_smoke import HOST, TENSOR, controller, matrix, request, save, setup
 
 FLOAT = "layer.float"
 INTEGER = "layer.indices"
@@ -214,12 +214,25 @@ def run(root, args, kind):
             ("BF16", [2, 2]), ("F32", [1, 2]), ("I64", [2])]
         assert tensors[TENSOR]["editable"] is True and tensors[INTEGER]["editable"] is False
 
+        for label, invalid_name in (("over-limit", "x" * 96), ("metadata", "__metadata__"),
+                                    ("control", "tensor\n"), ("non-ascii", "ténsor")):
+            refuse(f"native-name-{label}", lambda: post(
+                "weight_inspect", [source_id], {"tensor": invalid_name, "index": [0, 0]}), (400,))
+        legacy = inputs / "legacy.gguf"
+        legacy.write_bytes(matrix(ORIGINAL))
+        legacy_id = register(legacy, "gguf")
+        refuse("gguf-still-rejects-long-name", lambda: post(
+            "weight_inspect", [legacy_id], {"tensor": "x" * 64, "index": [0, 0]}), (400,))
+        initial_models = http("state")["models"]
+
         def tile(label, ident, expected_sha, values):
             result = inspect(label, ident, {"mode": "tile", "tensor": TENSOR, "origin": [0, 0],
                                            "shape": [2, 2], "source_sha256": expected_sha}, expected_sha)
-            assert result["values"] == [list(values[:2]), list(values[2:])], result
+            assert result["tensor"] == TENSOR and result["values"] == [list(values[:2]), list(values[2:])], result
 
         tile("source-tile", source_id, pin, ORIGINAL)
+        scalar = inspect("source-scalar", source_id, {"tensor": TENSOR, "index": [0, 1]}, pin)
+        assert scalar["tensor"] == TENSOR and scalar["value"] == 2
         manual = job("manual-proposal", "weight_propose", [source_id], {"source_sha256": pin, "edits": [
             {"tensor": TENSOR, "index": [0, 1], "op": "delta", "value": 0.5}]})
         auto = job("tune-proposal", "weight_tune", [source_id, cal, held], {
@@ -298,6 +311,9 @@ def run(root, args, kind):
 
 
 if __name__ == "__main__":
+    # The production inventory listed this exact 72-byte BF16 key; the
+    # previous tile request validator rejected it before dispatch.
+    TENSOR = "model.language_model.hyper_connection_mixer.input_mix_weight_down.weight"
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin-dir", required=True, type=Path)
     parser.add_argument("--gguf-python", required=True, type=Path)

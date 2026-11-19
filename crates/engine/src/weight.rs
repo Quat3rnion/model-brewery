@@ -92,29 +92,19 @@ enum Mode {
     Apply(Apply),
 }
 
-fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 63
-        && !name.starts_with('.')
-        && !name.contains("..")
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-}
-
 fn rank_ok(index: &[u64]) -> bool {
     (1..=4).contains(&index.len())
 }
 
-fn valid_edit(edit: &Edit) -> bool {
-    valid_name(&edit.tensor)
+fn valid_edit(edit: &Edit, native_safe: bool) -> bool {
+    weight_source::tensor_name(&edit.tensor, native_safe)
         && rank_ok(&edit.index)
         && matches!(edit.op.as_str(), "delta" | "set")
         && edit.value.is_finite()
 }
 
 impl Mode {
-    fn parse(job: &Job, options: Value) -> Result<Self> {
+    fn parse(job: &Job, options: Value, native_safe: bool) -> Result<Self> {
         ensure!(job.prompt.is_none(), "weight jobs do not accept prompts");
         Ok(match job.kind.as_str() {
             "weight_inspect" if options.get("mode").is_some() => {
@@ -133,7 +123,7 @@ impl Mode {
                         let v: Tile = serde_json::from_value(options)?;
                         let rank = v.shape.len();
                         ensure!(
-                            valid_name(&v.tensor)
+                            weight_source::tensor_name(&v.tensor, native_safe)
                                 && rank_ok(&v.shape)
                                 && v.origin.len() == rank
                                 && v.origin
@@ -156,7 +146,7 @@ impl Mode {
             "weight_inspect" => {
                 let v: Inspect = serde_json::from_value(options)?;
                 ensure!(
-                    valid_name(&v.tensor) && rank_ok(&v.index),
+                    weight_source::tensor_name(&v.tensor, native_safe) && rank_ok(&v.index),
                     "invalid scalar coordinate"
                 );
                 Self::Inspect(v)
@@ -167,7 +157,8 @@ impl Mode {
                 ensure!(
                     (1..=256).contains(&v.edits.len())
                         && v.edits.iter().all(|edit| {
-                            valid_edit(edit) && selected.insert((&edit.tensor, &edit.index))
+                            valid_edit(edit, native_safe)
+                                && selected.insert((&edit.tensor, &edit.index))
                         }),
                     "invalid or duplicate scalar edits"
                 );
@@ -176,7 +167,7 @@ impl Mode {
             "weight_tune" => {
                 let v: Tune = serde_json::from_value(options)?;
                 ensure!(
-                    valid_name(&v.tensor)
+                    weight_source::tensor_name(&v.tensor, native_safe)
                         && (1..=256).contains(&v.indices.len())
                         && v.indices.iter().collect::<BTreeSet<_>>().len() == v.indices.len()
                         && serde_json::to_vec(&v.indices)?.len() <= 8192
@@ -232,13 +223,6 @@ pub(crate) fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         !packed || env::var("BREWERY_WEIGHT_PACKED").as_deref() == Ok("1"),
         "packed weight editing is not enabled on this worker"
     );
-    let mode = Mode::parse(job, options).context("invalid weight job options")?;
-    if matches!(mode, Mode::Inventory(_) | Mode::Tile(_)) || mode.visual_sha().is_some() {
-        ensure!(
-            env::var("BREWERY_WEIGHT_VISUAL").as_deref() == Ok("1"),
-            "visual weight inspection is not enabled on this worker"
-        );
-    }
     let source_kind = job
         .inputs
         .first()
@@ -246,6 +230,13 @@ pub(crate) fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         .kind
         .as_str();
     let native_safe = weight_source::supports(source_kind);
+    let mode = Mode::parse(job, options, native_safe).context("invalid weight job options")?;
+    if matches!(mode, Mode::Inventory(_) | Mode::Tile(_)) || mode.visual_sha().is_some() {
+        ensure!(
+            env::var("BREWERY_WEIGHT_VISUAL").as_deref() == Ok("1"),
+            "visual weight inspection is not enabled on this worker"
+        );
+    }
     if native_safe {
         ensure!(
             env::var(weight_source::GATE).as_deref() == Ok("1"),
@@ -731,6 +722,7 @@ fn check_inventory(report: &Value, request: &Inventory, policy: CodecPolicy) -> 
                 !name.is_empty()
                     && name.len() <= 95
                     && name.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
+                    && (!policy.native_safe || weight_source::native_tensor_name(name))
                     && unique.insert(name)
             }) && inventory_dtype(tensor, policy)
                 && inventory_dimensions(
@@ -864,7 +856,7 @@ fn validate_proposal(proposal: &Value, sha: &str, policy: CodecPolicy) -> Result
         }))?;
         ensure!(
             edit.as_object().is_some_and(|v| v.len() == 7)
-                && valid_edit(&scalar)
+                && valid_edit(&scalar, policy.native_safe)
                 && policy.editable(&edit["dtype"])
                 && edit["before"].as_f64().is_some()
                 && edit["after"].as_f64().is_some()
