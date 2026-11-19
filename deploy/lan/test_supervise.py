@@ -1,6 +1,8 @@
 """Linux integration tests for the LAN upstream; no real controller changes."""
 
 import os
+import json
+import select
 from pathlib import Path
 import shutil
 import socket
@@ -128,6 +130,17 @@ class TestSupervise(unittest.TestCase):
                 pass
         self.assertEqual(fixture.wait(timeout=5), 0)
         self.assertEqual(fixture.stdout.read(), "\n", "unverified peer received bytes")
+        self.assertTrue(select.select([shim.stderr], [], [], 2)[0], "missing bridge failure record")
+        line = shim.stderr.readline()
+        self.assertNotIn("must not leave", line)
+        event = json.loads(line)
+        self.assertEqual(event["event"], "brewery_bridge_failure")
+        self.assertEqual(event["phase"], "verify_peer")
+        self.assertEqual(event["reason"], "timeout")
+        self.assertEqual(event["peer_check"], "peer_fd_not_owned")
+        self.assertEqual(event["upstream_port"], port)
+        self.assertGreaterEqual(event["elapsed_ms"], 900)
+        self.assertEqual(event["to_upstream_bytes"], 0)
 
     def test_bridge_streams_to_a_verified_peer_and_recovers_after_restart(self):
         first, port = self.fixture()

@@ -170,6 +170,21 @@ the same library and jobs. Stop standby before starting a new
 `local_sm120.py` workflow; start standby again after the workflow has
 acquired its lock. During controller handoffs the gateway can return `503`.
 
+For a gateway `502`, compare its timestamp with the bridge journal:
+
+```sh
+journalctl --user -u model-brewery-lan-bridge.service --utc \
+  --since '15 minutes ago' -o short-iso-precise --grep=brewery_bridge_failure
+```
+
+`tcp_connect` means the bridge was connecting to the controller. `verify_peer`
+means TCP connected but the bridge was checking which process accepted it.
+For that phase, `peer_check` is the last check result, and `connect_ms` shows
+how much of the shared one-second deadline the TCP connection used. Relay
+failures include byte counts for each direction. Records describe connections,
+not individual HTTP requests. Use the gateway journal for the route. The
+bridge does not log URLs, headers, bodies or credentials.
+
 The workbench follows the Halogen Dashboard visual style. Use the shared
 colors, typography, and control styles in `web/src/app.css` for new views.
 

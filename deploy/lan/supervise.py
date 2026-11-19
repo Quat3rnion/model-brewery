@@ -8,6 +8,7 @@ The controller must explicitly set BREWERY_DATA and an IPv4 BREWERY_LISTEN.
 import argparse
 import asyncio
 import fcntl
+import json
 import os
 from pathlib import Path
 import re
@@ -17,6 +18,7 @@ import socket
 import stat
 import sys
 import tempfile
+import time
 
 
 RUN = Path("/mnt/games/model-brewery/local-sm120")
@@ -104,7 +106,7 @@ def discover(exes, data):
     return None
 
 
-def verified_peer(sock, proc, exes, data):
+def peer_check(sock, proc, exes, data):
     """Check the accepted fd, not merely the process that owned the listener."""
     local = proc_address(sock.getsockname())
     remote = proc_address(sock.getpeername())
@@ -112,15 +114,18 @@ def verified_peer(sock, proc, exes, data):
     rows = {(src, dst, inode) for src, dst, state, inode in tcp4()
             if state == "01" and (src, dst) in ((local, remote), (remote, local))}
     if (local, remote, client_inode) not in rows:
-        return False
+        return "client_socket_not_visible"
     peers = {inode for src, dst, inode in rows if (src, dst) == (remote, local)}
-    return len(peers) == 1 and not peers.isdisjoint(socket_inodes(proc)) and (
-        identify(proc, exes, data) is not None
-    )
+    if len(peers) != 1:
+        return "peer_socket_not_unique"
+    if peers.isdisjoint(socket_inodes(proc)):
+        return "peer_fd_not_owned"
+    return "verified" if identify(proc, exes, data) is not None else "identity_changed"
 
 
-async def dial(target, exes, data):
+async def dial(target, exes, data, trace):
     proc, port = target
+    trace["phase"] = "pin_process"
     pinned = os.pidfd_open(int(proc.name))
     try:
         configured = identify(proc, exes, data)
@@ -129,12 +134,20 @@ async def dial(target, exes, data):
         with socket.socket() as sock:
             sock.setblocking(False)
             loop = asyncio.get_running_loop()
+            dial_start = time.monotonic()
             async with asyncio.timeout(1):
+                trace["phase"] = "tcp_connect"
                 await loop.sock_connect(sock, (LOOPBACK, port))
+                trace["connect_ms"] = round((time.monotonic() - dial_start) * 1000)
+                trace["phase"] = "verify_peer"
+                trace["peer_checks"] = 0
                 # Linux exposes the peer inode only after the server accepts.
                 while not select.select([pinned], [], [], 0)[0]:
-                    if verified_peer(sock, proc, exes, data):
+                    trace["peer_checks"] += 1
+                    trace["peer_check"] = peer_check(sock, proc, exes, data)
+                    if trace["peer_check"] == "verified":
                         if not select.select([pinned], [], [], 0)[0]:
+                            trace["phase"] = "open_stream"
                             # Transfer an already-verified TCP connection, with no data
                             # ever sent to the ephemeral address before verification.
                             return await asyncio.open_connection(sock=sock.dup())
@@ -144,10 +157,11 @@ async def dial(target, exes, data):
     raise ConnectionError("Brewery process exited")
 
 
-async def copy(reader, writer):
+async def copy(reader, writer, trace, counter):
     while data := await reader.read(65536):
         writer.write(data)
         await writer.drain()
+        trace[counter] += len(data)
     writer.write_eof()
 
 
@@ -166,25 +180,48 @@ def publish_port(path, port):
 async def serve(path, exes, data):
     target = None
     active = 0
+    sequence = 0
     stopping = asyncio.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         asyncio.get_running_loop().add_signal_handler(sig, stopping.set)
 
     async def bridge(reader, writer):
-        nonlocal active
+        nonlocal active, sequence
+        sequence += 1
+        started = time.monotonic()
+        trace = dict(event="brewery_bridge_failure", connection=sequence, active=active,
+                     phase="admission", upstream_pid=int(target[0].name) if target else None,
+                     upstream_port=target[1] if target else None, to_upstream_bytes=0,
+                     from_upstream_bytes=0)
+
+        def failure(reason, errno=None):
+            # Only bounded categories and numbers. Do not inspect HTTP or log exception text.
+            print(json.dumps(dict(trace, reason=reason, errno=errno,
+                                  elapsed_ms=round((time.monotonic() - started) * 1000))),
+                  file=sys.stderr, flush=True)
+
         if target is None or active >= 64:
+            failure("no_verified_listener" if target is None else "connection_limit")
             writer.close()
             return
         active += 1
         upstream = None
         tasks = []
         try:
-            incoming, upstream = await dial(target, exes, data)
-            tasks = [asyncio.create_task(copy(reader, upstream)),
-                     asyncio.create_task(copy(incoming, writer))]
+            incoming, upstream = await dial(target, exes, data, trace)
+            trace["phase"] = "relay"
+            tasks = [asyncio.create_task(copy(reader, upstream, trace, "to_upstream_bytes"),
+                                         name="relay_to_upstream"),
+                     asyncio.create_task(copy(incoming, writer, trace, "from_upstream_bytes"),
+                                         name="relay_from_upstream")]
             await asyncio.gather(*tasks)
-        except (OSError, TimeoutError):
-            pass
+            if trace["to_upstream_bytes"] and not trace["from_upstream_bytes"]:
+                failure("upstream_eof_without_response")
+        except OSError as exc:
+            for task in tasks:
+                if task.done() and not task.cancelled() and task.exception() is exc:
+                    trace["phase"] = task.get_name()
+            failure("timeout" if isinstance(exc, TimeoutError) else type(exc).__name__, exc.errno)
         finally:
             for task in tasks:
                 task.cancel()
