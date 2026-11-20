@@ -10,11 +10,15 @@ import stat
 import subprocess
 import tempfile
 
-from local_gguf import KINDS, canonical_path, metadata_bytes, require, sandbox
+from local_gguf import (KINDS, ROCMFPX_QUANTIZER_ENV, ROCMFPX_QUANTIZER_NAME, ROCMFPX_REVISION,
+                        ROCMFPX_SHA_ENV, canonical_path, metadata_bytes, pinned_native, require, sandbox)
 
 HOST = "local-gguf"
 REVISION = "184f6536024668e8908ab8c86033d56708e62b40"
 QUANT_SHA = "7ceb0e39e4f7e207fe8c55215368163bb5734072dc871a66b45527e1a5c9c672"
+# Separate CPU build from charlie12345/ROCmFPX at ROCMFPX_REVISION.
+ROCMFPX_QUANT_SHA = "593e59cb7bcdd51ca4f9e7cac3ea42797c48dd1c18ac9b13552dd8c382ae3708"
+ROCMFPX_PROBE_MAX = 8 << 20
 DISABLED = {"baseline", "benchmark", "cache_cleanup", "compare", "evaluate", "generate",
             "transfer", "transfer_preview", "convert_components", "custom_profiles", "gguf_hf_output"}
 
@@ -71,22 +75,83 @@ def probe_export(root, config, source, assets):
         (root / "standalone-probe.json").write_text(json.dumps(report, indent=2) + "\n")
 
 
+def probe_rocmfpx(root, source, sha):
+    source = canonical_path(str(source))
+    info = source.stat()
+    require(source.suffix == ".gguf" and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+            and 0 < info.st_size <= ROCMFPX_PROBE_MAX,
+            "ROCmFPX probe requires a tiny standalone unquantized GGUF fixture (maximum 8 MiB)")
+    tensor = "blk.0.attn_q.weight"
+    private_type = "Q4_0_ROCMFP4_FAST"
+    options = {"output_format": "gguf", "gguf_type": "Q8_0", "threads": 1,
+               "tensor_types": {tensor: private_type}, "encoder_family": "rocmfpx",
+               "encoder_revision": ROCMFPX_REVISION}
+    binary = root / "bin"
+    with tempfile.TemporaryDirectory(prefix="rocmfpx-probe-", dir=root) as name:
+        work = Path(name) / "convert/work"
+        output = work / "converted.gguf"
+        reports = {}
+        for kind, paths in (("convert", [source]), ("verify", [source, output])):
+            work = Path(name) / kind / "work"
+            work.mkdir(parents=True)
+            job = {"kind": kind, "options": options,
+                   "inputs": [{"path": str(path), "kind": "gguf", "host": HOST} for path in paths]}
+            cmd = ["/usr/bin/prlimit", f"--fsize={ROCMFPX_PROBE_MAX}", "--", str(binary / "brewery-engine")]
+            args, env = sandbox(work, paths, cmd, binary=binary, fork_sha=sha)
+            with tempfile.TemporaryFile(dir=work.parent) as stdout, tempfile.TemporaryFile(dir=work.parent) as stderr:
+                result = subprocess.run(args, env=env, input=json.dumps(job).encode(), timeout=90,
+                                        stdout=stdout, stderr=stderr)
+                stderr.seek(max(0, stderr.tell() - 2048))
+                require(result.returncode == 0, f"ROCmFPX {kind} probe failed: {stderr.read().decode(errors='replace')}")
+                stdout.seek(0)
+                report = json.load(stdout)
+            backend = report["backend_receipt"]
+            require(report["kind"] == kind and report["file_verification"]["status"] == "passed"
+                    and report["report"]["tensor_payloads_read"] is True
+                    and backend["executable_sha256"] == sha and backend["encoder_family"] == "rocmfpx"
+                    and backend["encoder_revision"] == ROCMFPX_REVISION
+                    and backend["stock_runtime_compatible"] is False
+                    and any(row["name"] == tensor and row["current_type"].upper() == private_type
+                            for row in report["report"]["gguf_tensors"]),
+                    f"invalid ROCmFPX {kind} probe receipt")
+            reports[kind] = report
+            if kind == "convert":
+                artifact = report["artifact"]
+                output_info = output.lstat()
+                require(stat.S_ISREG(output_info.st_mode) and 0 < output_info.st_size <= ROCMFPX_PROBE_MAX
+                        and artifact["path"] == str(output) and artifact["bytes"] == output_info.st_size
+                        and artifact["sha256"] == file_sha(output), "invalid ROCmFPX probe output")
+        (root / "rocmfpx-probe.json").write_text(json.dumps(reports, indent=2) + "\n")
+
+
 def stage(root, release, quantizer, catalog, dispatch_path, *, runtime=None, llama=None,
-          probe_source=None, probe_assets=None):
+          probe_source=None, probe_assets=None, rocmfpx_quantizer=None, rocmfpx_sha256=None,
+          rocmfpx_probe_source=None):
     root = root.absolute()
     if root.parent.resolve(strict=True) != root.parent:
         raise ValueError("expected canonical destination parent")
     require(file_sha(quantizer) == QUANT_SHA, "quantizer is not the verified CPU build")
     optional = (runtime, llama, probe_source, probe_assets)
     require(not any(optional) or all(optional), "standalone requires runtime, llama checkout, and both probe inputs")
+    fork = (rocmfpx_quantizer, rocmfpx_sha256, rocmfpx_probe_source)
+    require(not any(value is not None for value in fork) or all(fork),
+            "ROCmFPX quantizer, SHA-256, and probe source must be supplied together")
+    if rocmfpx_quantizer:
+        rocmfpx_quantizer = canonical_path(str(rocmfpx_quantizer))
+        info = rocmfpx_quantizer.stat()
+        require(stat.S_ISREG(info.st_mode) and info.st_mode & 0o111 and not rocmfpx_quantizer.samefile(quantizer)
+                and rocmfpx_sha256 == ROCMFPX_QUANT_SHA and file_sha(rocmfpx_quantizer) == rocmfpx_sha256,
+                "ROCmFPX quantizer is not the separately approved CPU build")
     dispatch = json.loads(dispatch_path.read_bytes())
     existing = dispatch["hosts"].get(HOST)
     old_config = {}
     if existing is not None:
-        require(runtime is not None and existing.get("local") is True
+        require(existing.get("local") is True
                 and not any(existing.get(k) for k in ("ssh", "managed_ssh"))
                 and existing.get("capabilities", {}).get("gguf_output") is True,
-                "local-gguf already exists; only standalone upgrades of the local worker can be staged")
+                "expected an existing direct local-gguf worker")
+        require(runtime is not None or not existing["capabilities"].get("gguf_safetensors_output"),
+                "an existing standalone upgrade requires its runtime, llama checkout, and both probe inputs")
         old = canonical_path(existing["config"])
         info = old.lstat()
         require(stat.S_ISREG(info.st_mode) and info.st_uid in {0, os.getuid()} and not info.st_mode & 0o022
@@ -96,8 +161,12 @@ def stage(root, release, quantizer, catalog, dispatch_path, *, runtime=None, lla
                 and "hf_download" not in old_config
                 and Path(old_config["admission"]).name == "local_gguf.py",
                 "expected an existing admitted direct local-gguf import root")
-    if json.loads(catalog.read_bytes())["encoder_revision"] != REVISION:
+    catalog_values = json.loads(catalog.read_bytes())
+    if catalog_values["encoder_revision"] != REVISION:
         raise ValueError("GGUF catalog has a different encoder revision")
+    if rocmfpx_quantizer:
+        require(catalog_values.get("rocmfpx_encoder_revision") == ROCMFPX_REVISION,
+                "GGUF catalog has a different ROCmFPX encoder revision")
     os.umask(0o077)
     root.mkdir(mode=0o700)
     try:
@@ -124,6 +193,18 @@ def stage(root, release, quantizer, catalog, dispatch_path, *, runtime=None, lla
                   "disk_reserve_bytes": max(16 << 30, old_config.get("disk_reserve_bytes", 0))}
         caps = (dict(existing.get("capabilities", {})) if existing else
                 dict.fromkeys(KINDS | {"gguf_output"}, True) | dict.fromkeys(DISABLED, False))
+        caps.pop("gguf_rocmfpx_output", None)
+        if "engine_env" in worker:
+            worker["engine_env"] = {key: value for key, value in worker["engine_env"].items()
+                                    if key not in (ROCMFPX_QUANTIZER_ENV, ROCMFPX_SHA_ENV)}
+        if existing and any(caps.get(k) for k in ("weight_inspect", "weight_propose", "weight_tune", "weight_apply")):
+            old_wrapper = canonical_path(existing["worker"])
+            require(old_config["admission"] == str(old_wrapper),
+                    "expected the existing local-gguf admission wrapper")
+            packed = trusted_dir(old_wrapper.parent / "weight-runtime-packed")
+            shutil.copytree(packed, binary / packed.name, symlinks=True)
+        if existing and not runtime:
+            (root / "local-roots.json").write_text(json.dumps(dict(imports=imports, state=state), default=str) + "\n")
         if runtime:
             runtime, llama = trusted_dir(runtime), trusted_dir(llama)
             require(len(runtime.parts) >= 3 and len(llama.parts) >= 3
@@ -135,12 +216,6 @@ def stage(root, release, quantizer, catalog, dispatch_path, *, runtime=None, lla
             require(interpreter.resolve(strict=True).is_relative_to(runtime)
                     and interpreter.is_file(), "runtime must contain its Python interpreter")
             exporter = binary / "gguf-export-hf"
-            if existing and any(caps.get(k) for k in ("weight_inspect", "weight_propose", "weight_tune", "weight_apply")):
-                old_wrapper = canonical_path(existing["worker"])
-                require(old_config["admission"] == str(old_wrapper),
-                        "expected the existing local-gguf admission wrapper")
-                packed = trusted_dir(old_wrapper.parent / "weight-runtime-packed")
-                shutil.copytree(packed, binary / packed.name, symlinks=True)
             shutil.copyfile(here.parents[1] / "tools/gguf-export-hf", exporter)
             exporter.chmod(0o700)
             (root / "exporter.sha256").write_text(file_sha(exporter) + "\n")
@@ -154,6 +229,17 @@ def stage(root, release, quantizer, catalog, dispatch_path, *, runtime=None, lla
             # The proposal is emitted only after the actual pinned exporter
             # succeeds through the same sandbox used for admitted jobs.
             caps["gguf_safetensors_output"] = True
+        if rocmfpx_quantizer:
+            staged_fork = binary / ROCMFPX_QUANTIZER_NAME
+            shutil.copyfile(rocmfpx_quantizer, staged_fork)
+            staged_fork.chmod(0o700)
+            pin = root / "rocmfpx.sha256"
+            pin.write_text(rocmfpx_sha256 + "\n")
+            pinned_native(staged_fork, pin)
+            probe_rocmfpx(root, rocmfpx_probe_source, rocmfpx_sha256)
+            worker["engine_env"] = {**worker.get("engine_env", {}), ROCMFPX_QUANTIZER_ENV: str(staged_fork),
+                                    ROCMFPX_SHA_ENV: rocmfpx_sha256}
+            caps["gguf_rocmfpx_output"] = True
         config.write_text(json.dumps(worker, indent=2) + "\n")
         dispatch["hosts"][HOST] = {**(existing or {}), "local": True, "worker": wrapper,
                                     "config": str(config), "capabilities": caps}
@@ -171,6 +257,11 @@ if __name__ == "__main__":
     cli.add_argument("--llama", type=Path, help="trusted llama.cpp checkout at the exporter pin")
     cli.add_argument("--probe-source", type=Path, help="bounded known-good standalone SafeTensors fixture")
     cli.add_argument("--probe-assets", type=Path, help="matching fixture config and tokenizer directory")
+    cli.add_argument("--rocmfpx-quantizer", type=Path, help="separately approved CPU-only ROCmFPX binary")
+    cli.add_argument("--rocmfpx-sha256", help="approved ROCmFPX executable SHA-256")
+    cli.add_argument("--rocmfpx-probe-source", type=Path, help="tiny unquantized ROCmFPX smoke fixture GGUF")
     args = cli.parse_args()
     stage(args.root, args.release, args.quantizer, args.catalog, args.dispatch,
-          runtime=args.runtime, llama=args.llama, probe_source=args.probe_source, probe_assets=args.probe_assets)
+           runtime=args.runtime, llama=args.llama, probe_source=args.probe_source, probe_assets=args.probe_assets,
+           rocmfpx_quantizer=args.rocmfpx_quantizer, rocmfpx_sha256=args.rocmfpx_sha256,
+           rocmfpx_probe_source=args.rocmfpx_probe_source)

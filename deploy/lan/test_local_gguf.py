@@ -60,7 +60,58 @@ class Admission(unittest.TestCase):
             self.assertFalse((root / "staged").exists())
             self.assertEqual(dispatch.read_bytes(), original)
 
-    def test_upgrade_keeps_existing_input_and_job_roots_and_other_workers(self):
+    def test_only_a_pinned_fork_that_passes_convert_and_verify_is_proposed(self):
+        with tempfile.TemporaryDirectory(dir="/arboretum") as name:
+            root = Path(name)
+            release = root / "release"
+            release.mkdir()
+            for leaf in ("brewery-worker", "brewery-engine"):
+                (release / leaf).touch()
+            stock, fork, probe, catalog, dispatch = (root / n for n in (
+                "quantizer", "fork", "tiny.gguf", "catalog.json", "dispatch.json"))
+            stock.write_bytes(b"stock")
+            fork.write_bytes(b"fork")
+            fork.chmod(0o700)
+            probe.write_bytes(b"tiny")
+            revision = "fb08d7cdb67082ddda15a25e64dc7ec413afc41c"
+            values = {"encoder_revision": stages.REVISION, "rocmfpx_encoder_revision": revision}
+            catalog.write_text(json.dumps(values))
+            original = b'{"hosts":{}}'
+            dispatch.write_bytes(original)
+            staged = root / "staged"
+            pin = stages.file_sha(fork)
+            args = (staged, release, stock, catalog, dispatch)
+            options = dict(rocmfpx_quantizer=fork, rocmfpx_sha256=pin, rocmfpx_probe_source=probe)
+            with patch.multiple(stages, QUANT_SHA=stages.file_sha(stock), ROCMFPX_QUANT_SHA=pin), \
+                    patch.object(stages, "probe_rocmfpx", side_effect=ValueError("verify failed")) as smoke:
+                with self.assertRaisesRegex(ValueError, "together"):
+                    stages.stage(*args, rocmfpx_quantizer=fork)
+                with self.assertRaisesRegex(ValueError, "approved CPU build"):
+                    stages.stage(*args, **(options | {"rocmfpx_sha256": "f" * 64}))
+                catalog.write_text(json.dumps(values | {"rocmfpx_encoder_revision": "0" * 40}))
+                with self.assertRaisesRegex(ValueError, "revision"):
+                    stages.stage(*args, **options)
+                catalog.write_text(json.dumps(values))
+                smoke.assert_not_called()
+                with self.assertRaisesRegex(ValueError, "verify failed"):
+                    stages.stage(*args, **options)
+                self.assertFalse(staged.exists())
+                smoke.side_effect = None
+                stages.stage(*args, **options)
+            self.assertEqual(dispatch.read_bytes(), original)
+            self.assertEqual((staged / "bin/llama-quantize").read_bytes(), b"stock")
+            fork_staged = staged / "bin/llama-quantize-rocmfpx"
+            self.assertEqual(fork_staged.read_bytes(), b"fork")
+            self.assertEqual((staged / "rocmfpx.sha256").read_text().strip(), pin)
+            caps = json.loads((staged / "dispatch.proposed.json").read_text())["hosts"]["local-gguf"]["capabilities"]
+            self.assertIs(caps["gguf_output"], True)
+            self.assertIs(caps["gguf_rocmfpx_output"], True)
+            self.assertNotIn("gguf_safetensors_output", caps)
+            cfg = json.loads((staged / "worker.json").read_text())
+            self.assertEqual(cfg["engine_env"], {"BREWERY_GGUF_ROCMFPX_QUANTIZER": str(fork_staged),
+                                               "BREWERY_GGUF_ROCMFPX_SHA256": pin})
+
+    def test_upgrade_keeps_existing_roots_and_workers_but_drops_stale_fork(self):
         with tempfile.TemporaryDirectory(dir="/arboretum") as name:
             root = Path(name)
             old = root / "old"
@@ -76,13 +127,18 @@ class Admission(unittest.TestCase):
             worker.write_text(json.dumps({
                 "root": str(old / "worker"), "source_roots": [str(old / "imports")],
                 "admission": str(wrapper), "disk_reserve_bytes": 20 << 30,
+                "engine_env": {
+                    "KEEP": "untouched",
+                    "BREWERY_GGUF_ROCMFPX_QUANTIZER": str(old / "bin/llama-quantize-rocmfpx"),
+                    "BREWERY_GGUF_ROCMFPX_SHA256": "f" * 64,
+                },
             }))
             quantizer, catalog, dispatch = (root / n for n in ("quantizer", "catalog.json", "dispatch.json"))
             quantizer.touch()
             catalog.write_text(json.dumps({"encoder_revision": stages.REVISION}))
             hosts = {"another": {"ssh": "fixture-unchanged"}, "local-gguf": {
                 "name": "Existing", "local": True, "worker": str(wrapper), "config": str(worker),
-                "capabilities": {"gguf_output": True, "gguf_hf_output": False},
+                "capabilities": {"gguf_output": True, "gguf_hf_output": False, "gguf_rocmfpx_output": True},
             }}
             dispatch.write_text(json.dumps({"hosts": hosts}))
             original = (worker.read_bytes(), dispatch.read_bytes())
@@ -103,6 +159,9 @@ class Admission(unittest.TestCase):
             self.assertEqual(cfg["source_roots"], [str(old / "imports")])
             self.assertEqual(cfg["root"], str(old / "worker"))
             self.assertEqual(cfg["disk_reserve_bytes"], 20 << 30)
+            self.assertEqual(cfg["engine_env"]["KEEP"], "untouched")
+            self.assertNotIn("BREWERY_GGUF_ROCMFPX_QUANTIZER", cfg["engine_env"])
+            self.assertNotIn("BREWERY_GGUF_ROCMFPX_SHA256", cfg["engine_env"])
 
     def test_packed_hgn_reaches_unchanged_memory_gate_only_for_local_file(self):
         with tempfile.TemporaryDirectory(dir="/arboretum") as name:
@@ -119,6 +178,44 @@ class Admission(unittest.TestCase):
                 job["inputs"][0]["kind"] = "gguf"
                 with self.assertRaisesRegex(ValueError, "source"):
                     ops.precheck(req)
+
+    def test_stock_only_upgrade_preserves_admission_roots_without_standalone(self):
+        with tempfile.TemporaryDirectory(dir="/arboretum") as name:
+            root = Path(name)
+            old, release = root / "old", root / "release"
+            for path in (release, old / "imports", old / "worker", old / "bin/weight-runtime-packed"):
+                path.mkdir(parents=True)
+            for leaf in ("brewery-worker", "brewery-engine"):
+                (release / leaf).touch()
+            wrapper = old / "bin/local_gguf.py"
+            wrapper.touch()
+            (old / "bin/weight-runtime-packed/edit").write_text("bound runtime")
+            cfg = old / "worker.json"
+            cfg.write_text(json.dumps({"root": str(old / "worker"), "admission": str(wrapper),
+                                       "source_roots": [str(old / "imports")]}))
+            stock, catalog, dispatch = (root / n for n in ("quantizer", "catalog.json", "dispatch.json"))
+            stock.touch()
+            catalog.write_text(json.dumps({"encoder_revision": stages.REVISION, "presets": [{"id": "Q4_0"}],
+                                           "tensor_types": []}))
+            caps = {"gguf_output": True, "gguf_safetensors_output": False, "weight_inspect": True}
+            dispatch.write_text(json.dumps({"hosts": {"local-gguf": {
+                "local": True, "worker": str(wrapper), "config": str(cfg), "capabilities": caps,
+            }}}))
+            staged = root / "staged"
+            with patch.object(stages, "QUANT_SHA", stages.file_sha(stock)):
+                stages.stage(staged, release, stock, catalog, dispatch)
+            self.assertFalse((staged / "standalone.json").exists())
+            self.assertEqual((staged / "bin/weight-runtime-packed/edit").read_text(), "bound runtime")
+            proposed = json.loads((staged / "dispatch.proposed.json").read_text())["hosts"]["local-gguf"]
+            self.assertEqual(proposed["capabilities"], caps)
+            source = old / "imports/fixture.gguf"
+            source.write_bytes(b"GGUF")
+            job = {"kind": "convert", "options": {"output_format": "gguf", "gguf_type": "Q4_0"},
+                   "inputs": [{"host": "local-gguf", "kind": "gguf", "path": str(source)}]}
+            with patch.multiple(ops, ROOT=staged, LOCAL_ROOTS=staged / "local-roots.json"), \
+                    patch.object(ops, "headroom", side_effect=ValueError("RAM gate reached")):
+                with self.assertRaisesRegex(ValueError, "RAM gate reached"):
+                    ops.precheck({"op": "prepare", "action": "start", "job": job})
 
     def test_visual_and_reviewed_apply_paths_stay_inside_worker(self):
         with tempfile.TemporaryDirectory(dir="/arboretum") as name:
@@ -212,3 +309,43 @@ class Admission(unittest.TestCase):
             disk.return_value.free = (16 << 30) + 1
             with self.assertRaisesRegex(ValueError, "free disk"):
                 ops.headroom("convert", 1024)
+
+    def test_fork_options_are_separate_and_need_the_staged_binary(self):
+        with tempfile.TemporaryDirectory(dir="/arboretum") as name:
+            root = Path(name)
+            inp, fork, pin = (root / n for n in ("source.gguf", "llama-quantize-rocmfpx", "rocmfpx.sha256"))
+            inp.write_bytes(b"GGUF")
+            catalog = {
+                "rocmfpx_encoder_revision": "fb08d7cdb67082ddda15a25e64dc7ec413afc41c",
+                "presets": [{"id": "Q8_0"}, {"id": "Q2_0", "rocmfpx_supported": False}],
+                "tensor_types": [{"id": "Q3_0_ROCMFPX", "encoder_family": "rocmfpx"}],
+            }
+            options = {"output_format": "gguf", "gguf_type": "Q8_0",
+                       "tensor_types": {"blk.0.attn_q.weight": "Q3_0_ROCMFPX"}}
+            job = {"kind": "convert", "inputs": [{"host": "local-gguf", "kind": "gguf", "path": str(inp)}],
+                   "options": options}
+            req = {"op": "prepare", "action": "start", "job": job}
+            with patch.multiple(ops, IMPORTS=root, ROCMFPX_PIN=pin, ROCMFPX_QUANTIZER=fork), \
+                    patch.object(ops, "catalog", return_value=catalog), patch.object(ops, "headroom"):
+                with self.assertRaisesRegex(ValueError, "encoder family"):
+                    ops.precheck(req)
+                options.update(encoder_family="rocmfpx", encoder_revision="0" * 40)
+                with self.assertRaisesRegex(ValueError, "revision"):
+                    ops.precheck(req)
+                options["encoder_revision"] = catalog["rocmfpx_encoder_revision"]
+                with self.assertRaisesRegex(ValueError, "not staged"):
+                    ops.precheck(req)
+                fork.write_bytes(b"fork")
+                fork.chmod(0o700)
+                pin.write_text(stages.file_sha(fork) + "\n")
+                pin.chmod(0o600)
+                ops.precheck(req)
+                options["gguf_type"] = "Q2_0"
+                with self.assertRaisesRegex(ValueError, "not supported by ROCmFPX"):
+                    ops.precheck(req)
+                options["gguf_type"] = "Q8_0"
+                fork.write_bytes(b"changed")
+                with self.assertRaisesRegex(ValueError, "approved CPU build"):
+                    ops.precheck(req)
+                del options["encoder_family"], options["encoder_revision"], options["tensor_types"]
+                ops.precheck(req)

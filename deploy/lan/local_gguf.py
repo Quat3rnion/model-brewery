@@ -21,9 +21,16 @@ ENGINE = BIN / "brewery-engine"
 WORKER = BIN / "brewery-worker"
 QUANTIZER = BIN / "llama-quantize"
 PIN = ROOT / "quantizer.sha256"
+ROCMFPX_REVISION = "fb08d7cdb67082ddda15a25e64dc7ec413afc41c"
+ROCMFPX_QUANTIZER_NAME = "llama-quantize-rocmfpx"
+ROCMFPX_QUANTIZER = BIN / ROCMFPX_QUANTIZER_NAME
+ROCMFPX_PIN = ROOT / "rocmfpx.sha256"
+ROCMFPX_QUANTIZER_ENV = "BREWERY_GGUF_ROCMFPX_QUANTIZER"
+ROCMFPX_SHA_ENV = "BREWERY_GGUF_ROCMFPX_SHA256"
 EXPORTER = BIN / "gguf-export-hf"
 EXPORTER_PIN = ROOT / "exporter.sha256"
 STANDALONE = ROOT / "standalone.json"
+LOCAL_ROOTS = ROOT / "local-roots.json"
 WEIGHT = BIN / "weight-runtime-packed"
 GIB = 1 << 30
 LIMIT = 64 << 10
@@ -53,19 +60,36 @@ def metadata_bytes(path):
     return total
 
 
-def standalone_config():
-    if not os.path.lexists(STANDALONE):
+def private_policy(path, fields):
+    if not os.path.lexists(path):
         return None
-    mode = STANDALONE.lstat()
+    mode = path.lstat()
     require(stat.S_ISREG(mode.st_mode) and mode.st_uid == os.getuid() and mode.st_mode & 0o077 == 0
-            and mode.st_size <= 8192, "invalid private standalone GGUF policy")
-    config = json.loads(STANDALONE.read_bytes())
-    require(set(config) == {"imports", "state", "runtime", "llama"}, "invalid standalone GGUF policy fields")
+            and mode.st_size <= 8192, f"invalid private GGUF policy: {path.name}")
+    config = json.loads(path.read_bytes())
+    require(isinstance(config, dict) and config.keys() == fields, f"invalid GGUF policy fields: {path.name}")
+    return config
+
+
+def local_config():
+    config = (private_policy(STANDALONE, {"imports", "state", "runtime", "llama"}) or
+              private_policy(LOCAL_ROOTS, {"imports", "state"}))
+    if not config:
+        return None
     return {k: canonical_path(v) for k, v in config.items()}
 
 
 def catalog():
     return json.loads((ROOT / "gguf_catalog.json").read_bytes())
+
+
+def rocmfpx_pin(job):
+    if job["kind"] not in KINDS or job["options"].get("encoder_family") != "rocmfpx":
+        return None
+    require(os.path.lexists(ROCMFPX_PIN) and os.path.lexists(ROCMFPX_QUANTIZER),
+            "ROCmFPX quantizer is not staged")
+    pinned_native(ROCMFPX_QUANTIZER, ROCMFPX_PIN)
+    return ROCMFPX_PIN.read_text().strip()
 
 
 def headroom(kind, source_bytes, matrix_bytes=0, state=None):
@@ -120,6 +144,7 @@ def job_inputs(job, *, standalone=False, imports=None, state=None):
         return weight_inputs(kind, inputs, paths, imports, state)
     require(isinstance(options, dict) and options.keys() <= {
         "output_format", "gguf_type", "tensor_types", "threads", "imatrix",
+        "encoder_family", "encoder_revision",
     }, "unsupported GGUF option")
     require(options.get("output_format") == "gguf", "local-gguf requires GGUF output")
     threads = options.get("threads", 4)
@@ -162,14 +187,24 @@ def job_inputs(job, *, standalone=False, imports=None, state=None):
     require(isinstance(overrides, dict) and len(overrides) <= 256
             and all(MODEL_NAME.fullmatch(name) and isinstance(value, str) and value in types
                     for name, value in overrides.items()), "unapproved GGUF tensor override")
-    require(has_matrix or not any(row.get("requires_imatrix", False)
-            for row in [presets[preset], *(types[value] for value in overrides.values())]),
+    selection = [presets[preset], *(types[value] for value in overrides.values())]
+    fork = any(row.get("encoder_family") == "rocmfpx" for row in selection)
+    if fork:
+        require(options.get("encoder_family") == "rocmfpx", "ROCmFPX selection requires its encoder family")
+        require(options.get("encoder_revision") == values.get("rocmfpx_encoder_revision") == ROCMFPX_REVISION,
+                "ROCmFPX selection requires the pinned source revision")
+        require(all(row.get("rocmfpx_supported", True) for row in selection),
+                "GGUF selection is not supported by ROCmFPX")
+    else:
+        require("encoder_family" not in options and "encoder_revision" not in options,
+                "stock GGUF options must not select a fork encoder")
+    require(has_matrix or not any(row.get("requires_imatrix", False) for row in selection),
             "imatrix required for selected GGUF quantization")
     return paths
 
 
 def check(job, config=None):
-    paths = job_inputs(job, standalone=config is not None,
+    paths = job_inputs(job, standalone=config is not None and "runtime" in config,
                        imports=config["imports"] if config else None, state=config["state"] if config else None)
     matrix_bytes = sum(p.stat().st_size for p in paths[1:]) if job["kind"] in WEIGHT_KINDS \
         else paths[-1].stat().st_size if "imatrix" in job["options"] else 0
@@ -187,7 +222,8 @@ def precheck(req):
     op = req["op"]
     if op == "prepare":
         require(req["action"] == "start", "local-gguf does not stage transfers")
-        check(req["job"], standalone_config())
+        check(req["job"], local_config())
+        rocmfpx_pin(req["job"])
     else:
         require(op in {"resolve", "start", "status", "cancel", "finish", "suggest_paths"},
                 "unapproved local-gguf worker operation")
@@ -196,11 +232,13 @@ def precheck(req):
                     "local-gguf requires direct local inputs")
 
 
-def sandbox(work, paths, command, config=None, binary=None):
+def sandbox(work, paths, command, config=None, binary=None, *, fork_sha=None):
     binary = binary or BIN
     env = {"PATH": "/usr/bin", "HOME": "/nonexistent", "LC_ALL": "C.UTF-8",
            "BREWERY_GGUF_QUANTIZER": str(binary / "llama-quantize"), "BREWERY_CPU_THREADS": "4", "OMP_NUM_THREADS": "4",
            "CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": "", **WEIGHT_ENV}
+    if fork_sha:
+        env.update({ROCMFPX_QUANTIZER_ENV: str(binary / ROCMFPX_QUANTIZER_NAME), ROCMFPX_SHA_ENV: fork_sha})
     shim = "/usr/bin/bwrap"
     args = [shim, "--die-with-parent", "--unshare-user", "--unshare-pid", "--unshare-net",
             "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
@@ -224,16 +262,17 @@ def admit():
     data = os.pread(0, LIMIT + 1, 0)
     require(len(data) <= LIMIT, "local-gguf engine request too large")
     job = json.loads(data)
-    config = standalone_config()
+    config = local_config()
     paths = check(job, config)
     pinned_native(QUANTIZER, PIN)
+    fork_sha = rocmfpx_pin(job)
     native = config if job["inputs"][0]["kind"] == "safetensors" else None
     if native:
         pinned_native(EXPORTER, EXPORTER_PIN)
     work = Path.cwd()
     require(work.name == "work" and work.parent.parent == (config["state"] if config else STATE) / "jobs",
             "unexpected local-gguf job directory")
-    args, env = sandbox(work, paths, [str(ENGINE)], native)
+    args, env = sandbox(work, paths, [str(ENGINE)], native, fork_sha=fork_sha)
     os.execve(args[0], args, env)
 
 
