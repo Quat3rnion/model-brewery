@@ -1,5 +1,13 @@
 #!/usr/bin/python3
-"""Inspect safetensors or export a bounded, audited HF checkpoint to floating GGUF."""
+"""Inspect or export bounded SafeTensors to GGUF with the pinned llama.cpp converter.
+
+Layer recipes support indexed HF or standalone SafeTensors with explicit assets.
+Use the source_sha256 from source-digest: a raw standalone file hash or a hash
+of all indexed member rows. The standalone assets_sha256 is separate.
+Layer overrides target decoder matrix weights. The default applies to all
+other ordinary matrices. Vectors and GPT-2 position embeddings retain source
+F32; narrower inputs for these tensors are not admitted by the recipe path.
+"""
 import argparse
 import ctypes
 import hashlib
@@ -27,6 +35,9 @@ ASSETS = frozenset("config.json tokenizer.json tokenizer_config.json chat_templa
                    "special_tokens_map.json added_tokens.json processor_config.json".split())
 INDEX = "model.safetensors.index.json"
 EXP = {"Qwen4ExpForConditionalGeneration", "Qwen4ExpForCausalLM"}
+RECIPE_SCHEMA = "brewery.layer-quant.v1"
+# Recipe label -> (GGML tensor type, llama.cpp file type).
+RECIPE_TYPES = {"F32": (0, 0), "F16": (1, 1), "BF16": (30, 32), "Q8_0": (8, 7)}
 
 
 def need(check, reason):
@@ -58,8 +69,11 @@ def read_json(path):
 
 
 def stamp(path):
-    s = path.lstat()
-    need(stat.S_ISREG(s.st_mode) and s.st_nlink == 1, f"expected non-aliased regular file: {path.name}")
+    return file_stamp(path.lstat(), path.name)
+
+
+def file_stamp(s, name):
+    need(stat.S_ISREG(s.st_mode) and s.st_nlink == 1, f"expected non-aliased regular file: {name}")
     return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
 
 
@@ -618,12 +632,83 @@ def copy_pinned(root, target):
     need(digest.hexdigest() == CODE_SHA, "llama.cpp Python files differ from pin")
 
 
+def source_identity(files, paths, assets, snapshot=None):
+    """Hash the physical source; optionally stage the same bytes for export."""
+    tree = hashlib.sha256()
+    standalone = None
+    for name, expected_stamp in sorted(files.items()):
+        size = expected_stamp[2]
+        digest = hashlib.sha256()
+        with os.fdopen(os.open(paths[name], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as src:
+            need(file_stamp(os.fstat(src.fileno()), name) == expected_stamp, f"source changed: {name}")
+            dst = (snapshot / name).open("xb") if snapshot is not None else None
+            try:
+                remaining = size
+                while remaining:
+                    data = src.read(min(MIB, remaining))
+                    need(bool(data), f"source truncated: {name}")
+                    digest.update(data)
+                    if dst is not None:
+                        dst.write(data)
+                    remaining -= len(data)
+            finally:
+                if dst is not None:
+                    dst.close()
+            need(file_stamp(os.fstat(src.fileno()), name) == expected_stamp, f"source changed: {name}")
+        sha = digest.hexdigest()
+        if assets is not None and name == "model.safetensors":
+            standalone = sha
+        else:
+            # Same row encoding as weight_safetensors.tree_digest.
+            tree.update(f"{name}\0{size}\0{sha}\n".encode("utf-8"))
+    if assets is not None:
+        return {"source_sha256": standalone, "assets_sha256": tree.hexdigest()}
+    return {"source_sha256": tree.hexdigest()}
+
+
+def compile_layer_recipe(report, recipe):
+    need(set(recipe) == {"schema", "source_sha256", "default_type", "layers"}
+         and recipe["schema"] == RECIPE_SCHEMA, "invalid layer recipe schema or fields")
+    sha = recipe["source_sha256"]
+    need(isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha)
+         and sha == report["source_sha256"], "layer recipe source_sha256 mismatch")
+    default, layers = recipe["default_type"], recipe["layers"]
+    need(isinstance(default, str) and default in RECIPE_TYPES, "unsupported GGUF default type")
+    need(isinstance(layers, dict), "layers must be an object")
+    expected = {}
+    matched_layers = set()
+    for name, dims in report["expected_gguf_tensors"].items():
+        if len(dims) == 1 or (report["architecture"] == "GPT2LMHeadModel" and name == "position_embd.weight"):
+            kind = report["source_dtypes"][name]
+            need(kind == "F32", f"{name}: pinned GGUF recipe requires source F32 (no silent widening)")
+        else:
+            need(len(dims) == 2 and name.endswith(".weight"), f"unclassified GGUF recipe tensor: {name}")
+            layer = re.match(r"blk\.([0-9]+)\.", name)
+            layer_id = layer[1] if layer else None
+            if layer_id is not None:
+                matched_layers.add(layer_id)
+            kind = layers.get(layer_id, default)
+            need(isinstance(kind, str) and kind in RECIPE_TYPES, f"unsupported GGUF type for {name}")
+            need(kind != "Q8_0" or dims[0] % 32 == 0, f"{name}: Q8_0 requires row width divisible by 32")
+        expected[name] = RECIPE_TYPES[kind][0]
+    need(layers.keys() <= matched_layers, "recipe selects an unknown or noncanonical decoder layer")
+    return {**report, "kind": "compile-layer-recipe", "outtype": default.lower(),
+            "layer_recipe": recipe, "expected_ggml_types": expected}
+
+
 def output_tensor_type(name, dims, outtype, arch):
     return 0 if len(dims) == 1 or (arch == "gpt2" and name == "position_embd.weight") else (
         30 if outtype == "bf16" else 1)
 
 
-def gguf_inventory(path, outtype, expected, arch="qwen2"):
+def tensor_bytes(dims, dtype):
+    if dtype == 8:
+        need(dims[0] % 32 == 0, "invalid GGUF Q8_0 row width")
+        return math.prod(dims) // 32 * 34
+    return math.prod(dims) * (4 if dtype == 0 else 2)
+
+
+def gguf_inventory(path, outtype, expected, arch="qwen2", expected_types=None):
     size = stamp(path)[2]
     with path.open("rb") as f:
         def raw(n):
@@ -669,7 +754,7 @@ def gguf_inventory(path, outtype, expected, arch="qwen2"):
             kind = u32()
             props[key] = (kind, value(kind))
         need(props.get("general.architecture") == (8, arch), "incorrect GGUF architecture")
-        need(props.get("general.file_type") == (4, 32 if outtype == "bf16" else 1),
+        need(props.get("general.file_type") == (4, RECIPE_TYPES[outtype.upper()][1]),
              "incorrect GGUF file type")
         need(props.get("tokenizer.ggml.model") == (8, "gpt2")
              and props.get("tokenizer.ggml.tokens", (None,))[0] == 9, "missing GGUF tokenizer")
@@ -683,10 +768,10 @@ def gguf_inventory(path, outtype, expected, arch="qwen2"):
             need(name in expected and name not in types and rank == len(expected[name]), "unexpected GGUF tensor")
             dims = [u64() for _ in range(rank)]
             dtype, offset = u32(), u64()
-            wanted = output_tensor_type(name, dims, outtype, arch)
+            wanted = expected_types[name] if expected_types is not None else output_tensor_type(name, dims, outtype, arch)
             need(dims == expected[name] and dtype == wanted and offset % 32 == 0,
                  f"GGUF tensor shape/type/alignment mismatch: {name}")
-            end = offset + math.prod(dims) * (4 if dtype == 0 else 2)
+            end = offset + tensor_bytes(dims, dtype)
             spans.append((offset, end))
             types[name] = {"shape": dims, "ggml_type": dtype}
         start = (f.tell() + 31) & ~31
@@ -707,9 +792,11 @@ def export(source, output, report, files, paths, assets):
     # Both the converter spool and final GGUF may widen F16/BF16 vectors to F32.
     # Count the known output tensor bytes twice, plus room for metadata.
     arch = "gpt2" if report["architecture"] == "GPT2LMHeadModel" else "qwen2"
-    fp_bytes = sum(math.prod(dims) * (4 if output_tensor_type(name, dims, report["outtype"], arch) == 0 else 2)
-                   for name, dims in report["expected_gguf_tensors"].items())
-    required = 2 * fp_bytes + 128 * MIB
+    expected_types = report.get("expected_ggml_types")
+    output_bytes = sum(tensor_bytes(dims, expected_types[name] if expected_types is not None else
+                                   output_tensor_type(name, dims, report["outtype"], arch))
+                       for name, dims in report["expected_gguf_tensors"].items())
+    required = 2 * output_bytes + 128 * MIB + (report["input_bytes"] if expected_types is not None else 0)
     need(shutil.disk_usage(output.parent).free >= required, f"need {required} bytes of scratch space")
     python = Path(os.environ.get("BREWERY_GGUF_PYTHON", "/usr/bin/python3"))
     llama = Path(os.environ.get("BREWERY_LLAMA_CPP", "/arboretum/llama.cpp"))
@@ -726,11 +813,20 @@ def export(source, output, report, files, paths, assets):
                    "--symlink", "usr/lib", "/lib64", "--proc", "/proc", "--dev", "/dev",
                    "--ro-bind", str(code), "/exporter", "--dir", "/input",
                    "--bind", str(work), "/work", "--chdir", "/work"]
+        input_paths = paths
+        if expected_types is not None:
+            # Mount private copies of the bytes checked against the recipe,
+            # not source inodes that can change during conversion.
+            snapshot = scratch / "input"
+            snapshot.mkdir()
+            identities = source_identity(files, paths, assets, snapshot)
+            need(all(report[key] == digest for key, digest in identities.items()), "source changed before export")
+            input_paths = {name: snapshot / name for name in files}
         # Expose only inventoried filenames. In particular a new pickle or
         # local Python module added to the source cannot enter this namespace.
         for name in sorted(files):
             need(stamp(paths[name]) == files[name], f"source changed: {name}")
-            command += ["--ro-bind", str(paths[name]), f"/input/{name}"]
+            command += ["--ro-bind", str(input_paths[name]), f"/input/{name}"]
         if not python.is_relative_to("/usr"):
             runtime = python.parent.parent
             need(runtime not in map(Path, ("/", "/home", "/opt", "/arboretum", "/mnt", "/usr/local"))
@@ -745,9 +841,17 @@ def export(source, output, report, files, paths, assets):
             "import transformers; original=transformers.AutoTokenizer.from_pretrained; "
             "transformers.AutoTokenizer.from_pretrained=classmethod(lambda cls,*a,**k:"
             "original(*a,**dict(k,trust_remote_code=False,local_files_only=True))); "
-            "sys.path.insert(0,'/exporter'); sys.argv=sys.argv[1:]; "
-            "runpy.run_path(sys.argv[0],run_name='__main__')"
+            "sys.path.insert(0,'/exporter'); "
         )
+        if expected_types is not None:
+            (code / "layer-types.json").write_text(json.dumps(expected_types))
+            bootstrap += (
+                "import json; from conversion import get_model_class; import gguf; "
+                "types=json.load(open('/exporter/layer-types.json')); "
+                f"cls=get_model_class({report['architecture']!r}); "
+                "cls.tensor_force_quant=lambda self,name,new_name,bid,n_dims:gguf.GGMLQuantizationType(types[new_name]); "
+            )
+        bootstrap += "sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name='__main__')"
         command += ["--", str(python), "-I", "-B", "-c", bootstrap,
                     "/exporter/convert_hf_to_gguf.py", "--disable-mistral-community-chat-template",
                     "--use-temp-file", "--outfile", "/work/model.gguf", "--outtype", report["outtype"], "/input"]
@@ -765,7 +869,7 @@ def export(source, output, report, files, paths, assets):
                        check=True, timeout=600, preexec_fn=limits)
         need({n: stamp(p) for n, p in selected_paths(source, assets).items()} == files, "source changed during export")
         model = work / "model.gguf"
-        inventory_out = gguf_inventory(model, report["outtype"], report["expected_gguf_tensors"], arch)
+        inventory_out = gguf_inventory(model, report["outtype"], report["expected_gguf_tensors"], arch, expected_types)
         with model.open("rb") as f:
             sha256 = hashlib.file_digest(f, "sha256").hexdigest()
             os.fsync(f.fileno())
@@ -777,7 +881,8 @@ def export(source, output, report, files, paths, assets):
             err = ctypes.get_errno()
             raise OSError(err, os.strerror(err), str(output))
     return {**report, **({"tokenizer_compatibility_checked": True} if arch == "gpt2" else {}),
-            "kind": "export", "tensor_payloads_read": True, "export_runtime_checked": True,
+             "kind": "export-layer-recipe" if expected_types is not None else "export",
+             "tensor_payloads_read": True, "export_runtime_checked": True,
             "exporter_sha256": CODE_SHA,
             "artifact": {"path": str(output / "model.gguf"), "sha256": sha256, "bytes": size},
             "gguf_inventory": inventory_out}
@@ -785,22 +890,38 @@ def export(source, output, report, files, paths, assets):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("inspect", "export"))
+    parser.add_argument("operation", choices=("inspect", "export", "source-digest",
+                                              "compile-layer-recipe", "export-layer-recipe"))
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--assets", type=Path, help="explicit config/tokenizer directory for a standalone SafeTensors file")
-    parser.add_argument("--outtype", choices=("bf16", "f16"), default="bf16")
+    parser.add_argument("--outtype", choices=("bf16", "f16"), help="uniform floating type for inspect/export")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--recipe", type=Path, help="source-bound JSON layer recipe")
     args = parser.parse_args()
-    if (args.operation == "export") != (args.output is not None):
-        parser.error("--output is required for export only")
+    is_export = args.operation in ("export", "export-layer-recipe")
+    layer_recipe = args.operation.endswith("-layer-recipe")
+    need_identity = layer_recipe or args.operation == "source-digest"
+    if is_export != (args.output is not None):
+        parser.error("--output is required for export and export-layer-recipe only")
+    if layer_recipe != (args.recipe is not None):
+        parser.error("--recipe is required for compile-layer-recipe and export-layer-recipe only")
+    if need_identity and args.outtype is not None:
+        parser.error("--outtype is only for inspect/export")
     try:
         source = args.source
         need(source.is_absolute() and source.resolve(strict=True) == source, "source must be an absolute canonical path")
         paths = selected_paths(source, args.assets)
-        report, files = inspect(source, args.outtype, paths)
+        report, files = inspect(source, args.outtype or "bf16", paths)
         report["source_format"] = "safetensors" if args.assets else "hf"
+        if need_identity:
+            need(args.assets is not None or INDEX in files, "layer recipes require indexed HF or standalone SafeTensors")
+            need(report["export_supported"], report.get("reason", "unsupported source"))
+            report.update(source_identity(files, paths, args.assets),
+                          kind="source-digest", tensor_payloads_read=True)
+            if layer_recipe:
+                report = compile_layer_recipe(report, read_json(args.recipe))
         need({n: stamp(p) for n, p in selected_paths(source, args.assets).items()} == files, "source changed during inspection")
-        if args.operation == "export":
+        if is_export:
             report = export(source, args.output, report, files, paths, args.assets)
         print(json.dumps(report, sort_keys=True, allow_nan=False))
     except (OSError, ValueError, TypeError, RecursionError, subprocess.SubprocessError) as err:
