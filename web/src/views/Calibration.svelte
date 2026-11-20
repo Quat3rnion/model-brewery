@@ -29,7 +29,7 @@
   function remove(key: string) {
     loaded = loaded.filter((l) => l.key !== key);
   }
-  const titles = { usage: 'Expert usage', preview: 'Profile size preview', speculation: 'Speculation acceptance', error: 'Not opened' } as const;
+  const titles = { expertMap: 'Expert map review', usage: 'Expert usage', preview: 'Profile size preview', speculation: 'Speculation acceptance', error: 'Not opened' } as const;
   const ok = $derived(loaded.filter((l) => l.parsed.kind !== 'error').length);
 </script>
 
@@ -37,7 +37,7 @@
   <div class="head">
     <h1 tabindex="-1">Calibration inputs</h1>
     <p class="muted small">
-      Read derived reports from <code>expert_usage.py</code>, <code>profile_preview.py</code> and the Halogen speculation export. These are descriptive statistics and size predictions. They are not calibration or quality results, and a preview is not a runnable profile.
+      Open expert usage, expert maps, profile size previews, or Halogen speculation reports. Reviewing a file does not change a checkpoint.
     </p>
   </div>
 
@@ -72,6 +72,16 @@
           <UsageReportView report={l.parsed.report} />
         {:else if l.parsed.kind === 'preview'}
           <PreviewReportView report={l.parsed.report} />
+        {:else if l.parsed.kind === 'expertMap'}
+          <dl>
+            <dt>Source checkpoint SHA-256</dt><dd class="mono break">{l.parsed.report.source}</dd>
+            <dt>Map file SHA-256</dt><dd class="mono break">{l.parsed.fileSha ?? 'Unavailable'}</dd>
+            <dt>Ranking method</dt><dd>{l.parsed.report.method}</dd>
+          </dl>
+          <p>Each list shows the original expert IDs in their proposed new order. The first ID goes to slot 0. This map has not been applied.</p>
+          {#each l.parsed.report.layers as layer (layer.layer)}
+            <details><summary>Layer {layer.layer}: {layer.order.length} retained</summary><p class="mono break">{layer.order.join(', ')}</p></details>
+          {/each}
         {:else}
           <SpeculationReportView report={l.parsed.report} />
         {/if}

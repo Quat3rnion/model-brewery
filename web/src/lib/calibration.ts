@@ -282,6 +282,7 @@ function readSpeculation(r: Record<string, unknown>): SpeculationReport | string
 // ---- Detection ----
 
 export type Parsed =
+  | {kind: 'expertMap'; report: {source: string; method: string; layers: {layer: number; order: number[]}[]}; fileSha?: string}
   | { kind: 'usage'; report: UsageReport }
   | { kind: 'preview'; report: PreviewReport }
   | { kind: 'speculation'; report: SpeculationReport }
@@ -302,6 +303,21 @@ export function parseReportText(text: string): Parsed {
   }
   const r = obj(data);
   if (!r) return { kind: 'error', message: 'The file is not a JSON object.' };
+  if (r.schema === 'brewery.expert-map.v1') {
+    const source = r.source_sha256;
+    const entries = Object.entries(obj(r.layers) ?? {});
+    const layers: {layer: number; order: number[]}[] = [];
+    if (typeof source !== 'string' || !/^[0-9a-f]{64}$/.test(source) || !entries.length || entries.length > 4096)
+      return {kind:'error', message:'Expected a source SHA-256 and a nonempty bounded layer map.'};
+    for (const [id, order] of entries) {
+      if (!/^(0|[1-9]\d{0,5})$/.test(id) || !Array.isArray(order) || !order.length || order.length > 65536 ||
+          order.some(x => !Number.isSafeInteger(x) || x < 0 || x >= 65536) || new Set(order).size !== order.length)
+        return {kind:'error', message:'Invalid layer ID or expert list. Each retained expert must appear exactly once in its layer.'};
+      layers.push({layer: Number(id), order});
+    }
+    const method = obj(r.review)?.method;
+    return {kind:'expertMap', report:{source, layers, method:method === 'frequency' ? 'Routing frequency' : method === 'reap' ? 'REAP saliency' : 'Not specified'}};
+  }
   if (r.schema === USAGE_SCHEMA) {
     const u = readUsage(r);
     return typeof u === 'string' ? { kind: 'error', message: u } : { kind: 'usage', report: u };
@@ -322,13 +338,19 @@ export interface FileLike {
   name: string;
   size: number;
   text(): Promise<string>;
+  arrayBuffer?(): Promise<ArrayBuffer>;
 }
 
 export async function readFileBounded(file: FileLike): Promise<Parsed> {
   if (file.size > MAX_FILE_BYTES)
     return { kind: 'error', message: `The file is larger than ${MAX_FILE_BYTES / 1024 / 1024} MiB. Derived reports are smaller; raw traces are not accepted.` };
   try {
-    return parseReportText(await file.text());
+    const parsed = parseReportText(await file.text());
+    if (parsed.kind === 'expertMap' && file.arrayBuffer && globalThis.crypto?.subtle) {
+      const hash = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+      parsed.fileSha = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
+    }
+    return parsed;
   } catch {
     return { kind: 'error', message: 'The file could not be read.' };
   }

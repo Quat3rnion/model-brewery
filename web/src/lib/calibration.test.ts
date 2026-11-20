@@ -107,6 +107,12 @@ describe('usage derived values', () => {
 });
 
 describe('bounded reading', () => {
+  it('reviews expert order by new slot, without inferring missing expert IDs', () => {
+    const map = {schema: 'brewery.expert-map.v1', source_sha256: 'a'.repeat(64), layers: {'3': [7, 0, 2]}};
+    const result = parseReportText(JSON.stringify(map));
+    expect(result).toMatchObject({kind: 'expertMap', report: {layers: [{layer: 3, order: [7, 0, 2]}]}});
+    expect(parseReportText(JSON.stringify({...map, layers: {'3': [7, 7]}})).kind).toBe('error');
+  });
   it('rejects a file above the cap before reading it', async () => {
     let read = false;
     const big = { name: 'x.json', size: MAX_FILE_BYTES + 1, text: async () => ((read = true), '{}') };
