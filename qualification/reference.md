@@ -1,3 +1,25 @@
+# Native packed operations
+
+These checks apply to matrix operations, not complete models. The tests compare
+outputs from packed weights with independent decoded results or pinned vectors.
+None of these kernels needs Python or PyTorch to run.
+
+| Directory under `native/` | Operation tested on CPU, NVIDIA `sm_120` and AMD `gfx1036` |
+| --- | --- |
+| `hgn` | BF16, F32, F16, Q4C-P, Q8G64, Q6G64, HT3, HT4 and I4R matrix-vector products. Includes HT3/HT4 and I4R expert layouts with rotation sidecars. FP8G uses a row gather; I64 is host metadata, not a GPU contraction. |
+| `gyro` | Agention wire IDs 144 through 151. Both original and rotated inputs were tested with signed rotation and identity rotation. The build checks the upstream codebook before use. |
+| `trellis-ref/glq*` | GLQ 3INST, 2 through 8 bits per weight, with a batch of three 32-by-64 products per rate and one 96-by-96 case at 5 bits. Maximum absolute GPU error: `1.05e-5`. |
+| `trellis-ref/qtip*` | 31 Cornell QTIP cases, including reference and swizzled layouts. Maximum absolute error: `4.77e-7`. The public interface specifies the supported axes, scale and sidecars. |
+
+The `gfx1151` builds for these operations were cross-compiled, not run.
+Use a matching device for an execution check. From the repository root, for
+example, run `make -C native/hgn cpu` then `native/hgn/.build/probe-cpu cpu`.
+For QTIP, build `qtip.cpp` and `qtip_test.cpp` together with a C++17 compiler,
+then run the result. Those tests use the included vectors; the Python oracle
+scripts are for regenerating vectors, not for running the kernels.
+These results do not enable a worker, verify model generation, or qualify a
+conversion for release.
+
 # Derived FP32 replay experiment
 
 This experiment is separate from native GGUF qualification. Do not use
