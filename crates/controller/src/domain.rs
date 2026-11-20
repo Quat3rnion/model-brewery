@@ -528,18 +528,27 @@ impl Host {
         let hy4 = options
             .remove(brewery_worker::hy4::CAPABILITY)
             .unwrap_or(false);
-        if hy4 {
+        let hy4_encode = options.remove(brewery_worker::hy4::ENCODE).unwrap_or(false);
+        if hy4 && hy4_encode {
+            return Err("Hy4 plan and encode require separate workers".into());
+        }
+        if hy4 || hy4_encode {
             for (capability, enabled) in &mut capabilities {
-                if capability != "plan" {
+                if capability != if hy4 { "plan" } else { "convert" } {
                     *enabled = false;
                     reasons.insert(
                         capability.clone(),
-                        "Dedicated Hy4 metadata-only planner".into(),
+                        "Dedicated Hy4 worker does not support this operation".into(),
                     );
                 }
             }
         }
         capabilities.insert(brewery_worker::hy4::CAPABILITY.into(), hy4);
+        capabilities.insert(brewery_worker::hy4::ENCODE.into(), hy4_encode);
+        if !hy4_encode {
+            reasons.entry(brewery_worker::hy4::ENCODE.into())
+                .or_insert_with(|| "Hy4 gate encoding is not configured on this worker".into());
+        }
         if !hy4 {
             reasons
                 .entry(brewery_worker::hy4::CAPABILITY.into())
@@ -572,6 +581,9 @@ impl Host {
             .map(|v| v.as_bool().ok_or("quantization_pool must be a bool"))
             .transpose()?
             .unwrap_or(false);
+        if hy4_encode && quantization_pool {
+            return Err("Dedicated Hy4 encoding does not accept pool scheduling".into());
+        }
         let resource_bounds = if id == crate::backend_hf::ID
             || config.get("resource_bounds").is_some_and(Value::is_null)
         {
@@ -690,11 +702,10 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
     }
     let inputs = &envelope.inputs;
     if envelope.options.contains_key(brewery_worker::hy4::OPTION) {
-        if inputs.len() != 1
-            || inputs[0].kind != "hf"
-            || !job.format.is_hgn()
-            || !brewery_worker::hy4::valid(&job.kind, &Value::Object(envelope.options.clone()))
-        {
+        let Some(capability) = brewery_worker::hy4::capability(&job.kind, &Value::Object(envelope.options.clone())) else {
+            return Vec::new();
+        };
+        if inputs.len() != 1 || inputs[0].kind != "hf" || !job.format.is_hgn() {
             return Vec::new();
         }
         return hosts
@@ -703,10 +714,16 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
                 host.id == job.host
                     && host.id == inputs[0].host
                     && !host.scheduling_paused
-                    && host.capabilities.get(brewery_worker::hy4::CAPABILITY) == Some(&true)
-                    && host.capabilities["plan"]
+                    && host.capabilities.get(capability) == Some(&true)
+                    && host.capabilities[&job.kind]
             })
             .collect();
+    }
+    if hosts.iter().any(|host| {
+        host.capabilities.get(brewery_worker::hy4::ENCODE) == Some(&true)
+            && (host.id == job.host || inputs.iter().any(|input| input.host == host.id))
+    }) {
+        return Vec::new();
     }
     if inputs.iter().any(|input| {
         hosts.iter().any(|host| {
@@ -812,6 +829,7 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
             } else {
                 Some(host.id.as_str()) == source
             }) && !host.scheduling_paused
+                && host.capabilities.get(brewery_worker::hy4::ENCODE) != Some(&true)
                 && host.supports_conversion(&job.options)
                 && components_allowed(host)
         })
@@ -900,13 +918,13 @@ impl NewJob {
         }
         if self.options.contains_key(brewery_worker::hy4::OPTION) {
             if !format.is_hgn()
-                || !brewery_worker::hy4::valid(&self.kind, &Value::Object(self.options.clone()))
+                || brewery_worker::hy4::capability(&self.kind, &Value::Object(self.options.clone())).is_none()
                 || n != 1
                 || main != "hf"
                 || inputs[0].host != host
                 || prompt.is_some()
             {
-                return Err("Hy4 planning requires one same-worker HF source and only the exact block-1 down Q8_0 override".into());
+                return Err("Hy4 jobs require one same-worker HF source and the exact operation-specific Q8_0 override".into());
             }
         } else if format.is_hgn() {
             if crate::weights::is_kind(&self.kind) {

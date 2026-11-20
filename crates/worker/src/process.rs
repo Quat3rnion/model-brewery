@@ -82,7 +82,10 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
         job
     };
     let download = job.kind == "hf_download";
-    let held = if download {
+    let hy4_encode = w.cfg.hy4_plan.as_ref().is_some_and(|p| p.encode.is_some());
+    let held = if hy4_encode {
+        hy4_encode_slot(w).map(Some)
+    } else if download {
         download_lock(w, id).map(Some)
     } else {
         Ok(None)
@@ -93,6 +96,15 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
     };
     let _guard = w.state_lock()?;
     let mut r = w.require(id)?;
+    if hy4_encode && held.is_ok() && (r.cancel || result.is_err()) {
+        for name in [hy4::FILE, hy4::RECEIPT, ".gate.partial"] {
+            if let Err(e) = fs::remove_file(base.join("work").join(name))
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                eprintln!("Hy4 scratch cleanup failed: {e}");
+            }
+        }
+    }
     if (r.cancel || result.is_err())
         && weight_source::job(&job.kind)
         && job
@@ -134,6 +146,20 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
         }
     };
     w.put(id, &r)
+}
+
+fn hy4_encode_slot(w: &Worker) -> Result<File> {
+    let file = fs::OpenOptions::new().read(true).write(true).create(true)
+        .truncate(false).open(w.cfg.root.join("hy4-encode.lock"))?;
+    fs2::FileExt::try_lock_exclusive(&file).context("Another Hy4 encode is active")?;
+    for entry in fs::read_dir(&w.jobs)? {
+        let work = entry?.path().join("work");
+        ensure!(
+            [hy4::FILE, hy4::RECEIPT, ".gate.partial"].iter().all(|name| !work.join(name).exists()),
+            "An existing Hy4 result or partial must be retired by the operator"
+        );
+    }
+    Ok(file)
 }
 
 fn download_lock(w: &Worker, id: &str) -> Result<File> {
@@ -215,6 +241,11 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
             .arg(&plan.host)
             .arg(&plan.source)
             .arg(&plan.halo_tools);
+        if let Some(encode) = &plan.encode {
+            c.args([&encode.control, &encode.preflight, &encode.quantizer])
+                .env("OPENBLAS_NUM_THREADS", "1")
+                .env("OMP_NUM_THREADS", "1");
+        }
         c
     } else if let Some(wrapper) = &w.cfg.admission {
         let mut c = Command::new(wrapper);
@@ -416,6 +447,27 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
         value.is_object(),
         "Engine output is not a JSON object; check private engine-output.json"
     );
+    if w.cfg.hy4_plan.as_ref().is_some_and(|p| p.encode.is_some()) {
+        let artifact = &value["artifact"];
+        let file = work.join(hy4::FILE);
+        let receipt = work.join(hy4::RECEIPT);
+        let file_metadata = fs::symlink_metadata(&file)?;
+        let receipt_metadata = fs::symlink_metadata(&receipt)?;
+        ensure!(
+            value["kind"] == "hy4_gate_encode" && value["verified"] == true
+                && artifact["kind"] == "gguf" && artifact["bytes"] == file_metadata.len()
+                && file_metadata.is_file() && file_metadata.nlink() == 1
+                && receipt_metadata.is_file() && receipt_metadata.nlink() == 1
+                && receipt_metadata.len() <= 1 << 20
+                && artifact["sha256"].as_str().is_some_and(is_digest)
+                && artifact["path"].as_str().map(Path::new) == Some(file.as_path())
+                && value["receipt_path"].as_str().map(Path::new) == Some(receipt.as_path())
+                && load::<Value>(&receipt)? == value
+                && fs::read_dir(&work)?.count() == 2,
+            "Hy4 encode did not return a verified fixed-path receipt"
+        );
+        return Ok(value);
+    }
     if w.cfg.hy4_plan.is_some() {
         ensure!(
             value["kind"] == "hy4_plan"

@@ -51,12 +51,22 @@ struct Hy4Plan {
     host: String,
     source: PathBuf,
     halo_tools: PathBuf,
+    encode: Option<Hy4Encode>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Hy4Encode {
+    control: PathBuf,
+    preflight: PathBuf,
+    quantizer: PathBuf,
 }
 
 impl Hy4Plan {
     fn validate(&self, action: &str, job: &Job) -> bool {
         action == "start"
-            && hy4::valid(&job.kind, &job.options)
+            && hy4::capability(&job.kind, &job.options)
+                == Some(if self.encode.is_some() { hy4::ENCODE } else { hy4::CAPABILITY })
             && job.prompt.is_none()
             && matches!(job.inputs.as_slice(), [i] if i.kind == "hf" && i.host == self.host
                 && i.path.as_os_str() == self.source.as_os_str())
@@ -138,6 +148,12 @@ impl Config {
             token(&plan.host)?;
             absolute(&plan.source)?;
             absolute(&plan.halo_tools)?;
+            if let Some(encode) = &plan.encode {
+                for path in [&encode.control, &encode.preflight, &encode.quantizer, &cfg.engine] {
+                    absolute(path)?;
+                    ensure!(!path.starts_with(&cfg.root), "Hy4 encoder pins must be outside worker state");
+                }
+            }
             ensure!(
                 cfg.source_roots.is_empty()
                     && cfg.source_grants.is_empty()

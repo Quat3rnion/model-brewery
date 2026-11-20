@@ -842,6 +842,9 @@ async fn add_conversion(
     payload: std::result::Result<Json<NewConversion>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Conversion>)> {
     let (request, submission) = read_submission(&headers, "conversions", payload)?;
+    if request.options.contains_key(brewery_worker::hy4::OPTION) {
+        return Err(ApiError::bad("Hy4 jobs require a single-stage /api/jobs request"));
+    }
     let mut store = app.store.lock().map_err(ApiError::storage)?;
     if let Some(submission) = &submission {
         match store.replay(submission).map_err(ApiError::storage)? {

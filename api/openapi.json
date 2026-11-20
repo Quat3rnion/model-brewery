@@ -862,7 +862,7 @@
       "HostCapabilityMap": {
         "type": "object",
         "description": "Per-worker availability. It has one boolean for each job kind and the extra capabilities listed below. hf_download is false unless the operator opts in to managed Hugging Face downloads. convert_components is true only if the operator enabled component replacement for a Hugging Face source. custom_profiles is true only if the operator enabled custom profiles with a separate CPU-only converter. gguf_output is true only if the operator set up the GGUF quantizer. gguf_hf_output also requires the bounded Hugging Face exporter. gguf_safetensors_output is a separate opt-in for workers that can pass standalone SafeTensors and a registered assets directory to that exporter. It requires gguf_output; gguf_hf_output alone does not enable it. gguf_layer_recipe opts a worker in to managed GGUF layer recipes; gguf_output and the applicable source capability are also required. This flag is not a job kind and is not in the aggregate capabilities map. weight_visual enables inventory, tiles, and source-pinned proposals and tuning. weight_hgn enables native HGN sources. weight_packed allows packed weight jobs. weight_safetensors enables standalone SafeTensors and indexed HF weight jobs. The weight capabilities are additional to the per-job opt-in and are false by default. The reasons map can say why.",
-        "propertyNames": {"anyOf": [{"$ref": "#/components/schemas/JobKind"}, {"enum": ["convert_components", "custom_profiles", "gguf_output", "gguf_hf_output", "gguf_safetensors_output", "gguf_rocmfpx_output", "gguf_layer_recipe", "hy4_plan", "weight_visual", "weight_hgn", "weight_packed", "weight_safetensors"]}]},
+        "propertyNames": {"anyOf": [{"$ref": "#/components/schemas/JobKind"}, {"enum": ["convert_components", "custom_profiles", "gguf_output", "gguf_hf_output", "gguf_safetensors_output", "gguf_rocmfpx_output", "gguf_layer_recipe", "hy4_plan", "hy4_encode", "weight_visual", "weight_hgn", "weight_packed", "weight_safetensors"]}]},
         "additionalProperties": {"type": "boolean"}, "minProperties": 25
       },
       "ConfiguredToken": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
@@ -1616,7 +1616,18 @@
         "description": "Convert a registered source. The only kind that accepts host auto. Auto uses an eligible member of the configured quantization pool, preferring the source host when eligible; without a configured pool, auto uses only the source host. An explicit host is checked against its backend allowlists. Null or omitted host selects the source host, not the auto pool.",
         "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/NoPrompt"}],
         "required": ["input_ids"],
-        "properties": {"kind": {"const": "convert"}, "input_ids": {"$ref": "#/components/schemas/ConversionInputIds"}, "options": {"$ref": "#/components/schemas/ConversionOptions"}}
+        "properties": {"kind": {"const": "convert"}, "input_ids": {"$ref": "#/components/schemas/ConversionInputIds"}, "options": {"$ref": "#/components/schemas/ConvertJobOptions"}}
+      },
+      "ConvertJobOptions": {
+        "type": "object",
+        "oneOf": [{"$ref": "#/components/schemas/ConversionOptions"}, {"$ref": "#/components/schemas/Hy4EncodeOptions"}]
+      },
+      "Hy4EncodeOptions": {
+        "description": "One pinned, same-worker HF input on a dedicated hy4_encode worker. This form does not allow host auto or a conversion workflow.",
+        "type": "object", "additionalProperties": false, "required": ["hy4_overrides"],
+        "properties": {
+          "hy4_overrides": {"const": {"blk.1.attn_gate.weight": "Q8_0"}}
+        }
       },
       "VerifyJob": {
         "description": "Verify converted HGN from a registered source. First input: hf, gguf or hgn source. Second: hgn output. Each further input must be a distinct auxiliary kind (assets, ngram, vision or mtp) selected by its zero-based option index.",
