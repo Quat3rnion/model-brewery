@@ -182,7 +182,10 @@ fn every_live_job_kind_has_one_typed_create_variant() {
                         .is_some_and(|variants| !variants.is_empty()
                             && variants
                                 .iter()
-                                .all(|variant| variant["additionalProperties"] == false))
+                                .all(|variant| {
+                                    let variant = variant.get("$ref").map_or(variant, |r| resolve(&contract, r));
+                                    variant["additionalProperties"] == false
+                                }))
                     || options["allOf"].is_array(),
                 "{kind} options are not constrained"
             );
@@ -199,4 +202,142 @@ fn every_live_job_kind_has_one_typed_create_variant() {
     assert_eq!(documented.len(), mapping.len());
     assert_eq!(capabilities, documented);
     assert_eq!(capabilities, kinds);
+}
+
+#[test]
+fn ssh_editor_setup_is_published_as_a_revisioned_admin_action_and_readback() {
+    let mut app = Fixture::new();
+    app.launch();
+    let contract: Value = serde_json::from_str(CONTRACT).unwrap();
+    let operation = &contract["paths"]["/api/admin/actions"]["post"];
+    let action = resolve(
+        &contract,
+        &operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+    )["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|variant| resolve(&contract, &variant["$ref"]))
+        .find(|variant| variant["properties"]["action"]["const"] == "setup_weight_editor")
+        .expect("setup_weight_editor is not published");
+    let state = app.json("GET", "/api/admin/state", None, 200);
+    let hosts = state["hosts"].as_array().unwrap();
+    let local = hosts.iter().find(|host| host["id"] == "alpha").unwrap();
+    let ssh = hosts.iter().find(|host| host["id"] == "beta").unwrap();
+    let request = serde_json::json!({
+        "action":"setup_weight_editor", "worker":"beta", "revision":ssh["revision"],
+        "model_directory":"/models/editor", "credential":"fixture"
+    });
+    assert_closed_fields(action, &request);
+    assert!(local["weight_editor"].get("setup").is_none());
+    let setup = &ssh["weight_editor"]["setup"];
+    let host_policy = &contract["components"]["schemas"]["AdminHostPolicy"];
+    let setup_schema = resolve(
+        &contract,
+        &host_policy["properties"]["weight_editor"]["properties"]["setup"]["$ref"],
+    );
+    assert_closed_fields(setup_schema, setup);
+    assert_eq!(setup["status"], "needs_setup");
+    assert_eq!(setup["credentials"], serde_json::json!([]));
+    assert!(setup["model_directory"].is_null());
+    assert!(setup["reason"].is_string());
+    // This fixture has an SSH definition, but no configured provision credential.
+    app.json("POST", "/api/admin/actions", Some(request.clone()), 409);
+    let mut bad = request;
+    bad["model_directory"] = serde_json::json!("/models/../outside");
+    app.json("POST", "/api/admin/actions", Some(bad), 400);
+}
+
+fn assert_closed_fields(schema: &Value, value: &Value) {
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["additionalProperties"], false);
+    let required: BTreeSet<_> = schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key.as_str().unwrap())
+        .collect();
+    let keys = |object: &Value| {
+        object
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(keys(value), keys(&schema["properties"]));
+    assert_eq!(
+        required,
+        value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect()
+    );
+}
+
+#[test]
+fn managed_gguf_layer_recipe_is_discoverable_and_round_trips() {
+    use serde_json::json;
+
+    let mut app = Fixture::new();
+    std::fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts":{"alpha":{"local":true,"capabilities":{
+            "gguf_output":true,"gguf_hf_output":true,"gguf_layer_recipe":true
+        }}}})
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let contract: Value = serde_json::from_str(CONTRACT).unwrap();
+    let discover = app.json("GET", "/api/state", None, 200);
+    assert_eq!(
+        discover["hosts"][0]["capabilities"]["gguf_layer_recipe"],
+        true
+    );
+    assert!(discover["capabilities"].get("gguf_layer_recipe").is_none());
+    let per_host = &contract["components"]["schemas"]["HostCapabilityMap"];
+    assert!(
+        per_host["propertyNames"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|branch| branch["enum"]
+                .as_array()
+                .is_some_and(|names| names.contains(&json!("gguf_layer_recipe"))))
+    );
+
+    let create = &contract["paths"]["/api/conversions"]["post"]["requestBody"]["content"]["application/json"];
+    let mut request = create["examples"]["ggufLayerRecipe"]["value"].clone();
+    assert!(
+        request.is_object(),
+        "managed recipe sample is not published"
+    );
+    let request_schema = resolve(&contract, &create["schema"]["$ref"]);
+    let recipe_options = resolve(
+        &contract,
+        &request_schema["then"]["then"]["properties"]["options"]["$ref"],
+    );
+    assert_closed_fields(recipe_options, &request["options"]);
+    let recipe = resolve(&contract, &recipe_options["properties"]["layer_recipe"]["$ref"]);
+    assert_closed_fields(recipe, &request["options"]["layer_recipe"]);
+    let source = app.register("alpha", "hf", "/source/base");
+    request["input_ids"] = json!([source]);
+    let result = app.json("POST", "/api/conversions", Some(request.clone()), 201);
+    assert_eq!(result["format"], "gguf");
+    assert_eq!(result["host"], "alpha");
+    assert_eq!(result["input_ids"], request["input_ids"]);
+    assert_eq!(result["options"], request["options"]);
+    let inspect = result["job_ids"]["inspect"].as_str().unwrap();
+    let job = app.json("GET", &format!("/api/jobs/{inspect}"), None, 200);
+    assert_eq!(job["kind"], "inspect");
+    assert_eq!(job["options"], request["options"]);
+
+    let mut mixed = request.clone();
+    mixed["options"]["preset"] = json!("Q8_0");
+    app.json("POST", "/api/conversions", Some(mixed), 400);
+    request["host"] = json!("auto");
+    app.json("POST", "/api/conversions", Some(request), 400);
 }

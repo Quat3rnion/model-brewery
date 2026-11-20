@@ -3,7 +3,7 @@
   "info": {
     "title": "Model Brewery Controller",
     "version": "0.1.0",
-    "description": "A loopback-only API for the Brewery workbench. Start with getState to discover configured workers, their capabilities, registered inputs, and saved prompts. The controller queues only the workflows described here. To convert a model, use createConversion: one request runs inspect, plan, convert and verify. Use createJob with one conversion kind only for a single diagnostic stage. Neither route qualifies a release. Worker and SSH configuration is operator-owned; there is no API for editing it, running shell commands, or reading arbitrary files or the private controller data directory. putSettings saves benchmark and evaluation settings for a worker that the operator enrolled; it accepts only approved ports, approved suites and loopback endpoints. applyAdminAction changes the lifecycle policy of catalog workers under the same access rules as Settings; it installs no worker and changes no SSH trust. Artifact paths in job results are worker-side references, not download URLs.\n\nSend a single Host header for the actual loopback listen address/port or localhost on that port. If sent, Origin must be the matching http origin and Sec-Fetch-Site must be same-origin or none. Non-browser POST clients must send Content-Type: application/json, including for the bodyless cancel action. Unrecognized API paths or methods return a JSON error with status 404 or 405. The router also handles HEAD for GET paths with no response body, except that HEAD on the event stream returns 405."
+    "description": "A loopback-only API for the Brewery workbench. Start with getState to discover configured workers, their capabilities, registered inputs, and saved prompts. The controller queues only the workflows described here. To convert a model, use createConversion: one request runs inspect, plan, convert and verify. Use createJob with one conversion kind only for a single diagnostic stage. Neither route qualifies a release. Worker and SSH configuration is operator-owned; there is no API for running shell commands or reading arbitrary files or the private controller data directory. putSettings saves benchmark and evaluation settings for a worker that the operator enrolled; it accepts only approved ports, approved suites and loopback endpoints. applyAdminAction changes controller policy under the same access rules as Settings. Its editor setup action installs a separate editor on an existing SSH worker without changing SSH trust or the original worker. Artifact paths in job results are worker-side references, not download URLs.\n\nSend a single Host header for the actual loopback listen address/port or localhost on that port. If sent, Origin must be the matching http origin and Sec-Fetch-Site must be same-origin or none. Non-browser POST clients must send Content-Type: application/json, including for the bodyless cancel action. Unrecognized API paths or methods return a JSON error with status 404 or 405. The router also handles HEAD for GET paths with no response body, except that HEAD on the event stream returns 405."
   },
   "servers": [
     {"url": "http://127.0.0.1:{port}", "description": "Default numeric loopback listener", "variables": {"port": {"default": "4141"}}},
@@ -459,7 +459,7 @@
       "get": {
         "operationId": "getAdminState",
         "summary": "Read the administration state",
-        "description": "Infrastructure state uses the same access rules as Settings. It lists dispatch hosts, their job admission and resource policy, legacy catalog workers and runtimes, and the latest 50 policy audit entries. Reading state does not contact workers.",
+        "description": "Infrastructure state uses the same access rules as Settings. It lists dispatch hosts, their job admission and resource policy, editor status, legacy catalog workers and runtimes, and the latest 50 policy audit entries. For an existing SSH transport, weight_editor.setup lists the setup status, last configured directory and available credential IDs and labels. Reading state does not contact workers.",
         "responses": {
           "200": {"description": "The administration state.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AdminState"}}}},
           "403": {"$ref": "#/components/responses/Forbidden"},
@@ -471,7 +471,7 @@
       "post": {
         "operationId": "applyAdminAction",
         "summary": "Apply one administration action",
-        "description": "Changes controller policy using normal Settings access. set_host_policy controls pause and restricts jobs; set_host_resources replaces bounded resource overrides. set_weight_editor enables or disables a verified editor without changing the model, installing software or granting other job permissions. These actions use the host policy revision. Legacy catalog lifecycle and SSH trust are separate.",
+        "description": "Changes controller policy using normal Settings access. set_host_policy controls pause and restricts jobs; set_host_resources replaces bounded resource overrides. setup_weight_editor installs and verifies a separate editor on an existing admitted SSH worker using a configured provision credential and existing SSH trust. It does not change the ordinary worker or planner. set_weight_editor enables or disables an available local or verified SSH editor without installing software or granting other job permissions. These actions use the host policy revision.",
         "requestBody": {
           "required": true,
           "x-brewery-max-body-bytes": 4096,
@@ -480,16 +480,17 @@
             "examples": {
               "approve": {"value": {"action": "approve", "worker": "worker-a"}},
               "disable": {"value": {"action": "disable_runtime", "worker": "worker-a", "runtime": "evaluator"}},
-              "pool": {"value": {"action": "set_resource_policy", "worker": "worker-a", "allow_pool": false}}
+              "pool": {"value": {"action": "set_resource_policy", "worker": "worker-a", "allow_pool": false}},
+              "setupWeightEditor": {"value": {"action": "setup_weight_editor", "worker": "worker-a", "revision": 0, "model_directory": "/srv/models", "credential": "editor-provision"}}
             }
           }}
         },
         "responses": {
           "200": {"description": "The action was applied. The body is the new administration state.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AdminState"}}}},
-          "400": {"description": "The body is malformed, too large, not JSON, or has an unknown field or action.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "400": {"description": "The body is malformed, too large, not JSON, has an unknown field or action, or gives an invalid editor model directory.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "403": {"$ref": "#/components/responses/Forbidden"},
           "404": {"$ref": "#/components/responses/NotFound"},
-          "409": {"description": "The worker state does not allow the action, the readiness or runtime check failed, the request exceeds the pool ceiling, or the helper is not available.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "The worker state does not allow the action, the readiness or runtime check failed, the request exceeds the pool ceiling, or the helper is not available. Editor setup also conflicts if the revision is stale, the worker is not an admitted SSH worker, the selected credential is not configured for that worker, or verification fails.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
           "500": {"$ref": "#/components/responses/StorageError"},
           "503": {"description": "No infrastructure catalog workers are configured, or another infrastructure action is running.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
@@ -612,14 +613,20 @@
       "post": {
         "operationId": "createConversion",
         "summary": "Start the default one-submit conversion workflow",
-        "description": "Default way to convert a model. One request makes the controller run the child jobs inspect, plan, convert and verify in this order on one worker. The controller stores the workflow, so it continues if the client disconnects, and resumes after a controller restart by using the stored child job IDs. A child job that was running and cannot be checked is not retried. The workflow stops at the first failed or cancelled child job. Later stages are not queued. The call does not wait for the worker. Poll getConversion, or follow the child jobs with getJob and streamEvents. There is no conversion event kind and no conversion key in capabilities; the child jobs use the normal job events. A succeeded workflow means that all four child jobs succeeded. It is not a release qualification, and it does not show model quality. To run one stage alone for diagnosis, use createJob.\n\nHost: omit host to use the source model's host. Set host to auto to use an eligible worker of the configured quantization pool. Set a worker ID to pin that worker. The workflow reports host auto as requested_host.\n\nIdempotency: a new request returns 201. A repeat with the same key and the same typed body returns 200 with the current workflow, not only an ID. A different body for the same key returns 409.",
+        "description": "Default way to convert a model. One request makes the controller run the child jobs inspect, plan, convert and verify in this order on one worker. The controller stores the workflow, so it continues if the client disconnects, and resumes after a controller restart by using the stored child job IDs. A child job that was running and cannot be checked is not retried. The workflow stops at the first failed or cancelled child job. Later stages are not queued. The call does not wait for the worker. Poll getConversion, or follow the child jobs with getJob and streamEvents. There is no conversion event kind and no conversion key in capabilities; the child jobs use the normal job events. A succeeded workflow means that all four child jobs succeeded. It is not a release qualification, and it does not show model quality. To run an ordinary stage alone for diagnosis, use createJob. A managed GGUF layer recipe is accepted only by createConversion.\n\nHost: omit host to use the source model's host. Set host to auto to use an eligible worker of the configured quantization pool. Set a worker ID to pin that worker. The workflow reports host auto as requested_host. A managed GGUF layer recipe must run on the source worker and does not accept auto.\n\nIdempotency: a new request returns 201. A repeat with the same key and the same typed body returns 200 with the current workflow, not only an ID. A different body for the same key returns 409.",
         "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
         "requestBody": {
           "required": true,
           "x-brewery-max-body-bytes": 262144,
           "content": {"application/json": {
             "schema": {"$ref": "#/components/schemas/NewConversion"},
-            "example": {"host": "auto", "input_ids": ["a1314ac4-3570-4549-9111-67b904f8bdad"], "options": {"profile": "v2", "threads": 8}, "decode_backend": "cuda"}
+            "examples": {
+              "hgnPool": {"value": {"host": "auto", "input_ids": ["a1314ac4-3570-4549-9111-67b904f8bdad"], "options": {"profile": "v2", "threads": 8}, "decode_backend": "cuda"}},
+              "ggufLayerRecipe": {"summary": "Source-bound recipe for an indexed Hugging Face snapshot", "value": {
+                "format": "gguf", "input_ids": ["a1314ac4-3570-4549-9111-67b904f8bdad"],
+                "options": {"layer_recipe": {"schema": "brewery.layer-quant.v1", "source_sha256": "1111111111111111111111111111111111111111111111111111111111111111", "default_type": "BF16", "layers": {"0": "Q8_0", "1": "F16"}}}
+              }}
+            }
           }}
         },
         "responses": {
@@ -818,8 +825,8 @@
       },
       "HostCapabilityMap": {
         "type": "object",
-        "description": "Per-worker availability. It has one boolean for each job kind and the extra capabilities listed below. hf_download is false unless the operator opts in to managed Hugging Face downloads. convert_components is true only if the operator enabled component replacement for a Hugging Face source. custom_profiles is true only if the operator enabled custom profiles with a separate CPU-only converter. gguf_output is true only if the operator set up the GGUF quantizer. gguf_hf_output also requires the bounded Hugging Face exporter. gguf_safetensors_output is a separate opt-in for workers that can pass standalone SafeTensors and a registered assets directory to that exporter. It requires gguf_output; gguf_hf_output alone does not enable it. weight_visual enables inventory, tiles, and source-pinned proposals and tuning. weight_hgn enables native HGN sources. weight_packed allows packed weight jobs. weight_safetensors enables standalone SafeTensors and indexed HF weight jobs. The weight capabilities are additional to the per-job opt-in and are false by default. The reasons map can say why.",
-        "propertyNames": {"anyOf": [{"$ref": "#/components/schemas/JobKind"}, {"enum": ["convert_components", "custom_profiles", "gguf_output", "gguf_hf_output", "gguf_safetensors_output", "gguf_rocmfpx_output", "weight_visual", "weight_hgn", "weight_packed", "weight_safetensors"]}]},
+        "description": "Per-worker availability. It has one boolean for each job kind and the extra capabilities listed below. hf_download is false unless the operator opts in to managed Hugging Face downloads. convert_components is true only if the operator enabled component replacement for a Hugging Face source. custom_profiles is true only if the operator enabled custom profiles with a separate CPU-only converter. gguf_output is true only if the operator set up the GGUF quantizer. gguf_hf_output also requires the bounded Hugging Face exporter. gguf_safetensors_output is a separate opt-in for workers that can pass standalone SafeTensors and a registered assets directory to that exporter. It requires gguf_output; gguf_hf_output alone does not enable it. gguf_layer_recipe opts a worker in to managed GGUF layer recipes; gguf_output and the applicable source capability are also required. This flag is not a job kind and is not in the aggregate capabilities map. weight_visual enables inventory, tiles, and source-pinned proposals and tuning. weight_hgn enables native HGN sources. weight_packed allows packed weight jobs. weight_safetensors enables standalone SafeTensors and indexed HF weight jobs. The weight capabilities are additional to the per-job opt-in and are false by default. The reasons map can say why.",
+        "propertyNames": {"anyOf": [{"$ref": "#/components/schemas/JobKind"}, {"enum": ["convert_components", "custom_profiles", "gguf_output", "gguf_hf_output", "gguf_safetensors_output", "gguf_rocmfpx_output", "gguf_layer_recipe", "hy4_plan", "weight_visual", "weight_hgn", "weight_packed", "weight_safetensors"]}]},
         "additionalProperties": {"type": "boolean"}, "minProperties": 25
       },
       "ConfiguredToken": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
@@ -844,6 +851,9 @@
           "benchmark_targets": {"type": "array", "items": {"$ref": "#/components/schemas/BenchmarkChoice"}},
           "benchmarks": {"type": "array", "items": {"$ref": "#/components/schemas/BenchmarkChoice"}},
           "quantization_pool": {"type": "boolean"},
+          "scheduling_paused": {"type": "boolean"},
+          "resource_bounds": {"$ref": "#/components/schemas/AdminResourceBounds"},
+          "resources": {"$ref": "#/components/schemas/AdminResourceLimits"},
           "quantization_backends": {
             "type": "object", "description": "Per-encoder configured backend allowlists. No key means there is no restriction for that encoder.",
             "propertyNames": {"enum": ["ht", "i4r", "q4cp"]}, "additionalProperties": {"type": "array", "items": {"$ref": "#/components/schemas/ConfiguredToken"}}
@@ -891,7 +901,8 @@
               {"$ref": "#/components/schemas/CompareOptions"}, {"$ref": "#/components/schemas/ConversionOptions"},
               {"$ref": "#/components/schemas/VerifyOptions"}, {"$ref": "#/components/schemas/GenerateOptions"},
               {"$ref": "#/components/schemas/BaselineOptions"}, {"$ref": "#/components/schemas/BenchmarkOptions"},
-              {"$ref": "#/components/schemas/CacheCleanupOptions"}, {"$ref": "#/components/schemas/EmptyOptions"}
+              {"$ref": "#/components/schemas/CacheCleanupOptions"}, {"$ref": "#/components/schemas/EmptyOptions"},
+              {"$ref": "#/components/schemas/GgufLayerRecipeOptions"}
             ]
           },
           "prompt_id": {"$ref": "#/components/schemas/Id"},
@@ -1190,17 +1201,54 @@
         "properties": {"action": {"const": "set_resource_policy"}, "worker": {"$ref": "#/components/schemas/AdminToken"}, "allow_pool": {"type": "boolean"}}
       },
       "AdminAction": {
-        "oneOf": [{"$ref": "#/components/schemas/AdminWorkerAction"}, {"$ref": "#/components/schemas/AdminRuntimeAction"}, {"$ref": "#/components/schemas/AdminPolicyAction"}, {"$ref": "#/components/schemas/AdminHostPolicyAction"}, {"$ref": "#/components/schemas/AdminHostResourcesAction"}, {"$ref": "#/components/schemas/AdminWeightEditorAction"}]
+        "oneOf": [{"$ref": "#/components/schemas/AdminWorkerAction"}, {"$ref": "#/components/schemas/AdminRuntimeAction"}, {"$ref": "#/components/schemas/AdminPolicyAction"}, {"$ref": "#/components/schemas/AdminHostPolicyAction"}, {"$ref": "#/components/schemas/AdminHostResourcesAction"}, {"$ref": "#/components/schemas/AdminWeightEditorAction"}, {"$ref": "#/components/schemas/AdminWeightEditorSetupAction"}]
       },
       "WeightCalibrationMatrix": {
         "type": "array", "minItems": 1, "maxItems": 1024,
         "items": {"type": "array", "minItems": 1, "maxItems": 16384, "items": {"type": "number"}}
       },
       "AdminWeightEditorAction": {
-        "description": "Enable the installed CPU editor for a local source host, or disable weight editing there. The host policy revision must match. Disabling blocks new jobs; allocated jobs finish on their original executor. This action does not grant access to new source directories.",
+        "description": "Enable or disable the installed local CPU editor or a verified SSH editor. The host policy revision must match. Disabling blocks new jobs; allocated jobs finish on their original executor. This action does not grant access to new source directories.",
         "type": "object", "additionalProperties": false, "required": ["action", "worker", "revision", "enabled"],
         "properties": {"action": {"const": "set_weight_editor"}, "worker": {"$ref": "#/components/schemas/HostId"},
           "revision": {"type": "integer", "minimum": 0}, "enabled": {"type": "boolean"}}
+      },
+      "AdminWeightEditorSetupAction": {
+        "type": "object", "additionalProperties": false,
+        "required": ["action", "worker", "revision", "model_directory", "credential"],
+        "description": "Install and verify a separate editor on an existing admitted SSH worker under its existing pinned trust. On success, the controller saves the verified setup, advances the host policy revision and enables the editor subject to job admission policy. This does not change ordinary RPC, the Hy4 planner, or SSH trust.",
+        "properties": {
+          "action": {"const": "setup_weight_editor"},
+          "worker": {"$ref": "#/components/schemas/HostId"},
+          "revision": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615, "description": "Echo the current host policy revision from getAdminState."},
+          "model_directory": {"$ref": "#/components/schemas/EditorModelDirectory"},
+          "credential": {"$ref": "#/components/schemas/EditorCredentialId", "description": "Select an ID from the worker's weight_editor.setup.credentials list. Do not send a key or key path."}
+        }
+      },
+      "EditorModelDirectory": {
+        "type": "string", "minLength": 2, "maxLength": 1024, "x-brewery-max-utf8-bytes": 1024,
+        "pattern": "^(?:/(?!\\.{1,2}(?:/|(?![\\s\\S])))[^/\\\\\\u0000-\\u001f\\u007f-\\u009f]+)+(?![\\s\\S])",
+        "description": "Absolute non-root directory on the SSH worker, at most 1024 UTF-8 bytes. No empty, dot or dot-dot components, trailing slash, backslash or control characters."
+      },
+      "EditorCredentialId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"},
+      "EditorCredentialChoice": {
+        "type": "object", "additionalProperties": false, "required": ["id", "label"],
+        "properties": {
+          "id": {"$ref": "#/components/schemas/EditorCredentialId"},
+          "label": {"type": "string", "minLength": 1, "maxLength": 96, "x-brewery-max-utf8-bytes": 96, "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f-\\u009f])[\\s\\S]*[^\\u0020\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]", "description": "Nonblank display label with no control characters, at most 96 UTF-8 bytes."}
+        }
+      },
+      "AdminWeightEditorSetup": {
+        "type": "object", "additionalProperties": false, "required": ["status", "model_directory", "credentials", "reason"],
+        "description": "Present for a host with an existing SSH editor transport. Setup verification is separate from enablement and job admission.",
+        "properties": {
+          "status": {"enum": ["needs_setup", "verified"]},
+          "model_directory": {"anyOf": [{"$ref": "#/components/schemas/EditorModelDirectory"}, {"type": "null"}], "description": "Last saved setup directory, even if verification is no longer valid; null if none is saved."},
+          "credentials": {"type": "array", "items": {"$ref": "#/components/schemas/EditorCredentialChoice"}, "description": "Configured provision credential choices for this worker. Empty when none is available. No secret material is returned."},
+          "reason": {"type": ["string", "null"], "description": "Why no credential choice is available, or null."}
+        },
+        "if": {"properties": {"status": {"const": "verified"}}},
+        "then": {"properties": {"model_directory": {"$ref": "#/components/schemas/EditorModelDirectory"}}}
       },
       "AdminJobKinds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/components/schemas/JobKind"}},
       "AdminHostPolicyAction": {
@@ -1251,7 +1299,7 @@
           "weight_editor": {"type": "object", "required": ["available", "enabled", "capabilities"], "properties": {
             "available": {"type": "boolean", "description": "A verified editor is available for this control."},
             "enabled": {"type": "boolean", "description": "Editor configured, independent of admission restrictions."},
-            "reason": {"type": "string"}, "capabilities": {"type": "object", "additionalProperties": {"type": "boolean"},
+            "reason": {"type": "string"}, "setup": {"$ref": "#/components/schemas/AdminWeightEditorSetup"}, "capabilities": {"type": "object", "additionalProperties": {"type": "boolean"},
               "description": "Effective host capabilities, not evidence that a particular file or tensor is editable."}
           }},
           "disabled_jobs": {"$ref": "#/components/schemas/AdminJobKinds"}, "installed_jobs": {"$ref": "#/components/schemas/AdminJobKinds"},
@@ -1408,8 +1456,28 @@
           }}
         }
       },
+      "GgufLayerRecipeTensorType": {"type": "string", "enum": ["F32", "F16", "BF16", "Q8_0"]},
+      "GgufLayerRecipe": {
+        "type": "object", "additionalProperties": false,
+        "required": ["schema", "source_sha256", "default_type", "layers"],
+        "properties": {
+          "schema": {"const": "brewery.layer-quant.v1"},
+          "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}(?![\\s\\S])", "description": "Lowercase SHA-256 of the registered weight source: the file digest of standalone SafeTensors or the tree digest of an indexed HF snapshot. It is not the digest of the recipe, the output, or the combined source and assets bundle."},
+          "default_type": {"$ref": "#/components/schemas/GgufLayerRecipeTensorType"},
+          "layers": {
+            "type": "object", "maxProperties": 256,
+            "description": "Maps zero-based layer IDs to tensor types. Keys are canonical decimal unsigned 32-bit integers: no signs or leading zeros. An empty map uses the default for every layer. The exporter checks that the named layers exist and that the requested types fit the source tensors.",
+            "propertyNames": {"pattern": "^(?:0|[1-9][0-9]{0,8}|[1-3][0-9]{9}|4[01][0-9]{8}|42[0-8][0-9]{7}|429[0-3][0-9]{6}|4294[0-8][0-9]{5}|42949[0-5][0-9]{4}|429496[0-6][0-9]{3}|4294967[01][0-9]{2}|42949672[0-8][0-9]|429496729[0-5])(?![\\s\\S])"},
+            "additionalProperties": {"$ref": "#/components/schemas/GgufLayerRecipeTensorType"}
+          }
+        }
+      },
+      "GgufLayerRecipeOptions": {
+        "type": "object", "additionalProperties": false, "required": ["layer_recipe"],
+        "properties": {"layer_recipe": {"$ref": "#/components/schemas/GgufLayerRecipe"}}
+      },
       "NewConversion": {
-        "description": "Request for the one-submit workflow inspect, plan, convert and verify. Top-level fields are closed. For HGN output, the input rules and options are the same as for the convert job. The verify stage uses decode_backend. To use a saved custom profile, set profile_revision and do not set options.profile. A custom profile needs a Hugging Face source, the cpu backend for every encoder and for decode_backend, and a worker with capabilities.custom_profiles true; otherwise the controller returns 400 or 409.\n\nGGUF output (format gguf). For hf and gguf sources, input_ids is [source, optional imatrix]. For standalone safetensors, input_ids is [weights, assets, optional imatrix]. The second ID must identify a registered assets directory with model config and tokenizer files. The worker does not search next to the weights file. The weights, assets and any imatrix must be registered on the same worker, and the job must run there. All GGUF workflows need capabilities.gguf_output; hf also needs gguf_hf_output, and safetensors also needs gguf_safetensors_output. The bounded exporter accepts only a small set of dense architectures and rejects Flash-Next. A GGUF source must hold only floating-point weights and be one file. An hgn source is refused. options accepts only preset (an ID from getGgufCatalog; default is the catalog default) and threads. decode_backend and every other option are refused. profile_revision must name a GGUF profile and cannot be combined with options.preset. A preset or tensor type that the catalog marks requires_imatrix needs the imatrix input, or the controller returns 400. The workflow runs the same four stages. The controller registers artifact_model_id, a gguf model, only after independent verification passes. A GGUF conversion is not a release qualification.",
+        "description": "Request for the one-submit workflow inspect, plan, convert and verify. Top-level fields are closed. For HGN output, the input rules and options are the same as for the convert job. The verify stage uses decode_backend. To use a saved custom profile, set profile_revision and do not set options.profile. A custom profile needs a Hugging Face source, the cpu backend for every encoder and for decode_backend, and a worker with capabilities.custom_profiles true; otherwise the controller returns 400 or 409.\n\nOrdinary GGUF output (format gguf, without options.layer_recipe). For hf and gguf sources, input_ids is [source, optional imatrix]. For standalone safetensors, input_ids is [weights, assets, optional imatrix]. The second ID must identify a registered assets directory with model config and tokenizer files. The worker does not search next to the weights file. The weights, assets and any imatrix must be registered on the same worker, and the job must run there. All GGUF workflows need capabilities.gguf_output; hf also needs gguf_hf_output, and safetensors also needs gguf_safetensors_output. The bounded exporter accepts only a small set of dense architectures and rejects Flash-Next. A GGUF source must hold only floating-point weights and be one file. An hgn source is refused. options accepts only preset (an ID from getGgufCatalog; default is the catalog default) and threads. decode_backend and every other option are refused. profile_revision must name a GGUF profile and cannot be combined with options.preset. A preset or tensor type that the catalog marks requires_imatrix needs the imatrix input, or the controller returns 400.\n\nManaged GGUF layer recipe (format gguf, with options.layer_recipe). The recipe is the only option. Submit one indexed HF snapshot ID or [standalone SafeTensors ID, assets directory ID]. Use the source worker, which must also advertise gguf_layer_recipe. Do not use auto, an imatrix, a saved profile or a decode backend.\n\nFor either GGUF form, the controller registers artifact_model_id, a gguf model, only after independent verification passes. A GGUF conversion is not a release qualification.",
         "type": "object", "required": ["input_ids"], "additionalProperties": false,
         "properties": {
           "format": {"enum": ["hgn", "gguf"], "default": "hgn", "description": "Output format. Absent or hgn: the HGN workflow, unchanged. gguf: see the GGUF rules in the description of this schema."},
@@ -1419,20 +1487,40 @@
           },
           "input_ids": {"type": "array", "items": {"$ref": "#/components/schemas/Id"}},
           "options": {"type": "object"},
-          "decode_backend": {"$ref": "#/components/schemas/EncoderBackend"},
-          "profile_revision": {"$ref": "#/components/schemas/ProfileRevision", "description": "Revision of a saved custom profile. Its format must equal the conversion format. An unknown revision returns 404. The stages use the saved content; the request cannot change it."}
+          "decode_backend": {"anyOf": [{"$ref": "#/components/schemas/EncoderBackend"}, {"type": "null"}]},
+          "profile_revision": {"anyOf": [{"$ref": "#/components/schemas/ProfileRevision"}, {"type": "null"}], "description": "Revision of a saved custom profile. Its format must equal the conversion format. An unknown revision returns 404. The stages use the saved content; the request cannot change it."}
         },
         "if": {"required": ["format"], "properties": {"format": {"const": "gguf"}}},
-        "then": {"properties": {
-          "input_ids": {"minItems": 1, "maxItems": 3},
-          "options": {"additionalProperties": false, "properties": {
-            "preset": {"$ref": "#/components/schemas/GgufPreset"},
-            "threads": {"$ref": "#/components/schemas/Threads"}
-          }}
-        }, "not": {"required": ["decode_backend"]}},
+        "then": {
+          "if": {"required": ["options"], "properties": {"options": {"required": ["layer_recipe"]}}},
+          "then": {
+            "description": "Managed GGUF layer recipe. Supply one indexed HF input, or two inputs in order: standalone SafeTensors weights and a registered assets directory. Both must be on the source worker. There is no imatrix, preset, thread override, saved profile or decode backend. Omit host, use null, or pin the source worker. The worker must advertise gguf_layer_recipe, gguf_output and gguf_hf_output or gguf_safetensors_output as appropriate, and accept all four stages. No eligible worker returns 409. The workflow checks the source digest and uses the same verified layer plan in each stage. It registers the GGUF output only after verification; success is not release qualification.",
+            "properties": {
+              "host": {"not": {"const": "auto"}},
+              "input_ids": {
+                "minItems": 1, "maxItems": 2,
+                "x-brewery-input-kinds": [["hf", "safetensors"]],
+                "x-brewery-additional-input-kinds": ["assets"]
+              },
+              "options": {"$ref": "#/components/schemas/GgufLayerRecipeOptions"},
+              "decode_backend": {"type": "null"},
+              "profile_revision": {"type": "null"}
+            }
+          },
+          "else": {"properties": {
+            "input_ids": {"minItems": 1, "maxItems": 3},
+            "profile_revision": {"$ref": "#/components/schemas/ProfileRevision"},
+            "options": {"additionalProperties": false, "properties": {
+              "preset": {"$ref": "#/components/schemas/GgufPreset"},
+              "threads": {"$ref": "#/components/schemas/Threads"}
+            }}
+          }, "not": {"required": ["decode_backend"]}}
+        },
         "else": {"properties": {
           "input_ids": {"$ref": "#/components/schemas/ConversionInputIds"},
-          "options": {"$ref": "#/components/schemas/ConversionOptions"}
+          "options": {"$ref": "#/components/schemas/ConversionOptions"},
+          "decode_backend": {"$ref": "#/components/schemas/EncoderBackend"},
+          "profile_revision": {"$ref": "#/components/schemas/ProfileRevision"}
         }}
       },
       "ConversionState": {
@@ -1447,6 +1535,8 @@
           "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}], "description": "Concrete worker ID, or auto before assignment of a pool worker."},
           "requested_host": {"const": "auto", "description": "Present if auto routing was requested."},
           "format": {"const": "gguf", "description": "Present only for a GGUF conversion. Absent means HGN."},
+          "input_ids": {"type": "array", "items": {"$ref": "#/components/schemas/Id"}},
+          "options": {"type": "object", "description": "Options submitted for the workflow.", "properties": {"layer_recipe": {"$ref": "#/components/schemas/GgufLayerRecipe"}}},
           "state": {"$ref": "#/components/schemas/ConversionState"},
           "stage": {"$ref": "#/components/schemas/ConversionStage", "description": "The current stage while running. After a stop, the stage where the workflow stopped or finished."},
           "job_ids": {
@@ -1463,17 +1553,27 @@
           "error": {"type": "string", "description": "Error of the failed child job when the worker gave one. Human-readable, not a stable machine code."},
           "artifact_model_id": {
             "$ref": "#/components/schemas/Id",
-            "description": "Model record of the converted hgn output. The controller can register it before verify passes. Its presence does not show that the workflow succeeded: check state."
+            "description": "Model record of the converted output. For GGUF, the controller registers it only after verify passes. For HGN, it can be registered before verification passes. Check state."
           },
           "created_at": {"$ref": "#/components/schemas/UnixMillis"}, "updated_at": {"$ref": "#/components/schemas/UnixMillis"},
           "finished_at": {"$ref": "#/components/schemas/UnixMillis"}
         }
       },
       "PlanJob": {
-        "description": "Plan conversion using a registered source and optional auxiliaries.",
+        "description": "Plan conversion using a registered source and optional auxiliaries. The Hy4 override form reads metadata only and requires one pinned HF source on a dedicated worker that advertises hy4_plan.",
         "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/DefaultInputHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
         "required": ["input_ids"],
-        "properties": {"kind": {"const": "plan"}, "input_ids": {"$ref": "#/components/schemas/ConversionInputIds"}, "options": {"$ref": "#/components/schemas/ConversionOptions"}}
+        "properties": {"kind": {"const": "plan"}, "input_ids": {"$ref": "#/components/schemas/ConversionInputIds"}, "options": {"$ref": "#/components/schemas/PlanOptions"}}
+      },
+      "PlanOptions": {
+        "type": "object",
+        "oneOf": [{"$ref": "#/components/schemas/ConversionOptions"}, {"$ref": "#/components/schemas/Hy4PlanOptions"}]
+      },
+      "Hy4PlanOptions": {
+        "type": "object", "additionalProperties": false, "required": ["hy4_overrides"],
+        "properties": {
+          "hy4_overrides": {"const": {"blk.1.ffn_down_exps.weight": "Q8_0"}}
+        }
       },
       "ConvertJob": {
         "description": "Convert a registered source. The only kind that accepts host auto. Auto uses an eligible member of the configured quantization pool, preferring the source host when eligible; without a configured pool, auto uses only the source host. An explicit host is checked against its backend allowlists. Null or omitted host selects the source host, not the auto pool.",
