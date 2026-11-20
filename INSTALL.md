@@ -214,9 +214,11 @@ a worker. Do not scan the network, inspect SSH configuration, or enroll hosts
 automatically.
 
 If the operator wants a worker, request its host ID, display name, address,
-SSH account, and port. Request the complete ED25519 SHA-256 host-key fingerprint
-from the host administrator through a trusted channel. Verify that fingerprint
-independently before you use it.
+SSH account, and port. In **Add SSH host**, enter the address and port to probe
+that endpoint for its Ed25519 host key. Compare the displayed SHA-256
+fingerprint with one from the host console or administrator before accepting
+it. You can also enter a known fingerprint manually. The probe does not log
+in, save a host, or install a worker.
 
 If the installer needs a separate SSH identity, request only the local path to
 an existing private-key file for `BREWERY_PROVISION_IDENTITY`. Do not ask for

@@ -30,28 +30,12 @@ struct Target {
 impl Target {
     fn valid(&self) -> bool {
         let bytes = self.user.as_bytes();
-        self.port != 0
+        endpoint_valid(&self.host, self.port)
             && (1..=32).contains(&bytes.len())
             && (bytes[0].is_ascii_lowercase() || bytes[0] == b'_')
             && bytes[1..]
                 .iter()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(b))
-            && (self.host.parse::<IpAddr>().is_ok()
-                || (self.host.len() <= 253
-                    && self.host.split('.').all(|label| {
-                        label.len() <= 63
-                            && label
-                                .as_bytes()
-                                .first()
-                                .is_some_and(u8::is_ascii_alphanumeric)
-                            && label
-                                .as_bytes()
-                                .last()
-                                .is_some_and(u8::is_ascii_alphanumeric)
-                            && label
-                                .bytes()
-                                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                    })))
             && transport::fingerprint_valid(&self.fingerprint)
     }
 
@@ -61,6 +45,18 @@ impl Target {
             && self.port == other.port
             && self.fingerprint == other.fingerprint
     }
+}
+
+fn endpoint_valid(host: &str, port: u16) -> bool {
+    port != 0
+        && (host.parse::<IpAddr>().is_ok()
+            || (host.len() <= 253
+                && host.split('.').all(|label| {
+                    label.len() <= 63
+                        && label.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+                        && label.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
+                        && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                })))
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -142,6 +138,7 @@ pub struct Registry {
     state: Mutex<State>,
     helper: Option<transport::Helper>,
     changes: Semaphore,
+    discovery: Semaphore,
 }
 
 impl Registry {
@@ -180,6 +177,7 @@ impl Registry {
             state: Mutex::new(state),
             helper,
             changes: Semaphore::new(1),
+            discovery: Semaphore::new(1),
         };
         let state = out.state.lock().expect("SSH registry lock");
         for (id, row) in &state.rows {

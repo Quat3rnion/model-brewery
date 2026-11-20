@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { listHosts, permitted, problem, removeHost, saveHost, sshAction, type Action, type Definition, type SshHost } from '../lib/ssh-hosts';
+  import { listHosts, permitted, probeHostKey, problem, removeHost, saveHost, sshAction, validEndpoint, type Action, type Definition, type HostKey, type SshHost } from '../lib/ssh-hosts';
   const blank = ():Definition => ({id:'',name:'',host:'',user:'',port:22,fingerprint:''});
   let hosts = $state<SshHost[]>([]);
   let available = $state(false), ready = $state(false), busy = $state(false);
   let error = $state(''), note = $state('');
   let editing = $state(false), revision = $state<number>();
   let draft = $state<Definition>(blank());
+  let candidate = $state<HostKey>(), accepted = $state(false), probing = $state(false);
   let removing = $state(''), approved = $state('');
   const key = (h:SshHost) => JSON.stringify([h.id,h.revision,h.confirmation]);
   async function run(work:()=>Promise<void>) {
@@ -22,8 +23,24 @@
   }); }
   onMount(()=>{ void refresh(); });
   function edit(h?:SshHost) {
+    candidate = undefined; accepted = false;
     draft = h ? {...h} : blank(); revision = h?.revision; editing = true;
     error = note = removing = approved = '';
+  }
+  function clearProbe() {
+    candidate = undefined;
+    if (accepted) draft.fingerprint = '';
+    accepted = false; error = note = '';
+  }
+  function probe() { return run(async () => {
+    clearProbe(); probing = true;
+    try { candidate = await probeHostKey(draft.host,draft.port); }
+    finally { probing = false; }
+  }); }
+  function accept() {
+    if (!candidate || candidate.host !== draft.host || candidate.port !== draft.port) return;
+    draft.fingerprint = candidate.fingerprint; accepted = true; candidate = undefined;
+    note = 'Fingerprint added to the draft. Save the definition to keep it.';
   }
   function update(h:SshHost) { hosts = [...hosts.filter(x=>x.id !== h.id),h].sort((a,b)=>a.id.localeCompare(b.id)); }
   function save() { return run(async () => { update(await saveHost(draft,revision)); editing = false; note = 'Host definition saved.'; }); }
@@ -47,7 +64,7 @@
     </div>
     {#if !ready && busy}<p role="status">Loading SSH hosts…</p>{/if}
     {#if ready}
-      {#if !available}<p class="note warn">The SSH helper is unavailable. Connections and installations are disabled.</p>{/if}
+      {#if !available}<p class="note warn">The SSH helper is unavailable. You can probe host keys and save definitions, but cannot test connections or install workers.</p>{/if}
       {#if editing}
         <form class="stack" onsubmit={(e)=>{e.preventDefault(); if (!problem(draft)) void save();}}>
           <fieldset disabled={busy} class="stack">
@@ -55,12 +72,27 @@
             <div class="grid-2">
               <label class="field">Host ID<input class="input" required disabled={revision !== undefined} bind:value={draft.id} /></label>
               <label class="field">Display name<input class="input" required bind:value={draft.name} /></label>
-              <label class="field">Host address<input class="input" required bind:value={draft.host} autocomplete="off" spellcheck="false" /></label>
-              <label class="field">SSH port<input class="input" required type="number" min="1" max="65535" bind:value={draft.port} /></label>
+              <label class="field">Host address<input class="input" required oninput={clearProbe} bind:value={draft.host} autocomplete="off" spellcheck="false" /></label>
+              <label class="field">SSH port<input class="input" required type="number" min="1" max="65535" oninput={clearProbe} bind:value={draft.port} /></label>
               <label class="field">SSH account<input class="input" required bind:value={draft.user} autocomplete="off" spellcheck="false" /></label>
-              <label class="field">Host key fingerprint<input class="input mono" required bind:value={draft.fingerprint} placeholder="SHA256:…" aria-describedby="ssh-pin-help" autocomplete="off" spellcheck="false" /></label>
+              <label class="field">Host key fingerprint<input class="input mono" required oninput={()=>{accepted=false; candidate=undefined; note='';}} bind:value={draft.fingerprint} placeholder="SHA256:…" aria-describedby="ssh-pin-help" autocomplete="off" spellcheck="false" /></label>
             </div>
             <p id="ssh-pin-help" class="xs muted">Get the expected SHA256 fingerprint from the host administrator through a trusted channel. Do not enter a password or private key.</p>
+            {#if revision === undefined}
+              <div class="row">
+                <button class="btn" type="button" disabled={!validEndpoint(draft.host,draft.port)} onclick={probe}>Probe host key</button>
+                <span class="xs muted" role="status">{probing ? 'Reading host key…' : 'Reads the key without signing in.'}</span>
+              </div>
+              {#if candidate}
+                <div class="note warn stack" aria-label="Host key review" role="region">
+                  <strong>Untrusted host key</strong>
+                  <div class="small break">{candidate.host} · port {candidate.port} · {candidate.algorithm}</div>
+                  <code class="small break">{candidate.fingerprint}</code>
+                  <p class="small">Compare the full fingerprint with the one from the host administrator. Accept only if every character matches.</p>
+                  <div><button class="btn" type="button" onclick={accept}>Accept fingerprint</button></div>
+                </div>
+              {/if}
+            {/if}
             <div class="row">
               <button class="btn primary" disabled={!!problem(draft)} type="submit">Save definition</button>
               <button class="btn" type="button" onclick={()=>editing=false}>Cancel edit</button>

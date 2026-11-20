@@ -89,6 +89,7 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
             "confirmModelDirectory",
         ),
         ("post", "/api/admin/actions", "applyAdminAction"),
+        ("post", "/api/admin/ssh-host-key", "probeSshHostKey"),
         ("get", "/api/admin/ssh-hosts", "listSshHosts"),
         ("post", "/api/admin/ssh-hosts", "createSshHost"),
         ("put", "/api/admin/ssh-hosts/{id}", "updateSshHost"),

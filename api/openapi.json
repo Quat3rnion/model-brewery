@@ -497,6 +497,29 @@
         }
       }
     },
+    "/api/admin/ssh-host-key": {
+      "post": {
+        "operationId": "probeSshHostKey",
+        "summary": "Read one SSH endpoint's Ed25519 public host key for operator review.",
+        "description": "The controller contacts only the requested host and port. The result is an observation, not an authenticated identity. This request does not log in, save a definition, trust a key, or install a worker.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false, "required": ["host", "port"],
+          "properties": {"host": {"$ref": "#/components/schemas/SshHostFields/properties/host"}, "port": {"$ref": "#/components/schemas/SshHostFields/properties/port"}}
+        }}}},
+        "responses": {
+          "200": {"description": "Untrusted key presented by the endpoint.", "content": {"application/json": {"schema": {
+            "type": "object", "required": ["host", "port", "algorithm", "fingerprint", "public_key"],
+            "properties": {"host": {"$ref": "#/components/schemas/SshHostFields/properties/host"}, "port": {"$ref": "#/components/schemas/SshHostFields/properties/port"},
+              "algorithm": {"const": "ssh-ed25519"}, "fingerprint": {"type": "string", "pattern": "^SHA256:[A-Za-z0-9+/]{43}$"},
+              "public_key": {"type": "string", "pattern": "^ssh-ed25519 [A-Za-z0-9+/]{68}$"}}
+          }}}},
+          "400": {"$ref": "#/components/responses/BadRequest"}, "403": {"$ref": "#/components/responses/Forbidden"},
+          "422": {"description": "The request contains missing, unknown or mistyped fields."},
+          "429": {"description": "Another key probe is in progress. Retry after it finishes."},
+          "502": {"description": "No usable Ed25519 key was returned."}, "503": {"description": "The controller cannot run ssh-keyscan."}
+        }
+      }
+    },
     "/api/admin/ssh-hosts": {
       "get": {
         "operationId": "listSshHosts",
@@ -1162,7 +1185,7 @@
           "host": {"type": "string", "minLength": 1, "maxLength": 253, "description": "ASCII DNS name or literal IPv4 or IPv6 address, without scheme, brackets or scope."},
           "user": {"type": "string", "pattern": "^[a-z_][a-z0-9_-]{0,31}$"},
           "port": {"type": "integer", "minimum": 1, "maximum": 65535},
-          "fingerprint": {"type": "string", "pattern": "^SHA256:[A-Za-z0-9+/]{43}$", "description": "Independently verified OpenSSH Ed25519 fingerprint."}
+          "fingerprint": {"type": "string", "pattern": "^SHA256:[A-Za-z0-9+/]{43}$", "description": "OpenSSH Ed25519 fingerprint accepted by the operator. Later connections must match this pin."}
         }
       },
       "CreateSshHost": {"allOf": [{"$ref": "#/components/schemas/SshHostFields"}], "required": ["id"], "properties": {"id": {"$ref": "#/components/schemas/SshHostId"}}, "unevaluatedProperties": false},

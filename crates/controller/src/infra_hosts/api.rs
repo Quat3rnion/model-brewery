@@ -1,5 +1,6 @@
 use super::{
-    Provision, Registry, Row, State as RegistryState, Target, id_valid, name_valid, transport,
+    Provision, Registry, Row, State as RegistryState, Target, endpoint_valid, id_valid, name_valid,
+    transport,
 };
 use crate::{App, store::Store, web::ApiError};
 use axum::{
@@ -17,10 +18,18 @@ type Shared = Arc<App>;
 
 pub fn router() -> Router<Shared> {
     Router::new()
+        .route("/admin/ssh-host-key", post(discover_key))
         .route("/admin/ssh-hosts", get(list).post(create))
         .route("/admin/ssh-hosts/{id}", put(update).delete(remove))
         .route("/admin/ssh-hosts/{id}/action", post(action))
         .layer(DefaultBodyLimit::max(8 * 1024))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Endpoint {
+    host: String,
+    port: u16,
 }
 
 // Flat configuration objects are intentional; deserialize the target
@@ -72,12 +81,49 @@ struct Action {
 type Payload = std::result::Result<Json<Box<RawValue>>, JsonRejection>;
 
 fn body<T: serde::de::DeserializeOwned>(payload: Payload) -> Result<T> {
-    let invalid = |code| ApiError(code, "invalid SSH definition request".into());
+    ssh_body(payload, "invalid SSH definition request")
+}
+
+fn ssh_body<T: serde::de::DeserializeOwned>(payload: Payload, message: &'static str) -> Result<T> {
+    let invalid = |code| ApiError(code, message.into());
     let Json(raw) = payload.map_err(|err| invalid(err.status()))?;
     if !raw.get().starts_with('{') {
         return Err(invalid(StatusCode::UNPROCESSABLE_ENTITY));
     }
     serde_json::from_str(raw.get()).map_err(|_| invalid(StatusCode::UNPROCESSABLE_ENTITY))
+}
+
+async fn discover_key(State(app): State<Shared>, payload: Payload) -> Result<Json<Value>> {
+    let Endpoint { host, port } = ssh_body(payload, "invalid SSH host key discovery request")?;
+    if !endpoint_valid(&host, port) {
+        return Err(ApiError::bad("invalid SSH host or port"));
+    }
+    let _probe = app.ssh_hosts.discovery.try_acquire().map_err(|_| {
+        ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "another SSH host key discovery is in progress".into(),
+        )
+    })?;
+    let (public_key, fingerprint) =
+        transport::discover_key(&host, port)
+            .await
+            .map_err(|error| match error {
+                transport::DiscoveryError::Unavailable => ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "SSH host key scanner unavailable".into(),
+                ),
+                transport::DiscoveryError::Failed => ApiError(
+                    StatusCode::BAD_GATEWAY,
+                    "could not obtain an Ed25519 SSH host key".into(),
+                ),
+            })?;
+    Ok(Json(json!({
+        "host": host,
+        "port": port,
+        "algorithm": "ssh-ed25519",
+        "fingerprint": fingerprint,
+        "public_key": public_key
+    })))
 }
 
 fn conflict(message: &'static str) -> ApiError {

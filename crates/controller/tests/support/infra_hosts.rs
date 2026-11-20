@@ -1,6 +1,7 @@
 use super::*;
 
 const ROUTE: &str = "/api/admin/ssh-hosts";
+const DISCOVERY: &str = "/api/admin/ssh-host-key";
 const FINGERPRINT: &str = "SHA256:kmYlmuZBwV+t4tJiZRRDQWzVv848g2LMqV6K5JdW6X8";
 const HELPER: &str = r#"#!/usr/bin/python3
 import json, pathlib, sys
@@ -25,6 +26,90 @@ if (here / "bad-key").exists():
     reply["host_key"] = "ssh-ed25519 invalid"
 print(json.dumps(reply))
 "#;
+
+struct Sshd(Child);
+
+impl Drop for Sshd {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        self.0.wait().unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires local OpenSSH sshd, ssh-keygen, and ssh-keyscan"]
+fn discovers_the_loopback_sshd_public_key_without_enrolling_it() {
+    let mut app = Fixture::new();
+    let key = app.path("host_key");
+    assert!(
+        Command::new("/usr/bin/ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&key)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let public_key_file = app.path("host_key.pub");
+    let public_key = fs::read_to_string(&public_key_file).unwrap();
+    let public_key = public_key
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let fingerprint = Command::new("/usr/bin/ssh-keygen")
+        .args(["-l", "-E", "sha256", "-f"])
+        .arg(&public_key_file)
+        .output()
+        .unwrap();
+    assert!(fingerprint.status.success());
+    let fingerprint_text = String::from_utf8(fingerprint.stdout).unwrap();
+    let fingerprint = fingerprint_text.split_whitespace().nth(1).unwrap();
+
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    let config = app.path("sshd_config");
+    fs::write(
+        &config,
+        format!(
+            "ListenAddress 127.0.0.1\nPort {port}\nHostKey {}\nPidFile {}\n\
+             PasswordAuthentication no\nKbdInteractiveAuthentication no\n\
+             PubkeyAuthentication no\nUsePAM no\n",
+            key.display(),
+            app.path("sshd.pid").display(),
+        ),
+    )
+    .unwrap();
+    let log = app.path("sshd.log");
+    drop(reservation);
+    let mut sshd = Sshd(
+        Command::new("/usr/bin/sshd")
+            .args(["-D", "-e", "-f"])
+            .arg(&config)
+            .stdin(Stdio::null())
+            .stderr(fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    wait_for(|| {
+        let text = fs::read_to_string(&log).unwrap();
+        assert!(sshd.0.try_wait().unwrap().is_none(), "{text}");
+        text.contains("Server listening on").then_some(())
+    });
+    app.launch();
+    assert_eq!(
+        app.json(
+            "POST",
+            DISCOVERY,
+            Some(json!({"host":"127.0.0.1","port":port})),
+            200,
+        ),
+        json!({
+            "host":"127.0.0.1","port":port,"algorithm":"ssh-ed25519",
+            "fingerprint":fingerprint,"public_key":public_key
+        })
+    );
+    assert_eq!(app.json("GET", ROUTE, None, 200)["hosts"], json!([]));
+}
 
 #[test]
 fn definition_edits_are_local_durable_and_revision_guarded() {

@@ -1689,8 +1689,12 @@ fingerprint in the private controller registry under
 `$BREWERY_DATA/ssh-hosts`. It writes a private dispatch overlay. It does not
 edit the operator dispatch file or `~/.ssh/config`.
 
-Get the complete ED25519 SHA-256 fingerprint from the host administrator over
-a trusted channel. Do not trust a key that you have not checked independently.
+In **Add SSH host**, enter the address and port, then probe the host key. The
+controller requests the Ed25519 public key from that endpoint without logging
+in. Check the displayed SHA-256 fingerprint against the host console or a
+trusted message from the administrator: a first connection alone does not
+prove the host's identity. Accept the key to use it in the form, or enter a
+known fingerprint manually. Neither probing nor accepting saves the host.
 The form does not accept a password or private key.
 
 1. Save the host definition. This does not connect to the host.

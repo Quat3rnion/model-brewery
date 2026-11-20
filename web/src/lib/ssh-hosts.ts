@@ -4,6 +4,19 @@ export type Action = 'test'|'plan'|'install';
 const base = '/api/admin/ssh-hosts';
 const path = (id: string) => `${base}/${encodeURIComponent(id)}`;
 const fp = /^SHA256:[A-Za-z0-9+/]{43}$/;
+export function validEndpoint(host:string,port:number) {
+  return !!host && !/[\s/@]/.test(host) && !host.startsWith('-') && Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+export interface HostKey {host:string; port:number; algorithm:'ssh-ed25519'; fingerprint:string; public_key:string}
+export async function probeHostKey(host:string,port:number):Promise<HostKey> {
+  if (!validEndpoint(host,port)) throw new Error('Enter a host address and valid SSH port.');
+  const key = await request('/api/admin/ssh-host-key','POST',{host,port}) as HostKey;
+  if (key?.host !== host || key.port !== port || key.algorithm !== 'ssh-ed25519' ||
+      typeof key.fingerprint !== 'string' || !fp.test(key.fingerprint) ||
+      typeof key.public_key !== 'string' || !/^ssh-ed25519 [A-Za-z0-9+/]{68}$/.test(key.public_key))
+    throw new Error('The probe did not return a valid host key for this address and port.');
+  return key;
+}
 export function problem(d: Definition) {
   if (!d.id.trim() || !d.name.trim()) return 'Enter a host ID and display name.';
   if (!d.host || /[\s/@]/.test(d.host) || d.host.startsWith('-')) return 'Enter a host address, not a URL.';
@@ -16,6 +29,14 @@ async function request(url: string, method = 'GET', body?: unknown): Promise<unk
   const r = await fetch(url,{method,mode:'same-origin',referrerPolicy:'same-origin',credentials:'same-origin',redirect:'error',cache:'no-store',
     headers:body ? {'Content-Type':'application/json'} : undefined,body:body ? JSON.stringify(body) : undefined});
   if (!r.ok) {
+    if (url === '/api/admin/ssh-host-key') {
+      const issue: Record<number,string> = {
+        429:'Another host key probe is running. Try again when it finishes.',
+        502:'No Ed25519 host key was received. Check the address, port and SSH server.',
+        503:'The controller cannot run ssh-keyscan. Install the OpenSSH client on the controller or enter a known fingerprint.',
+      };
+      if (issue[r.status]) throw new Error(`HTTP ${r.status}: ${issue[r.status]}`);
+    }
     const reason: Record<number,string> = {400:'Check the host fields.',401:'Sign in to Settings.',403:'Check your Settings access.',409:'The host changed, is busy, or cannot perform this action. Refresh and review it again.',502:'The SSH helper refused the action. Check the address, account and trusted fingerprint.',503:'The SSH helper is unavailable.'};
     throw new Error(`HTTP ${r.status}: ${reason[r.status] ?? 'Refresh the host list and check the controller configuration.'}`);
   }
