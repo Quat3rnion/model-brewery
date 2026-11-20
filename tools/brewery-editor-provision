@@ -1,6 +1,7 @@
 #!/usr/bin/python3 -ISB
 """Install one pinned, packaged CPU editor sidecar on an existing SSH worker."""
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -117,13 +118,17 @@ print(json.dumps({"root":str(dest)}))
 """
 
 
-def target(request):
-    transport = request["transport"]
-    fingerprint = request["fingerprint"]
+def normalize_hostname(host):
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return host.removesuffix(".").lower()
+
+
+def resolve(transport, *, direct):
     if "target" in transport:
         row = transport["target"]
-        need(row["fingerprint"] == fingerprint, "Provision credential pin differs from verified host")
-        return row["host"], row["port"], transport["key"]
+        return row["host"], row["port"], [transport["key"]]
     alias = transport["alias"]
     need(PROVISION["matches"](PROVISION["ID"], alias), "Invalid SSH alias")
     args = ["/usr/bin/ssh", "-G"]
@@ -132,36 +137,71 @@ def target(request):
     raw = capture([*args, "--", alias], 6, "Could not resolve existing SSH alias")
     opts = dict(line.split(" ", 1) for line in raw.decode().splitlines() if " " in line)
     host, port = opts["hostname"], int(opts["port"])
+    if direct:
+        need(all(opts.get(opt, "none").lower() == "none" for opt in
+                 ("proxycommand", "proxyjump", "knownhostscommand")),
+             "Saved logins require a directly pinned SSH endpoint")
     lookup = opts.get("hostkeyalias") or (host if port == 22 else f"[{host}]:{port}")
-    need(PROVISION["a_safe_host"](host) and 0 < port < 65536, "Invalid existing SSH target")
+    need(PROVISION["a_safe_host"](str(normalize_hostname(host))) and 0 < port < 65536,
+         "Invalid existing SSH target")
+    keys, revoked = set(), set()
     for opt in ("userknownhostsfile", "globalknownhostsfile"):
-        for path in shlex.split(opts.get(opt, "")):
+        for path in shlex.split(opts.get(opt, ""))[:8]:
             path = os.path.expanduser(path)
             if not path.startswith("/") or "%" in path or not Path(path).is_file():
                 continue
-            result = subprocess.run(
-                ["/usr/bin/ssh-keygen", "-F", lookup, "-f", path],
-                capture_output=True, timeout=4, check=False, text=True,
-            )
-            if result.returncode:
+            try:
+                lines = capture(["/usr/bin/ssh-keygen", "-F", lookup, "-f", path], 2,
+                                "Could not resolve existing host pin").decode().splitlines()
+            except PROVISION["Problem"]:
                 continue
-            for line in result.stdout.splitlines():
+            for line in lines:
                 cols = line.split()
-                if len(cols) >= 3 and cols[1] == "ssh-ed25519" and not line.startswith(("#", "@")):
-                    try:
-                        key = PROVISION["base64"].b64decode(cols[2], validate=True)
-                    except ValueError:
-                        continue
-                    digest = PROVISION["base64"].b64encode(hashlib.sha256(key).digest()).decode().rstrip("=")
-                    if digest == fingerprint.removeprefix("SHA256:"):
-                        return host, port, " ".join(cols[1:3])
+                if len(cols) >= 4 and cols[0] == "@revoked" and cols[2] == "ssh-ed25519":
+                    revoked.add(" ".join(cols[2:4]))
+                elif len(cols) >= 3 and cols[1] == "ssh-ed25519" and not line.startswith(("#", "@")):
+                    keys.add(" ".join(cols[1:3]))
+    return host, port, sorted(keys - revoked)
+
+
+def target(request):
+    fingerprint = request["fingerprint"]
+    expected = request.get("expected_endpoint")
+    host, port, keys = resolve(request["transport"], direct=expected is not None)
+    if expected is not None:
+        need(set(expected) == {"host", "port", "key"} and
+             normalize_hostname(host) == normalize_hostname(expected["host"]) and
+             port == expected["port"] and expected["key"] in keys,
+             "The saved SSH definition does not match the worker endpoint and host key")
+        keys = [expected["key"]]
+    for key in keys:
+        try:
+            decoded = PROVISION["base64"].b64decode(key.split()[1], validate=True)
+        except (ValueError, IndexError):
+            continue
+        digest = PROVISION["base64"].b64encode(hashlib.sha256(decoded).digest()).decode().rstrip("=")
+        if digest == fingerprint.removeprefix("SHA256:"):
+            return host, port, key
     raise ValueError("Provision credential pin not found for the existing SSH alias")
+
+
+def inspect_aliases():
+    aliases = PROVISION["parse"](sys.stdin.buffer.read(65537))
+    need(isinstance(aliases, dict) and len(aliases) <= 64, "Invalid SSH alias request")
+    result = {}
+    for worker, transport in aliases.items():
+        try:
+            host, port, keys = resolve(transport, direct=True)
+            result[worker] = {"host": host, "port": port, "keys": keys}
+        except (OSError, ValueError, KeyError, PROVISION["Problem"]):
+            continue
+    print(json.dumps(result))
 
 
 def main():
     request = PROVISION["parse"](sys.stdin.buffer.read(8193))
-    need(set(request) == {"worker", "transport", "model_directory", "generation", "identity", "user", "fingerprint"},
-         "Invalid editor setup request")
+    required = {"worker", "transport", "model_directory", "generation", "identity", "user", "fingerprint"}
+    need(required <= request.keys() <= required | {"expected_endpoint"}, "Invalid editor setup request")
     host, port, key = target(request)
     req = {"host": host, "port": port, "fingerprint": request["fingerprint"], "user": request["user"]}
     need(PROVISION["matches"](PROVISION["USER"], req["user"]) and req["user"] != "root",
@@ -202,7 +242,11 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        if sys.argv[1:] == ["inspect-aliases"]:
+            inspect_aliases()
+        else:
+            need(len(sys.argv) == 1, "Invalid editor provisioning command")
+            main()
     except Exception:
         # No helper arguments, remote output or credential paths go to HTTP.
         sys.exit("Remote editor provisioning failed")

@@ -72,7 +72,7 @@ pub(super) fn catalog() -> Vec<Identity> {
     identities
 }
 
-pub(super) fn usable(path: &str) -> bool {
+pub(crate) fn usable(path: &str) -> bool {
     if !safe_path(path) {
         return false;
     }

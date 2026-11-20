@@ -1,5 +1,5 @@
 mod api;
-mod identity;
+pub(crate) mod identity;
 pub(crate) mod transport;
 
 use crate::{
@@ -99,6 +99,22 @@ struct Row {
     checked_identity: Option<String>,
     revision: u64,
     provision: Provision,
+}
+
+pub(crate) const SAVED_LOGIN_PREFIX: &str = "saved-ssh:";
+
+#[derive(Serialize)]
+pub(crate) struct EditorEndpoint {
+    pub host: String,
+    pub port: u16,
+    pub key: String,
+}
+
+pub(crate) struct EditorLogin {
+    pub endpoint: EditorEndpoint,
+    pub user: String,
+    pub identity: PathBuf,
+    pub fingerprint: String,
 }
 
 impl Row {
@@ -289,6 +305,72 @@ impl Registry {
         Some(json!({"target":row.target,"key":key}))
     }
 
+    pub(crate) fn lock_editor_logins(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        self.changes.try_acquire().ok()
+    }
+
+    fn editor_login(&self, row: &Row) -> Option<EditorLogin> {
+        let key = match &row.provision {
+            Provision::Defined => return None,
+            Provision::Verified { key }
+            | Provision::Planned { key, .. }
+            | Provision::Installed { key, .. } => key,
+        };
+        let identity = row.checked_identity.as_deref()?;
+        let current = if matches!(row.provision, Provision::Installed { .. }) {
+            self.installed_identity(row)
+        } else {
+            row.identity_file.as_deref().or(self.default_identity.as_deref())
+        };
+        if current != Some(identity)
+            || !identity::usable(identity)
+            || !transport::key_matches(key, &row.target.fingerprint)
+        {
+            return None;
+        }
+        Some(EditorLogin {
+            endpoint: EditorEndpoint {
+                host: row.target.host.clone(),
+                port: row.target.port,
+                key: key.clone(),
+            },
+            user: row.target.user.clone(),
+            identity: identity.into(),
+            fingerprint: row.target.fingerprint.clone(),
+        })
+    }
+
+    pub(crate) fn editor_login_choices(&self, host: &str, port: u16, keys: &[String]) -> Vec<Value> {
+        let state = self.state.lock().expect("SSH registry lock");
+        state
+            .rows
+            .values()
+            .filter_map(|row| {
+                let login = self.editor_login(row)?;
+                if !same_hostname(host, &login.endpoint.host)
+                    || port != login.endpoint.port
+                    || !keys.contains(&login.endpoint.key)
+                {
+                    return None;
+                }
+                Some(json!({
+                    "id": format!("{SAVED_LOGIN_PREFIX}{}:{}", row.id, row.revision),
+                    "label": row.name
+                }))
+            })
+            .collect()
+    }
+
+    pub(crate) fn selected_editor_login(&self, credential: &str) -> Option<EditorLogin> {
+        let (id, revision) = credential.strip_prefix(SAVED_LOGIN_PREFIX)?.split_once(':')?;
+        let state = self.state.lock().expect("SSH registry lock");
+        let row = state.rows.get(id)?;
+        if revision != row.revision.to_string() {
+            return None;
+        }
+        self.editor_login(row)
+    }
+
     fn write_dispatch(&self, state: &State) -> Result<(), Error> {
         let mut hosts = self.base.clone();
         for row in state.rows.values().filter(|r| self.dispatchable(r)) {
@@ -318,6 +400,16 @@ impl Registry {
         }
         *state = next;
         Ok(())
+    }
+}
+
+pub(crate) fn same_hostname(left: &str, right: &str) -> bool {
+    let left = left.trim_end_matches('.');
+    let right = right.trim_end_matches('.');
+    match (left.parse::<IpAddr>(), right.parse::<IpAddr>()) {
+        (Ok(left), Ok(right)) => left == right,
+        (Err(_), Err(_)) => left.eq_ignore_ascii_case(right),
+        _ => false,
     }
 }
 

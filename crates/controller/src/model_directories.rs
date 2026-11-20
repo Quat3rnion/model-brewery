@@ -240,7 +240,7 @@ async fn confirm(
         record_audit(&tx, &audit, "applied")?;
         tx.commit().map_err(ApiError::storage)?;
     }
-    admin.view(&app).map(Json).map_err(ApiError::storage)
+    admin.view(&app).await.map(Json).map_err(ApiError::storage)
 }
 
 pub(crate) struct Access {

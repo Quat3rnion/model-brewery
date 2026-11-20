@@ -1267,12 +1267,12 @@
         "pattern": "^(?:/(?!\\.{1,2}(?:/|(?![\\s\\S])))[^/\\\\\\u0000-\\u001f\\u007f-\\u009f]+)+(?![\\s\\S])",
         "description": "Absolute non-root directory on the SSH worker, at most 1024 UTF-8 bytes. No empty, dot or dot-dot components, trailing slash, backslash or control characters."
       },
-      "EditorCredentialId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"},
+      "EditorCredentialId": {"type": "string", "description": "Opaque choice returned by getAdminState. A saved SSH login choice includes its definition revision.", "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63}|saved-ssh:[A-Za-z0-9][A-Za-z0-9._-]{0,63}:[1-9][0-9]{0,19})(?![\\s\\S])"},
       "EditorCredentialChoice": {
         "type": "object", "additionalProperties": false, "required": ["id", "label"],
         "properties": {
           "id": {"$ref": "#/components/schemas/EditorCredentialId"},
-          "label": {"type": "string", "minLength": 1, "maxLength": 96, "x-brewery-max-utf8-bytes": 96, "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f-\\u009f])[\\s\\S]*[^\\u0020\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]", "description": "Nonblank display label with no control characters, at most 96 UTF-8 bytes."}
+          "label": {"type": "string", "minLength": 1, "maxLength": 256, "x-brewery-max-utf8-bytes": 256, "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f-\\u009f])[\\s\\S]*[^\\u0020\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]", "description": "Display label from the SSH definition or the worker-specific credential catalog."}
         }
       },
       "AdminWeightEditorSetup": {
@@ -1281,8 +1281,9 @@
         "properties": {
           "status": {"enum": ["needs_setup", "verified"]},
           "model_directory": {"anyOf": [{"$ref": "#/components/schemas/EditorModelDirectory"}, {"type": "null"}], "description": "Last saved setup directory, even if verification is no longer valid; null if none is saved."},
-          "credentials": {"type": "array", "items": {"$ref": "#/components/schemas/EditorCredentialChoice"}, "description": "Configured provision credential choices for this worker. Empty when none is available. No secret material is returned."},
-          "reason": {"type": ["string", "null"], "description": "Why no credential choice is available, or null."}
+          "credentials": {"type": "array", "items": {"$ref": "#/components/schemas/EditorCredentialChoice"}, "description": "Eligible verified SSH logins and worker-specific provision credentials. Echo the selected ID; do not send a private key or key path."},
+          "blocker": {"enum": ["runtime", "credential", null], "description": "Prerequisite for a new installation: the pinned editor runtime or a verified login for this worker. Null if neither is missing."},
+          "reason": {"type": ["string", "null"], "description": "Actionable explanation of the setup blocker, or null."}
         },
         "if": {"properties": {"status": {"const": "verified"}}},
         "then": {"properties": {"model_directory": {"$ref": "#/components/schemas/EditorModelDirectory"}}}

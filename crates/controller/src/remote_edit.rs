@@ -2,7 +2,10 @@
 use crate::{
     Error,
     domain::Host,
-    infra_hosts::transport::{key_matches, private_write, ssh_path},
+    infra_hosts::{
+        EditorLogin, identity, same_hostname,
+        transport::{key_matches, private_write, ssh_path},
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -35,7 +38,11 @@ pub(crate) struct Installer {
     dir: PathBuf,
     helper: Option<PathBuf>,
     credentials: BTreeMap<String, Credential>,
+    inspect: tokio::sync::Semaphore,
 }
+
+pub(crate) const NO_LOGIN: &str =
+    "Select a current verified SSH login, or configure a provision credential for this worker.";
 
 #[derive(Deserialize)]
 struct Installed {
@@ -43,6 +50,23 @@ struct Installed {
     port: u16,
     key: String,
     root: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct Resolved {
+    pub host: String,
+    pub port: u16,
+    pub keys: Vec<String>,
+}
+
+impl Resolved {
+    pub fn from_managed(transport: &Value) -> Option<Self> {
+        Some(Self {
+            host: transport["target"]["host"].as_str()?.into(),
+            port: transport["target"]["port"].as_u64()?.try_into().ok()?,
+            keys: vec![transport["key"].as_str()?.into()],
+        })
+    }
 }
 
 pub(crate) fn model_directory(value: &str) -> bool {
@@ -107,6 +131,7 @@ impl Installer {
             dir,
             helper,
             credentials,
+            inspect: tokio::sync::Semaphore::new(1),
         })
     }
 
@@ -121,22 +146,64 @@ impl Installer {
     }
 
     pub fn choices(&self, id: &str) -> Vec<Value> {
-        if self.helper.is_none() {
-            return Vec::new();
-        }
         self.credentials
             .iter()
-            .filter(|(_, c)| c.worker == id)
+            .filter(|(_, c)| c.worker == id && trusted(&c.identity, 0o077))
             .map(|(id, c)| json!({"id":id,"label":c.label}))
             .collect()
     }
 
     pub fn accepts(&self, id: &str, credential: &str) -> bool {
-        self.helper.is_some()
-            && self
-                .credentials
-                .get(credential)
-                .is_some_and(|c| c.worker == id)
+        self.credentials
+            .get(credential)
+            .is_some_and(|c| c.worker == id && trusted(&c.identity, 0o077))
+    }
+
+    fn checked_helper(&self) -> Option<&Path> {
+        self.helper.as_deref().filter(|path| {
+            trusted(path, 0o6022) && path.metadata().is_ok_and(|md| md.mode() & 0o100 != 0)
+        })
+    }
+
+    pub async fn inspect_aliases(&self, aliases: BTreeMap<String, Value>) -> BTreeMap<String, Resolved> {
+        if aliases.is_empty() {
+            return BTreeMap::new();
+        }
+        let Ok(_slot) = self.inspect.try_acquire() else {
+            return BTreeMap::new();
+        };
+        let Some(helper) = self.checked_helper() else {
+            return BTreeMap::new();
+        };
+        let Ok(request) = serde_json::to_vec(&aliases) else {
+            return BTreeMap::new();
+        };
+        if request.len() > 65536 {
+            return BTreeMap::new();
+        }
+        run(helper, &["inspect-aliases"], &[], &request, 2)
+            .await
+            .ok()
+            .and_then(|raw| serde_json::from_slice(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn setup_blocker(&self) -> Option<&'static str> {
+        if self.checked_helper().is_none() {
+            return Some("The trusted remote editor helper is not configured or is unavailable.");
+        }
+        let package = env::var_os("BREWERY_REMOTE_EDITOR_PACKAGE").map(PathBuf::from);
+        let checksum = env::var("BREWERY_REMOTE_EDITOR_PACKAGE_SHA256");
+        if !package.is_some_and(|path| {
+            path.is_absolute()
+                && ssh_path(&path).is_ok()
+                && trusted(&path, 0o6022)
+                && path.metadata().is_ok_and(|md| (1..=512 << 20).contains(&md.len()))
+        }) || !checksum.is_ok_and(|pin| brewery_worker::is_digest(&pin))
+        {
+            return Some("The pinned remote editor runtime package is not configured or is unavailable.");
+        }
+        None
     }
 
     pub fn advertise(&self, host: &mut Host, generation: Uuid) {
@@ -154,24 +221,38 @@ impl Installer {
         transport: &Value,
         directory: &str,
         credential: &str,
+        saved: Option<&EditorLogin>,
     ) -> Result<Receipt, Error> {
-        let helper = self.helper.as_ref().ok_or("No remote editor helper")?;
-        let key = self
-            .credentials
-            .get(credential)
-            .filter(|c| c.worker == id)
-            .ok_or("Unknown worker credential")?;
+        let helper = self.checked_helper().ok_or("No remote editor helper")?;
+        let (identity_file, user, fingerprint) = if let Some(saved) = saved {
+            if !saved.identity.to_str().is_some_and(identity::usable) {
+                return Err(NO_LOGIN.into());
+            }
+            (&saved.identity, &saved.user, &saved.fingerprint)
+        } else {
+            let key = self.credentials.get(credential)
+                .filter(|c| c.worker == id && trusted(&c.identity, 0o077))
+                .ok_or(NO_LOGIN)?;
+            (&key.identity, &key.user, &key.fingerprint)
+        };
         if !model_directory(directory) {
             return Err("Invalid model directory".into());
         }
         let generation = Uuid::new_v4();
-        let request = serde_json::to_vec(&json!({
+        let mut request = json!({
             "worker":id,"transport":transport,"model_directory":directory,"generation":generation,
-            "identity":key.identity,"user":key.user,"fingerprint":key.fingerprint
-        }))?;
-        let result = run(helper, &[], &[], &request, 150).await?;
+            "identity":identity_file,"user":user,"fingerprint":fingerprint
+        });
+        if let Some(saved) = saved {
+            request["expected_endpoint"] = serde_json::to_value(&saved.endpoint)?;
+        }
+        let result = run(helper, &[], &[], &serde_json::to_vec(&request)?, 150).await?;
         let installed: Installed = serde_json::from_slice(&result)?;
-        if !key_matches(&installed.key, &key.fingerprint)
+        if saved.is_some_and(|login| {
+            !same_hostname(&installed.host, &login.endpoint.host)
+                || installed.port != login.endpoint.port
+                || installed.key != login.endpoint.key
+        }) || !key_matches(&installed.key, fingerprint)
             || installed.port == 0
             || installed.host.is_empty()
             || !installed
@@ -192,6 +273,9 @@ impl Installer {
         let lane = self.dir.join(generation.to_string());
         fs::DirBuilder::new().mode(0o700).create(&lane)?;
         let verify = async {
+            if saved.is_some() && !identity_file.to_str().is_some_and(identity::usable) {
+                return Err::<(), Error>(NO_LOGIN.into());
+            }
             let known = lane.join("known_hosts");
             let ssh = lane.join("ssh");
             let config = self.config_for(generation);
@@ -202,7 +286,7 @@ impl Installer {
                 StrictHostKeyChecking yes\nHostKeyAlgorithms ssh-ed25519\nUpdateHostKeys no\n\
                 IdentityAgent none\nIdentitiesOnly yes\nIdentityFile \"{}\"\n\
                 PasswordAuthentication no\nKbdInteractiveAuthentication no\n",
-                installed.host, installed.port, key.user, ssh_path(&known)?, ssh_path(&key.identity)?
+                installed.host, installed.port, user, ssh_path(&known)?, ssh_path(identity_file)?
             ).as_bytes())?;
             private_write(&config, &serde_json::to_vec(&json!({"hosts":{(id):{
                 "ssh":id,"ssh_config":ssh,"remote_worker":format!("{}/brewery-worker",installed.root),

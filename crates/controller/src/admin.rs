@@ -425,7 +425,13 @@ impl Admin {
         Ok(effective)
     }
 
-    fn view(&self, app: &App) -> Result<Value, Error> {
+    async fn view(&self, app: &App) -> Result<Value, Error> {
+        let aliases = app.defined_hosts()?.into_iter().filter_map(|host| {
+            let transport = app.ssh_hosts.editor_transport(&host.id)?;
+            transport.get("alias")?;
+            Some((host.id, transport))
+        }).take(64).collect();
+        let resolved = app.remote_edit.inspect_aliases(aliases).await;
         let store = app
             .store
             .lock()
@@ -468,19 +474,39 @@ impl Admin {
                 host_policy.restrict(effective)?;
             }
             let mut editor = editor_view(host, &configured, effective.as_ref(), &app.local_edit, &host_policy);
-            if app.ssh_hosts.editor_transport(&host.id).is_some() {
+            if let Some(transport) = app.ssh_hosts.editor_transport(&host.id) {
                 editor["available"] = json!(remote_available);
                 if remote_available {
                     editor.as_object_mut().expect("editor object").remove("reason");
                 } else {
                     editor["reason"] = json!("Set up and verify a remote editor on this SSH worker.");
                 }
-                let credentials = app.remote_edit.choices(&host.id);
+                let mut credentials = app.remote_edit.choices(&host.id);
+                let managed = crate::remote_edit::Resolved::from_managed(&transport);
+                let endpoint = managed.as_ref().or_else(|| resolved.get(&host.id));
+                if let Some(endpoint) = endpoint {
+                    credentials.extend(app.ssh_hosts.editor_login_choices(&endpoint.host, endpoint.port, &endpoint.keys));
+                }
+                let (blocker, reason) = if let Some(reason) = app.remote_edit.setup_blocker() {
+                    (Some("runtime"), Some(reason.to_owned()))
+                } else if credentials.is_empty() {
+                    let reason = endpoint.map_or_else(
+                        || crate::remote_edit::NO_LOGIN.to_owned(),
+                        |e| {
+                            let host = if e.host.contains(':') { format!("[{}]", e.host) } else { e.host.clone() };
+                            format!("Verify a saved SSH login for {host}:{} with the worker's pinned host key, or configure a provision credential.", e.port)
+                        },
+                    );
+                    (Some("credential"), Some(reason))
+                } else {
+                    (None, None)
+                };
                 editor["setup"] = json!({
                     "status": if remote_available { "verified" } else { "needs_setup" },
                     "model_directory": host_policy.remote_editor.as_ref().map(|r| &r.directory),
                     "credentials": credentials,
-                    "reason": credentials.is_empty().then_some("No provision credential is configured for this SSH worker.")
+                    "blocker": blocker,
+                    "reason": reason
                 });
             }
             host_rows.push(json!({"id":host.id,"name":host.name,"revision":host_policy.revision,
@@ -685,6 +711,7 @@ fn configured(app: &App) -> ApiResult<&Admin> {
 async fn state(State(app): State<Arc<App>>) -> ApiResult<Json<Value>> {
     configured(&app)?
         .view(&app)
+        .await
         .map(Json)
         .map_err(ApiError::storage)
 }
@@ -722,7 +749,14 @@ async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
         if !crate::remote_edit::model_directory(model_directory) {
             return Err(ApiError(StatusCode::BAD_REQUEST, "Use an absolute canonical model directory on the SSH worker"));
         }
-        let transport = {
+        let uses_saved = credential.starts_with(crate::infra_hosts::SAVED_LOGIN_PREFIX);
+        let _ssh_changes = if uses_saved {
+            Some(app.ssh_hosts.lock_editor_logins()
+                .ok_or(ApiError::conflict("Another SSH host definition change is in progress"))?)
+        } else {
+            None
+        };
+        let (transport, saved) = {
             let _store = app.store.lock().map_err(ApiError::storage)?;
             let hosts = app.defined_hosts().map_err(ApiError::storage)?;
             let host = hosts.iter().find(|h| h.id == id)
@@ -736,15 +770,23 @@ async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
             if admin.legacy_host(&db, host.clone()).map_err(ApiError::storage)?.is_none() {
                 return Err(ApiError::conflict("The existing SSH worker is not admitted"));
             }
-            if !app.remote_edit.accepts(id, credential) {
-                return Err(ApiError::conflict("Select a configured provision credential for this worker"));
+            if let Some(reason) = app.remote_edit.setup_blocker() {
+                return Err(ApiError::conflict(reason));
             }
+            let saved = if uses_saved {
+                Some(app.ssh_hosts.selected_editor_login(credential)
+                    .ok_or(ApiError::conflict(crate::remote_edit::NO_LOGIN))?)
+            } else if app.remote_edit.accepts(id, credential) {
+                None
+            } else {
+                return Err(ApiError::conflict(crate::remote_edit::NO_LOGIN));
+            };
             record_audit(&db, &action, "started")?;
-            transport
+            (transport, saved)
         };
         let receipt = app
             .remote_edit
-            .setup(&admin.command, id, &transport, model_directory, credential)
+            .setup(&admin.command, id, &transport, model_directory, credential, saved.as_ref())
             .await;
         {
             let _store = app.store.lock().map_err(ApiError::storage)?;
@@ -753,6 +795,7 @@ async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
             let mut current = infra_policy::Policy::load(&tx, id).map_err(ApiError::storage)?;
             let receipt = match receipt {
                 Ok(receipt) if current.revision == *revision
+                    && (!uses_saved || app.ssh_hosts.selected_editor_login(credential).is_some())
                     && app.ssh_hosts.editor_transport(id).as_ref() == Some(&transport) => receipt,
                 _ => {
                     record_audit(&tx, &action, "failed")?;
@@ -768,7 +811,7 @@ async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
             record_audit(&tx, &action, "applied")?;
             tx.commit().map_err(ApiError::storage)?;
         }
-        return admin.view(&app).map(Json).map_err(ApiError::storage);
+        return admin.view(&app).await.map(Json).map_err(ApiError::storage);
     }
     if let Action::SetHostPolicy { revision, .. }
     | Action::SetHostResources { revision, .. }
@@ -832,7 +875,7 @@ async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
             record_audit(&tx, &action, "applied")?;
             tx.commit().map_err(ApiError::storage)?;
         }
-        return admin.view(&app).map(Json).map_err(ApiError::storage);
+        return admin.view(&app).await.map(Json).map_err(ApiError::storage);
     }
     let entry = admin
         .catalog
@@ -940,7 +983,7 @@ async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
         let _store = app.store.lock().map_err(ApiError::storage)?;
         admin.record(&action, Some((&entry.binding, &p)), "applied")?;
     }
-    admin.view(&app).map(Json).map_err(ApiError::storage)
+    admin.view(&app).await.map(Json).map_err(ApiError::storage)
 }
 
 impl Admin {

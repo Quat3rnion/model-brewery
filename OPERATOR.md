@@ -2173,14 +2173,27 @@ namespaces are unavailable, the helper fails closed.
 
 ### Set up editing on an existing SSH worker
 
-Settings can install a separate CPU weight editor on an existing, admitted
-SSH worker, including a metadata-only planner. Select the worker, enter the
-absolute, canonical model directory **on that worker**, and select its
-provision credential. Setup does not change enrollment, the original
-worker configuration, or the planner's SSH key. The controller exposes
-editor jobs only after it verifies the package and opens the new worker over
-the pinned SSH connection. Existing model-size and source-proof limits still
-apply. For Tune, register the two calibration files on the same worker.
+In **Settings → Infrastructure**, select the SSH worker that owns the Library
+entry, then open **Weight editing**. Setup installs a separate CPU editor;
+it does not replace the worker or change the planner's SSH key.
+
+1. Select a verified SSH login for the same server. If none is listed, open
+   **SSH hosts**, add or edit the definition for that address and port,
+   select a login identity, save, and use **Test connection**. Return to
+   the worker's editor settings. Use the endpoint shown for that worker.
+   If a server has both LAN and Tailscale addresses, a login tested at one
+   address is not proof for the other. You can add a second SSH definition
+   for the worker's address without changing the first definition.
+2. Enter the absolute model directory **on the worker**. The login account
+   must be able to read it. Do not enter a file path or a local directory
+   from the machine running the browser.
+3. Submit setup. The controller checks the host key, installs the pinned
+   package in the remote account's home, and checks that the new worker
+   responds. Selecting a login or entering a directory does not install
+   anything. Editor jobs become available only after verification succeeds.
+
+Existing model-size and source-proof limits still apply. For Tune, register
+the two calibration files on the same worker.
 
 Prepare these controller settings before the first setup:
 
@@ -2193,8 +2206,10 @@ Prepare these controller settings before the first setup:
   symlinks; use binaries from this release and the target's architecture
   and Python ABI. The target needs `/usr/bin/python3`, Bubblewrap with
   `--ro-bind-fd`, and working unprivileged user namespaces.
-- `BREWERY_REMOTE_EDITOR_CREDENTIALS`: absolute path to a private JSON
-  object keyed by credential ID. For example:
+- Optional: `BREWERY_REMOTE_EDITOR_CREDENTIALS` supplies additional
+  worker-specific credentials instead of a verified SSH login from Settings.
+  It is an absolute path to a private JSON object keyed by credential ID.
+  For example:
 
   ```json
   {
