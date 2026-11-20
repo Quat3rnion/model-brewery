@@ -3,11 +3,16 @@
 
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import stat
 import subprocess
+import sys
+import tarfile
 from tempfile import TemporaryDirectory
 
 TOOLS = Path(__file__).resolve().parent
@@ -259,9 +264,18 @@ def main():
         if name == "install":
             cmd.add_argument("--bin-dir", type=Path, required=True)
             cmd.add_argument("--dependency-sha256", required=True)
+    archive = commands.add_parser("editor-archive", help="stage the pinned SSH editor payload")
+    archive.add_argument("--bin-dir", type=Path, required=True)
+    archive.add_argument("--worker-sha256", required=True)
+    archive.add_argument("--engine-sha256", required=True)
+    archive.add_argument("--runtime-sha256", required=True)
+    archive.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     os.umask(0o077)
     try:
+        if args.command == "editor-archive":
+            editor_archive(args)
+            return
         abi, dependencies = dependency_files(args.gguf_python.resolve(strict=True))
         fingerprint = hashlib.sha256(encode(
             {"abi": abi, "files": {name: digest(path) for name, path in dependencies.items()}}
@@ -272,6 +286,82 @@ def main():
             install(args.bin_dir, abi, dependencies, fingerprint, args.dependency_sha256)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         parser.exit(1, f"weight runtime: {exc}\n")
+
+
+def editor_archive(args):
+    """Serialize only the exact package members understood by the installer."""
+    binary_pins = {"brewery-worker": args.worker_sha256, "brewery-engine": args.engine_sha256}
+    pin = args.runtime_sha256
+    if not all(re.fullmatch(r"[0-9a-f]{64}", value) for value in (*binary_pins.values(), pin)):
+        raise ValueError("invalid editor archive input digest")
+    base = args.bin_dir.resolve(strict=True)
+    root = base / ASSETS
+    payload = tree(root)
+
+    def read(path):
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+            md = os.fstat(stream.fileno())
+            if not stat.S_ISREG(md.st_mode) or not 0 <= md.st_size <= 128 << 20:
+                raise ValueError("invalid editor archive member: " + path.name)
+            data = stream.read((128 << 20) + 1)
+            if len(data) != md.st_size:
+                raise ValueError("editor archive input changed: " + path.name)
+            return data
+
+    receipt = read(root / "manifest.json")
+    if hashlib.sha256(receipt).hexdigest() != pin:
+        raise ValueError("editor runtime manifest pin does not match")
+    manifest = json.loads(receipt)
+    if not isinstance(manifest, dict) or manifest.get("abi") != sys.implementation.cache_tag:
+        raise ValueError("editor runtime ABI differs from the build host")
+    files = manifest.get("files")
+    if not isinstance(files, dict) or not all(isinstance(value, str) and
+            re.fullmatch(r"[0-9a-f]{64}", value) for value in files.values()):
+        raise ValueError("invalid editor runtime file digests")
+    if set(files) | {"manifest.json"} != {str(rel) for rel in payload} or "manifest.json" in files:
+        raise ValueError("editor runtime file set does not match manifest")
+    stock = (TOOLS / "brewery-weight-runtime-launch.sh").read_text().replace(
+        "@MANIFEST_SHA256@", pin).replace("@VERIFY_RUNTIME@", VERIFY_RUNTIME).encode()
+    names = sorted([*binary_pins, *STOCK_LAUNCHERS, f"{ASSETS}/manifest.json",
+                    *(f"{ASSETS}/{name}" for name in files)])
+    if len(names) > 8192:
+        raise ValueError("too many editor archive members")
+    machine = {"x86_64": 62, "aarch64": 183}.get(os.uname().machine)
+    if machine is None or sys.platform != "linux":
+        raise ValueError("unsupported editor build host architecture")
+
+    output = args.output.absolute()
+    with TemporaryDirectory(prefix=".editor-archive-", dir=output.parent) as directory:
+        scratch = Path(directory)
+        candidate = scratch / "editor.tar"
+        with tarfile.open(candidate, mode="x:", format=tarfile.USTAR_FORMAT) as archive:
+            for name in names:
+                parts = name.split("/")
+                if not all(re.fullmatch(r"[A-Za-z0-9_.+-]+", p) and p not in (".", "..") for p in parts):
+                    raise ValueError("unsupported editor archive member")
+                data = receipt if name == f"{ASSETS}/manifest.json" else read(base / name)
+                if name in binary_pins:
+                    if (len(data) < 20 or data[:6] != b"\x7fELF\x02\x01"
+                            or int.from_bytes(data[18:20], "little") != machine
+                            or hashlib.sha256(data).hexdigest() != binary_pins[name]):
+                        raise ValueError("editor binary architecture or digest mismatch: " + name)
+                elif name in STOCK_LAUNCHERS:
+                    if data != stock:
+                        raise ValueError("editor launcher does not match this release: " + name)
+                elif name != f"{ASSETS}/manifest.json":
+                    if hashlib.sha256(data).hexdigest() != files[name.removeprefix(f"{ASSETS}/")]:
+                        raise ValueError("editor runtime member digest mismatch: " + name)
+                info = tarfile.TarInfo(name)
+                info.mode = 0o700 if "/" not in name else 0o600
+                info.size = len(data)
+                with io.BytesIO(data) as stream:
+                    archive.addfile(info, stream)
+        if candidate.stat().st_size > 512 << 20:
+            raise ValueError("editor archive exceeds installer limit")
+        archive_pin = digest(candidate)
+        candidate.chmod(0o400)
+        os.link(candidate, output)
+    print(archive_pin)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ try {
   const state = {workers:[],hosts:[host]};
   await page.route('**/api/**', async route=>{
     const path = new URL(route.request().url()).pathname;
+    if (path === '/api/admin/ssh-hosts') return route.fulfill({json:{available:true,hosts:[]}});
     if (path === '/api/admin/actions') {
       const action = route.request().postDataJSON();
       actions.push(action);
@@ -46,7 +47,7 @@ try {
     assert.deepEqual(actions.shift(),{action:'set_weight_editor',worker:'frame',revision,enabled});
   }
   assert.deepEqual(actions,[]);
-  const credentials=[{id:'fallback',label:'Fallback account'},{id:'operator-ssh',label:'Frame provisioner'}];
+  const credentials=[{id:'fallback',label:'Fallback account'},{id:'operator-ssh',label:'Verified SSH login · Frame'}];
   host.weight_editor={available:false,enabled:false,capabilities:{},setup:{status:'needs_setup',model_directory:null,credentials,reason:null}};
   await page.reload();
   for (const width of [390,1280]) {
@@ -55,10 +56,12 @@ try {
     if (process.env.SHOT_PREFIX) await panel.screenshot({path:`${process.env.SHOT_PREFIX}-setup-${width}.png`});
     assert.ok(await panel.evaluate(el=>el.scrollWidth<=el.clientWidth));
   }
-  await panel.getByLabel('Saved SSH credential').selectOption({label:'Frame provisioner'});
+  await panel.getByLabel('SSH login for editor setup').selectOption({label:'Verified SSH login · Frame'});
   await panel.getByText('needs setup',{exact:true}).waitFor();
   const directory=panel.getByLabel('Remote model directory');
   await directory.fill('/models/HF');
+  await panel.getByText(/install.*verify.*before enabling/i).waitFor();
+  assert.deepEqual(actions,[]);
   await panel.getByRole('button',{name:'Set up and enable editor'}).press('Enter');
   await page.getByRole('alert').filter({hasText:'Editor probe failed on frame.'}).waitFor();
   assert.deepEqual(actions,[{action:'setup_weight_editor',worker:'frame',revision:6,model_directory:'/models/HF',credential:'operator-ssh'}]);
@@ -69,6 +72,18 @@ try {
   await panel.getByText(reason,{exact:true}).waitFor();
   await directory.fill('/models/HF');
   assert.ok(await panel.getByRole('button',{name:'Set up and enable editor'}).isDisabled());
+  await panel.getByText(/Add SSH host.*Edit definition.*Test connection/).waitFor();
+  await panel.getByText(/address and SSH port.*different host ID/i).waitFor();
+  await panel.getByRole('button',{name:'Go to SSH hosts'}).press('Enter');
+  assert.equal(await page.evaluate(()=>document.activeElement?.id),'ssh-hosts-heading');
+  await page.getByRole('button',{name:'Add SSH host'}).press('Enter');
+  await page.getByRole('group',{name:'New SSH host'}).waitFor();
+  const runtimeReason='The controller is missing the remote editor runtime package.';
+  host.weight_editor.setup={status:'needs_setup',model_directory:'/models/HF',credentials,reason:runtimeReason,blocker:'runtime'};
+  await page.reload();
+  await panel.getByText(runtimeReason,{exact:true}).waitFor();
+  assert.ok(await panel.getByRole('button',{name:'Set up and enable editor'}).isDisabled());
+  assert.equal(await panel.getByRole('button',{name:'Go to SSH hosts'}).count(),0);
   host.weight_editor={available:true,enabled:false,capabilities:{},setup:{status:'verified',model_directory:'/models/HF',credentials,reason:null}};
   await page.reload();
   await panel.getByText('verified',{exact:true}).waitFor();

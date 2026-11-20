@@ -62,7 +62,7 @@
 </script>
 
 <section class="panel" aria-labelledby="ssh-hosts-heading">
-  <header><h2 id="ssh-hosts-heading">SSH hosts</h2></header>
+  <header><h2 id="ssh-hosts-heading" tabindex="-1">SSH hosts</h2></header>
   <div class="body stack">
     <p class="small muted">Define a remote host, verify its SSH identity, then review the installation plan. Saving a definition does not connect to the host.</p>
     <div class="row">

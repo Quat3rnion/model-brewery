@@ -10,7 +10,7 @@
   let submittingSetup = $state(false);
   const remotePath = $derived(directory ?? w?.setup?.model_directory ?? '');
   const credential = $derived(reference ?? w?.setup?.credentials[0]?.id ?? '');
-  const canSetup = $derived(!busy && remotePath.trim().startsWith('/') && w?.setup?.credentials.some(c=>c.id===credential));
+  const canSetup = $derived(!busy && !submittingSetup && !w?.setup?.blocker && remotePath.trim().startsWith('/') && w?.setup?.credentials.some(c=>c.id===credential));
   async function setupEditor() {
     if (!canSetup) return;
     submittingSetup=true;
@@ -45,14 +45,20 @@
           disabled={!w.setup || busy} oninput={e=>directory=e.currentTarget.value} aria-describedby="editor-path-help" />
         <p class="xs muted" id="editor-path-help">Use the absolute path on {host.name}, not a directory on this device.</p>
       </div>
-      {#if w.setup?.credentials.length}
-        <div class="field"><label for="editor-credential">Saved SSH credential</label>
+      {#if w.setup?.blocker === 'runtime'}
+        <p class="small">Ask the controller administrator to configure the editor runtime, then select <strong>Refresh infrastructure</strong>.</p>
+      {:else if w.setup?.credentials.length && w.setup.blocker !== 'credential'}
+        <div class="field"><label for="editor-credential">SSH login for editor setup</label>
           <select id="editor-credential" class="input" value={credential} disabled={busy} onchange={e=>reference=e.currentTarget.value}>
             {#each w.setup.credentials as ref (ref.id)}<option value={ref.id}>{ref.label}</option>{/each}
           </select>
         </div>
-      {:else if !w.setup?.reason}
-        <p class="small muted">{w.setup ? 'No saved SSH credential is available for setup.' : 'This controller did not report editor setup for this host.'}</p>
+        <p class="small">When you select <strong>Set up and enable editor</strong>, the controller will use this login to install the editor on {host.name} and verify it before enabling weight editing.</p>
+      {:else if w.setup}
+        <p class="small">In SSH hosts, select <strong>Add SSH host</strong> or <strong>Edit definition</strong>. Use the worker’s address and SSH port. For a new definition, choose a different host ID that is not already in use. Choose the SSH login identity, save the definition, then select <strong>Test connection</strong>. After verification, select <strong>Refresh infrastructure</strong> to see the login here.</p>
+        <div><button class="btn small" type="button" onclick={()=>document.getElementById('ssh-hosts-heading')?.focus()}>Go to SSH hosts</button></div>
+      {:else}
+        <p class="small muted">This controller did not report editor setup for this host.</p>
       {/if}
       <div><button type="button" class="btn primary" disabled={!canSetup} onclick={setupEditor}>Set up and enable editor</button></div>
       {#if submittingSetup}<p role="status" class="small">Setting up and checking the editor on {host.name}…</p>{/if}

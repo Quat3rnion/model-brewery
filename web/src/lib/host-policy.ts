@@ -8,7 +8,7 @@ export const limits = {
   disk_reserve_bytes: 'Disk reserve (bytes)',
 };
 interface Credential { id:string; label:string }
-interface EditorSetup { status:string; model_directory:string|null; credentials:Credential[]; reason?:string }
+interface EditorSetup { status:string; model_directory:string|null; credentials:Credential[]; reason?:string; blocker?:string }
 function isCredential(value:unknown):value is Credential {
   const c=obj(value);
   return typeof c?.id==='string' && c.id.length>0 && typeof c.label==='string';
@@ -21,7 +21,8 @@ function readWeightEditor(raw:unknown):WeightEditorPolicy|null {
   return {available:w.available, enabled:w.enabled, capabilities:caps as Record<string,boolean>, ...(typeof w.reason === 'string' ? {reason:w.reason} : {}),
     ...(setup && typeof setup.status==='string' && Array.isArray(setup.credentials) && setup.credentials.every(isCredential)
       ? {setup:{status:setup.status, model_directory:typeof setup.model_directory==='string'?setup.model_directory:null,
-        credentials:setup.credentials, ...(typeof setup.reason==='string' ? {reason:setup.reason} : {})}} : {})};
+        credentials:setup.credentials, ...(typeof setup.reason==='string' ? {reason:setup.reason} : {}),
+        ...(typeof setup.blocker==='string' ? {blocker:setup.blocker} : {})}} : {})};
 }
 export interface HostPolicy {
   directories:Directories|null;

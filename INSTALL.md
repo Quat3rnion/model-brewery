@@ -69,6 +69,44 @@ install -m 755 target/release/brewery-dispatch "$release/bin/brewery-dispatch"
 cp -a web/dist "$release/web/dist"
 ```
 
+### Stage an optional SSH editor package
+
+Build on Linux with the same architecture, Python ABI, and compatible system
+libraries as the intended worker. The worker also needs `/usr/bin/python3`,
+Bubblewrap with `--ro-bind-fd`, and working unprivileged user namespaces. Before
+setup, confirm that the worker account can read and traverse the selected model
+directory. A package that passes on the controller does not verify a remote worker.
+
+Use the locked worker and engine build from this release. Install the pinned
+CPU runtime as described in [OPERATOR.md](OPERATOR.md#package-the-local-cpu-weight-runtime).
+Record the worker, engine and runtime manifest digests in the release record.
+Then stage the archive and its two controller-side helpers:
+
+```sh
+install -m 755 target/release/brewery-worker target/release/brewery-engine "$release/bin"
+install -m 755 tools/brewery-editor-provision tools/brewery-provision "$release/bin"
+# Install the pinned CPU runtime in "$release/bin" before this command.
+/usr/bin/python3 -IB tools/brewery-weight-runtime.py editor-archive \
+  --bin-dir "$release/bin" --output "$release/editor.tar" \
+  --worker-sha256 "$WORKER_SHA256" --engine-sha256 "$ENGINE_SHA256" \
+  --runtime-sha256 "$RUNTIME_MANIFEST_SHA256"
+```
+
+The command compares the package inputs to the recorded digests, checks that the
+two binaries match the build host architecture, and prints the archive digest.
+The archive contains only the worker, engine, the two runtime launchers, and
+the manifest-verified runtime files. It contains no SSH credentials.
+Set these variables on the controller with absolute paths:
+
+```ini
+Environment=BREWERY_REMOTE_EDITOR_PROVISION=/path/to/release/bin/brewery-editor-provision
+Environment=BREWERY_REMOTE_EDITOR_PACKAGE=/path/to/release/editor.tar
+Environment=BREWERY_REMOTE_EDITOR_PACKAGE_SHA256=<archive SHA-256>
+```
+
+Keep the two helpers together in the release. These settings stage an installer;
+they do not sign in to any worker, change a saved SSH definition, or start setup.
+
 Create the private state directory and select this release for a first
 installation:
 
