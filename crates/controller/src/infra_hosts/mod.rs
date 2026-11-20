@@ -320,7 +320,9 @@ impl Registry {
         let current = if matches!(row.provision, Provision::Installed { .. }) {
             self.installed_identity(row)
         } else {
-            row.identity_file.as_deref().or(self.default_identity.as_deref())
+            row.identity_file
+                .as_deref()
+                .or(self.default_identity.as_deref())
         };
         if current != Some(identity)
             || !identity::usable(identity)
@@ -340,7 +342,12 @@ impl Registry {
         })
     }
 
-    pub(crate) fn editor_login_choices(&self, host: &str, port: u16, keys: &[String]) -> Vec<Value> {
+    pub(crate) fn editor_login_choices(
+        &self,
+        host: &str,
+        port: u16,
+        keys: &[String],
+    ) -> Vec<Value> {
         let state = self.state.lock().expect("SSH registry lock");
         state
             .rows
@@ -362,7 +369,9 @@ impl Registry {
     }
 
     pub(crate) fn selected_editor_login(&self, credential: &str) -> Option<EditorLogin> {
-        let (id, revision) = credential.strip_prefix(SAVED_LOGIN_PREFIX)?.split_once(':')?;
+        let (id, revision) = credential
+            .strip_prefix(SAVED_LOGIN_PREFIX)?
+            .split_once(':')?;
         let state = self.state.lock().expect("SSH registry lock");
         let row = state.rows.get(id)?;
         if revision != row.revision.to_string() {
@@ -404,8 +413,8 @@ impl Registry {
 }
 
 pub(crate) fn same_hostname(left: &str, right: &str) -> bool {
-    let left = left.trim_end_matches('.');
-    let right = right.trim_end_matches('.');
+    let left = left.strip_suffix('.').unwrap_or(left);
+    let right = right.strip_suffix('.').unwrap_or(right);
     match (left.parse::<IpAddr>(), right.parse::<IpAddr>()) {
         (Ok(left), Ok(right)) => left == right,
         (Err(_), Err(_)) => left.eq_ignore_ascii_case(right),

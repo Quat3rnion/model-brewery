@@ -1276,7 +1276,7 @@
         }
       },
       "AdminWeightEditorSetup": {
-        "type": "object", "additionalProperties": false, "required": ["status", "model_directory", "credentials", "reason"],
+        "type": "object", "additionalProperties": false, "required": ["status", "model_directory", "credentials", "blocker", "reason"],
         "description": "Present for a host with an existing SSH editor transport. Setup verification is separate from enablement and job admission.",
         "properties": {
           "status": {"enum": ["needs_setup", "verified"]},

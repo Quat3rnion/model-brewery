@@ -165,7 +165,10 @@ impl Installer {
         })
     }
 
-    pub async fn inspect_aliases(&self, aliases: BTreeMap<String, Value>) -> BTreeMap<String, Resolved> {
+    pub async fn inspect_aliases(
+        &self,
+        aliases: BTreeMap<String, Value>,
+    ) -> BTreeMap<String, Resolved> {
         if aliases.is_empty() {
             return BTreeMap::new();
         }
@@ -198,10 +201,14 @@ impl Installer {
             path.is_absolute()
                 && ssh_path(&path).is_ok()
                 && trusted(&path, 0o6022)
-                && path.metadata().is_ok_and(|md| (1..=512 << 20).contains(&md.len()))
+                && path
+                    .metadata()
+                    .is_ok_and(|md| (1..=512 << 20).contains(&md.len()))
         }) || !checksum.is_ok_and(|pin| brewery_worker::is_digest(&pin))
         {
-            return Some("The pinned remote editor runtime package is not configured or is unavailable.");
+            return Some(
+                "The pinned remote editor runtime package is not configured or is unavailable.",
+            );
         }
         None
     }
@@ -230,7 +237,9 @@ impl Installer {
             }
             (&saved.identity, &saved.user, &saved.fingerprint)
         } else {
-            let key = self.credentials.get(credential)
+            let key = self
+                .credentials
+                .get(credential)
                 .filter(|c| c.worker == id && trusted(&c.identity, 0o077))
                 .ok_or(NO_LOGIN)?;
             (&key.identity, &key.user, &key.fingerprint)
@@ -358,15 +367,21 @@ async fn run(
     let mut group = Group(pid);
     let mut stdin = child.stdin.take().ok_or("Missing installer input")?;
     let stdout = child.stdout.take().ok_or("Missing installer output")?;
-    let ((), output, status) = timeout(Duration::from_secs(seconds), async {
-        tokio::try_join!(
-            async move { stdin.write_all(input).await },
+    let (output, status) = timeout(Duration::from_secs(seconds), async {
+        let ((), output) = tokio::try_join!(
+            async move {
+                stdin.write_all(input).await?;
+                drop(stdin);
+                Ok(())
+            },
             crate::dispatch::read_limited(stdout, 64 * 1024),
-            child.wait()
-        )
+        )?;
+        // Keep the group leader unreaped until stdout is closed.
+        let status = child.wait().await?;
+        group.0 = 0;
+        Ok::<_, std::io::Error>((output, status))
     })
     .await??;
-    group.0 = 0;
     if !status.success() {
         return Err("Remote editor setup or verification failed".into());
     }

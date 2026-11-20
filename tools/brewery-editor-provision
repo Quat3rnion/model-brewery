@@ -148,7 +148,13 @@ def resolve(transport, *, direct):
     for opt in ("userknownhostsfile", "globalknownhostsfile"):
         for path in shlex.split(opts.get(opt, ""))[:8]:
             path = os.path.expanduser(path)
-            if not path.startswith("/") or "%" in path or not Path(path).is_file():
+            if not path.startswith("/") or "%" in path:
+                continue
+            try:
+                md = Path(path).stat()
+            except OSError:
+                continue
+            if not stat.S_ISREG(md.st_mode) or md.st_size > 16 << 20:
                 continue
             try:
                 lines = capture(["/usr/bin/ssh-keygen", "-F", lookup, "-f", path], 2,

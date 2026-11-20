@@ -37,6 +37,7 @@ def verify(smoke, host, models, missing, credential="fixture", extra=()):
     choices = before["weight_editor"]["setup"]["credentials"]
     assert {"id": "fixture", "label": "Fixture key"} in choices
     assert {choice["id"] for choice in choices} == {"fixture", *extra}
+    assert before["weight_editor"]["setup"]["blocker"] is None
     rev = before["revision"]
     install(rev, models, "not-configured", 409)
     assert row()["revision"] == rev
@@ -49,12 +50,11 @@ def verify(smoke, host, models, missing, credential="fixture", extra=()):
     }
     install(rev, models, expect=409)
     install(ready["revision"], missing, expect=409)
-    assert row()["weight_editor"]["setup"]["status"] == "verified"
-    assert row()["weight_editor"]["setup"]["model_directory"] == models
+    assert row() == ready
     return ready
 
 
-def saved_logins(api, root, user, port, other_port, fingerprint, editors, server_log):
+def saved_logins(api, root, user, port, other_port, fingerprint, editors, server_log, known):
     base = {
         "host": "127.0.0.1", "user": user, "port": port,
         "fingerprint": fingerprint, "identity_file": str(root / "provision-key"),
@@ -83,6 +83,15 @@ def saved_logins(api, root, user, port, other_port, fingerprint, editors, server
     setup(f"saved-ssh:wrong-port:{other['revision']}")
     setup(f"saved-ssh:wrong-host:{wrong_host['revision']}")
     assert server_log.read_bytes() == log and not editors.exists()
+    worker_pin = known.read_bytes()
+    known.write_bytes(f"{HOST} ".encode() + (root / "rpc-key.pub").read_bytes())
+    try:
+        choices = next(x for x in api.call("admin/state")["hosts"] if x["id"] == HOST)
+        assert choices["weight_editor"]["setup"]["credentials"] == [{"id": "fixture", "label": "Fixture key"}]
+        setup(stale)
+        assert server_log.read_bytes() == log and not editors.exists()
+    finally:
+        known.write_bytes(worker_pin)
     with api.opener.open(Request(f"{api.url}/api/admin/ssh-hosts/separate-login",
                          json.dumps({**base, "name": "Renamed login", "revision": same["revision"]}).encode(),
                          {"Content-Type": "application/json"}, method="PUT"), timeout=4) as reply:
@@ -211,6 +220,21 @@ IdentityFile {root / 'rpc-key'}
                 with controller(root, old_controller, env) as url:
                     rows = Smoke(root, url, None).call("admin/state")["hosts"]
                     assert next(x for x in rows if x["id"] == HOST)["weight_editor"].get("setup") is None
+            for missing_env, blocker, message in (
+                ("BREWERY_REMOTE_EDITOR_PROVISION", "runtime", "trusted remote editor helper"),
+                ("BREWERY_REMOTE_EDITOR_PACKAGE", "runtime", "pinned remote editor runtime package"),
+                ("BREWERY_REMOTE_EDITOR_CREDENTIALS", "credential", f"127.0.0.1:{port}"),
+            ):
+                with controller(root, bins, {k: v for k, v in env.items() if k != missing_env}) as url:
+                    api = Smoke(root, url, None)
+                    worker = next(x for x in api.call("admin/state")["hosts"] if x["id"] == HOST)
+                    setup = worker["weight_editor"]["setup"]
+                    assert setup["blocker"] == blocker and message in setup["reason"], setup
+                    error = api.call("admin/actions", {
+                        "action": "setup_weight_editor", "worker": HOST, "revision": worker["revision"],
+                        "model_directory": str(models), "credential": "fixture",
+                    }, status=409)["error"]
+                    assert (message if blocker == "runtime" else "verified SSH login") in error, error
             save(credentials, {"fixture": row, "original": original_key_row})
             with controller(root, bins, env) as url:
                 api = Smoke(root, url, None)
@@ -223,7 +247,7 @@ IdentityFile {root / 'rpc-key'}
             with controller(root, bins, env) as url:
                 api = Smoke(root, url, None)
                 current, choices = saved_logins(api, root, user, port, other_port, f"SHA256:{digest}",
-                                               home / ".local/share/model-brewery/editors", server_log)
+                                               home / ".local/share/model-brewery/editors", server_log, known)
                 ready = verify(api, HOST, str(models), str(root / "missing"), current, choices)
                 assert "plan" in ready["allowed_jobs"]
                 model = api.call("models", {
