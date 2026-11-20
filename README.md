@@ -13,6 +13,22 @@ Model Brewery is a Linux workbench for inspecting, editing, converting and evalu
 - Convert supported models to HGN or GGUF through inspect, plan, convert, and independent verification. Available conversions depend on the source architecture and worker runtime.
 - Trace models, run benchmarks, and score GSM8K with or without a diagnostic reference.
 
+## Inside the workbench
+
+**Edit a weight.** Select a tensor, then choose a cell in its heatmap to inspect the stored value and propose a change.
+
+![Weight editor with a tensor heatmap, a selected cell and controls for changing its value](docs/images/weight-editor.png)
+
+**Review before applying.** In this example, the original weight is `0.125`. The requested `0.1` rounds to `0.0999755859375` in F16. Applying the proposal creates a separate revision and keeps the original checkpoint.
+
+![Pending weight edit showing the requested and representable values before the change is applied](docs/images/weight-review.png)
+
+**Set a quantization profile.** In this example, layers 2 through 7 use HT43 for eligible tensors; the other layers keep the base profile.
+
+![Quantization profile with six of 48 layers selected and HT43 chosen for all roles](docs/images/quantization-profile.png)
+
+**Choose checkpoint components.** Keep the embedded components or select replacements from the model library.
+
 ![The Convert page showing the tokenizer, vision tower, n-gram lookup and MTP head supplied by a Flash-Next checkpoint](docs/images/checkpoint-components.png)
 
 ## Reference
