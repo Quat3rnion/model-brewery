@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, ensure};
 pub mod hf_download;
+pub mod hy4;
 pub mod operational;
 pub mod resources;
 pub mod source_grants;

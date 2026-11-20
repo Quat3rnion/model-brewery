@@ -20,6 +20,7 @@ pub struct Dispatcher {
     pub backend: Option<backend_hf::Lane>,
     pub local_edit: Arc<crate::local_edit::Lanes>,
     pub ssh_hosts: Arc<crate::infra_hosts::Registry>,
+    pub remote_edit: Arc<crate::remote_edit::Installer>,
     pub launch_timeout: Duration,
     pub poll: Duration,
 }
@@ -100,6 +101,8 @@ impl Dispatcher {
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
                 .env("BREWERY_DISPATCH_CONFIG", config);
+        } else if let Some(id) = job.remote_editor {
+            command.env("BREWERY_DISPATCH_CONFIG", self.remote_edit.config_for(id));
         } else if let Some(lane) = backend {
             command.env_clear().env(
                 "BREWERY_DISPATCH_CONFIG",
@@ -380,6 +383,12 @@ async fn drive(app: &App, dispatch: &Dispatcher, job: Job, recovered: bool) -> R
                     .zip(dispatch.local_edit.get(&job.host))
             {
                 lane.advertise(host);
+            }
+            if let Some(generation) = job.remote_editor
+                && dispatch.remote_edit.config_for(generation).is_file()
+                && let Some(host) = hosts.iter_mut().find(|h| h.id == job.host)
+            {
+                dispatch.remote_edit.advertise(host, generation);
             }
             let allowed = candidates(&job, &envelope, &hosts)
                 .iter()

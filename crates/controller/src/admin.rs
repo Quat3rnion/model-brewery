@@ -139,6 +139,12 @@ enum Action {
         revision: u64,
         enabled: bool,
     },
+    SetupWeightEditor {
+        worker: String,
+        revision: u64,
+        model_directory: String,
+        credential: String,
+    },
 }
 
 impl Action {
@@ -153,7 +159,8 @@ impl Action {
             | Self::SetResourcePolicy { worker, .. }
             | Self::SetHostPolicy { worker, .. }
             | Self::SetHostResources { worker, .. }
-            | Self::SetWeightEditor { worker, .. } => worker,
+            | Self::SetWeightEditor { worker, .. }
+            | Self::SetupWeightEditor { worker, .. } => worker,
         }
     }
 }
@@ -385,27 +392,26 @@ impl Admin {
         Ok(Some(host))
     }
 
-    pub fn effective_hosts(
-        &self,
-        hosts: &[Host],
-        lanes: &crate::local_edit::Lanes,
-    ) -> Result<Vec<Host>, Error> {
-        self.hosts_with_policy(hosts, Some(lanes))
+    pub fn effective_hosts(&self, hosts: &[Host], app: &App) -> Result<Vec<Host>, Error> {
+        self.hosts_with_policy(hosts, Some(app))
     }
 
     fn hosts_with_policy(
         &self,
         hosts: &[Host],
-        lanes: Option<&crate::local_edit::Lanes>,
+        app: Option<&App>,
     ) -> Result<Vec<Host>, Error> {
         let db = self.db.lock().map_err(|_| "admin storage unavailable")?;
         let mut effective = Vec::new();
         for host in hosts {
             let mut host = host.clone();
-            let policy = lanes
-                .map(|lanes| {
+            let policy = app
+                .map(|app| {
                     let policy = infra_policy::Policy::load(&db, &host.id)?;
-                    apply_editor(&mut host, &policy, lanes);
+                    apply_editor(&mut host, &policy, &app.local_edit);
+                    if policy.weight_editor == Some(true) {
+                        advertise_remote(app, &mut host, &policy);
+                    }
                     Ok::<_, Error>(policy)
                 })
                 .transpose()?;
@@ -451,16 +457,36 @@ impl Admin {
             if let Some(lane) = app.local_edit.get(&host.id) {
                 lane.advertise(&mut installed);
             }
+            let remote_available = advertise_remote(app, &mut installed, &host_policy);
             let mut configured = operational[&host.id].clone();
             apply_editor(&mut configured, &host_policy, &app.local_edit);
+            if host_policy.weight_editor == Some(true) && remote_available {
+                advertise_remote(app, &mut configured, &host_policy);
+            }
             let mut effective = self.legacy_host(&db, configured.clone())?;
             if let Some(effective) = &mut effective {
                 host_policy.restrict(effective)?;
             }
+            let mut editor = editor_view(host, &configured, effective.as_ref(), &app.local_edit, &host_policy);
+            if app.ssh_hosts.editor_transport(&host.id).is_some() {
+                editor["available"] = json!(remote_available);
+                if remote_available {
+                    editor.as_object_mut().expect("editor object").remove("reason");
+                } else {
+                    editor["reason"] = json!("Set up and verify a remote editor on this SSH worker.");
+                }
+                let credentials = app.remote_edit.choices(&host.id);
+                editor["setup"] = json!({
+                    "status": if remote_available { "verified" } else { "needs_setup" },
+                    "model_directory": host_policy.remote_editor.as_ref().map(|r| &r.directory),
+                    "credentials": credentials,
+                    "reason": credentials.is_empty().then_some("No provision credential is configured for this SSH worker.")
+                });
+            }
             host_rows.push(json!({"id":host.id,"name":host.name,"revision":host_policy.revision,
                 "paused":host_policy.paused,"draining":host_policy.paused && busy.contains(&host.id),
                 "disabled_jobs":host_policy.disabled_jobs,"installed_jobs":infra_policy::job_kinds(&installed),
-                "weight_editor":editor_view(host, &configured, effective.as_ref(), &app.local_edit, &host_policy),
+                "weight_editor":editor,
                 "model_directories":model_directories::view(&app.local_edit, &host.id, &host_policy),
                 "resources":host_policy.resources,"resource_bounds":host.resource_bounds,
                 "effective_resources":effective.as_ref().unwrap_or(host).effective_resources(),
@@ -549,6 +575,18 @@ fn editor_available(
         .get(&host.id)
         .is_some_and(|lane| !lane.configured.is_empty() || !policy.model_directories.is_empty())
         || (host.id == crate::backend_hf::ID && host.capabilities["weight_inspect"])
+}
+
+fn advertise_remote(app: &App, host: &mut Host, policy: &infra_policy::Policy) -> bool {
+    let binding = app.ssh_hosts.editor_transport(&host.id);
+    if !app.remote_edit.available(policy.remote_editor.as_ref(), binding.as_ref()) {
+        return false;
+    }
+    app.remote_edit.advertise(
+        host,
+        policy.remote_editor.as_ref().expect("verified receipt").generation,
+    );
+    true
 }
 
 fn apply_editor(host: &mut Host, policy: &infra_policy::Policy, lanes: &crate::local_edit::Lanes) {
@@ -674,6 +712,64 @@ async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
         )
     })?;
     let id = action.worker();
+    if let Action::SetupWeightEditor {
+        revision,
+        model_directory,
+        credential,
+        ..
+    } = &action
+    {
+        if !crate::remote_edit::model_directory(model_directory) {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "Use an absolute canonical model directory on the SSH worker"));
+        }
+        let transport = {
+            let _store = app.store.lock().map_err(ApiError::storage)?;
+            let hosts = app.defined_hosts().map_err(ApiError::storage)?;
+            let host = hosts.iter().find(|h| h.id == id)
+                .ok_or(ApiError(StatusCode::NOT_FOUND, "Unknown defined worker"))?;
+            let transport = app.ssh_hosts.editor_transport(id)
+                .ok_or(ApiError::conflict("Select an existing SSH worker"))?;
+            let db = admin.db.lock().map_err(ApiError::storage)?;
+            if infra_policy::Policy::load(&db, id).map_err(ApiError::storage)?.revision != *revision {
+                return Err(ApiError::conflict("Host policy revision is stale"));
+            }
+            if admin.legacy_host(&db, host.clone()).map_err(ApiError::storage)?.is_none() {
+                return Err(ApiError::conflict("The existing SSH worker is not admitted"));
+            }
+            if !app.remote_edit.accepts(id, credential) {
+                return Err(ApiError::conflict("Select a configured provision credential for this worker"));
+            }
+            record_audit(&db, &action, "started")?;
+            transport
+        };
+        let receipt = app
+            .remote_edit
+            .setup(&admin.command, id, &transport, model_directory, credential)
+            .await;
+        {
+            let _store = app.store.lock().map_err(ApiError::storage)?;
+            let mut db = admin.db.lock().map_err(ApiError::storage)?;
+            let tx = db.transaction().map_err(ApiError::storage)?;
+            let mut current = infra_policy::Policy::load(&tx, id).map_err(ApiError::storage)?;
+            let receipt = match receipt {
+                Ok(receipt) if current.revision == *revision
+                    && app.ssh_hosts.editor_transport(id).as_ref() == Some(&transport) => receipt,
+                _ => {
+                    record_audit(&tx, &action, "failed")?;
+                    tx.commit().map_err(ApiError::storage)?;
+                    return Err(ApiError::conflict("Could not verify remote editor setup. Check the pinned host, provision key, remote directory, and packaged runtime."));
+                }
+            };
+            current.revision = current.revision.checked_add(1)
+                .ok_or(ApiError::conflict("Host policy revision limit reached"))?;
+            current.remote_editor = Some(receipt);
+            current.weight_editor = Some(true);
+            current.save(&tx, id).map_err(ApiError::storage)?;
+            record_audit(&tx, &action, "applied")?;
+            tx.commit().map_err(ApiError::storage)?;
+        }
+        return admin.view(&app).map(Json).map_err(ApiError::storage);
+    }
     if let Action::SetHostPolicy { revision, .. }
     | Action::SetHostResources { revision, .. }
     | Action::SetWeightEditor { revision, .. } = &action
@@ -702,6 +798,7 @@ async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
                     if let Some(lane) = app.local_edit.get(id) {
                         lane.advertise(&mut installed);
                     }
+                    advertise_remote(&app, &mut installed, &current);
                     current.disabled_jobs = infra_policy::validate_jobs(&installed, disabled_jobs)
                         .ok_or(ApiError(StatusCode::BAD_REQUEST, "Disabled jobs must be distinct and within the installed worker capabilities"))?;
                     current.paused = *paused;
@@ -719,7 +816,8 @@ async fn apply(app: Arc<App>, action: Action) -> ApiResult<Json<Value>> {
                     current.resources = *resources;
                 }
                 Action::SetWeightEditor { enabled, .. } => {
-                    if !editor_available(host, &app.local_edit, &current) {
+                    if !editor_available(host, &app.local_edit, &current)
+                        && !advertise_remote(&app, &mut host.clone(), &current) {
                         return Err(ApiError::conflict(editor_reason(&app.local_edit, id)));
                     }
                     current.weight_editor = Some(*enabled);

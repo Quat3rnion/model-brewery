@@ -299,7 +299,7 @@ async fn put_settings(
     if native.managed()
         && let Some(admin) = &app.admin
         && !admin
-            .effective_hosts(std::slice::from_ref(host), &app.local_edit)
+            .effective_hosts(std::slice::from_ref(host), &app)
             .map_err(ApiError::storage)?
             .iter()
             .any(|active| active.id == id)
@@ -674,10 +674,11 @@ async fn add_job(
     };
     let (mut job, mut envelope) = request.build(host, inputs, prompt).map_err(ApiError::bad)?;
     let hosts = app.effective_hosts().map_err(ApiError::storage)?;
-    if crate::weights::is_kind(&job.kind) {
-        job.local_edit = hosts
-            .iter()
-            .any(|entry| entry.id == job.host && entry.local_edit);
+    if crate::weights::is_kind(&job.kind)
+        && let Some(entry) = hosts.iter().find(|entry| entry.id == job.host)
+    {
+        job.local_edit = entry.local_edit;
+        job.remote_editor = entry.remote_editor;
     }
     if job.kind == "weight_apply" {
         let prior_id = job.options["proposal_job_id"]
@@ -688,7 +689,7 @@ async fn add_job(
             .map_err(ApiError::storage)?
             .ok_or_else(|| ApiError::not_found("proposal job"))?;
         let saved = store.envelope(prior_id).map_err(ApiError::storage)?;
-        if prior.local_edit != job.local_edit {
+        if prior.local_edit != job.local_edit || prior.remote_editor != job.remote_editor {
             return Err(ApiError::bad(
                 "make a new proposal on the current weight editor",
             ));

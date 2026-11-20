@@ -387,6 +387,48 @@ impl Store {
         } else {
             None
         };
+        if let Some(policy) = inspect.options.get("layer_recipe") {
+            return Ok((|| {
+                crate::gguf::layer_receipt(job, result, policy)?;
+                if let Some(inspected) = &inspected {
+                    conversion::same_component_source(inspected, result)?;
+                    if inspected["layer_plan_sha256"] != result["layer_plan_sha256"]
+                        || inspected["layer_recipe_plan"] != result["layer_recipe_plan"]
+                    {
+                        return Err("GGUF layer recipe plan changed after inspection".into());
+                    }
+                } else if job.id != *inspect_id {
+                    return Err("prior GGUF layer recipe inspection missing".into());
+                }
+                let (stage, artifact) = match job.kind.as_str() {
+                    "inspect" => {
+                        conversion::preflight(result, "inspect")?;
+                        ("plan", None)
+                    }
+                    "plan" => {
+                        conversion::preflight(result, "plan")?;
+                        ("convert", None)
+                    }
+                    "convert" => ("verify", Some(crate::gguf::artifact(job, result)?)),
+                    "verify" => {
+                        crate::gguf::verification(
+                            result,
+                            published.as_ref().ok_or("prior GGUF artifact missing")?,
+                            &row.host,
+                        )?;
+                        return Ok(None);
+                    }
+                    _ => return Err("unexpected GGUF layer recipe stage".into()),
+                };
+                let (next, envelope) = row.build(
+                    stage,
+                    inspect.inputs.clone(),
+                    artifact,
+                    Some(&result["layer_plan_sha256"]),
+                )?;
+                Ok(Some((next, envelope, None)))
+            })());
+        }
         let profile = job
             .profile_revision
             .as_deref()

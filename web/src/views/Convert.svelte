@@ -2,7 +2,7 @@
   import Advanced from '../components/Advanced.svelte';
   import { brewery } from '../lib/store.svelte';
   import { Submitter } from '../lib/submit.svelte';
-  import { CONVERT_SOURCE_KINDS, capability } from '../lib/format';
+  import { CONVERT_SOURCE_KINDS, capability, isSafeSource } from '../lib/format';
   import { CONVERT_ENUMS, VERIFY_OUTPUT_KINDS, buildConvertJob, poolHosts, type ConvertForm, type ConvertStep } from '../lib/convert';
   import HostSelect from '../components/HostSelect.svelte';
   import ModelSelect from '../components/ModelSelect.svelte';
@@ -16,6 +16,7 @@
   import { BASE_LABEL, shortRev } from '../lib/profiles';
   import { REV_PREFIX } from '../lib/conversion';
   import GgufConvert from '../components/GgufConvert.svelte';
+  import LayerRecipe from '../components/LayerRecipe.svelte';
   import { conversions, ConversionStarter } from '../lib/conversions.svelte';
   import { buildConversion, isActiveConversion } from '../lib/conversion';
 
@@ -67,6 +68,12 @@
   const wfBuilt = $derived(buildConversion(wfForm, models));
   const wfSource = $derived(models.find((m) => m.id === form.source));
   let outFormat = $state<'hgn' | 'gguf'>('hgn');
+  let useLayerRecipe = $state(false);
+  const recipeStarter = new ConversionStarter();
+  const recipeSource = $derived(wfSource && isSafeSource(wfSource.kind) ? wfSource : undefined);
+  const recipeKey = $derived(recipeSource && JSON.stringify([
+    recipeSource.id, recipeSource.kind, recipeSource.host, recipeSource.path, recipeSource.sha256, recipeSource.bundle_sha256,
+  ]));
   $effect(() => {
     if (profileStore.pendingUse?.startsWith('gguf:')) outFormat = 'gguf';
   });
@@ -109,7 +116,7 @@
   const starter = new ConversionStarter();
   async function startConversion() {
     // One POST per click. The body is built only here, never from an effect.
-    if (!wfBuilt.body || starter.busy) return;
+    if (useLayerRecipe || !wfBuilt.body || starter.busy) return;
     const c = await starter.start(wfBuilt.body);
     if (c) queueMicrotask(() => document.getElementById(`run-${c.id}`)?.scrollIntoView({ block: 'nearest' }));
   }
@@ -130,7 +137,7 @@
 
   const s = new Submitter();
   function submit() {
-    if (built.job) s.submit(built.job);
+    if (!useLayerRecipe && built.job) s.submit(built.job);
   }
   const usesBackends = $derived(step === 'inspect' || step === 'plan' || step === 'convert');
   const usesPlanOpts = $derived(step === 'plan' || step === 'convert');
@@ -146,18 +153,32 @@
 <div class="stack">
   <div class="head">
     <h1 tabindex="-1">Convert</h1>
-    <p class="muted small">Convert a BF16 checkpoint to an HGN v2 or HT43 bundle. One action runs inspect, plan, convert and verify on the controller; you can leave or reload this page. The bundle stays on the host that produced it.</p>
+    <p class="muted small">Convert a checkpoint to HGN or GGUF. Managed conversions run inspect, plan, convert and verify. To set the output type per layer for SafeTensors, select Layer recipe.</p>
   </div>
 
   <section class="panel" aria-labelledby="wf-h">
     <header>
       <h2 id="wf-h">Convert a checkpoint</h2>
       <div class="fmt" role="radiogroup" aria-label="Output format">
-        <label class:on={outFormat === 'hgn'}><input type="radio" bind:group={outFormat} value="hgn" /> HGN bundle</label>
+        <label class:on={outFormat === 'hgn'}><input type="radio" bind:group={outFormat} value="hgn" /> {useLayerRecipe ? 'HGN archive' : 'HGN bundle'}</label>
         <label class:on={outFormat === 'gguf'}><input type="radio" bind:group={outFormat} value="gguf" /> GGUF file</label>
       </div>
     </header>
-    {#if outFormat === 'gguf'}
+    <div class="body">
+      <label class="inline"><input type="checkbox" bind:checked={useLayerRecipe} /> Layer recipe</label>
+    </div>
+    {#if useLayerRecipe}
+      <div class="body stack">
+        <ModelSelect bind:value={form.source} kinds={['hf', 'safetensors']} label="Source checkpoint" hint="Select the SafeTensors file or indexed HF directory to read its layers and SHA-256." id="recipe-source" />
+        {#if recipeSource}
+          {#key recipeKey}
+            <LayerRecipe source={recipeSource} format={outFormat} starter={recipeStarter} />
+          {/key}
+        {:else}
+          <Submit blockers={['Select a SafeTensors source.']} onclick={() => {}}>Run layer recipe</Submit>
+        {/if}
+      </div>
+    {:else if outFormat === 'gguf'}
     <div class="body">
       {#if profileStore.gguf}<GgufConvert catalog={profileStore.gguf} bind:source={form.source} />
       {:else if profileStore.ggufStatus === 'unavailable'}<p class="note warn">This controller does not offer GGUF output.</p>
@@ -247,7 +268,7 @@
     {/if}
   </section>
 
-  <section class="panel" aria-labelledby="runs-h">
+  <section class="panel" id="conversion-runs" aria-labelledby="runs-h">
     <header><h2 id="runs-h">Conversions <span class="muted num small">({runs.length})</span></h2></header>
     {#if !conversions.loaded}
       <p class="empty">Loading…</p>
@@ -269,6 +290,7 @@
     {/if}
   </section>
 
+  {#if !useLayerRecipe}
   <details class="disclosure manual">
     <summary><span class="t">Individual steps (diagnostics)</span><span class="s xs">Run inspect, plan, convert or verify as a single job</span></summary>
     <div class="stack manual-body">
@@ -390,6 +412,7 @@
   </div>
     </div>
   </details>
+  {/if}
 
   <RecentJobs kinds={['inspect', 'plan', 'convert', 'verify']} title="Recent converter jobs" limit={8} />
 </div>

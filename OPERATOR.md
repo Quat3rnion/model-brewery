@@ -2157,8 +2157,57 @@ mounts only the checked manifest members read-only. It does not mount the
 source directory or its parent. Reviewed apply still checks the full SHA-256
 of each source member before it publishes a new output. The sandbox has no
 host network or credential store. If Bubblewrap or unprivileged user
-namespaces are unavailable, the helper fails closed. This package is for
-local workers, not the SSH worker installer.
+namespaces are unavailable, the helper fails closed.
+
+### Set up editing on an existing SSH worker
+
+Settings can install a separate CPU weight editor on an existing, admitted
+SSH worker, including a metadata-only planner. Select the worker, enter the
+absolute, canonical model directory **on that worker**, and select its
+provision credential. Setup does not change enrollment, the original
+worker configuration, or the planner's SSH key. The controller exposes
+editor jobs only after it verifies the package and opens the new worker over
+the pinned SSH connection. Existing model-size and source-proof limits still
+apply. For Tune, register the two calibration files on the same worker.
+
+Prepare these controller settings before the first setup:
+
+- `BREWERY_REMOTE_EDITOR_PROVISION`: absolute path to the trusted executable
+  `tools/brewery-editor-provision`, beside `tools/brewery-provision`.
+- `BREWERY_REMOTE_EDITOR_PACKAGE` and `BREWERY_REMOTE_EDITOR_PACKAGE_SHA256`:
+  a trusted, pinned, uncompressed tar archive with `brewery-worker`,
+  `brewery-engine`, `brewery-weight-edit`, `brewery-weight-tune`, and
+  `brewery-weight-runtime/` at the archive root. Use regular files, not
+  symlinks; use binaries from this release and the target's architecture
+  and Python ABI. The target needs `/usr/bin/python3`, Bubblewrap with
+  `--ro-bind-fd`, and working unprivileged user namespaces.
+- `BREWERY_REMOTE_EDITOR_CREDENTIALS`: absolute path to a private JSON
+  object keyed by credential ID. For example:
+
+  ```json
+  {
+    "planner-editor": {
+      "label": "Planner editor provision key",
+      "worker": "frame-hy4-plan",
+      "user": "brewery-editor",
+      "identity": "/path/to/worker-editor-key",
+      "fingerprint": "SHA256:<existing SSH server fingerprint>"
+    }
+  }
+  ```
+
+  The `identity` is a private service-readable key file, not a password or
+  browser upload. Use a dedicated non-root account with read access to the
+  selected model directory and access to its own private home. The key must
+  permit the installer and the sidecar RPC; the original forced-command
+  planner key cannot do this. A static SSH alias must already have the
+  same Ed25519 pin in its known-hosts file and be reachable directly from
+  the controller. Managed SSH definitions reuse their verified pin.
+
+Disabling the editor blocks new editor jobs without removing the installed
+runtime or changing the planner. Failed setup leaves the previous verified
+settings in place. Old, unselected releases do not receive new jobs; retain
+them while any allocations or published outputs still reference their files.
 
 ## Weight edit tools (fixtures only)
 

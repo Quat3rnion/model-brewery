@@ -4,11 +4,71 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::LazyLock};
 
 pub const CATALOG_JSON: &str = include_str!("gguf_catalog.json");
 pub const STANDALONE_CAPABILITY: &str = "gguf_safetensors_output";
 pub const ROCMFPX_CAPABILITY: &str = "gguf_rocmfpx_output";
+pub const LAYER_RECIPE_CAPABILITY: &str = "gguf_layer_recipe";
+
+pub fn layer_recipe(value: &Value) -> Result<(), String> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Recipe {
+        schema: String,
+        source_sha256: String,
+        default_type: String,
+        layers: BTreeMap<String, String>,
+    }
+    let policy: Recipe =
+        serde_json::from_value(value.clone()).map_err(|_| "invalid layer recipe")?;
+    let supported = |ty: &str| matches!(ty, "F32" | "F16" | "BF16" | "Q8_0");
+    if policy.schema != "brewery.layer-quant.v1"
+        || !valid_revision(&policy.source_sha256)
+        || !supported(&policy.default_type)
+        || policy.layers.len() > 256
+        || policy.layers.iter().any(|(layer, ty)| {
+            layer
+                .parse::<u32>()
+                .ok()
+                .is_none_or(|id| id.to_string() != *layer)
+                || !supported(ty)
+        })
+    {
+        return Err("invalid or unsupported GGUF layer recipe".into());
+    }
+    Ok(())
+}
+
+pub fn layer_receipt(job: &Job, result: &Value, recipe: &Value) -> Result<(), String> {
+    let plan = &result["layer_recipe_plan"];
+    let expected_sha = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(plan).map_err(|_| "invalid layer plan receipt")?)
+    );
+    if result["kind"] != job.kind
+        || result["output_format"] != "gguf"
+        || result["host"] != job.host
+        || result["release_qualified"] != false
+        || plan["recipe"] != *recipe
+        || result["inputs"][0]["sha256"] != recipe["source_sha256"]
+        || result["layer_plan_sha256"] != expected_sha
+        || !plan["exporter_sha256"].as_str().is_some_and(valid_revision)
+        || !plan["source_bundle_sha256"]
+            .as_str()
+            .is_some_and(valid_revision)
+        || plan["source_bundle_sha256"] != result["source_sha256"]
+        || !plan["tensors"]
+            .as_object()
+            .is_some_and(|tensors| !tensors.is_empty())
+        || (matches!(job.kind.as_str(), "convert" | "verify")
+            && result["report"]["stored_tensors"] != plan["tensors"])
+    {
+        return Err("worker did not attest the exact source-bound GGUF layer recipe".into());
+    }
+    Ok(())
+}
 
 pub fn input_layout(inputs: &[Model], verify: bool) -> Result<Option<usize>, String> {
     let (source, mut remaining) = inputs.split_first().ok_or("GGUF source is required")?;

@@ -1,0 +1,208 @@
+#!/usr/bin/python3 -ISB
+"""Install one pinned, packaged CPU editor sidecar on an existing SSH worker."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import shlex
+import stat
+import subprocess
+import sys
+import tempfile
+
+
+# Reuse the SSH options, bounded command capture, fingerprint scan and key
+# validation from the standard operator provisioning helper.
+PROVISION = runpy.run_path(str(Path(__file__).with_name("brewery-provision")))
+capture = PROVISION["capture"]
+need = PROVISION["need"]
+MAX_PACKAGE = 512 << 20
+REMOTE = r"""
+import hashlib, json, os, pathlib, pwd, re, shutil, stat, subprocess, sys, tarfile, tempfile
+os.umask(0o077)
+uid = os.geteuid()
+home = pathlib.Path(pwd.getpwuid(uid).pw_dir)
+request = json.loads(sys.stdin.buffer.readline(8193))
+model = pathlib.Path(request["model_directory"])
+assert uid != 0 and sys.platform == "linux"
+assert re.fullmatch(r"/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", str(home)) and home.resolve() == home
+assert model.is_absolute() and model != pathlib.Path("/") and model.resolve(strict=True) == model
+assert model.is_dir() and os.access(model, os.R_OK | os.X_OK)
+assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", request["worker"])
+assert re.fullmatch(r"[0-9a-f-]{36}", request["generation"])
+assert type(request["size"]) is int and 1 <= request["size"] <= 512 << 20
+assert re.fullmatch(r"[0-9a-f]{64}", request["sha256"])
+parent = home / ".local/share/model-brewery/editors" / request["worker"]
+dest = parent / request["generation"]
+assert not (model.is_relative_to(parent) or parent.is_relative_to(model))
+def check_dir(p):
+    md = p.lstat()
+    assert stat.S_ISDIR(md.st_mode) and md.st_uid == uid and not md.st_mode & 0o022
+check_dir(home)
+folder = home
+for part in parent.relative_to(home).parts:
+    folder = folder / part
+    folder.mkdir(mode=0o700, exist_ok=True)
+    check_dir(folder)
+with tempfile.TemporaryDirectory(prefix=".install-", dir=parent) as stage_name:
+    stage = pathlib.Path(stage_name)
+    with tempfile.TemporaryFile(dir=stage) as archive:
+        digest = hashlib.sha256()
+        left = request["size"]
+        while left:
+            chunk = sys.stdin.buffer.read(min(left, 1 << 20))
+            assert chunk
+            archive.write(chunk)
+            digest.update(chunk)
+            left -= len(chunk)
+        assert not sys.stdin.buffer.read(1) and digest.hexdigest() == request["sha256"]
+        archive.seek(0)
+        binaries = {"brewery-worker", "brewery-engine", "brewery-weight-edit", "brewery-weight-tune"}
+        seen = set()
+        total = 0
+        with tarfile.open(fileobj=archive, mode="r:") as tar:
+            for member in tar:
+                name = member.name
+                assert name not in seen and len(seen) < 8192
+                assert re.fullmatch(r"[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*", name)
+                assert all(part not in (".", "..") for part in name.split("/"))
+                assert name in binaries or name == "brewery-weight-runtime" or name.startswith("brewery-weight-runtime/")
+                assert member.isdir() or member.isfile()
+                assert 0 <= member.size <= 128 << 20
+                total += member.size
+                assert total <= request["size"]
+                seen.add(name)
+                out = stage / name
+                if member.isdir():
+                    assert name not in binaries
+                    out.mkdir(mode=0o700, parents=True, exist_ok=True)
+                else:
+                    out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    with out.open("xb") as sink:
+                        shutil.copyfileobj(tar.extractfile(member), sink, length=1 << 20)
+                        sink.flush()
+                        os.fchmod(sink.fileno(), 0o700 if name in binaries else 0o600)
+                        os.fsync(sink.fileno())
+        assert binaries <= seen
+    machine = {"x86_64": 62, "aarch64": 183}[os.uname().machine]
+    for name in ("brewery-worker", "brewery-engine"):
+        with (stage / name).open("rb") as binary:
+            hdr = binary.read(20)
+        assert len(hdr) == 20 and hdr[:6] == b"\x7fELF\x02\x01" and int.from_bytes(hdr[18:20], "little") == machine
+    for helper, jobs in (("brewery-weight-edit", {"weight_inspect", "weight_propose", "weight_apply"}),
+                         ("brewery-weight-tune", {"weight_tune"})):
+        answer = json.loads(subprocess.check_output([stage / helper, "--capabilities"], timeout=35))
+        assert answer["schema"] == "brewery.weight-runtime.v1" and set(answer["jobs"]) == jobs
+        assert set(answer["formats"]) >= {"gguf", "hgn", "safetensors", "hf"}
+        assert answer["visual"] is True and answer["packed"] is True and answer["proof_source_fds"] is True
+    env = dict.fromkeys(("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"), "")
+    env.update(dict.fromkeys(("BREWERY_CPU_THREADS", "OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"), "2"))
+    env.update(dict.fromkeys(("BREWERY_WEIGHT_VISUAL", "BREWERY_WEIGHT_PACKED", "BREWERY_WEIGHT_HGN", "BREWERY_WEIGHT_SAFETENSORS", "PYTHONNOUSERSITE"), "1"))
+    env.update(BREWERY_ALLOW_GPU_LOAD="0", BREWERY_WEIGHT_SAFETENSORS_VERIFY_BYTES="67108864",
+               BREWERY_WEIGHT_EDIT=str(dest / "brewery-weight-edit"), BREWERY_WEIGHT_TUNE=str(dest / "brewery-weight-tune"))
+    config = {"root":str(dest / "state"), "engine":str(dest / "brewery-engine"), "source_roots":[str(model)],
+              "engine_env":env, "weight_editor_host":request["worker"]}
+    with (stage / "worker.json").open("x") as out:
+        json.dump(config, out)
+        out.flush()
+        os.fsync(out.fileno())
+    assert not dest.exists() and not dest.is_symlink()
+    stage.rename(dest)
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    os.fsync(fd)
+    os.close(fd)
+print(json.dumps({"root":str(dest)}))
+"""
+
+
+def target(request):
+    transport = request["transport"]
+    fingerprint = request["fingerprint"]
+    if "target" in transport:
+        row = transport["target"]
+        need(row["fingerprint"] == fingerprint, "Provision credential pin differs from verified host")
+        return row["host"], row["port"], transport["key"]
+    alias = transport["alias"]
+    need(PROVISION["matches"](PROVISION["ID"], alias), "Invalid SSH alias")
+    args = ["/usr/bin/ssh", "-G"]
+    if transport.get("config"):
+        args += ["-F", transport["config"]]
+    raw = capture([*args, "--", alias], 6, "Could not resolve existing SSH alias")
+    opts = dict(line.split(" ", 1) for line in raw.decode().splitlines() if " " in line)
+    host, port = opts["hostname"], int(opts["port"])
+    lookup = opts.get("hostkeyalias") or (host if port == 22 else f"[{host}]:{port}")
+    need(PROVISION["a_safe_host"](host) and 0 < port < 65536, "Invalid existing SSH target")
+    for opt in ("userknownhostsfile", "globalknownhostsfile"):
+        for path in shlex.split(opts.get(opt, "")):
+            path = os.path.expanduser(path)
+            if not path.startswith("/") or "%" in path or not Path(path).is_file():
+                continue
+            result = subprocess.run(
+                ["/usr/bin/ssh-keygen", "-F", lookup, "-f", path],
+                capture_output=True, timeout=4, check=False, text=True,
+            )
+            if result.returncode:
+                continue
+            for line in result.stdout.splitlines():
+                cols = line.split()
+                if len(cols) >= 3 and cols[1] == "ssh-ed25519" and not line.startswith(("#", "@")):
+                    try:
+                        key = PROVISION["base64"].b64decode(cols[2], validate=True)
+                    except ValueError:
+                        continue
+                    digest = PROVISION["base64"].b64encode(hashlib.sha256(key).digest()).decode().rstrip("=")
+                    if digest == fingerprint.removeprefix("SHA256:"):
+                        return host, port, " ".join(cols[1:3])
+    raise ValueError("Provision credential pin not found for the existing SSH alias")
+
+
+def main():
+    request = PROVISION["parse"](sys.stdin.buffer.read(8193))
+    need(set(request) == {"worker", "transport", "model_directory", "generation", "identity", "user", "fingerprint"},
+         "Invalid editor setup request")
+    host, port, key = target(request)
+    req = {"host": host, "port": port, "fingerprint": request["fingerprint"], "user": request["user"]}
+    need(PROVISION["matches"](PROVISION["USER"], req["user"]) and req["user"] != "root",
+         "Invalid provision login")
+    need(PROVISION["pinned_key"](req) == key, "SSH host key does not match the existing pin")
+    package = os.environ["BREWERY_REMOTE_EDITOR_PACKAGE"]
+    pin = os.environ["BREWERY_REMOTE_EDITOR_PACKAGE_SHA256"]
+    need(PROVISION["safe_home"](package) and PROVISION["matches"](PROVISION["DIGEST"], pin),
+         "A pinned editor package is required")
+    with tempfile.TemporaryDirectory(prefix="brewery-editor-") as root, os.fdopen(
+        os.open(package, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb"
+    ) as incoming:
+        md = os.fstat(incoming.fileno())
+        size = md.st_size
+        need(stat.S_ISREG(md.st_mode) and 0 < size <= MAX_PACKAGE, "Invalid editor package file")
+        known = Path(root) / "known_hosts"
+        need(PROVISION["safe_home"](str(known)), "Invalid SSH scratch directory")
+        known.write_text(f"brewery-provision {key}\n")
+        os.environ["BREWERY_PROVISION_IDENTITY"] = request["identity"]
+        argv = PROVISION["ssh"](req, known)
+        argv[-1] = "exec /usr/bin/python3 -I -B -c " + shlex.quote(REMOTE)
+        with tempfile.TemporaryFile(dir=root) as frame:
+            header = {k: request[k] for k in ("worker", "model_directory", "generation")}
+            frame.write(json.dumps(dict(header, size=size, sha256=pin)).encode() + b"\n")
+            calculated = hashlib.sha256()
+            left = size
+            while left:
+                data = incoming.read(min(left, 1 << 20))
+                need(data, "Editor archive changed")
+                frame.write(data)
+                calculated.update(data)
+                left -= len(data)
+            need(not incoming.read(1) and calculated.hexdigest() == pin, "Editor archive pin does not match")
+            frame.seek(0)
+            answer = json.loads(capture(argv, 115, "Editor install failed", stdin=frame))
+    print(json.dumps({"host":host,"port":port,"key":key,"root":answer["root"]}))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        # No helper arguments, remote output or credential paths go to HTTP.
+        sys.exit("Remote editor provisioning failed")

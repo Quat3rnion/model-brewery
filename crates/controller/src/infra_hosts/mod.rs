@@ -1,5 +1,5 @@
 mod api;
-mod transport;
+pub(crate) mod transport;
 
 use crate::{
     Error,
@@ -230,6 +230,22 @@ impl Registry {
         ids.iter()
             .any(|id| state.rows.get(*id).is_some_and(|r| self.dispatchable(r)))
             .then(|| self.dir.join("dispatch.json"))
+    }
+
+    /// The editor installer must use the already defined transport identity.
+    /// Static aliases are resolved and checked against their existing pin by
+    /// the helper; managed rows pass their previously verified public key.
+    pub(crate) fn editor_transport(&self, id: &str) -> Option<Value> {
+        if let Some(row) = self.base.get(id) {
+            let alias = row.get("ssh")?.as_str()?;
+            return Some(json!({"alias":alias,"config":row.get("ssh_config")}));
+        }
+        let state = self.state.lock().expect("SSH registry lock");
+        let row = state.rows.get(id)?;
+        let Provision::Installed { key, .. } = &row.provision else {
+            return None;
+        };
+        Some(json!({"target":row.target,"key":key}))
     }
 
     fn write_dispatch(&self, state: &State) -> Result<(), Error> {

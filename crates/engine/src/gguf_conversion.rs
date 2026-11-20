@@ -1,13 +1,14 @@
 mod inventory;
+mod layer_recipe;
 
 use crate::{
-    bounded, child_budget, child_threads, converter, integrity, progress::Progress, write_json, Job,
+    Job, bounded, child_budget, child_threads, converter, integrity, progress::Progress, write_json,
 };
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use brewery_worker::ROCMFPX_REVISION;
 use inventory::{Model, Namespace, Types};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -201,6 +202,9 @@ impl Tool {
 }
 
 pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
+    if job.options.get("layer_recipe").is_some() {
+        return layer_recipe::run(job, cwd, progress);
+    }
     let options: Options =
         serde_json::from_value(job.options.clone()).context("invalid GGUF options")?;
     let namespace = match (
@@ -418,12 +422,16 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
                     "unknown exact GGUF tensor override {name}"
                 );
             }
-            report["gguf_tensors"] = json!(tensors
-                .iter()
-                .map(|(name, shape)| json!({"name":name,"shape":shape,"current_type":null}))
-                .collect::<Vec<_>>());
+            report["gguf_tensors"] = json!(
+                tensors
+                    .iter()
+                    .map(|(name, shape)| json!({"name":name,"shape":shape,"current_type":null}))
+                    .collect::<Vec<_>>()
+            );
         }
-        report["planning_scope"] = json!("GGUF tensor names and dimensions only; type layout confirmed after transient FP export");
+        report["planning_scope"] = json!(
+            "GGUF tensor names and dimensions only; type layout confirmed after transient FP export"
+        );
         disk = converter::disk_preflight(
             cwd,
             ids[0]

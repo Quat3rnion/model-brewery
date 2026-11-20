@@ -385,6 +385,41 @@ fn suggestions_validate_same_origin_json_and_forward_space_preserving_prefix() {
 }
 
 #[test]
+fn hy4_plan_requires_an_opted_in_source_host_and_exact_override() {
+    let mut app = Fixture::new();
+    fs::write(app.path("dispatch.json"), json!({"hosts":{
+        "alpha":{"local":true,"capabilities":{"hy4_plan":true}},
+        "beta":{"local":true}
+    }}).to_string()).unwrap();
+    app.launch();
+    let model = |host| app.json("POST", "/api/models", Some(json!({
+        "name":"Pinned Hy4","host":host,"kind":"hf","path":"/models/hy4"
+    })), 201)["id"].clone();
+    let source = model("alpha");
+    let other = model("beta");
+    let body = json!({"kind":"plan","host":"alpha","input_ids":[source],
+        "options":{"hy4_overrides":{"blk.1.ffn_down_exps.weight":"Q8_0"}}});
+    app.json("POST", "/api/jobs", Some(body.clone()), 201);
+    for (key, value, status) in [
+        ("kind", json!("convert"), 409),
+        ("input_ids", json!([other]), 400),
+        ("options", json!({"hy4_overrides":{"blk.1.ffn_up_exps.weight":"Q8_0"}}), 400),
+        ("options", json!({"hy4_overrides":{"blk.1.ffn_down_exps.weight":"Q8_0"},"threads":1}), 400),
+    ] {
+        let mut bad = body.clone();
+        bad[key] = value;
+        app.json("POST", "/api/jobs", Some(bad), status);
+    }
+    let mut generic = body.clone();
+    generic["options"] = json!({});
+    app.json("POST", "/api/jobs", Some(generic), 409);
+    let mut off = body;
+    off["host"] = json!("beta");
+    off["input_ids"] = json!([other]);
+    app.json("POST", "/api/jobs", Some(off), 409);
+}
+
+#[test]
 fn benchmark_jobs_only_dispatch_ids_allowlisted_for_an_opted_in_host() {
     let mut app = Fixture::new();
     fs::write(

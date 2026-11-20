@@ -169,6 +169,8 @@ pub struct Job {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub local_edit: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_editor: Option<uuid::Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory_revision: Option<u64>,
     pub state: State,
     pub progress: String,
@@ -327,6 +329,8 @@ pub struct Host {
     #[serde(skip)]
     pub local_edit: bool,
     #[serde(skip)]
+    pub remote_editor: Option<uuid::Uuid>,
+    #[serde(skip)]
     pub(crate) provision_binding: Option<String>,
     pub id: String,
     pub name: String,
@@ -432,7 +436,7 @@ impl Host {
         let benchmark_targets = benchmark_choices(config, "benchmark_targets")?;
         let benchmarks = benchmark_choices(config, "benchmarks")?;
         let benchmark_configured = !benchmark_targets.is_empty() && !benchmarks.is_empty();
-        let mut capabilities = BTreeMap::new();
+        let mut capabilities = BTreeMap::<String, bool>::new();
         for (capability, reason) in [
             (
                 "weight_visual",
@@ -464,6 +468,7 @@ impl Host {
             "gguf_hf_output",
             crate::gguf::STANDALONE_CAPABILITY,
             crate::gguf::ROCMFPX_CAPABILITY,
+            crate::gguf::LAYER_RECIPE_CAPABILITY,
         ] {
             let enabled = options.remove(capability).unwrap_or(false)
                 && (capability == "gguf_output" || capabilities.get("gguf_output") == Some(&true));
@@ -519,6 +524,28 @@ impl Host {
                     .into()
                 });
             }
+        }
+        let hy4 = options
+            .remove(brewery_worker::hy4::CAPABILITY)
+            .unwrap_or(false);
+        if hy4 {
+            for (capability, enabled) in &mut capabilities {
+                if capability != "plan" {
+                    *enabled = false;
+                    reasons.insert(
+                        capability.clone(),
+                        "Dedicated Hy4 metadata-only planner".into(),
+                    );
+                }
+            }
+        }
+        capabilities.insert(brewery_worker::hy4::CAPABILITY.into(), hy4);
+        if !hy4 {
+            reasons
+                .entry(brewery_worker::hy4::CAPABILITY.into())
+                .or_insert_with(|| {
+                    "Hy4 metadata-only planning is not configured on this worker".into()
+                });
         }
         let name = config
             .get("name")
@@ -583,6 +610,7 @@ impl Host {
         }
         Ok(Self {
             local_edit: false,
+            remote_editor: None,
             provision_binding: None,
             id: id.into(),
             name,
@@ -661,6 +689,37 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
         return Vec::new();
     }
     let inputs = &envelope.inputs;
+    if envelope.options.contains_key(brewery_worker::hy4::OPTION) {
+        if inputs.len() != 1
+            || inputs[0].kind != "hf"
+            || !job.format.is_hgn()
+            || !brewery_worker::hy4::valid(&job.kind, &Value::Object(envelope.options.clone()))
+        {
+            return Vec::new();
+        }
+        return hosts
+            .iter()
+            .filter(|host| {
+                host.id == job.host
+                    && host.id == inputs[0].host
+                    && !host.scheduling_paused
+                    && host.capabilities.get(brewery_worker::hy4::CAPABILITY) == Some(&true)
+                    && host.capabilities["plan"]
+            })
+            .collect();
+    }
+    if inputs.iter().any(|input| {
+        hosts.iter().any(|host| {
+            host.id == input.host
+                && host.capabilities.get(brewery_worker::hy4::CAPABILITY) == Some(&true)
+                && !(crate::weights::is_kind(&job.kind)
+                    && host.id == job.host
+                    && job.remote_editor.is_some()
+                    && host.remote_editor == job.remote_editor)
+        })
+    }) {
+        return Vec::new();
+    }
     let needs_components = inputs.first().is_some_and(|source| source.kind == "hf")
         && match job.kind.as_str() {
             "inspect" | "plan" | "convert" => inputs.len() > 1,
@@ -670,6 +729,9 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
     let components_allowed = |host: &Host| {
         if !job.format.is_hgn() {
             return host.capabilities["gguf_output"]
+                && (!envelope.options.contains_key("layer_recipe")
+                    || (host.capabilities[crate::gguf::LAYER_RECIPE_CAPABILITY]
+                        && inputs.iter().all(|input| input.host == host.id)))
                 && match envelope.options.get("encoder_family") {
                     None => true,
                     Some(family) => {
@@ -713,8 +775,12 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
             .filter(|host| {
                 host.id == job.host
                     && !host.scheduling_paused
-                    && (!crate::weights::is_kind(&job.kind) || host.local_edit == job.local_edit)
+                    && (!crate::weights::is_kind(&job.kind)
+                        || (host.local_edit == job.local_edit
+                            && host.remote_editor == job.remote_editor))
                     && host.capabilities[&job.kind]
+                    && (host.capabilities.get(brewery_worker::hy4::CAPABILITY) != Some(&true)
+                        || (crate::weights::is_kind(&job.kind) && job.remote_editor.is_some()))
                     && (!needs_hgn || host.capabilities["weight_hgn"])
                     && (!needs_safetensors || host.capabilities["weight_safetensors"])
                     && (!needs_packed || host.capabilities["weight_packed"])
@@ -832,7 +898,17 @@ impl NewJob {
         if prompt.is_some() && !matches!(self.kind.as_str(), "compare" | "generate") {
             return Err("this workflow does not accept a prompt".into());
         }
-        if format.is_hgn() {
+        if self.options.contains_key(brewery_worker::hy4::OPTION) {
+            if !format.is_hgn()
+                || !brewery_worker::hy4::valid(&self.kind, &Value::Object(self.options.clone()))
+                || n != 1
+                || main != "hf"
+                || inputs[0].host != host
+                || prompt.is_some()
+            {
+                return Err("Hy4 planning requires one same-worker HF source and only the exact block-1 down Q8_0 override".into());
+            }
+        } else if format.is_hgn() {
             if crate::weights::is_kind(&self.kind) {
                 if inputs.iter().any(|input| input.host != host) {
                     return Err(
@@ -877,6 +953,7 @@ impl NewJob {
             host_slot: None,
             dispatch_resources: Default::default(),
             local_edit: false,
+            remote_editor: None,
             directory_revision: None,
             input_ids: self.input_ids,
             options: self.options,

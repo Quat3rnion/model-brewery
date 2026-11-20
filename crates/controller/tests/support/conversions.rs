@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn layer_recipe_requires_an_explicitly_capable_source_worker() {
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts":{
+            "alpha":{"local":true,"capabilities":{"gguf_output":true,"gguf_hf_output":true}}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let source = app.register("alpha", "hf", "/source/base");
+    let policy = json!({"schema":"brewery.layer-quant.v1","source_sha256":"1".repeat(64),
+                        "default_type":"BF16","layers":{"0":"F16"}});
+    let request = json!({"format":"gguf","input_ids":[source],"options":{"layer_recipe":policy}});
+    for field in ["preset", "imatrix", "threads"] {
+        let mut wrong = request.clone();
+        wrong["options"][field] = json!(1);
+        app.json("POST", "/api/conversions", Some(wrong), 400);
+    }
+    let mut wrong = request.clone();
+    wrong["format"] = json!("hgn");
+    app.json("POST", "/api/conversions", Some(wrong), 400);
+    app.json("POST", "/api/conversions", Some(request), 409);
+    assert!(app.launches().is_empty());
+}
+
+#[test]
 fn profile_export_options_are_preview_only_for_both_encoders() {
     let mut app = Fixture::new();
     app.launch();

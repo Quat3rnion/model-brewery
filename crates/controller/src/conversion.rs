@@ -71,7 +71,28 @@ impl Conversion {
         if profile.is_some_and(|p| p.format() != request.format) {
             return Err("saved profile format does not match conversion format".into());
         }
-        let gguf = if request.format == Format::Gguf {
+        let layer_recipe = request.options.get("layer_recipe");
+        if let Some(policy) = layer_recipe {
+            if request.format != Format::Gguf
+                || request.options.len() != 1
+                || request.profile_revision.is_some()
+                || request.decode_backend.is_some()
+            {
+                return Err("layer_recipe requires GGUF output and cannot be combined with other options, a profile or a decode backend".into());
+            }
+            if !matches!(source.kind.as_str(), "hf" | "safetensors")
+                || request
+                    .host
+                    .as_deref()
+                    .is_some_and(|host| host != source.host)
+                || inputs.iter().any(|input| input.host != source.host)
+                || crate::gguf::input_layout(&inputs, false)?.is_some()
+            {
+                return Err("layer_recipe requires indexed HF or standalone SafeTensors with assets, on the source worker, without an imatrix".into());
+            }
+            crate::gguf::layer_recipe(policy)?;
+        }
+        let gguf = if request.format == Format::Gguf && layer_recipe.is_none() {
             if request.decode_backend.is_some()
                 || request
                     .options
@@ -178,13 +199,35 @@ impl Conversion {
         recipe: Option<&Value>,
     ) -> Result<(Job, Envelope), String> {
         if self.format == Format::Gguf {
-            let selection: Selection =
-                serde_json::from_value(recipe.ok_or("GGUF policy missing")?.clone())
-                    .map_err(|_| "invalid GGUF policy")?;
             let verify = stage == "verify";
             if verify {
                 inputs.insert(1, output.ok_or("GGUF output missing")?);
             }
+            if let Some(policy) = self.options.get("layer_recipe") {
+                let (mut job, mut envelope) = NewJob {
+                    kind: stage.into(),
+                    host: Some(self.host.clone()),
+                    input_ids: inputs.iter().map(|model| model.id.clone()).collect(),
+                    options: Map::new(),
+                    prompt_id: None,
+                    prompt: None,
+                }
+                .build_for(self.host.clone(), inputs, None, self.format)?;
+                job.options.insert("layer_recipe".into(), policy.clone());
+                envelope.options = job.options.clone();
+                envelope
+                    .options
+                    .insert("output_format".into(), "gguf".into());
+                if let Some(plan) = recipe {
+                    envelope
+                        .options
+                        .insert("layer_plan_sha256".into(), plan.clone());
+                }
+                return Ok((job, envelope));
+            }
+            let selection: Selection =
+                serde_json::from_value(recipe.ok_or("GGUF policy missing")?.clone())
+                    .map_err(|_| "invalid GGUF policy")?;
             let matrix = selection.inputs(&inputs, verify)?;
             let options = selection.options(self.options.get("threads"), matrix);
             let (mut job, mut envelope) = NewJob {

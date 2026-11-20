@@ -203,7 +203,20 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
         let r = w.require(id)?;
         ensure!(!r.cancel, "cancel requested");
     }
-    let mut command = if let Some(wrapper) = &w.cfg.admission {
+    let mut command = if let Some(plan) = &w.cfg.hy4_plan {
+        ensure!(
+            plan.validate("start", job),
+            "Invalid pinned Hy4 plan request"
+        );
+        let mut c = Command::new("/usr/bin/python3");
+        c.env_clear()
+            .args(["-I", "-B"])
+            .arg(&w.cfg.engine)
+            .arg(&plan.host)
+            .arg(&plan.source)
+            .arg(&plan.halo_tools);
+        c
+    } else if let Some(wrapper) = &w.cfg.admission {
         let mut c = Command::new(wrapper);
         c.args(["--wait", "--"]).arg(&w.cfg.engine);
         c
@@ -403,6 +416,17 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
         value.is_object(),
         "Engine output is not a JSON object; check private engine-output.json"
     );
+    if w.cfg.hy4_plan.is_some() {
+        ensure!(
+            value["kind"] == "hy4_plan"
+                && value["payload_verified"] == false
+                && value["runtime_ready"] == false
+                && value.get("artifact").is_none()
+                && fs::read_dir(&work)?.next().is_none(),
+            "Hy4 planner did not return an artifact-free metadata receipt"
+        );
+        return Ok(value);
+    }
     if let Some(download) = download {
         let spec = hf_download::Spec::parse(&job.options)?;
         let mut path = work.join("download");

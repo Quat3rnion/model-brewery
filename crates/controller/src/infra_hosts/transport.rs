@@ -22,7 +22,7 @@ pub(super) fn fingerprint_valid(value: &str) -> bool {
         .is_some_and(|s| STANDARD_NO_PAD.decode(s).is_ok_and(|b| b.len() == 32))
 }
 
-pub(super) fn key_matches(key: &str, fingerprint: &str) -> bool {
+pub(crate) fn key_matches(key: &str, fingerprint: &str) -> bool {
     let Some(blob) = key
         .strip_prefix("ssh-ed25519 ")
         .and_then(|key| STANDARD.decode(key).ok())
@@ -144,7 +144,7 @@ impl Drop for ProcessGroup {
     }
 }
 
-pub(super) fn private_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn private_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let scratch = path.with_file_name(format!(".write-{}", uuid::Uuid::new_v4()));
     let mut file = OpenOptions::new()
         .create_new(true)
@@ -163,7 +163,7 @@ pub(super) fn private_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
-fn ssh_path(path: &Path) -> Result<&str, crate::Error> {
+pub(crate) fn ssh_path(path: &Path) -> Result<&str, crate::Error> {
     let text = path.to_str().ok_or("SSH state path is not UTF-8")?;
     if !path.is_absolute() || text.chars().any(|c| c.is_control() || "\"\\%$".contains(c)) {
         return Err("invalid SSH config path".into());

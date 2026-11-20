@@ -12,6 +12,7 @@ mod idempotency;
 mod infra_hosts;
 mod local_edit;
 mod profiles;
+mod remote_edit;
 mod settings;
 mod store;
 mod suggestions;
@@ -44,6 +45,7 @@ struct App {
     pub admin: Option<admin::Admin>,
     local_edit: Arc<local_edit::Lanes>,
     ssh_hosts: Arc<infra_hosts::Registry>,
+    remote_edit: Arc<remote_edit::Installer>,
     suggestions: suggestions::PathSuggestions,
     feed_subscribers: Arc<tokio::sync::Semaphore>,
 }
@@ -58,7 +60,7 @@ impl App {
     fn effective_hosts(&self) -> Result<Vec<Host>, Error> {
         let hosts = self.settings.effective(&self.defined_hosts()?);
         match &self.admin {
-            Some(admin) => admin.effective_hosts(&hosts, &self.local_edit),
+            Some(admin) => admin.effective_hosts(&hosts, self),
             None => Ok(hosts),
         }
     }
@@ -105,11 +107,13 @@ async fn main() -> Result<(), Error> {
             }),
     );
     let ssh_hosts = Arc::new(infra_hosts::Registry::open(&data, config_value.as_ref())?);
+    let remote_edit = Arc::new(remote_edit::Installer::open(&data)?);
     let mut dispatcher = Dispatcher {
         command: env_path("BREWERY_DISPATCH", "brewery-dispatch"),
         backend: None,
         local_edit: local_edit.clone(),
         ssh_hosts: ssh_hosts.clone(),
+        remote_edit: remote_edit.clone(),
         launch_timeout: Duration::from_secs(env_num("BREWERY_DISPATCH_TIMEOUT_SECS", 21600)?),
         poll: Duration::from_millis(env_num("BREWERY_POLL_MS", 1000)?.max(25)),
     };
@@ -142,6 +146,7 @@ async fn main() -> Result<(), Error> {
         admin,
         local_edit,
         ssh_hosts,
+        remote_edit,
         suggestions: suggestions::PathSuggestions::new(dispatcher.command.clone()),
         feed_subscribers: Arc::new(tokio::sync::Semaphore::new(feed::SUBSCRIBERS)),
     });

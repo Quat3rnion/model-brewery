@@ -41,6 +41,26 @@ struct Config {
     backend_weight_download_root: Option<PathBuf>,
     backend_weight_calibration_root: Option<PathBuf>,
     resource_bounds: Option<resources::Bounds>,
+    hy4_plan: Option<Hy4Plan>,
+    weight_editor_host: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Hy4Plan {
+    host: String,
+    source: PathBuf,
+    halo_tools: PathBuf,
+}
+
+impl Hy4Plan {
+    fn validate(&self, action: &str, job: &Job) -> bool {
+        action == "start"
+            && hy4::valid(&job.kind, &job.options)
+            && job.prompt.is_none()
+            && matches!(job.inputs.as_slice(), [i] if i.kind == "hf" && i.host == self.host
+                && i.path.as_os_str() == self.source.as_os_str())
+    }
 }
 fn reserve() -> u64 {
     1024 * 1024 * 1024
@@ -96,8 +116,42 @@ impl Config {
         }
         absolute(&cfg.root)?;
         absolute(&cfg.engine)?;
+        if let Some(host) = &cfg.weight_editor_host {
+            token(host)?;
+            ensure!(
+                cfg.source_roots.len() == 1
+                    && cfg.source_grants.is_empty()
+                    && cfg.admission.is_none()
+                    && cfg.hy4_plan.is_none()
+                    && cfg.pinned_publication.is_none()
+                    && cfg.managed_settings.is_none()
+                    && cfg.hf_download.is_none()
+                    && cfg.backend_weight_download_root.is_none()
+                    && cfg.backend_weight_calibration_root.is_none(),
+                "Remote weight editor requires a dedicated worker and one model directory"
+            );
+        }
         if let Some(p) = &cfg.admission {
             absolute(p)?;
+        }
+        if let Some(plan) = &cfg.hy4_plan {
+            token(&plan.host)?;
+            absolute(&plan.source)?;
+            absolute(&plan.halo_tools)?;
+            ensure!(
+                cfg.source_roots.is_empty()
+                    && cfg.source_grants.is_empty()
+                    && cfg.admission.is_none()
+                    && cfg.pinned_publication.is_none()
+                    && cfg.managed_settings.is_none()
+                    && cfg.hf_download.is_none()
+                    && cfg.backend_weight_download_root.is_none()
+                    && cfg.backend_weight_calibration_root.is_none()
+                    && cfg.engine_env.is_empty()
+                    && !cfg.root.starts_with(&plan.source)
+                    && !plan.source.starts_with(&cfg.root),
+                "Hy4 planning requires a dedicated worker and separate state root"
+            );
         }
         if let Some(download) = &cfg.hf_download {
             download.validate()?;
@@ -557,6 +611,22 @@ impl Worker {
             token(&input.kind)?;
             absolute(&input.path)?;
         }
+        if let Some(host) = &self.cfg.weight_editor_host {
+            ensure!(
+                action == "start" && job.prompt.is_none()
+                    && matches!(job.kind.as_str(), "weight_inspect" | "weight_propose" | "weight_tune" | "weight_apply")
+                    && job.inputs.iter().all(|input| &input.host == host),
+                "Remote editor allows only direct weight jobs on its own host"
+            );
+        }
+        if self.cfg.hy4_plan.as_ref().map_or_else(
+            || job.options.get(hy4::OPTION).is_some(),
+            |plan| !plan.validate(&action, &job),
+        ) {
+            return Ok(Reply::error(
+                "Only the configured direct Hy4 metadata plan is allowed",
+            ));
+        }
         if let Some(r) = self.get(id)? {
             if let Some(old) = r.job {
                 ensure!(
@@ -891,6 +961,23 @@ impl Worker {
             .clone();
         ensure!(input.kind == original.kind, "resolved input kind changed");
         let job = r.job.as_ref().unwrap();
+        if let Some(plan) = &self.cfg.hy4_plan {
+            ensure!(
+                plan.validate(&r.action, job)
+                    && index == 0
+                    && provided.is_none()
+                    && input.host == original.host
+                    && input.path.as_os_str() == original.path.as_os_str(),
+                "Hy4 planning does not accept staged or substituted inputs"
+            );
+            input.extra.clear();
+            input
+                .extra
+                .insert("integrity_basis".into(), json!("hy4_metadata_only"));
+            r.inputs.insert(index, input.clone());
+            self.put(id, &r)?;
+            return Ok(to_value(input)?);
+        }
         let standalone = standalone_gguf(job);
         ensure!(
             !standalone || provided.is_none(),
@@ -1202,6 +1289,27 @@ impl Worker {
     }
 
     fn handle(&self, request: Rpc) -> Result<Value> {
+        ensure!(
+            self.cfg.weight_editor_host.is_none()
+                || !matches!(&request,
+                    Rpc::Plan { .. } | Rpc::Seal { .. } | Rpc::Write { .. }
+                    | Rpc::Cleanup { .. } | Rpc::Read { .. } | Rpc::Describe { .. }
+                ),
+            "Remote editor does not permit transfer or cache operations"
+        );
+        ensure!(
+            self.cfg.hy4_plan.is_none()
+                || matches!(
+                    &request,
+                    Rpc::Prepare { .. }
+                        | Rpc::Resolve { .. }
+                        | Rpc::Start { .. }
+                        | Rpc::Status { .. }
+                        | Rpc::Cancel { .. }
+                        | Rpc::Finish { .. }
+                ),
+            "Hy4 metadata worker does not support this operation"
+        );
         // Reads/description may hash large files; they never mutate durable state.
         let request = match request {
             Rpc::Describe { input } => {
@@ -1490,6 +1598,10 @@ fn main() {
                     } => {
                         ensure!(index < count && count <= 128, "invalid input index");
                         let w = Worker::open()?;
+                        ensure!(
+                            w.cfg.hy4_plan.is_none(),
+                            "Hy4 metadata worker does not describe bundles"
+                        );
                         let (p, root) =
                             w.source(&input.path).context("Source input unavailable")?;
                         let mut emit = |detail: &ProgressDetail| -> Result<()> {

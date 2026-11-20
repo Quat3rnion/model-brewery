@@ -17,6 +17,8 @@ pub(super) struct Policy {
     #[serde(default)]
     pub weight_editor: Option<bool>,
     #[serde(default)]
+    pub remote_editor: Option<crate::remote_edit::Receipt>,
+    #[serde(default)]
     pub model_directories: Vec<brewery_worker::source_grants::SourceGrant>,
 }
 
