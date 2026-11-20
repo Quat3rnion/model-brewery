@@ -598,6 +598,30 @@ encoder revision. It lists only types that the encoder can write. It has no
 `IQ1_XXS`, and it has no F32 preset. A name that is not in the catalog is
 refused.
 
+**ROCmFPX presets and tensor types.** The catalog also lists five presets from
+a separate encoder. It pins `charlie12345/ROCmFPX` to commit
+`fb08d7cdb67082ddda15a25e64dc7ec413afc41c`. The table separates each GGUF
+`general.file_type` value from its per-tensor GGML type ID.
+
+| Preset | `general.file_type` | Fork tensor type and GGML ID | Bytes per 32 weights |
+| --- | ---: | --- | ---: |
+| `Q3_0_ROCMFPX` | 112 | `Q3_0_ROCMFPX` (104) | 14 |
+| `Q4_0_ROCMFP4` | 100 | `Q4_0_ROCMFP4` (100) | 18 |
+| `Q4_0_ROCMFP4_FAST` | 103 | `Q4_0_ROCMFP4_FAST` (101) | 17 |
+| `Q6_0_ROCMFPX` | 110 | `Q6_0_ROCMFPX` (102) | 26 |
+| `Q8_0_ROCMFPX` | 111 | `Q8_0_ROCMFPX` (103) | 33 |
+
+These five fork types are the only ROCmFPX tensor overrides. Each override
+must use one exact tensor name and one exact type from the catalog. The engine
+escapes the tensor name and anchors the match before it calls the quantizer.
+No ROCmFPX type requires an imatrix. A ROCmFPX selection must emit at least
+one fork tensor type. The engine refuses a dry run that emits none.
+
+A stock preset, such as `Q8_0`, can carry an exact ROCmFPX tensor override.
+That selection uses the fork encoder. The pinned fork does not
+define stock `Q2_0` (GGML type ID 42). The catalog excludes `Q2_0` from
+ROCmFPX selections. Other stock presets and tensor types remain available.
+
 **Precision and mixed presets are separate things.** A *precision* preset
 (`F16`, `BF16`) stores every weight in one floating-point type. It takes no
 tensor override. A *mixed* preset (for example `Q4_K_M`) lets the quantizer
@@ -627,11 +651,81 @@ is off by default.
 | `capabilities.gguf_output` | dispatch host entry | `true` allows GGUF output from a GGUF source. |
 | `capabilities.gguf_hf_output` | dispatch host entry | `true` also allows an HF source. It has an effect only if `gguf_output` is `true`. |
 | `capabilities.gguf_safetensors_output` | dispatch host entry | `true` allows standalone SafeTensors with registered `assets`. It is false by default and requires `gguf_output`. Production workers do not have this capability enabled. |
+| `capabilities.gguf_rocmfpx_output` | dispatch host entry | `true` is required for a ROCmFPX preset or tensor override. The worker also needs `gguf_output` and the capability for the source type. |
 | `BREWERY_GGUF_QUANTIZER` | engine | Absolute path of a regular, CPU-only `llama-quantize`. The engine runs it offline with a fixed, cleaned environment. |
+| `BREWERY_GGUF_ROCMFPX_QUANTIZER` | engine | Absolute path of a separate, self-contained CPU ROCmFPX quantizer executable. Do not use the stock quantizer path. |
+| `BREWERY_GGUF_ROCMFPX_SHA256` | engine | Lowercase SHA-256 digest of the ROCmFPX quantizer. The engine checks the digest and runs a private copy of the verified binary. |
 | `BREWERY_GGUF_HF_EXPORTER` | engine | Required for HF and standalone SafeTensors sources. Unused for GGUF sources. |
+
+ROCmFPX jobs use the independent `llama-quantize-rocmfpx` encoder. A worker
+must report `capabilities.gguf_rocmfpx_output: true` and have both ROCmFPX
+engine settings above. The controller binds each fork selection to the pinned
+revision. The worker checks the revision and settings. The engine rejects a
+binary whose SHA-256 does not match. Stock `llama-quantize` remains separate.
+
+**Staging a local worker.** `deploy/lan/stage_local_gguf.py` requires
+`--root`, `--release`, `--quantizer`, `--catalog` and `--dispatch`. Use a new
+staging directory for `--root`. Pass the approved stock CPU binary to
+`--quantizer`; the stager checks its pin. For ROCmFPX, pass all three fork flags:
+
+| Flag | Value |
+| --- | --- |
+| `--rocmfpx-quantizer` | Separate CPU quantizer from the pinned ROCmFPX source. |
+| `--rocmfpx-sha256` | `593e59cb7bcdd51ca4f9e7cac3ea42797c48dd1c18ac9b13552dd8c382ae3708` |
+| `--rocmfpx-probe-source` | Unquantized GGUF fixture, at most 8 MiB. |
+
+The stager checks the supplied binary against the pinned SHA-256. It runs a
+bounded, network-isolated convert and verify probe before it enables
+`capabilities.gguf_rocmfpx_output`. It writes `dispatch.proposed.json` and
+leaves the supplied dispatch file unchanged.
+
+Replace the sample paths below. Use a new `/arboretum` directory for `ROOT`.
+The `--catalog` value must point to this checkout's pinned catalog.
+
+```sh
+ROOT=/arboretum/rocmfpx-stage-unique-name
+RELEASE=/path/to/verified-release
+STOCK_QUANTIZER=/path/to/llama-quantize
+ROCMFPX_QUANTIZER=/path/to/llama-quantize-rocmfpx
+DISPATCH=/path/to/dispatch.json
+PROBE=/path/to/tiny-unquantized.gguf
+python3 -B deploy/lan/stage_local_gguf.py \
+  --root "$ROOT" \
+  --release "$RELEASE" \
+  --quantizer "$STOCK_QUANTIZER" \
+  --catalog crates/controller/src/gguf_catalog.json \
+  --dispatch "$DISPATCH" \
+  --rocmfpx-quantizer "$ROCMFPX_QUANTIZER" \
+  --rocmfpx-sha256 593e59cb7bcdd51ca4f9e7cac3ea42797c48dd1c18ac9b13552dd8c382ae3708 \
+  --rocmfpx-probe-source "$PROBE"
+```
 
 A worker that pins a source for release qualification refuses GGUF output.
 The API has no route to change these settings.
+
+**Reader and smoke check.** A GGUF file with ROCmFPX tensors needs a reader
+built from the same pinned fork revision. Do not use a stock `llama.cpp`
+reader for these files.
+
+The smoke script needs NumPy and `gguf-py` from the pinned fork checkout. Use
+CPU-only `llama-quantize-rocmfpx` and matching `llama-simple` builds. Set
+`OUT` to a new directory under `/arboretum`, then run:
+
+```sh
+ROCMFPX_SRC=/absolute/path/to/ROCmFPX
+ROCMFPX_QUANTIZER=/absolute/path/to/llama-quantize-rocmfpx
+ROCMFPX_READER=/absolute/path/to/llama-simple
+OUT=/arboretum/rocmfpx-smoke-unique-name
+PYTHONPATH="$ROCMFPX_SRC/gguf-py" python3 -B qualification/rocmfpx_smoke.py \
+  --quantizer "$ROCMFPX_QUANTIZER" \
+  --reader "$ROCMFPX_READER" \
+  --out "$OUT"
+```
+
+The script checks five base encodings, an exact tensor override, and CPU
+decode on a synthetic Qwen2 fixture. It checks the output file structure and
+block sizes. This is a format and runtime smoke check. It does not measure
+model quality or GPU performance, and it is not release qualification.
 
 **What the result proves.** The `convert` stage writes `converted.gguf`
 only after a structure check. `verify` then reads the registered output on

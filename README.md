@@ -29,6 +29,8 @@ Model Brewery is a work in progress. [Issues](https://github.com/Quat3rnion/mode
 
 ![Quantization profile with six of 48 layers selected and HT43 chosen for all roles](docs/images/quantization-profile.png)
 
+For ROCmFPX formats and worker requirements, see [ROCmFPX GGUF qualification](qualification/rocmfpx.md).
+
 **Choose checkpoint components.** Keep the embedded components or select replacements from the model library.
 
 ![The Convert page showing the tokenizer, vision tower, n-gram lookup and MTP head supplied by a Flash-Next checkpoint](docs/images/checkpoint-components.png)
