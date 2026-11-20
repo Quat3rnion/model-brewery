@@ -17,6 +17,7 @@
   import { REV_PREFIX } from '../lib/conversion';
   import GgufConvert from '../components/GgufConvert.svelte';
   import LayerRecipe from '../components/LayerRecipe.svelte';
+  import Hy4Plan from '../components/Hy4Plan.svelte';
   import { conversions, ConversionStarter } from '../lib/conversions.svelte';
   import { buildConversion, isActiveConversion } from '../lib/conversion';
 
@@ -267,6 +268,8 @@
     </div>
     {/if}
   </section>
+
+  <Hy4Plan bind:sourceId={form.source} />
 
   <section class="panel" id="conversion-runs" aria-labelledby="runs-h">
     <header><h2 id="runs-h">Conversions <span class="muted num small">({runs.length})</span></h2></header>
