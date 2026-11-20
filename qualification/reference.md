@@ -22,22 +22,29 @@ scripts are for regenerating vectors, not for running the kernels.
 These results do not enable a worker, verify model generation, or qualify a
 conversion for release.
 
-`native/exl3` has a baseline CPU encoder and a C ABI for packed forward. The
-encoder writes one 128-by-128 input-major F32 block to a **new** SafeTensors
-file. It does not reproduce the upstream calibrated quantizer. Forward reads
-aligned layers with co-located companions; it does not load a model or run a
-token generator. Build with C++17 and json-c. For example:
+### Native EXL3 checkpoint operation
 
-```sh
-make -C native/exl3 test-cpu
-make -C native/exl3 CUDA_ARCH=sm_120 test-cuda
-make -C native/exl3 HIP_ARCH=gfx1036 test-rocm
-native/exl3/build/exl3-checkpoint --help
-```
+Use `make -C native/exl3 test-cpu` with a C++17 compiler, `pkg-config` and
+json-c. Set `TMPDIR` to a writable scratch directory. On a matching GPU,
+use `test-cuda CUDA_ARCH=sm_120` or `test-rocm HIP_ARCH=gfx1036` instead.
+Use separate `BUILD` directories when changing architectures. CUDA needs
+`nvcc`; ROCm needs `hipcc` or a HIP-enabled Clang with its SDK and runtime.
+The core library does not link json-c. The CLI uses json-c to read
+SafeTensors headers.
 
-Use distinct `BUILD` directories when changing device architectures. Select
-the backend explicitly: an unavailable backend fails instead of running on
-CPU. Separately, the [GGUF ternary tests](../native/gguf-ternary/RESULTS.md)
+`exl3-checkpoint encode mul1 3 layer weights.f32 new.safetensors` encodes
+one 128-by-128 **input-major**, little-endian FP32 matrix at 1.5 bits per
+weight. The encoder uses a bounded CPU beam search, not the calibrated
+upstream optimizer. The integer argument is twice the bit rate: even
+values 2 through 16 select 1 through 8 bits for all three codebooks;
+3, 5 and 7 select the additional fractional rates for MUL1.
+`exl3-checkpoint forward cpu new.safetensors layer x.f32 new-y.f32`
+applies that layer to a little-endian FP32 vector. For CUDA or ROCm, use
+the matching `-cuda` or `-rocm` executable and select `cuda` or `rocm`
+instead of `cpu`. The CLI rejects an unavailable backend instead of running
+on CPU. It will not replace an existing output.
+
+Separately, the [GGUF ternary tests](../native/gguf-ternary/RESULTS.md)
 exercise direct CUDA and HIP operations for `TQ1_0` and `TQ2_0`. Their
 success does not change the pinned stock ggml CUDA graph's rejection of both.
 
