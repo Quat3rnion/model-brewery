@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import struct
@@ -58,7 +59,7 @@ def write_safetensors(path, tensors):
     path.write_bytes(struct.pack("<Q", len(raw)) + raw + payload)
 
 
-def llama_fixture(assets):
+def llama_fixture(assets, *, trellis=False):
     assets.mkdir()
     config = {
         "architectures": ["LlamaForCausalLM"], "model_type": "llama",
@@ -66,6 +67,8 @@ def llama_fixture(assets):
         "num_key_value_heads": 1, "num_hidden_layers": 3, "vocab_size": 16,
         "max_position_embeddings": 128, "tie_word_embeddings": False,
     }
+    if trellis:
+        config.update(hidden_size=128, intermediate_size=256, num_key_value_heads=2)
     (assets / "config.json").write_text(json.dumps(config))
     (assets / "tokenizer.json").write_text(json.dumps({
         "version": "1.0", "truncation": None, "padding": None, "added_tokens": [],
@@ -89,6 +92,27 @@ def llama_fixture(assets):
         else:
             output = raw
         expected[name] = (target, shape, output)
+
+    if trellis:
+        for name, shape in (("model.embed_tokens.weight", [16, 128]),
+                            ("lm_head.weight", [16, 128]), ("model.norm.weight", [128])):
+            add(name, shape, [-0.5, 1.25] * (math.prod(shape) // 2), "BF16")
+        for layer in range(3):
+            for i, (suffix, shape) in enumerate((
+                ("self_attn.q_proj", [128, 128]), ("self_attn.k_proj", [128, 128]),
+                ("self_attn.v_proj", [128, 128]), ("self_attn.o_proj", [128, 128]),
+                ("mlp.gate_proj", [256, 128]), ("mlp.up_proj", [256, 128]),
+                ("mlp.down_proj", [128, 256]),
+            )):
+                # Known, BF16-exact weights; row 0 is dead, others have varying RMS.
+                values = [0.0 if r == 0 else
+                          (((r * 7 + c * 5 + (r ^ c) + layer * 11 + i * 19) % 37) - 18)
+                          * (1 + r % 4) / 64
+                          for r in range(shape[0]) for c in range(shape[1])]
+                add(f"model.layers.{layer}.{suffix}.weight", shape, values, "BF16")
+            for norm in ("input_layernorm", "post_attention_layernorm"):
+                add(f"model.layers.{layer}.{norm}.weight", [128], [1.25] * 128, "BF16")
+        return tensors, expected
 
     add("model.embed_tokens.weight", [16, 64], [1.5] * 1024, "BF16")
     add("model.norm.weight", [64], [0.75] * 64, "BF16")
@@ -138,7 +162,177 @@ def indexed_digest(files):
     ))
 
 
+def read_hgn_v2(raw):
+    """Independent HGN 1.1.0 header/table reader; no converter code or receipt."""
+    magic, version, count, table, data, size = struct.unpack_from("<4sIQQQQ", raw)
+    if (magic, version, table, size) != (b"HGN1", 2, 104, len(raw)) or data % 64:
+        raise ValueError("invalid HGN header")
+    tensors, minimum = {}, data
+    for at in range(table, table + 160 * count, 160):
+        name, dtype, rank, *fields = struct.unpack_from("<96sII4qQQII", raw, at)
+        name = name.rstrip(b"\0").decode("ascii")
+        shape, offset, length, checksum, variant = fields[:rank], *fields[4:]
+        if offset < minimum or offset % 64 or offset + length > size or name in tensors:
+            raise ValueError("invalid HGN tensor table")
+        minimum = offset + length
+        payload = raw[offset:minimum]
+        xor32 = 0
+        for word, in struct.iter_unpack("<I", payload + b"\0" * (-length % 4)):
+            xor32 ^= word
+        if xor32 != checksum:
+            raise ValueError(f"HGN checksum mismatch: {name}")
+        tensors[name] = dtype, variant, shape, payload, offset
+    return tensors
+
+
+def decode_trellis(payload, rows, cols, bits, su, sv):
+    """Decode circular states and invert the Hadamards from STORAGE.md, not Rust."""
+    matrix = [[0.0] * cols for _ in range(rows)]
+    limit = 256 * bits
+    tile = 0
+    for row_band in range(0, rows, 128):
+        for col in range(0, cols, 16):
+            for row in range(row_band, row_band + 128, 16):
+                words = struct.unpack_from(f"<{8 * bits}I", payload, tile)
+                tile += 32 * bits
+                stream = "".join(f"{word:032b}" for word in words)
+                cyclic = stream[limit - 16:] + stream
+                for i in range(256):
+                    end = bits * (i + 1)
+                    state = int(cyclic[end:end + 16], 2)
+                    a = sum(((state * 0x83DCD12D) & 0xFFFFFFFF).to_bytes(4, "little"))
+                    value, = struct.unpack("<e", struct.pack("<e", (1774 * a - 905216) / 2**18))
+                    matrix[row + (i // 8) % 16][col + 8 * (i // 128) + i % 8] = value
+
+    def butterfly(v):
+        for step in (1, 2, 4, 8, 16, 32, 64):
+            for start in range(0, 128, 2 * step):
+                for i in range(start, start + step):
+                    a, b = v[i], v[i + step]
+                    v[i], v[i + step] = a + b, a - b
+        return v
+
+    for n in range(0, rows, 128):
+        for k in range(0, cols, 128):
+            block = [butterfly(row[k:k + 128]) for row in matrix[n:n + 128]]
+            for c, col in enumerate(zip(*block)):
+                for r, value in enumerate(butterfly(list(col))):
+                    matrix[n + r][k + c] = (value / 128) * su[k + c] * sv[n + r]
+    return matrix
+
+
 class LayerRecipeHgnTests(unittest.TestCase):
+    @unittest.skipUnless(HELPER, "set BREWERY_LAYER_HGN_HELPER to the built upstream native adapter")
+    def test_trellis_overrides_write_real_native_payloads(self):
+        tmp = os.environ.get("TMPDIR", "/arboretum")
+        with tempfile.TemporaryDirectory(dir=tmp) as work:
+            root = Path(work)
+            assets = root / "assets"
+            tensors, _ = llama_fixture(assets, trellis=True)
+            source, recipe, output = root / "model.safetensors", root / "recipe.json", root / "bundle"
+            write_safetensors(source, tensors)
+            original = source.read_bytes()
+            recipe.write_text(json.dumps({
+                "schema": "brewery.layer-quant.v1", "source_sha256": sha(original),
+                "default_type": "BF16", "layers": {"0": "HT3", "1": "HT4"},
+            }))
+            result = run_export(source, recipe, output, "--assets", assets, helper=HELPER)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            model = output / "model.hgn"
+            file_bytes = model.read_bytes()
+            actual = read_hgn_v2(file_bytes)
+            receipt = json.loads((output / RECEIPT).read_bytes())
+            records = {row["name"]: row for row in receipt["tensors"]}
+            self.assertTrue(receipt["structural_reader_verified"])
+            self.assertFalse(receipt["runtime_load_verified"])
+            self.assertEqual(receipt["model"]["sha256"], sha(file_bytes))
+            self.assertEqual(receipt["trellis"]["spec_commit"], "79e75fd4ae7642478823525b0a3212951f584af5")
+            self.assertRegex(receipt["trellis"]["encoder_sha256"], r"^[0-9a-f]{64}$")
+            expected_names = set(tensors)
+            first = "model.layers.0.self_attn.q_proj.weight"
+            for name, (_, shape, raw) in tensors.items():
+                with self.subTest(tensor=name):
+                    dtype, variant, actual_shape, payload, _ = actual[name]
+                    self.assertEqual(actual_shape, shape)
+                    self.assertEqual(records[name]["source_payload_sha256"], sha(raw))
+                    self.assertEqual(records[name]["native_payload_sha256"], sha(payload))
+                    if len(shape) != 2 or not name.startswith(("model.layers.0.", "model.layers.1.")):
+                        self.assertEqual((dtype, variant, payload), (0, 0, raw))
+                        continue
+                    rows, cols = shape
+                    bits = 3 if name.startswith("model.layers.0.") else 4
+                    self.assertEqual((dtype, variant, len(payload)), (16, 0x1200 + 2 * bits, rows * cols * bits // 8))
+                    self.assertEqual(records[name]["native_type"], f"HT{bits}")
+                    self.assertGreater(len(set(payload)), 100)
+                    vectors = []
+                    for suffix, length in (("suh", cols), ("svh", rows)):
+                        companion = name.removesuffix("weight") + suffix
+                        expected_names.add(companion)
+                        vtype, vvariant, vshape, vraw, _ = actual[companion]
+                        self.assertEqual((vtype, vvariant, vshape, len(vraw)), (2, 0, [length], 2 * length))
+                        self.assertEqual(records[name]["rotation"][suffix], {
+                            "name": companion, "shape": [length], "native_type": "F16",
+                            "native_payload_sha256": sha(vraw),
+                        })
+                        vectors.append(struct.unpack(f"<{length}e", vraw))
+                    su, sv = vectors
+                    self.assertEqual(set(su), {-1.0, 1.0})
+                    source_values = [struct.unpack("<f", b"\0\0" + raw[i:i + 2])[0]
+                                     for i in range(0, len(raw), 2)]
+                    for row, scale in enumerate(sv):
+                        rms = math.sqrt(math.fsum(x * x for x in source_values[row * cols:(row + 1) * cols]) / cols)
+                        self.assertEqual(abs(scale), struct.unpack("<e", struct.pack("<e", rms))[0])
+                    decoded = decode_trellis(payload, rows, cols, bits, su, sv)
+                    self.assertEqual(decoded[0], [0.0] * cols)
+                    error = math.fsum((x - y)**2 for x, y in
+                                      zip(source_values, (v for row in decoded for v in row)))
+                    energy = math.fsum(x * x for x in source_values)
+                    self.assertLess(math.sqrt(error / energy), 0.18 if bits == 3 else 0.11)
+            self.assertEqual(set(actual), expected_names)
+            self.assertEqual(source.read_bytes(), original)
+            repeated = root / "repeat"
+            result = run_export(source, recipe, repeated, "--assets", assets, helper=HELPER)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((repeated / "model.hgn").read_bytes(), file_bytes)
+            corrupted = bytearray(file_bytes)
+            corrupted[actual[first][4] + 43] ^= 1
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                read_hgn_v2(corrupted)
+            corrupt = root / "corrupt.hgn"
+            corrupt.write_bytes(corrupted)
+            inspect = subprocess.run([HELPER, "inspect", corrupt], capture_output=True, text=True)
+            self.assertNotEqual(inspect.returncode, 0)
+            self.assertIn("checksum mismatch", inspect.stderr)
+
+    def test_trellis_rejects_misaligned_gqa_rows_and_nonlayer_types(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR", "/arboretum")) as work:
+            root = Path(work)
+            assets = root / "assets"
+            tensors, _ = llama_fixture(assets, trellis=True)
+            config = assets / "config.json"
+            config.write_text(json.dumps({**json.loads(config.read_bytes()), "num_key_value_heads": 1}))
+            for name, (dtype, shape, raw) in list(tensors.items()):
+                if name.endswith(("k_proj.weight", "v_proj.weight")):
+                    tensors[name] = (dtype, [shape[0] // 2, shape[1]], raw[:len(raw) // 2])
+            source, recipe, output = root / "model.safetensors", root / "recipe.json", root / "bundle"
+            write_safetensors(source, tensors)
+            for layers, default, message in (
+                ({"0": "HT3"}, "BF16", "HT3 requires rows and columns divisible by 128: model.layers.0.self_attn.k_proj.weight"),
+                ({"0": "HT4"}, "BF16", "HT4 requires rows and columns divisible by 128: model.layers.0.self_attn.k_proj.weight"),
+                ({}, "HT4", "layer overrides only"),
+                ({"0": "HT43"}, "BF16", "HT43 is a profile, not a codec"),
+                ({"0": "I4R"}, "BF16", "requests 'I4R'"),
+            ):
+                with self.subTest(layers=layers, default=default):
+                    recipe.write_text(json.dumps({
+                        "schema": "brewery.layer-quant.v1", "source_sha256": sha(source.read_bytes()),
+                        "default_type": default, "layers": layers,
+                    }))
+                    result = run_export(source, recipe, output, "--assets", assets)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stderr)
+                    self.assertFalse(output.exists())
+
     def test_qwen2_rejects_narrow_vectors_and_missing_bias(self):
         with tempfile.TemporaryDirectory(dir="/arboretum") as work:
             root = Path(work)

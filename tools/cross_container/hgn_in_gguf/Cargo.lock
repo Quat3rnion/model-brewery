@@ -61,6 +61,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 [[package]]
 name = "bf16-to-hgn"
 version = "0.1.0"
+source = "git+https://github.com/Quat3rnion/bf16-to-hgn.git?rev=eaa15cb465410c95adf355f3208a34a95d6e81b9#eaa15cb465410c95adf355f3208a34a95d6e81b9"
 dependencies = [
  "anyhow",
  "cc",

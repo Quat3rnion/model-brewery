@@ -10,6 +10,7 @@
   import type { JobDetail, JobSummary, Model } from '../lib/types';
   import { inventoryJob, readInventory, walkInventory } from '../lib/weightmap';
   import Submit from './Submit.svelte';
+  import { trellisProblem } from '../lib/trellis-layer';
 
   let { source, format, starter }: { source: Model; format: 'gguf' | 'hgn'; starter: ConversionStarter } = $props();
 
@@ -85,7 +86,8 @@
   });
 
   const common = ['BF16', 'F16', 'F32'] as const;
-  type OutputType = typeof common[number] | 'Q8_0' | 'Q8G64';
+  const trellis = ['HT3','HT4'] as const;
+  type OutputType = typeof common[number] | 'Q8_0' | 'Q8G64' | typeof trellis[number];
   const formatTypes = $derived<readonly OutputType[]>([...common, format === 'gguf' ? 'Q8_0' : 'Q8G64']);
   let defaultType = $state<OutputType>('BF16');
   let overrides = $state<Record<number, OutputType | ''>>({});
@@ -99,11 +101,19 @@
     return t.shape.length === 2 && Number.isSafeInteger(layer) ? [layer] : [];
   })))].sort((a, b) => a - b) : []);
   const sourceSha = $derived(complete ? inventory.pages[0].source_sha256 : null);
-  const incompatible = $derived([...new Set([defaultType, ...layers.map(layer => overrides[layer])])]
-    .filter(type => type && !formatTypes.includes(type)));
+  const trellisIssues = $derived.by(() => {
+    if (format !== 'hgn') return {};
+    const byName = new Map(inventory.pages.flatMap(p=>p.tensors.map(t=>[t.name,t] as const)));
+    return Object.fromEntries(layers.map(n=>[n,trellisProblem(n,byName)]));
+  });
+  const incompatible = $derived([...new Set([
+    ...(!formatTypes.includes(defaultType) ? [defaultType] : []),
+    ...layers.map(n=>overrides[n]).filter(type=>type && !formatTypes.includes(type) && !(format==='hgn' && (type==='HT3' || type==='HT4'))),
+  ])]);
+  const badGeometry = $derived(layers.some(n=>trellisIssues[n] && (overrides[n]==='HT3' || overrides[n]==='HT4')));
   const layerTypes = $derived(Object.fromEntries(layers.filter(layer => overrides[layer]).map(layer => [layer, overrides[layer]])));
   const tooMany = $derived(Object.keys(layerTypes).length > 256);
-  const recipe = $derived(!problem && sourceSha && layers.length && !incompatible.length && !tooMany ? {
+  const recipe = $derived(!problem && sourceSha && layers.length && !incompatible.length && !badGeometry && !tooMany ? {
     schema: 'brewery.layer-quant.v1',
     source_sha256: sourceSha,
     default_type: defaultType,
@@ -155,9 +165,12 @@
   }
 </script>
 
-{#snippet typeOptions(value: OutputType | '')}
+{#snippet typeOptions(value: OutputType | '', layer?: number)}
   {#each formatTypes as type (type)}<option value={type}>{type}</option>{/each}
-  {#if value && !formatTypes.includes(value)}
+  {#if layer !== undefined && format === 'hgn'}
+    {#each trellis as type}<option value={type} disabled={!!trellisIssues[layer]}>{type}</option>{/each}
+  {/if}
+  {#if value && !formatTypes.includes(value) && !(layer !== undefined && format === 'hgn' && (value === 'HT3' || value === 'HT4'))}
     <option {value} disabled>{value} (not supported for {format.toUpperCase()})</option>
   {/if}
 {/snippet}
@@ -179,13 +192,14 @@
       </select>
     </label>
     {#each layers as layer (layer)}
-      <label class="field">
-        Layer {layer} type
-        <select class="input" bind:value={overrides[layer]}>
+      <div class="field">
+        <label for="recipe-layer-{layer}">Layer {layer} type</label>
+        <select id="recipe-layer-{layer}" class="input" aria-describedby={trellisIssues[layer] ? `ht-help-${layer}` : undefined} bind:value={overrides[layer]}>
           <option value="">Default ({defaultType})</option>
-          {@render typeOptions(overrides[layer] ?? '')}
+          {@render typeOptions(overrides[layer] ?? '', layer)}
         </select>
-      </label>
+        {#if trellisIssues[layer]}<span class="hint" id="ht-help-{layer}">HT3/HT4 unavailable. {trellisIssues[layer]}</span>{/if}
+      </div>
     {/each}
   </div>
   {#if incompatible.length}

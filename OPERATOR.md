@@ -36,7 +36,43 @@ HGN tracing, dataset preparation, and fine-tuning are not in v1.
 - [Managed benchmarks](#managed-benchmarks)
 - [Web settings and administration](#web-settings-and-administration)
 - [Offline usage and profile preview](#offline-usage-and-profile-preview)
+- [Trellis weight formats](#trellis-weight-formats)
 - [Weight edit tools](#weight-edit-tools-fixtures-only)
+
+## Trellis weight formats
+
+A bit width does not identify a codec. Match the stored tensor type, its
+companion data, and the reader. Use the table to identify a format, not to
+infer that a worker can write it.
+
+| Family | What identifies the weights |
+| --- | --- |
+| Native HGN | `HT3` and `HT4` use dtype 16 with variants `0x1206` and `0x1208`, respectively. Both use `Su` and `Sv` companions and require matrix dimensions divisible by 128. `HT43` is a model profile, not a third tensor type. `ht_beam` sets the encoder search width, not the weight precision. |
+| [ik_llama.cpp KT](https://github.com/ikawrakow/ik_llama.cpp/blob/7c00f8788e303bfba2886138e288effb0fd5fbbf/ggml/include/ggml.h) | Fork tensor IDs are `IQ1_KT` = 158, `IQ2_KT` = 153, `IQ3_KT` = 154, and `IQ4_KT` = 155. Do not use model preset numbers as tensor IDs. These [sequence-generator formats](https://github.com/ikawrakow/ik_llama.cpp/pull/113) are not QTIP checkpoints. |
+| [Gyro Trellis GGUF](https://gitlab.com/agentionai-group/agention-gyro/-/blob/587a5269848eb07996c9c1433f9ad638604eb4d8/SPEC.md) | Agention specifies eight layouts: `TQK4` through `TQK7`, `TQ2_T`, and `TQP5` through `TQP7`. Its public reference encoder is an uncalibrated baseline, not the encoder used for its published models. The [ik reader integration](https://github.com/ikawrakow/ik_llama.cpp/pull/2812) supports six of the eight layouts, not `TQK4` or `TQK5`, and remaps their disk IDs on load. Keep the declared Hadamard rotation with the weights. Stock GGUF `TQ1_0` and `TQ2_0` are **ternary**, not trellis formats. |
+| [QTIP](https://github.com/Cornell-RelaxML/qtip), [EXL3](https://github.com/turboderp-org/exllamav3), [GLQ](https://github.com/cnygaard/glq) | These projects have distinct checkpoint layouts and readers. Keep codebooks, transforms, and scales with their packed weights. A target average bitrate is not the stored type of every matrix. GLQ's trellis path is distinct from its E8 lattice path. |
+
+For a layer override, check the actual stored type after export and decode it
+with a matching reader. Header inspection alone does not establish that a
+runtime can load the model. A successful decode does not establish model
+quality. Do not substitute another quantization if the requested writer,
+matrix geometry, companion data, or runtime is unavailable.
+
+For the native HGN layer recipe tool, build the CPU adapter from its locked
+manifest. The build needs a C++17 compiler and OpenMP (`libgomp` on Linux):
+
+```sh
+cargo build --locked --manifest-path tools/cross_container/hgn_in_gguf/Cargo.toml \
+  --bin brewery-layer-quant-hgn
+```
+
+Pass the resulting executable to `tools/layer_recipe_hgn.py --helper`.
+The inputs are a dense Llama or Qwen2 SafeTensors checkpoint, its
+source-bound recipe, and a new output directory. For a standalone file,
+also pass `--assets` with its matching configuration and tokenizer.
+Do not use this path for a fused rank-3 Flash-Next expert matrix.
+The receipt's `runtime_load_verified` field distinguishes a verified
+archive from a model that has run in Halogen.
 
 ## Crates
 

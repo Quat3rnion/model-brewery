@@ -23,9 +23,14 @@ from weight_safetensors import (
 SCHEMA = "brewery.layer-quant.v1"
 RECEIPT = "layer-recipe.receipt.json"
 FLOAT_BYTES = {"F32": 4, "F16": 2, "BF16": 2}
-TARGETS = (*FLOAT_BYTES, "Q8G64")
+DEFAULT_TARGETS = (*FLOAT_BYTES, "Q8G64")
+TRELLIS_BITS = {"HT3": 3, "HT4": 4}
+TARGETS = (*DEFAULT_TARGETS, *TRELLIS_BITS)
 ARCHITECTURES = {"llama": "LlamaForCausalLM", "qwen2": "Qwen2ForCausalLM"}
 NATIVE_IDENTITY = "brewery-layer-recipe-structural-v1"
+TRELLIS_SPEC_COMMIT = "79e75fd4ae7642478823525b0a3212951f584af5"
+# bf16-to-hgn eaa15cb465410c95adf355f3208a34a95d6e81b9, as pinned in Cargo.lock.
+TRELLIS_ENCODER_SHA256 = "e686f78a79315addc20b312235b835108fced8474844832fb50b882a7f7458ff"
 ASSETS = {
     "config.json": 1 << 20, "tokenizer.json": 32 << 20,
     "tokenizer_config.json": 2 << 20, "generation_config.json": 1 << 20,
@@ -53,10 +58,14 @@ def parse_recipe(path):
          "invalid brewery.layer-quant.v1 recipe or source SHA-256")
     layers = recipe["layers"]
     need(isinstance(layers, dict) and len(layers) <= 256
-         and all(re.fullmatch("0|[1-9][0-9]{0,2}", layer) and target in TARGETS
-                 for layer, target in layers.items()), "invalid layer IDs or native HGN types")
-    need("default_type" not in recipe or recipe["default_type"] in TARGETS,
-         "invalid default native HGN type")
+         and all(re.fullmatch("0|[1-9][0-9]{0,2}", layer) for layer in layers),
+         "invalid layer IDs")
+    for layer, target in layers.items():
+        need(target in TARGETS,
+             f"unsupported native HGN types: layer {layer} requests {target!r}; "
+             f"supported types are {', '.join(TARGETS)} (HT43 is a profile, not a codec)")
+    need("default_type" not in recipe or recipe["default_type"] in DEFAULT_TARGETS,
+         "invalid default native HGN type; HT3 and HT4 are layer overrides only")
     return recipe, hashlib.sha256(raw).hexdigest()
 
 
@@ -215,6 +224,9 @@ def tensor_plan(tensors, recipe, config):
         target = per_matrix.get(name, t.dtype)
         if target == "Q8G64":
             need(t.shape[-1] % 64 == 0, f"Q8G64 probes require columns divisible by 64: {name}")
+        elif target in TRELLIS_BITS:
+            need(len(t.shape) == 2 and all(128 <= d <= 2**24 and d % 128 == 0 for d in t.shape),
+                 f"{target} requires rows and columns divisible by 128: {name} {t.shape}")
         else:
             need(FLOAT_BYTES[target] <= FLOAT_BYTES[t.dtype], f"widening is not supported: {name}")
         plan.append({"name": name, "shape": t.shape, "dtype": t.dtype, "target": target})
@@ -290,26 +302,52 @@ def make_receipt(recipe, recipe_sha, assets, plan, source_hashes, native, model,
     need(isinstance(native, dict) and native.get("version") == 2
          and native.get("identity") == NATIVE_IDENTITY and isinstance(native.get("tensors"), list),
          "invalid native Reader report")
-    rows = native["tensors"]
-    need(len(rows) == len(plan), "native HGN tensor count differs from source")
+    rows = {row["name"]: row for row in native["tensors"]}
+    need(len(rows) == len(native["tensors"]), "duplicate native HGN tensor name")
+    trellis = any(row["target"] in TRELLIS_BITS for row in plan)
+    if trellis:
+        need(native.get("spec_commit") == TRELLIS_SPEC_COMMIT
+             and native.get("encoder_sha256") == TRELLIS_ENCODER_SHA256,
+             "native trellis helper does not match the pinned encoder and HGN spec; rebuild with Cargo.lock")
     details = []
-    for expected, found in zip(plan, rows, strict=True):
+    for expected in plan:
         name = expected["name"]
+        found = rows.pop(name, None)
         target, src = expected["target"], expected["dtype"]
-        need(found["name"] == name and found["shape"] == list(expected["shape"])
+        need(found is not None and found["shape"] == list(expected["shape"])
              and found["dtype"] == target, f"native HGN tensor metadata mismatch: {name}")
         digest = found["sha256"]
         need(isinstance(digest, str) and re.fullmatch("[0-9a-f]{64}", digest),
              f"invalid native HGN payload hash: {name}")
         original = source_hashes[name]
         need(src != target or digest == original, f"unchanged HGN payload differs: {name}")
-        details.append({"name": name, "shape": expected["shape"], "source_type": src,
-                        "native_type": target, "source_payload_sha256": original,
-                        "native_payload_sha256": digest})
+        detail = {"name": name, "shape": expected["shape"], "source_type": src,
+                  "native_type": target, "source_payload_sha256": original,
+                  "native_payload_sha256": digest}
+        if target in TRELLIS_BITS:
+            bits = TRELLIS_BITS[target]
+            n, k = expected["shape"]
+            need(found["code"] == 16 and found["variant"] == 0x1200 + 2 * bits
+                 and found["size"] == n * k * bits // 8,
+                 f"native trellis ABI mismatch: {name}")
+            rotation = {}
+            for suffix, length in (("suh", k), ("svh", n)):
+                companion = name.removesuffix(".weight") + "." + suffix
+                plane = rows.pop(companion, None)
+                need(plane is not None and plane["dtype"] == "F16" and plane["code"] == 2
+                     and plane["variant"] == 0 and plane["shape"] == [length]
+                     and plane["size"] == 2 * length
+                     and isinstance(plane["sha256"], str) and re.fullmatch("[0-9a-f]{64}", plane["sha256"]),
+                     f"missing or invalid native rotation plane: {companion}")
+                rotation[suffix] = {"name": companion, "shape": [length], "native_type": "F16",
+                                    "native_payload_sha256": plane["sha256"]}
+            detail["rotation"] = rotation
+        details.append(detail)
+    need(not rows, "unexpected native HGN tensors")
     with open_path(model, OPEN_FILE) as fd:
         size = os.fstat(fd).st_size
         model_sha = hash_fd(fd, size)
-    return {
+    receipt = {
         "schema": "brewery.layer-quant-hgn.receipt.v1",
         "source_sha256": recipe["source_sha256"], "recipe_sha256": recipe_sha,
         "format": "native_hgn_v2", "architecture": config["architectures"][0],
@@ -319,6 +357,9 @@ def make_receipt(recipe, recipe_sha, assets, plan, source_hashes, native, model,
         "model": {"path": "model.hgn", "bytes": size, "sha256": model_sha},
         "asset_sha256": assets, "tensors": details,
     }
+    if trellis:
+        receipt["trellis"] = {"spec_commit": TRELLIS_SPEC_COMMIT, "encoder_sha256": TRELLIS_ENCODER_SHA256}
+    return receipt
 
 
 def main(argv=None):

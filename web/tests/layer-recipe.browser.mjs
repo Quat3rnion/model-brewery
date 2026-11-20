@@ -36,10 +36,14 @@ const jobs = new Map();
 const reads = [];
 const errors = [];
 const row = name => ({ name, dtype: 'BF16', shape: [64, 64], editable: true });
+const projections = ['self_attn.q_proj','self_attn.k_proj','self_attn.v_proj','self_attn.o_proj','mlp.gate_proj','mlp.up_proj','mlp.down_proj'];
+const denseLayer = (layer, kv) => projections.map((name,i)=>({
+  ...row(`model.layers.${layer}.${name}.weight`), shape: [[256,256],[kv,256],[kv,256],[256,256],[512,256],[512,256],[256,512]][i],
+}));
 function inventory(model, id, options, created_at = 0) {
   const { offset } = options;
   const items = model === standalone
-    ? [row('model.layers.0.self_attn.q_proj.weight'), row('model.layers.1.mlp.gate_proj.weight'), row('model.embed_tokens.weight')]
+    ? [...denseLayer(0,128), ...denseLayer(1,64), row('model.embed_tokens.weight')]
     : offset === 0
       ? Array.from({ length: 128 }, (_, i) => row(`model.layers.7.aux_${i}.weight`))
       : [row('model.layers.9.mlp.gate_proj.weight')];
@@ -49,7 +53,7 @@ function inventory(model, id, options, created_at = 0) {
     bundle_sha256: model === standalone ? 'c'.repeat(64) : treeSha,
   }], report: {
     mode: 'inventory', source_format: model.kind, source_sha256: sha256,
-    offset, total: model === standalone ? 3 : 129, next_offset: model === indexed && offset === 0 ? 128 : null,
+    offset, total: model === standalone ? items.length : 129, next_offset: model === indexed && offset === 0 ? 128 : null,
     tensors: items,
   } } };
 }
@@ -136,6 +140,25 @@ try {
     return JSON.parse(await readFile(await file.path(), 'utf8'));
   }
   await choose('Standalone weights');
+  await layer(0).waitFor();
+  if (process.env.SHOT_PREFIX) for (const width of [390,1280]) {
+    await page.setViewportSize({width,height:900});
+    await layer(0).scrollIntoViewIfNeeded();
+    await page.screenshot({path:`${process.env.SHOT_PREFIX}-${width}.png`});
+  }
+  for (const type of ['HT3','HT4']) {
+    await layer(0).selectOption(type);
+    assert.ok(await layer(1).getByRole('option',{name:type,exact:true}).isDisabled());
+    assert.equal(await page.getByLabel('Default type',{exact:true}).getByRole('option',{name:type,exact:true}).count(),0);
+    assert.deepEqual(await download(),{schema:'brewery.layer-quant.v1',source_sha256:fileSha,default_type:'BF16',layers:{0:type}});
+    assert.ok(await runButton.isDisabled());
+    await page.getByRole('radio',{name:'GGUF file'}).check();
+    assert.equal(await layer(0).inputValue(),type);
+    assert.ok(await page.getByRole('button',{name:'Download recipe'}).isDisabled());
+    assert.ok(await runButton.isDisabled());
+    await page.getByRole('radio',{name:'HGN archive'}).check();
+    assert.equal(await layer(0).inputValue(),type);
+  }
   await layer(0).selectOption('F16');
   await layer(1).selectOption('BF16');
   await page.getByRole('radio', { name: 'GGUF file' }).check();
