@@ -78,6 +78,21 @@ try {
   assert.equal(await page.evaluate(()=>document.activeElement?.id),'ssh-hosts-heading');
   await page.getByRole('button',{name:'Add SSH host'}).press('Enter');
   await page.getByRole('group',{name:'New SSH host'}).waitFor();
+  // Exercise keyboard activation after the policy renders but before the
+  // initial navigation's animation frames have run.
+  await page.clock.install({time:new Date('2026-01-01T12:00:00Z')});
+  await page.clock.pauseAt(new Date('2026-01-01T12:01:00Z'));
+  for (const width of [390,1280]) {
+    await page.setViewportSize({width,height:900});
+    await page.reload();
+    await panel.getByRole('button',{name:'Go to SSH hosts'}).press('Enter');
+    assert.equal(await page.evaluate(()=>document.activeElement?.id),'ssh-hosts-heading');
+    await page.clock.runFor(32); // mount frame, then section-focus frame
+    assert.equal(await page.evaluate(()=>document.activeElement?.id),'ssh-hosts-heading');
+    await page.keyboard.press('Tab');
+    assert.equal(await page.evaluate(()=>document.activeElement?.textContent),'Refresh SSH hosts');
+  }
+  await page.clock.resume();
   const runtimeReason='The controller is missing the remote editor runtime package.';
   host.weight_editor.setup={status:'needs_setup',model_directory:'/models/HF',credentials,reason:runtimeReason,blocker:'runtime'};
   await page.reload();

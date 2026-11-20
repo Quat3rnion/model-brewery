@@ -22,7 +22,9 @@
   let focusTarget = $state('');
   let mounted = false;
   $effect(() => {
-    if (status === 'ok' && focusTarget && policy) { const id=focusTarget; focusTarget=''; requestAnimationFrame(()=>document.getElementById(id)?.focus()); }
+    // Effects run after the policy DOM is updated. Do not defer this focus:
+    // a later frame could override a keyboard action in the rendered panel.
+    if (status === 'ok' && focusTarget && policy) { const id=focusTarget; focusTarget=''; document.getElementById(id)?.focus(); }
   });
   const policy = $derived(hostId ? st?.hosts?.find(h => h.id === hostId) : st?.hosts?.[0]);
   let confirmDeactivate = $state<string | null>(null);
@@ -61,9 +63,9 @@
       }
       if (window.location.hash === '#/settings/infrastructure') document.getElementById('infrastructure')?.focus();
     };
-    const frame = requestAnimationFrame(focusSection);
+    focusSection();
     window.addEventListener('hashchange', focusSection);
-    return () => { mounted = false; cancelAnimationFrame(frame); window.removeEventListener('hashchange', focusSection); };
+    return () => { mounted = false; window.removeEventListener('hashchange', focusSection); };
   });
 
   async function saveDirectory(change:DirectoryChange) {
