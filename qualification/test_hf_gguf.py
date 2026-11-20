@@ -239,6 +239,23 @@ class HfGguf(unittest.TestCase):
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn(b"missing or additional tensors", rejected.stderr)
 
+            (source / "model.safetensors").unlink()
+            source_types = {"model.norm.weight": "F32", "model.layers.0.self_attn.k_proj.weight": "F16"}
+            mixed = []
+            for name, dims in model:
+                dtype = source_types.get(name, "BF16")
+                size = (4 if dtype == "F32" else 2) * math.prod(dims)
+                mixed.append((name, dims, size, dtype))
+            fixture(source, "Qwen2ForCausalLM", mixed, sharded=True, **cfg)
+            indexed = json.loads(subprocess.run(argv, capture_output=True, check=True).stdout)
+            self.assertFalse(indexed["tensor_payloads_read"])
+            self.assertEqual(indexed["expected_gguf_tensors"], report["expected_gguf_tensors"])
+            dtypes = indexed["source_dtypes"]
+            self.assertEqual(dtypes.keys(), indexed["expected_gguf_tensors"].keys())
+            self.assertEqual(dtypes["output_norm.weight"], "F32")
+            self.assertEqual(dtypes["blk.0.attn_k.weight"], "F16")
+            self.assertEqual(dtypes["blk.0.attn_k.bias"], "BF16")
+
     def test_output_validator_rejects_inventory_loss_and_payload_truncation(self):
         read = runpy.run_path(str(CLI))["gguf_inventory"]
         u32 = lambda n: struct.pack("<I", n)

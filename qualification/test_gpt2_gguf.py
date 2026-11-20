@@ -26,6 +26,7 @@ class Gpt2Gguf(unittest.TestCase):
             "transformer.wte.weight": [2, 8], "transformer.wpe.weight": [16, 8],
             "transformer.ln_f.weight": [8], "transformer.ln_f.bias": [8], "lm_head.weight": [2, 8],
         }
+        self.dtypes = {}
         for part, shape in (
             ("ln_1", [8]), ("ln_2", [8]), ("attn.c_attn", [8, 24]), ("attn.c_proj", [8, 8]),
             ("mlp.c_fc", [8, 32]), ("mlp.c_proj", [32, 8]),
@@ -41,10 +42,12 @@ class Gpt2Gguf(unittest.TestCase):
         (self.assets / "config.json").write_text(json.dumps(self.config))
         header, offset = {}, 0
         for name, shape in self.shapes.items():
-            size = 4 * math.prod(shape)
-            header[name] = {"dtype": "F32", "shape": shape, "data_offsets": [offset, offset + size]}
+            dtype = self.dtypes.get(name, "F32")
+            size = {"F32": 4, "F16": 2, "BF16": 2}[dtype] * math.prod(shape)
+            header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + size]}
             offset += size
         raw = json.dumps(header).encode()
+        raw += b" " * (-len(raw) % 8)
         self.source.write_bytes(struct.pack("<Q", len(raw)) + raw + bytes(offset))
         args = [CLI, operation, "--source", self.source, "--assets", self.assets]
         if operation == "export":
@@ -68,6 +71,21 @@ class Gpt2Gguf(unittest.TestCase):
         self.assertEqual(dims["blk.0.attn_qkv.weight"], [8, 24])
         self.assertEqual(dims["blk.0.ffn_up.weight"], [8, 32])
         self.assertEqual(dims["blk.0.ffn_down.weight"], [32, 8])
+
+    def test_standalone_receipt_reports_dtypes_before_conversion(self):
+        self.dtypes.update({
+            "transformer.wpe.weight": "BF16",
+            "transformer.h.0.attn.c_attn.weight": "F16",
+            "transformer.h.0.attn.c_attn.bias": "BF16",
+        })
+        report = self.inspect()
+        self.assertFalse(report["tensor_payloads_read"])
+        dtypes = report["source_dtypes"]
+        self.assertEqual(dtypes.keys(), report["expected_gguf_tensors"].keys())
+        self.assertEqual(dtypes["position_embd.weight"], "BF16")
+        self.assertEqual(dtypes["blk.0.attn_qkv.weight"], "F16")
+        self.assertEqual(dtypes["blk.0.attn_qkv.bias"], "BF16")
+        self.assertEqual(dtypes["output.weight"], "F32")
 
     def test_no_bare_or_undeclared_head_inference(self):
         del self.shapes["lm_head.weight"]

@@ -187,10 +187,12 @@ def qwen2(config, tensors):
             add(f"model.layers.{i}.self_attn.{part}_proj.weight", f"blk.{i}.attn_{part}.weight", [width, hidden])
             add(f"model.layers.{i}.self_attn.{part}_proj.bias", f"blk.{i}.attn_{part}.bias", [width])
     need(expected.keys() == tensors.keys(), "unsupported Qwen2 tensor inventory (missing or additional tensors)")
-    for name, (_, shape) in expected.items():
+    source_dtypes = {}
+    for name, (gguf, shape) in expected.items():
         dtype, actual = tensors[name]
         need(dtype in ("BF16", "F16", "F32") and shape == actual, f"Qwen2 tensor mismatch: {name}")
-    return {gguf: dims[::-1] for gguf, dims in expected.values()}
+        source_dtypes[gguf] = dtype
+    return {gguf: dims[::-1] for gguf, dims in expected.values()}, source_dtypes
 
 
 def gpt2(config, tensors):
@@ -245,10 +247,12 @@ def gpt2(config, tensors):
     missing, extra = expected.keys() - tensors.keys(), tensors.keys() - expected.keys()
     need(not missing, f"missing GPT-2 tensor: {min(missing, default='')}")
     need(not extra, f"unknown GPT-2 tensor: {min(extra, default='')}")
-    for name, (_, shape, _) in expected.items():
+    source_dtypes = {}
+    for name, (dest, shape, _) in expected.items():
         dtype, dims = tensors[name]
         need(dtype in ("F32", "F16", "BF16") and dims == shape, f"GPT-2 tensor shape or dtype mismatch: {name}")
-    return {dest: dims for dest, _, dims in expected.values()}
+        source_dtypes[dest] = dtype
+    return {dest: dims for dest, _, dims in expected.values()}, source_dtypes
 
 
 def qwen4exp(arch, config, tensors, shard_names):
@@ -562,7 +566,8 @@ def inspect(source, outtype, paths=None):
         report["reason"] = "only text and at most 512 MiB of input are admitted"
     else:
         is_gpt2 = arch == "GPT2LMHeadModel"
-        report["expected_gguf_tensors"] = (gpt2 if is_gpt2 else qwen2)(config, tensors)
+        dims, dtypes = (gpt2 if is_gpt2 else qwen2)(config, tensors)
+        report.update(expected_gguf_tensors=dims, source_dtypes=dtypes)
         if not {"tokenizer.json", "tokenizer_config.json"} <= files.keys():
             report["reason"] = "local tokenizer.json and tokenizer_config.json are required"
         else:

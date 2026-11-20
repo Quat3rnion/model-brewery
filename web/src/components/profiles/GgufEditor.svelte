@@ -96,6 +96,17 @@
     }) : null));
   const exactNames = $derived(new Set(tensors?.map(t => t.name)));
   const layers = $derived(tensors ? [...new Set(tensors.filter((t) => t.layer !== null).map((t) => t.layer as number))].sort((a, b) => a - b) : []);
+  const originalFormats = $derived.by(() => {
+    const groups = new Map<number | null, Set<string>>();
+    for (const t of tensors ?? native) {
+      const formats = groups.get(t.layer) ?? new Set<string>();
+      const type = 'dtype' in t ? t.dtype : t.currentType;
+      for (const f of (type ?? 'Not reported').split(' + ')) formats.add(f);
+      groups.set(t.layer, formats);
+    }
+    return [...groups].sort(([a], [b]) => (a ?? Infinity) - (b ?? Infinity))
+      .map(([layer, formats]) => ({layer, types: [...formats].sort().join(', ')}));
+  });
   const roles = $derived(tensors ? [...new Set(tensors.filter((t) => t.layer !== null).map((t) => t.role))].sort() : []);
 
   // Range tool
@@ -289,6 +300,14 @@
   </fieldset>
 
   {#if tensors?.length || native.length || Object.keys(overrides).length}
+    {#if originalFormats.length}
+      <details>
+        <summary>Original formats by layer</summary>
+        <dl>{#each originalFormats as group (group.layer)}
+          <dt>{group.layer === null ? 'Other tensors' : `Layer ${group.layer}`}</dt><dd>{group.types}</dd>
+        {/each}</dl>
+      </details>
+    {/if}
     <div class="field">
       <label for="{uid}-q">Search tensors and overrides</label>
       <input id="{uid}-q" class="input" type="search" bind:value={q} autocomplete="off" spellcheck="false" />
@@ -299,7 +318,7 @@
     <div class="table-wrap">
       <table class="data stackable">
         <caption class="sr-only">Source tensors and GGUF overrides</caption>
-        <thead><tr><th scope="col">Tensor</th><th scope="col">Shape</th><th scope="col">Source type</th><th scope="col">Output type</th><th scope="col" class="r">Bytes</th></tr></thead>
+        <thead><tr><th scope="col">Tensor</th><th scope="col">Shape</th><th scope="col">Original format</th><th scope="col">Output type</th><th scope="col" class="r">Bytes</th></tr></thead>
         <tbody>
           {#each listed.slice(visiblePage * PAGE, visiblePage * PAGE + PAGE) as t (t.name)}
             {@const ov = Object.hasOwn(overrides, t.name) ? overrides[t.name] : ''}
@@ -307,7 +326,7 @@
             <tr class:changed={!!ov && t.kind !== 'native'}>
               <th scope="row" class="mono xs break">{t.name}{#if t.kind === 'typed'}<div><Badge tone="muted" label="Typed name, checked by the worker" /></div>{/if}</th>
               <td class="mono xs" data-label="Shape">{t.shape ? t.shape.join('×') : '—'}</td>
-              <td class="mono xs" data-label="Source type">{t.currentType ?? '—'}</td>
+              <td class="mono xs" data-label="Original format">{t.currentType ?? 'Not reported'}</td>
               <td data-label="Output type">
                 {#if t.kind === 'native'}
                   <span class="xs muted">Read-only</span>

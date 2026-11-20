@@ -59,12 +59,19 @@ export async function resolveGgufSource(
     const sha = validSha(input.sha256);
     if ((file && sha !== file) || (bundle && tree !== bundle)) continue;
     if (job.kind === 'inspect' || job.kind === 'plan') {
-      const tensors = ggufTensorsFromResult(result);
-      if (tensors?.length) return { tensors, planned: source.kind !== 'gguf' };
-      if (source.kind === 'hf') {
-        const main = plannedMainTensors(result);
-        if (main?.length) return { tensors: main, planned: true };
+      const measured = source.kind !== 'gguf' ? plannedMainTensors(result) : null;
+      const formats = new Map(measured?.map(t => [t.name, t.currentType]));
+      const tensors = ggufTensorsFromResult(result)?.map(t => ({...t,
+        currentType: source.kind === 'gguf' ? t.currentType : formats.get(t.name) ?? null}));
+      if (tensors?.length && tensors.some(t => !t.currentType) && tree && tree === sha) {
+        const fromPin = await published(tree);
+        if (fromPin) {
+          const pinnedFormats = new Map(fromPin.tensors.map(t => [t.name, t.currentType]));
+          for (const t of tensors) t.currentType ??= pinnedFormats.get(t.name) ?? null;
+        }
       }
+      if (tensors?.length) return { tensors, planned: source.kind !== 'gguf' };
+      if (measured?.length) return { tensors: measured, planned: true };
     }
     if (!current()) return null;
     if ((!inventory(job) || (report?.source_format === 'hf' && report.mode === 'inventory' && report.source_sha256 === tree)) &&
