@@ -1000,6 +1000,14 @@ builds on both ends after active jobs finish. Older workers do not
 implement the streaming request. Native conversion counters also require
 a converter built with `BREWERY_NATIVE_PROGRESS` support.
 
+If a Frame Hy4 job reports only `Converting model (…s elapsed)`, the
+worker has not reported a work counter. Elapsed time is not proof that
+another byte was converted. Do not estimate progress from the size of
+the partial GGUF: the encoder sets its final length before it copies
+the payload, then reads the data back to verify it. A full-size partial
+file does not show that either pass is complete. Leave the job running;
+updating the UI cannot recover counters that its worker never sent.
+
 If the POST response is lost, repeat the same request with the same key.
 A replay returns the original ID, not a second job. A `409` means the
 key was already used for a different request. `wait` prints the terminal

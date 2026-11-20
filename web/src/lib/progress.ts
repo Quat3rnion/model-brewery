@@ -115,6 +115,9 @@ function amount(d: ProgressDetail, v: number): string {
 }
 
 const PHASES: Record<string, string> = {
+  hy4_encode_gate: 'Encoding Hy4 gate rows',
+  hy4_copy_spans: 'Materializing Hy4 output',
+  hy4_verify_readback: 'Verifying Hy4 output',
   inventory_input: 'Inventorying input files',
   inventory_output: 'Inventorying engine output',
   hash_input: 'Hashing input',
@@ -153,6 +156,7 @@ export function phaseLabel(phase: string): string {
  * `*_values` count tensor values with the generic unit `items`.
  */
 export function unitLabel(d: Pick<ProgressDetail, 'phase' | 'unit'>): string {
+  if (d.phase === 'hy4_encode_gate' && d.unit === 'items') return 'rows';
   return d.unit === 'items' && d.phase.endsWith('_values') ? 'values' : d.unit;
 }
 

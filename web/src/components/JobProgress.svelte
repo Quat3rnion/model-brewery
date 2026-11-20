@@ -4,11 +4,10 @@
   // The rate comes from the shared tracker in lib/live.svelte.ts, so every
   // view of the same job shows the same measured value.
   import Progress from './Progress.svelte';
-  import { detailFraction, detailLines, legacyDetail, phaseEtaFor, shownDetail, threadsFor, unitLabel } from '../lib/progress';
+  import { STALE_MS, detailFraction, detailLines, legacyDetail, phaseEtaFor, shownDetail, threadsFor, unitLabel } from '../lib/progress';
   import { etaText, rateText } from '../lib/rate';
   import { describeStep } from '../lib/steps';
   import { live } from '../lib/live.svelte';
-  import { progressText } from '../lib/format';
   import type { JobSummary } from '../lib/types';
 
   // compact: bar, main line, then rate and age on one line. No input or file lines.
@@ -25,7 +24,6 @@
   });
   const threads = $derived(detail && !compact ? threadsFor(job, detail, live.now) : null);
   const fraction = $derived(detail ? detailFraction(detail) : null);
-  const legacy = $derived(progressText(job.progress));
   const footer = $derived(
     [sample ? 'Observed from the running process, not reported by the controller.' : '', lines?.age ?? '', fraction !== null ? 'Percent covers this phase only.' : '']
       .filter(Boolean)
@@ -39,10 +37,16 @@
     const m = shown ? { source: shown.source, detail: shown.detail } : legacyCounter ? { source: 'legacy' as const, detail: legacyCounter } : null;
     if (!m) return null;
     const view = live.rate(job.id, m.source, m.detail);
-    return { rate: rateText(view, unitLabel(m.detail)), eta: phaseEtaFor(job, view, m.detail, live.now) };
+    const stale = m.detail.updated_at_ms !== null && live.now - m.detail.updated_at_ms >= STALE_MS;
+    const eta = etaText(phaseEtaFor(job, view, m.detail, live.now), compact);
+    const waiting = m.detail.total !== null && !m.detail.estimated && m.detail.completed < m.detail.total && (!view || view.kind === 'warming' || (view.kind === 'rate' && view.perSecond > 0));
+    return {
+      rate: stale ? 'Measurement is stale.' : rateText(view, unitLabel(m.detail)),
+      eta: eta ?? (!stale && waiting ? 'Phase time left: waiting for measurements.' : 'Phase time left: unavailable.'),
+    };
   });
   const rate = $derived(measured?.rate ?? null);
-  const eta = $derived(etaText(measured?.eta ?? null, compact));
+  const eta = $derived(measured?.eta ?? null);
 </script>
 
 {#if detail && lines}
@@ -87,7 +91,7 @@
   <Progress progress={job.progress} {label} />
   {#if rate}<p class="xs num rate">{compact && eta ? `${rate} · ${eta}` : rate}</p>{/if}
   {#if eta && !compact}<p class="xs num rate">{eta}</p>{/if}
-  {#if !legacy && job.state === 'running'}<p class="xs muted">No measured progress yet.</p>{/if}
+  {#if !legacyCounter && measuring}<p class="xs muted">Work count, rate and phase time left are unavailable.</p>{/if}
 {/if}
 
 <style>
