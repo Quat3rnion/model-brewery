@@ -15,17 +15,21 @@ export const NEVER_OFFER = new Set(['IQ1_XXS']);
 export const IMATRIX_KIND = 'imatrix';
 
 export interface GgufPreset {
+  fork:boolean;
   id: string;
   label: string | null;
   requiresImatrix: boolean;
 }
 export interface GgufType {
+  fork:boolean;
   id: string;
   blockSize: number | null;
   blockBytes: number | null;
   requiresImatrix: boolean;
 }
 export interface GgufCatalog {
+  encoderRevision:string|null;
+  forkRevision:string|null;
   presets: GgufPreset[];
   types: GgufType[];
   typeById: Map<string, GgufType>;
@@ -39,12 +43,24 @@ export function parseGgufCatalog(v: unknown): GgufCatalog | null {
   const presets = o.presets
     .map(obj)
     .filter((p): p is Record<string, unknown> => !!p && typeof p.id === 'string' && !!p.id && !NEVER_OFFER.has(p.id as string))
-    .map((p) => ({ id: p.id as string, label: typeof p.label === 'string' ? p.label : null, requiresImatrix: p.requires_imatrix === true }));
+    .filter(p=>p.encoder_family===undefined || (p.encoder_family==='rocmfpx' && typeof o.rocmfpx_encoder_revision==='string' && !!o.rocmfpx_encoder_revision))
+    .map((p) => ({ id: p.id as string, label: typeof p.label === 'string' ? p.label : null, requiresImatrix: p.requires_imatrix === true, fork:p.encoder_family==='rocmfpx' }));
   const types = o.tensor_types
     .map(obj)
     .filter((t): t is Record<string, unknown> => !!t && typeof t.id === 'string' && !!t.id && !NEVER_OFFER.has(t.id as string))
-    .map((t) => ({ id: t.id as string, blockSize: pos(t.block_size), blockBytes: pos(t.block_bytes), requiresImatrix: t.requires_imatrix === true }));
-  return { presets, types, typeById: new Map(types.map((t) => [t.id, t])) };
+    .filter(t=>t.encoder_family===undefined || (t.encoder_family==='rocmfpx' && typeof o.rocmfpx_encoder_revision==='string' && !!o.rocmfpx_encoder_revision))
+    .map((t) => ({ id: t.id as string, blockSize: pos(t.block_size), blockBytes: pos(t.block_bytes), requiresImatrix: t.requires_imatrix === true, fork:t.encoder_family==='rocmfpx' }));
+  return { presets, types, typeById: new Map(types.map((t) => [t.id, t])), encoderRevision:typeof o.encoder_revision==='string'?o.encoder_revision:null, forkRevision:typeof o.rocmfpx_encoder_revision==='string'?o.rocmfpx_encoder_revision:null };
+}
+
+export const FORK_NOTICE='This output requires a matching ROCmFPX fork reader. Do not use a stock llama.cpp reader.';
+export function forkSelected(c:GgufCatalog,preset:string,overrides:Record<string,string>) {
+  return !!c.presets.find(p=>p.id===preset)?.fork || Object.values(overrides).some(t=>c.typeById.get(t)?.fork);
+}
+export function profileMatches(c:GgufCatalog,p:{preset:string;overrides:Record<string,string>;encoderRevision?:string;encoderFamily?:string}) {
+  if (!c.presets.some(row=>row.id===p.preset) || Object.values(p.overrides).some(t=>!c.typeById.has(t))) return false;
+  if (forkSelected(c,p.preset,p.overrides)) return p.encoderFamily==='rocmfpx' && !!c.forkRevision && p.encoderRevision===c.forkRevision;
+  return p.encoderFamily===undefined && (c.encoderRevision===null || p.encoderRevision===c.encoderRevision);
 }
 
 export interface GgufTensor {

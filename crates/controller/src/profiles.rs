@@ -137,6 +137,9 @@ impl NewProfile {
                 let selection = Selection::new(Some(&gguf.preset), gguf.overrides)?;
                 let mut identity = json!({"schema":1,"format":"gguf","name":gguf.name,"preset":selection.preset,
                     "overrides":selection.overrides,"encoder_revision":selection.encoder_revision});
+                if let Some(family) = selection.encoder_family {
+                    identity["encoder_family"] = json!(family);
+                }
                 identity.sort_all_objects();
                 let revision = format!(
                     "{:x}",

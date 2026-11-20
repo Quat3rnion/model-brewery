@@ -400,10 +400,14 @@ impl Store {
             let selection = row.gguf_selection(&inspect, profile.as_ref())?;
             selection.receipt(job, result)?;
             if job.id != *inspect_id {
-                conversion::same_component_source(
-                    inspected.as_ref().unwrap_or(&Value::Null),
-                    result,
-                )?;
+                let inspected = inspected.as_ref().unwrap_or(&Value::Null);
+                conversion::same_component_source(inspected, result)?;
+                if selection.encoder_family.is_some()
+                    && inspected["backend_receipt"]["executable_sha256"]
+                        != result["backend_receipt"]["executable_sha256"]
+                {
+                    return Err("ROCmFPX executable changed after inspection".into());
+                }
             }
             let (stage, artifact) = match job.kind.as_str() {
                 "inspect" => {

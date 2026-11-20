@@ -463,6 +463,7 @@ impl Host {
             "gguf_output",
             "gguf_hf_output",
             crate::gguf::STANDALONE_CAPABILITY,
+            crate::gguf::ROCMFPX_CAPABILITY,
         ] {
             let enabled = options.remove(capability).unwrap_or(false)
                 && (capability == "gguf_output" || capabilities.get("gguf_output") == Some(&true));
@@ -669,6 +670,12 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
     let components_allowed = |host: &Host| {
         if !job.format.is_hgn() {
             return host.capabilities["gguf_output"]
+                && match envelope.options.get("encoder_family") {
+                    None => true,
+                    Some(family) => {
+                        family == "rocmfpx" && host.capabilities[crate::gguf::ROCMFPX_CAPABILITY]
+                    }
+                }
                 && match inputs.first().map(|source| source.kind.as_str()) {
                     Some("hf") => host.capabilities["gguf_hf_output"],
                     Some("safetensors") => {

@@ -21,6 +21,7 @@ pub const SUGGEST_PATH_BYTES: usize = 16 * 1024;
 pub const SUGGEST_JSON_LIMIT: u64 = 48 * 1024;
 pub const PROGRESS_LIMIT: u64 = 4096;
 pub const PROGRESS_THREADS: usize = 16;
+pub const ROCMFPX_REVISION: &str = "fb08d7cdb67082ddda15a25e64dc7ec413afc41c";
 
 pub fn object() -> Value {
     json!({})

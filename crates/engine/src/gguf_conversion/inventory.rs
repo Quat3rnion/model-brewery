@@ -44,25 +44,52 @@ const TYPES: &[(u64, &str, u64, u64)] = &[
     (42, "Q2_0", 64, 18),
 ];
 
-pub(super) fn exact_dtype(name: &str) -> Option<u64> {
-    TYPES
-        .iter()
-        .find(|(id, n, _, _)| *n == name && !matches!(id, 0 | 24..=27))
-        .map(|entry| entry.0)
+// GGML tensor IDs, not llama_ftype IDs. These entries are private to
+// ROCmFPX fb08d7c (ggml.h, ggml/rocmfp4/rocmfp4.h, ggml/rocmfpx/rocmfpx.h).
+const ROCMFPX_TYPES: &[(u64, &str, u64, u64)] = &[
+    (100, "Q4_0_ROCMFP4", 32, 18),
+    (101, "Q4_0_ROCMFP4_FAST", 32, 17),
+    (102, "Q6_0_ROCMFPX", 32, 26),
+    (103, "Q8_0_ROCMFPX", 32, 33),
+    (104, "Q3_0_ROCMFPX", 32, 14),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Namespace {
+    Stock,
+    RocmFpx,
 }
 
-pub(super) fn dtype(name: &str) -> Option<u64> {
-    TYPES
-        .iter()
-        .find(|(_, n, _, _)| n.eq_ignore_ascii_case(name))
-        .map(|entry| entry.0)
-}
+impl Namespace {
+    fn types(self) -> impl Iterator<Item = &'static (u64, &'static str, u64, u64)> {
+        let stock = TYPES.iter();
+        let fork = match self {
+            Self::Stock => &[][..],
+            Self::RocmFpx => ROCMFPX_TYPES,
+        };
+        // Q2_0 (42) is not defined by the pinned fork.
+        stock
+            .filter(move |entry| self == Self::Stock || entry.0 != 42)
+            .chain(fork)
+    }
 
-fn spec(id: u64) -> Result<&'static (u64, &'static str, u64, u64)> {
-    TYPES
-        .iter()
-        .find(|entry| entry.0 == id)
-        .with_context(|| format!("unsupported GGUF tensor type {id}"))
+    pub(super) fn exact_dtype(self, name: &str) -> Option<u64> {
+        self.types()
+            .find(|(id, n, _, _)| *n == name && !matches!(id, 0 | 24..=27))
+            .map(|entry| entry.0)
+    }
+
+    fn dtype(self, name: &str) -> Option<u64> {
+        self.types()
+            .find(|(_, n, _, _)| n.eq_ignore_ascii_case(name))
+            .map(|entry| entry.0)
+    }
+
+    fn spec(self, id: u64) -> Result<&'static (u64, &'static str, u64, u64)> {
+        self.types()
+            .find(|entry| entry.0 == id)
+            .with_context(|| format!("unsupported GGUF tensor type {id}"))
+    }
 }
 
 pub(super) fn valid_name(name: &str) -> bool {
@@ -78,8 +105,8 @@ pub(super) struct Tensor {
 }
 
 impl Tensor {
-    pub(super) fn bytes(&self, ty: u64) -> Result<u64> {
-        let &(_, _, block, size) = spec(ty)?;
+    pub(super) fn bytes(&self, ty: u64, namespace: Namespace) -> Result<u64> {
+        let &(_, _, block, size) = namespace.spec(ty)?;
         ensure!(
             self.shape[0].is_multiple_of(block),
             "GGUF tensor row is incompatible with requested block size"
@@ -99,6 +126,7 @@ pub(super) struct Model {
     ftype: Option<u64>,
     align: u64,
     data: u64,
+    namespace: Namespace,
 }
 
 fn align(value: u64, align: u64) -> Result<u64> {
@@ -109,7 +137,7 @@ fn align(value: u64, align: u64) -> Result<u64> {
 }
 
 impl Model {
-    pub(super) fn open(path: &Path) -> Result<Self> {
+    pub(super) fn open(path: &Path, namespace: Namespace) -> Result<Self> {
         let meta = crate::integrity::canonical(path)?;
         ensure!(meta.is_file(), "expected regular GGUF file");
         let mut r = BufReader::new(File::open(path)?);
@@ -202,7 +230,7 @@ impl Model {
             let offset = number(&mut r, 8)?;
             let tensor = Tensor { shape, ty };
             let end = offset
-                .checked_add(tensor.bytes(ty)?)
+                .checked_add(tensor.bytes(ty, namespace)?)
                 .context("GGUF tensor extent overflow")?;
             ensure!(
                 offset % alignment == 0 && end <= meta.len(),
@@ -226,7 +254,20 @@ impl Model {
                 start >= end && next <= meta.len() - data,
                 "GGUF tensor payload overlaps or is truncated"
             );
+            if namespace == Namespace::RocmFpx {
+                ensure!(
+                    start == align(end, alignment)?,
+                    "ROCmFPX GGUF tensor payload has a gap"
+                );
+            }
             end = next;
+        }
+        if namespace == Namespace::RocmFpx {
+            let payload = meta.len() - data;
+            ensure!(
+                payload == end || payload == align(end, alignment)?,
+                "unexpected ROCmFPX GGUF trailing payload"
+            );
         }
         Ok(Self {
             architecture,
@@ -234,23 +275,34 @@ impl Model {
             ftype,
             align: alignment,
             data,
+            namespace,
         })
     }
 
-    pub(super) fn predicted_bytes(&self, types: &Types) -> Result<u64> {
+    pub(super) fn check_stock_source(&self) -> Result<()> {
+        // An output tagged with a private llama_ftype is not a floating
+        // source even if every tensor was retained in its original type.
+        ensure!(
+            !self.ftype.is_some_and(|id| (100..=119).contains(&id)),
+            "source GGUF cannot use a private ROCmFPX file type"
+        );
+        Ok(())
+    }
+
+    pub(super) fn predicted_bytes(&self, types: &Types, target: Namespace) -> Result<u64> {
         self.tensors.iter().try_fold(self.data, |n, (name, t)| {
-            n.checked_add(align(t.bytes(types[name])?, self.align)?)
+            n.checked_add(align(t.bytes(types[name], target)?, self.align)?)
                 .context("GGUF size estimate overflow")
         })
     }
 
-    pub(super) fn summary(&self, types: &Types) -> Value {
+    pub(super) fn summary(&self, types: &Types, target: Namespace) -> Value {
         json!(self
             .tensors
             .iter()
             .map(|(name, t)| json!({
-                "name":name,"shape":t.shape,"current_type":spec(t.ty).unwrap().1,
-                "planned_type":types.get(name).and_then(|id|spec(*id).ok()).map(|s|s.1)
+                "name":name,"shape":t.shape,"current_type":self.namespace.spec(t.ty).unwrap().1,
+                "planned_type":types.get(name).and_then(|id|target.spec(*id).ok()).map(|s|s.1)
             }))
             .collect::<Vec<_>>())
     }
@@ -259,6 +311,7 @@ impl Model {
         &self,
         log: &str,
         overrides: &BTreeMap<String, String>,
+        target: Namespace,
     ) -> Result<Types> {
         let mut result = BTreeMap::new();
         for line in log.lines() {
@@ -291,23 +344,24 @@ impl Model {
                 .split_once(", size = ")
                 .context("missing native GGUF plan size")?;
             ensure!(
-                dtype(current.trim()) == Some(tensor.ty),
+                self.namespace.dtype(current.trim()) == Some(tensor.ty),
                 "native GGUF plan input type differs"
             );
             let ty = if size.contains(" -> ") {
                 let (_, ty) = size
                     .rsplit_once('(')
                     .context("missing native target tensor type")?;
-                dtype(ty.strip_suffix(')').context("invalid native target type")?)
+                target
+                    .dtype(ty.strip_suffix(')').context("invalid native target type")?)
                     .context("unknown native target type")?
             } else {
                 tensor.ty
             };
-            tensor.bytes(ty)?;
+            tensor.bytes(ty, target)?;
             ensure!(
                 overrides
                     .get(name)
-                    .is_none_or(|requested| dtype(requested) == Some(ty)),
+                    .is_none_or(|requested| target.exact_dtype(requested) == Some(ty)),
                 "native plan did not honor exact tensor override {name}"
             );
             ensure!(

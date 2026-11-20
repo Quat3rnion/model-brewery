@@ -2,6 +2,7 @@
   "schema": 1,
   "format": "gguf",
   "encoder_revision": "184f6536024668e8908ab8c86033d56708e62b40",
+  "rocmfpx_encoder_revision": "fb08d7cdb67082ddda15a25e64dc7ec413afc41c",
   "default_preset": "Q4_K_M",
   "presets": [
     {
@@ -10,6 +11,7 @@
     },
     {
       "id": "Q2_0",
+      "rocmfpx_supported": false,
       "requires_imatrix": false
     },
     {
@@ -151,7 +153,12 @@
     {
       "id": "BF16",
       "requires_imatrix": false
-    }
+    },
+    {"id": "Q3_0_ROCMFPX", "requires_imatrix": false, "encoder_family": "rocmfpx"},
+    {"id": "Q4_0_ROCMFP4", "requires_imatrix": false, "encoder_family": "rocmfpx"},
+    {"id": "Q4_0_ROCMFP4_FAST", "requires_imatrix": false, "encoder_family": "rocmfpx"},
+    {"id": "Q6_0_ROCMFPX", "requires_imatrix": false, "encoder_family": "rocmfpx"},
+    {"id": "Q8_0_ROCMFPX", "requires_imatrix": false, "encoder_family": "rocmfpx"}
   ],
   "tensor_types": [
     {
@@ -254,6 +261,7 @@
     },
     {
       "id": "Q2_0",
+      "rocmfpx_supported": false,
       "type_id": 42,
       "block_size": 64,
       "block_bytes": 18,
@@ -342,6 +350,11 @@
       "block_size": 256,
       "block_bytes": 66,
       "requires_imatrix": false
-    }
+    },
+    {"id": "Q3_0_ROCMFPX", "type_id": 104, "block_size": 32, "block_bytes": 14, "requires_imatrix": false, "encoder_family": "rocmfpx"},
+    {"id": "Q4_0_ROCMFP4", "type_id": 100, "block_size": 32, "block_bytes": 18, "requires_imatrix": false, "encoder_family": "rocmfpx"},
+    {"id": "Q4_0_ROCMFP4_FAST", "type_id": 101, "block_size": 32, "block_bytes": 17, "requires_imatrix": false, "encoder_family": "rocmfpx"},
+    {"id": "Q6_0_ROCMFPX", "type_id": 102, "block_size": 32, "block_bytes": 26, "requires_imatrix": false, "encoder_family": "rocmfpx"},
+    {"id": "Q8_0_ROCMFPX", "type_id": 103, "block_size": 32, "block_bytes": 33, "requires_imatrix": false, "encoder_family": "rocmfpx"}
   ]
 }

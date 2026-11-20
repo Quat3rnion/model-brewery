@@ -8,6 +8,7 @@ use std::{collections::BTreeMap, sync::LazyLock};
 
 pub const CATALOG_JSON: &str = include_str!("gguf_catalog.json");
 pub const STANDALONE_CAPABILITY: &str = "gguf_safetensors_output";
+pub const ROCMFPX_CAPABILITY: &str = "gguf_rocmfpx_output";
 
 pub fn input_layout(inputs: &[Model], verify: bool) -> Result<Option<usize>, String> {
     let (source, mut remaining) = inputs.split_first().ok_or("GGUF source is required")?;
@@ -67,6 +68,7 @@ impl Format {
 #[derive(Deserialize)]
 struct Catalog {
     encoder_revision: String,
+    rocmfpx_encoder_revision: String,
     default_preset: String,
     presets: Vec<Entry>,
     tensor_types: Vec<Entry>,
@@ -76,13 +78,23 @@ struct Catalog {
 struct Entry {
     id: String,
     requires_imatrix: bool,
+    encoder_family: Option<EncoderFamily>,
+    rocmfpx_supported: Option<bool>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EncoderFamily {
+    Rocmfpx,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Selection {
     pub preset: String,
     pub overrides: BTreeMap<String, String>,
     pub encoder_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_family: Option<EncoderFamily>,
     pub requires_imatrix: bool,
 }
 
@@ -102,6 +114,8 @@ impl Selection {
             return Err("floating-point GGUF presets do not accept tensor overrides".into());
         }
         let mut requires_imatrix = preset.requires_imatrix;
+        let mut encoder_family = preset.encoder_family;
+        let mut rocmfpx_supported = preset.rocmfpx_supported != Some(false);
         for (name, choice) in &overrides {
             if name.is_empty()
                 || name.len() > 63
@@ -119,13 +133,49 @@ impl Selection {
                 .find(|t| t.id == *choice)
                 .ok_or("unknown GGUF tensor type")?;
             requires_imatrix |= entry.requires_imatrix;
+            encoder_family = encoder_family.or(entry.encoder_family);
+            rocmfpx_supported &= entry.rocmfpx_supported != Some(false);
         }
+        if encoder_family.is_some() && !rocmfpx_supported {
+            return Err("preset or tensor type is not supported by the ROCmFPX encoder".into());
+        }
+        let encoder_revision = match encoder_family {
+            None => &catalog.encoder_revision,
+            Some(EncoderFamily::Rocmfpx)
+                if catalog.rocmfpx_encoder_revision == brewery_worker::ROCMFPX_REVISION =>
+            {
+                &catalog.rocmfpx_encoder_revision
+            }
+            Some(EncoderFamily::Rocmfpx) => return Err("ROCmFPX catalog revision mismatch".into()),
+        };
         Ok(Self {
             preset: preset.id.clone(),
             overrides,
-            encoder_revision: catalog.encoder_revision.clone(),
+            encoder_revision: encoder_revision.clone(),
+            encoder_family,
             requires_imatrix,
         })
+    }
+
+    pub fn validate_revision(&self) -> Result<(), String> {
+        if *self != Self::new(Some(&self.preset), self.overrides.clone())? {
+            return Err(
+                "saved GGUF profile is incompatible with the current encoder catalog".into(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn matches_encoder(&self, options: &Map<String, Value>) -> bool {
+        match self.encoder_family {
+            Some(family) => {
+                options.get("encoder_family") == Some(&json!(family))
+                    && options.get("encoder_revision") == Some(&json!(self.encoder_revision))
+            }
+            None => {
+                !options.contains_key("encoder_family") && !options.contains_key("encoder_revision")
+            }
+        }
     }
 
     pub fn inputs(&self, inputs: &[Model], verify: bool) -> Result<Option<usize>, String> {
@@ -142,6 +192,10 @@ impl Selection {
             ("gguf_type".into(), json!(self.preset)),
             ("tensor_types".into(), json!(self.overrides)),
         ]);
+        if let Some(family) = self.encoder_family {
+            options.insert("encoder_family".into(), json!(family));
+            options.insert("encoder_revision".into(), json!(self.encoder_revision));
+        }
         if let Some(index) = imatrix {
             options.insert("imatrix".into(), json!(index));
         }
@@ -160,6 +214,15 @@ impl Selection {
             || !result["source_sha256"].as_str().is_some_and(valid_revision)
         {
             return Err("worker did not attest the selected GGUF stage and source".into());
+        }
+        if let Some(family) = self.encoder_family
+            && (result["backend_receipt"]["encoder_family"] != json!(family)
+                || result["backend_receipt"]["encoder_revision"] != self.encoder_revision
+                || !result["backend_receipt"]["executable_sha256"]
+                    .as_str()
+                    .is_some_and(valid_revision))
+        {
+            return Err("worker did not attest the pinned ROCmFPX encoder".into());
         }
         Ok(())
     }

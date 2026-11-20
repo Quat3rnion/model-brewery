@@ -5,7 +5,7 @@
   import { capability, hostName, modelLabel } from '../lib/format';
   import { profileStore } from '../lib/profiles.svelte';
   import { conversions, ConversionStarter } from '../lib/conversions.svelte';
-  import { buildGgufConversion, imatrixRequired, IMATRIX_KIND, type GgufCatalog } from '../lib/gguf';
+  import { buildGgufConversion, imatrixRequired, IMATRIX_KIND, forkSelected, profileMatches, FORK_NOTICE, type GgufCatalog } from '../lib/gguf';
   import { shortRev } from '../lib/profiles';
   import ModelSelect from './ModelSelect.svelte';
   import ComponentPicker from './ComponentPicker.svelte';
@@ -38,6 +38,7 @@
   $effect(()=>{void source; assets=''; imatrix='';});
   const rev = $derived(choice.startsWith('rev:') ? profileStore.ggufSaved.find((p) => p.revision === choice.slice(4)) : undefined);
   const preset = $derived(choice.startsWith('preset:') ? choice.slice(7) : '');
+  const fork = $derived(forkSelected(catalog, rev?.preset ?? preset, rev?.overrides ?? {}));
   const needsImatrix = $derived(rev ? imatrixRequired(catalog, rev.preset, rev.overrides) : !!catalog.presets.find((p) => p.id === preset)?.requiresImatrix);
   const built = $derived(
     buildGgufConversion(catalog, { source, sourceKind:src?.kind, assets, preset, revision: rev ? { revision: rev.revision, needsImatrix } : null, imatrix: needsImatrix ? imatrix : '', threads, host }),
@@ -45,6 +46,8 @@
   const target = $derived(hosts.find((h) => h.id === (host || src?.host)));
   const blockers = $derived.by(() => {
     const out = [...built.problems];
+    if (rev && !profileMatches(catalog,rev)) out.push('This profile does not match the current encoder catalog.');
+    if (fork && target?.capabilities?.gguf_rocmfpx_output!==true) out.push(target?.reasons?.gguf_rocmfpx_output ?? 'Choose a worker that reports ROCmFPX output support.');
     if (source && (!src || src.available===false || !['hf','gguf','safetensors'].includes(src.kind))) out.push('Choose an available HF checkpoint, standalone SafeTensors file or GGUF input.');
     if (src && !target) out.push('The controller did not report a worker for this source.');
     if (src && host && host!==src.host) out.push('Run on the host of the registered inputs.');
@@ -77,11 +80,11 @@
       <select id="gg-choice" class="input" bind:value={choice} aria-describedby="gg-choice-h" aria-required="true">
         <option value="" disabled>Choose a preset or profile</option>
         <optgroup label="llama.cpp presets">
-          {#each catalog.presets as p (p.id)}<option value="preset:{p.id}">{p.label ?? p.id}{p.requiresImatrix ? ' (needs imatrix)' : ''}</option>{/each}
+          {#each catalog.presets as p (p.id)}<option value="preset:{p.id}">{p.label ?? p.id}{p.fork ? ' · ROCmFPX' : ''}{p.requiresImatrix ? ' (needs imatrix)' : ''}</option>{/each}
         </optgroup>
         {#if profileStore.ggufSaved.length}
           <optgroup label="Saved GGUF profiles">
-            {#each profileStore.ggufSaved as p (p.revision)}<option value="rev:{p.revision}">{p.name} · {shortRev(p.revision)} ({p.preset} + {Object.keys(p.overrides).length})</option>{/each}
+            {#each profileStore.ggufSaved as p (p.revision)}<option disabled={!profileMatches(catalog,p)} value="rev:{p.revision}">{p.name} · {shortRev(p.revision)} ({p.preset} + {Object.keys(p.overrides).length}){profileMatches(catalog,p) ? '' : ' · incompatible revision'}</option>{/each}
           </optgroup>
         {/if}
       </select>
@@ -91,6 +94,7 @@
       </span>
     </div>
   </div>
+  {#if fork}<p class="note warn small">{FORK_NOTICE}</p>{/if}
   {#if standalone && src}
     <div class="field">
       <label for="gg-assets">Config and tokenizer assets (required)</label>

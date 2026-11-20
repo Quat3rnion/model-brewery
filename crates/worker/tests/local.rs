@@ -352,6 +352,42 @@ fn resolve_input(t: &Rig, id: &str, action: &str, kind: &str, index: usize, inpu
 }
 
 #[test]
+fn rocmfpx_admission_requires_the_current_revision_and_separate_pinned_tool() {
+    let t = Rig::new();
+    let mut opts = json!({
+        "output_format":"gguf", "gguf_type":"Q4_0_ROCMFP4",
+        "encoder_family":"rocmfpx", "encoder_revision":brewery_worker::ROCMFPX_REVISION
+    });
+    let prepare = |id, kind, options: &Value| {
+        t.rpc_raw(&json!({"op":"prepare","id":id,"action":"start","job":{
+            "kind":kind,"inputs":[{"host":"b","path":t.src.join("source.gguf"),"kind":"gguf"}],
+            "options":options
+        }}))["ok"]
+            .clone()
+    };
+    let mut config: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
+    config["engine_env"] = json!({"BREWERY_GGUF_QUANTIZER":"/usr/bin/true"});
+    fs::write(&t.b, config.to_string()).unwrap();
+    assert_eq!(prepare("stock-only", "inspect", &opts)["state"], "failed");
+    config["engine_env"]["BREWERY_GGUF_ROCMFPX_QUANTIZER"] = json!("/usr/bin/true");
+    config["engine_env"]["BREWERY_GGUF_ROCMFPX_SHA256"] = json!("a".repeat(64));
+    fs::write(&t.b, config.to_string()).unwrap();
+    assert_eq!(prepare("same-path", "inspect", &opts)["state"], "failed");
+    config["engine_env"]["BREWERY_GGUF_ROCMFPX_QUANTIZER"] = json!("/usr/bin/false");
+    fs::write(&t.b, config.to_string()).unwrap();
+    assert_eq!(
+        prepare("wrong-role", "weight_inspect", &opts)["state"],
+        "failed"
+    );
+    assert_eq!(prepare("fork-enabled", "inspect", &opts)["state"], "queued");
+    opts["encoder_revision"] = json!("stale");
+    assert_eq!(
+        prepare("wrong-revision", "inspect", &opts)["state"],
+        "failed"
+    );
+}
+
+#[test]
 fn standalone_gguf_admission_requires_config_and_direct_pinned_assets() {
     let t = Rig::new();
     let weights = t.src.join("weights.safetensors");

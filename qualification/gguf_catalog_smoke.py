@@ -221,7 +221,10 @@ def run_case(binary, out, name, mode, preset, calibration, exact, inputs):
 def smoke(binary, out):
     catalog = json.loads(CATALOG.read_text())
     need(catalog["encoder_revision"] == REVISION, "catalog changed encoder revision; review fixture expectations")
-    presets, exacts = catalog["presets"], catalog["tensor_types"]
+    # This oracle is linked to the stock reader. Fork-specific layouts
+    # have a separate quantizer and must be exercised by its matching reader.
+    presets, exacts = ([p for p in catalog[k] if not p.get("encoder_family")]
+                       for k in ("presets", "tensor_types"))
     need(len(presets) == len({p["id"] for p in presets}) == 37, "expected 37 unique global presets")
     need(len(exacts) == len({p["id"] for p in exacts}) == 27, "expected 27 unique exact types")
     inputs = {mode: inspect(out / f"{mode}-f32.gguf")[1] for mode in ("dense", "moe")}

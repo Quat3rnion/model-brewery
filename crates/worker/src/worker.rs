@@ -641,6 +641,42 @@ impl Worker {
                 Reply::error("This worker only runs Hugging Face download jobs"),
             );
         }
+        if job.options.get("encoder_family").is_some()
+            || job.options.get("encoder_revision").is_some()
+        {
+            let valid = action == "start"
+                && matches!(job.kind.as_str(), "inspect" | "plan" | "convert" | "verify")
+                && job.options["output_format"] == "gguf"
+                && job.options["encoder_family"] == "rocmfpx"
+                && job.options["encoder_revision"] == ROCMFPX_REVISION
+                && job.prompt.is_none()
+                && self.cfg.pinned_publication.is_none()
+                && !self
+                    .cfg
+                    .engine_env
+                    .contains_key("BREWERY_EXPECTED_SOURCE_SHA256")
+                && self
+                    .cfg
+                    .engine_env
+                    .get("BREWERY_GGUF_ROCMFPX_QUANTIZER")
+                    .is_some_and(|path| {
+                        Path::new(path).is_absolute()
+                            && self.cfg.engine_env.get("BREWERY_GGUF_QUANTIZER") != Some(path)
+                    })
+                && self
+                    .cfg
+                    .engine_env
+                    .get("BREWERY_GGUF_ROCMFPX_SHA256")
+                    .is_some_and(|sha| is_digest(sha));
+            if !valid {
+                return self.record_prepare(
+                    id,
+                    action,
+                    job,
+                    Reply::error("Worker does not support the pinned ROCmFPX GGUF encoder"),
+                );
+            }
+        }
         if standalone_gguf(&job) {
             let source = &job.inputs[0];
             let assets = if job.kind == "verify" { 2 } else { 1 };

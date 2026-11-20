@@ -228,6 +228,12 @@ else:
         gguf = envelope["options"].get("output_format") == "gguf"
         if gguf:
             result.update(output_format="gguf", gguf_type=envelope["options"]["gguf_type"], release_qualified=False)
+            if envelope["options"].get("encoder_family") == "rocmfpx":
+                result["backend_receipt"] = {
+                    "encoder_family": "rocmfpx",
+                    "encoder_revision": envelope["options"]["encoder_revision"],
+                    "executable_sha256": ("d" if kind == "plan" and (root / "changed-rocmfpx-tool").exists() else "c") * 64,
+                }
         if recipe := envelope["options"].get("profile_recipe"):
             result["custom_profile"] = {"revision": recipe["revision"], "release_qualified": False}
         if kind in ("inspect", "plan"):

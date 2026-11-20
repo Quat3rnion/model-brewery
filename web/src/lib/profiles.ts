@@ -273,6 +273,8 @@ export function parseProfiles(v: unknown, c: Catalog | null): SavedProfile[] {
 export const shortRev = (r: string) => r.slice(0, 10);
 
 export interface SavedGgufProfile {
+  encoderFamily?:string;
+  encoderRevision?:string;
   revision: string;
   name: string;
   preset: string;
@@ -289,7 +291,9 @@ export function parseGgufProfiles(v: unknown): SavedGgufProfile[] {
     const ov = obj(o.overrides) ?? {};
     const overrides: Record<string, string> = {};
     for (const k of Object.keys(ov).sort()) if (typeof ov[k] === 'string') overrides[k] = ov[k] as string;
-    out.push({ revision: o.revision, name: o.name, preset: o.preset, overrides, createdAt: num(o.created_at) });
+    out.push({ revision: o.revision, name: o.name, preset: o.preset, overrides, createdAt: num(o.created_at),
+      ...(typeof o.encoder_family==='string' ? {encoderFamily:o.encoder_family} : {}),
+      ...(typeof o.encoder_revision==='string' ? {encoderRevision:o.encoder_revision} : {}) });
   }
   return out.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
 }

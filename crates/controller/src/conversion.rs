@@ -97,6 +97,7 @@ impl Conversion {
                     .transpose()?;
                 Selection::new(preset, BTreeMap::new())?
             };
+            selection.validate_revision()?;
             selection.inputs(&inputs, false)?;
             Some(selection)
         } else {
@@ -263,15 +264,20 @@ impl Conversion {
         let overrides: BTreeMap<String, String> =
             serde_json::from_value(inspect.options["tensor_types"].clone())
                 .map_err(|_| "invalid stored GGUF overrides")?;
-        if let Some(profile) = profile {
+        let selection = if let Some(profile) = profile {
             let selection = profile.gguf().ok_or("stored GGUF profile missing")?;
             if selection.preset != preset || selection.overrides != overrides {
                 return Err("saved GGUF profile does not match workflow snapshot".into());
             }
-            Ok(selection)
+            selection.validate_revision()?;
+            selection
         } else {
-            Selection::new(Some(preset), overrides)
+            Selection::new(Some(preset), overrides)?
+        };
+        if !selection.matches_encoder(&inspect.options) {
+            return Err("GGUF workflow encoder revision does not match its snapshot".into());
         }
+        Ok(selection)
     }
 
     pub fn next(&mut self, job: &Job) {

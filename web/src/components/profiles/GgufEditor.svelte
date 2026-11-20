@@ -8,7 +8,7 @@
   import { profileStore } from '../../lib/profiles.svelte';
   import { formatBytes, formatTime, isTerminal, modelLabel, newestFirst } from '../../lib/format';
   import { parseGgufProfiles, shortRev, type SavedGgufProfile } from '../../lib/profiles';
-  import { buildGgufProfileBody, ggufTensorsFromResult, imatrixRequired, rangeOverrides, tensorBytes, type GgufCatalog, type GgufTensor } from '../../lib/gguf';
+  import { buildGgufProfileBody, ggufTensorsFromResult, imatrixRequired, rangeOverrides, tensorBytes, forkSelected, profileMatches, FORK_NOTICE, type GgufCatalog, type GgufTensor } from '../../lib/gguf';
   import Badge from '../Badge.svelte';
 
   let { catalog }: { catalog: GgufCatalog } = $props();
@@ -115,10 +115,11 @@
     }
   }
   function useInConvert(p: SavedGgufProfile) {
+    if (!profileMatches(catalog,p)) return;
     profileStore.pendingUse = `gguf:${p.revision}`;
     location.hash = '#/convert';
   }
-  const typeNote = (id: string) => (catalog.typeById.get(id)?.requiresImatrix ? ' (needs imatrix)' : '');
+  const typeNote = (id: string) => (catalog.typeById.get(id)?.fork ? ' · ROCmFPX' : '') + (catalog.typeById.get(id)?.requiresImatrix ? ' (needs imatrix)' : '');
 </script>
 
 <div class="stack">
@@ -141,7 +142,8 @@
               <td class="xs" data-label="Saved">{p.createdAt ? formatTime(p.createdAt) : '—'}</td>
               <td class="acts">
                 <button type="button" class="btn small" onclick={() => edit(p)} aria-label="Edit {p.name} as a new revision">Edit</button>
-                <button type="button" class="btn small primary" onclick={() => useInConvert(p)} aria-label="Use GGUF profile {p.name} in Convert">Use in Convert</button>
+                <button type="button" class="btn small primary" disabled={!profileMatches(catalog,p)} onclick={() => useInConvert(p)} aria-label="Use GGUF profile {p.name} in Convert">Use in Convert</button>
+                {#if !profileMatches(catalog,p)}<span class="xs muted">Incompatible encoder revision</span>{/if}
               </td>
             </tr>
           {/each}
@@ -154,9 +156,10 @@
     <div class="field">
       <label for="{uid}-preset">Base preset</label>
       <select id="{uid}-preset" class="input" bind:value={preset} aria-describedby="{uid}-preset-h">
-        {#each catalog.presets as p (p.id)}<option value={p.id}>{p.label ?? p.id}{p.requiresImatrix ? ' (needs imatrix)' : ''}</option>{/each}
+        {#each catalog.presets as p (p.id)}<option value={p.id}>{p.label ?? p.id}{p.fork ? ' · ROCmFPX' : ''}{p.requiresImatrix ? ' (needs imatrix)' : ''}</option>{/each}
       </select>
       <span class="hint" id="{uid}-preset-h">A llama.cpp quantization preset. It is not an HGN profile.</span>
+      {#if forkSelected(catalog,preset,overrides)}<p class="note warn small">{FORK_NOTICE} Conversion requires a worker with ROCmFPX output support.</p>{/if}
     </div>
     <div class="field">
       <label for="{uid}-src">Tensor names from</label>

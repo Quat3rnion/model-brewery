@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildGgufConversion,
+  forkSelected, profileMatches,
   buildGgufProfileBody,
   ggufTensorsFromResult,
   imatrixRequired,
@@ -23,6 +24,18 @@ const raw = {
 };
 
 describe('catalog', () => {
+  it('pins fork presets and mixed exact overrides to their own encoder revision', () => {
+    const c=parseGgufCatalog({...raw,encoder_revision:'stock1',rocmfpx_encoder_revision:'fork1',
+      presets:[...raw.presets,{id:'FPX',encoder_family:'rocmfpx'}],
+      tensor_types:[...raw.tensor_types,{id:'FPX',encoder_family:'rocmfpx'}]})!;
+    const mixed={preset:'Q4_K_M',overrides:{'blk.1.weight':'FPX'},encoderFamily:'rocmfpx',encoderRevision:'fork1'};
+    expect(forkSelected(c,'FPX',{})).toBe(true);
+    expect(forkSelected(c,mixed.preset,mixed.overrides)).toBe(true);
+    expect(profileMatches(c,mixed)).toBe(true);
+    expect(profileMatches(c,{...mixed,encoderRevision:'stock1'})).toBe(false);
+    expect(profileMatches(c,{...mixed,encoderFamily:undefined})).toBe(false);
+    expect(profileMatches(parseGgufCatalog(raw)!,{preset:'Q4_K_M',overrides:{}})).toBe(true);
+  });
   it('keeps presets and real tensor types; IQ1_XXS is never offered', () => {
     const c = parseGgufCatalog(raw)!;
     expect(c.presets.map((p) => p.id)).toEqual(['Q4_K_M', 'IQ2_XXS']);

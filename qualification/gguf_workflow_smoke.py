@@ -15,8 +15,10 @@ def checksum(p):
         return file_digest(f, "sha256").hexdigest()
 
 
-def run(bins, quantizer, source, preset, matrix):
+def run(bins, quantizer, source, preset, matrix, fork=None, fork_sha=None):
     assert source.stat().st_size < (64 << 20), "smoke accepts only a bounded fixture"
+    if fork and checksum(fork) != fork_sha:
+        raise ValueError("ROCmFPX quantizer digest mismatch")
     before = checksum(source)
     with tempfile.TemporaryDirectory() as d:
         r = Path(d)
@@ -25,12 +27,15 @@ def run(bins, quantizer, source, preset, matrix):
         roots = {source.parent}
         if matrix:
             roots.add(matrix.parent)
+        fork_env = {"BREWERY_GGUF_ROCMFPX_QUANTIZER": str(fork),
+                    "BREWERY_GGUF_ROCMFPX_SHA256": fork_sha} if fork else {}
         save(r / "worker.json", {"root": str(r/"worker"), "source_roots": sorted(map(str, roots)),
                                  "engine": str(bins/"brewery-engine"), "engine_env": {
                                      "BREWERY_GGUF_QUANTIZER": str(quantizer),
-                                     "BREWERY_CPU_THREADS": "2"}})
+                                     "BREWERY_CPU_THREADS": "2", **fork_env}})
         save(r / "dispatch.json", {"hosts":{"tiny":{"local":True, "worker":str(bins/"brewery-worker"),
-                                   "config":str(r/"worker.json"),"capabilities":{"gguf_output":True}}}})
+                                   "config":str(r/"worker.json"),"capabilities":{"gguf_output":True,
+                                   **({"gguf_rocmfpx_output":True} if fork else {})}}}})
         with controller(r, 0) as url:
             catalog, _ = request(url, "profiles/gguf-catalog")
             assert preset in [v["id"] for v in catalog["presets"]]
@@ -56,6 +61,11 @@ def run(bins, quantizer, source, preset, matrix):
             with Path(artifact["path"]).open("rb") as f:
                 assert f.read(4)==b"GGUF"
             assert before==checksum(source)
+            if fork:
+                result = final["result"]
+                assert result["backend_receipt"]["executable_sha256"] == fork_sha
+                assert any("ROCMFP" in row["current_type"].upper() for row in result["report"]["gguf_tensors"]), \
+                    "fork workflow did not verify any ROCmFPX-family tensor"
             print(json.dumps({"preset":preset,"format":artifact["kind"],"bytes":Path(artifact["path"]).stat().st_size,
                               "stages":list(flow["job_ids"]),"source_unchanged":True}))
 
@@ -66,5 +76,10 @@ if __name__ == "__main__":
         p.add_argument("--"+flag,required=True,type=Path)
     p.add_argument("--preset",default="BF16")
     p.add_argument("--imatrix",type=Path)
+    p.add_argument("--rocmfpx-quantizer", type=Path)
+    p.add_argument("--rocmfpx-sha256")
     a = p.parse_args()
-    run(a.bin_dir.resolve(),a.quantizer.resolve(),a.source.resolve(),a.preset,a.imatrix and a.imatrix.resolve())
+    if bool(a.rocmfpx_quantizer) != bool(a.rocmfpx_sha256):
+        p.error("provide both --rocmfpx-quantizer and --rocmfpx-sha256")
+    run(a.bin_dir.resolve(),a.quantizer.resolve(),a.source.resolve(),a.preset,a.imatrix and a.imatrix.resolve(),
+        a.rocmfpx_quantizer and a.rocmfpx_quantizer.resolve(), a.rocmfpx_sha256)

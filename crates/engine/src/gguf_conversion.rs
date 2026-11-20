@@ -4,7 +4,8 @@ use crate::{
     bounded, child_budget, child_threads, converter, integrity, progress::Progress, write_json, Job,
 };
 use anyhow::{bail, ensure, Context, Result};
-use inventory::{dtype, exact_dtype, Model, Types};
+use brewery_worker::ROCMFPX_REVISION;
+use inventory::{Model, Namespace, Types};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -60,6 +61,14 @@ const PRESETS: &[(&str, u64)] = &[
 const IMATRIX_REQUIRED: &[&str] = &[
     "IQ1_M", "IQ1_S", "IQ2_M", "IQ2_S", "IQ2_XS", "IQ2_XXS", "IQ3_XS", "IQ3_XXS", "Q2_K_S",
 ];
+// llama_ftype (general.file_type), NOT the GGML tensor type number.
+const ROCMFPX_PRESETS: &[(&str, u64)] = &[
+    ("Q4_0_ROCMFP4", 100),
+    ("Q4_0_ROCMFP4_FAST", 103),
+    ("Q6_0_ROCMFPX", 110),
+    ("Q8_0_ROCMFPX", 111),
+    ("Q3_0_ROCMFPX", 112),
+];
 const LOG_LIMIT: u64 = 8 << 20;
 
 #[derive(Deserialize)]
@@ -71,6 +80,8 @@ struct Options {
     tensor_types: BTreeMap<String, String>,
     imatrix: Option<usize>,
     threads: Option<u64>,
+    encoder_family: Option<String>,
+    encoder_revision: Option<String>,
 }
 
 struct Tool {
@@ -91,6 +102,40 @@ impl Tool {
             "{var} must name a regular executable"
         );
         let (member, stamp) = integrity::file_digest(&path, "binary".into())?;
+        Ok(Self {
+            path,
+            sha: member.sha256,
+            stamp,
+        })
+    }
+
+    fn rocmfpx(work: &Path) -> Result<Self> {
+        const VAR: &str = "BREWERY_GGUF_ROCMFPX_QUANTIZER";
+        const SHA: &str = "BREWERY_GGUF_ROCMFPX_SHA256";
+        let expected = env::var(SHA).with_context(|| format!("{SHA} is required"))?;
+        ensure!(
+            expected.len() == 64
+                && expected
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "{SHA} must be lowercase hexadecimal SHA-256"
+        );
+        let configured = Tool::open(VAR)?;
+        ensure!(
+            configured.sha == expected,
+            "ROCmFPX quantizer SHA-256 mismatch"
+        );
+        // Run private verified bytes, not the mutable configured pathname.
+        // The operator must supply a self-contained CPU quantizer (no adjacent libraries).
+        let path = work.join("rocmfpx-quantize");
+        fs::copy(&configured.path, &path)?;
+        configured.stamp.check(&configured.path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
+        let (member, stamp) = integrity::file_digest(&path, "binary".into())?;
+        ensure!(
+            member.sha256 == expected,
+            "staged ROCmFPX quantizer SHA-256 mismatch"
+        );
         Ok(Self {
             path,
             sha: member.sha256,
@@ -158,11 +203,35 @@ impl Tool {
 pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let options: Options =
         serde_json::from_value(job.options.clone()).context("invalid GGUF options")?;
-    let preset = PRESETS
-        .iter()
-        .find(|(name, _)| *name == options.gguf_type)
-        .map(|(_, id)| *id)
-        .context("unsupported GGUF preset")?;
+    let namespace = match (
+        options.encoder_family.as_deref(),
+        options.encoder_revision.as_deref(),
+    ) {
+        (None, None) => Namespace::Stock,
+        (Some("rocmfpx"), Some(ROCMFPX_REVISION)) => Namespace::RocmFpx,
+        _ => bail!("unsupported GGUF encoder family or revision"),
+    };
+    let fork = namespace == Namespace::RocmFpx;
+    let lookup = |presets: &[(&str, u64)]| {
+        presets
+            .iter()
+            .find(|(name, _)| *name == options.gguf_type)
+            .map(|(_, id)| *id)
+    };
+    let preset = if fork {
+        lookup(ROCMFPX_PRESETS).or_else(|| {
+            (options.gguf_type != "Q2_0"
+                && options
+                    .tensor_types
+                    .values()
+                    .any(|ty| namespace.exact_dtype(ty).is_some_and(|id| id >= 100)))
+            .then(|| lookup(PRESETS))
+            .flatten()
+        })
+    } else {
+        lookup(PRESETS)
+    }
+    .context("unsupported GGUF preset")?;
     ensure!(
         options.output_format == "gguf" && job.prompt.is_none(),
         "invalid GGUF job"
@@ -244,7 +313,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     );
     for (name, ty) in &options.tensor_types {
         ensure!(
-            inventory::valid_name(name) && exact_dtype(ty).is_some(),
+            inventory::valid_name(name) && namespace.exact_dtype(ty).is_some(),
             "invalid or unsupported GGUF tensor override"
         );
     }
@@ -259,7 +328,13 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         !matches!(preset, 0 | 1 | 32) || options.tensor_types.is_empty(),
         "floating-point presets do not support tensor overrides"
     );
-    let quantizer = Tool::open("BREWERY_GGUF_QUANTIZER")?;
+    let scratch = tempfile::Builder::new().prefix(".gguf-").tempdir_in(cwd)?;
+    let work = scratch.path();
+    let quantizer = if fork {
+        Tool::rocmfpx(work)?
+    } else {
+        Tool::open("BREWERY_GGUF_QUANTIZER")?
+    };
     let threads = child_threads(options.threads)?;
     let ids = integrity::check_inputs(&job.inputs, progress)?;
     ensure!(
@@ -270,8 +345,6 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         "split GGUF is not supported"
     );
     let source_sha = integrity::source_hash(&job.inputs, &ids, &roles);
-    let scratch = tempfile::Builder::new().prefix(".gguf-").tempdir_in(cwd)?;
-    let work = scratch.path();
     let _phase = progress.start(
         match job.kind.as_str() {
             "inspect" => "inspect",
@@ -363,7 +436,8 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         }
         artifact = report_artifact(cwd, progress, &report, &job.kind)?;
     } else {
-        let fp = Model::open(&fp_path)?;
+        let fp = Model::open(&fp_path, Namespace::Stock)?;
+        fp.check_stock_source()?;
         ensure!(
             fp.tensors
                 .values()
@@ -385,7 +459,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
                 .tensors
                 .get(name)
                 .with_context(|| format!("unknown exact GGUF tensor override {name}"))?;
-            tensor.bytes(dtype(ty).unwrap())?;
+            tensor.bytes(namespace.exact_dtype(ty).unwrap(), namespace)?;
         }
         let prepared = if let Some((index, path)) = imatrix {
             // Do not embed a registered source path into GGUF imatrix metadata.
@@ -410,6 +484,11 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
                 cmd.arg("--imatrix").arg(path);
             }
             for (name, ty) in &options.tensor_types {
+                let ty = if fork {
+                    ty.to_ascii_lowercase()
+                } else {
+                    ty.clone()
+                };
                 cmd.arg("--tensor-type")
                     .arg(format!("^{}$={ty}", escape_exact(name)));
             }
@@ -433,20 +512,26 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
                 "GGUF quantizer reported a fallback or missing importance matrix"
             );
             if dry {
-                fp.parse_plan(&log, &options.tensor_types)
+                fp.parse_plan(&log, &options.tensor_types, namespace)
             } else {
                 Ok(BTreeMap::new())
             }
         };
         let expected = quant(true)?;
+        if fork {
+            ensure!(
+                expected.values().any(|ty| (100..=104).contains(ty)),
+                "ROCmFPX dry run selected no ROCmFPX tensor types"
+            );
+        }
         ensure!(
             !temp_output.exists(),
             "GGUF dry run unexpectedly produced an output"
         );
-        let output_bytes = fp.predicted_bytes(&expected)?;
+        let output_bytes = fp.predicted_bytes(&expected, namespace)?;
         disk = converter::disk_preflight(cwd, output_bytes)?;
         report["architecture"] = json!(fp.architecture);
-        report["gguf_tensors"] = fp.summary(&expected);
+        report["gguf_tensors"] = fp.summary(&expected, namespace);
         report["output_gguf_bytes_estimate"] = json!(output_bytes);
         if job.kind == "convert" || verify {
             if !verify {
@@ -469,9 +554,9 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
                 );
                 Some(integrity::identify_output(path, progress)?)
             };
-            let actual = Model::open(path)?;
+            let actual = Model::open(path, namespace)?;
             fp.verify(&actual, &expected, preset)?;
-            report["gguf_tensors"] = actual.summary(&BTreeMap::new());
+            report["gguf_tensors"] = actual.summary(&BTreeMap::new(), namespace);
             report["passed"] = json!(true);
             report["tensor_payloads_read"] = json!(true);
             file_verification = json!({"status":"passed","scope":"physical SHA-256, GGUF header, tensor inventory, shapes, payload bounds and exact planned types; no numerical or runtime check"});
@@ -493,12 +578,19 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     }
     disk["scope"] = json!("GGUF payload estimate plus 5% and 64 MiB; not a disk reservation");
     ids.iter().try_for_each(integrity::Identity::check)?;
+    let mut backend_receipt = json!({"tool":"llama-quantize","executable_sha256":quantizer.sha,
+        "hf_exporter_sha256":exporter_sha,"threads":threads,"requested_options":job.options});
+    if fork {
+        backend_receipt["encoder_family"] = json!("rocmfpx");
+        backend_receipt["encoder_revision"] = json!(ROCMFPX_REVISION);
+        backend_receipt["stock_runtime_compatible"] = json!(false);
+    }
     Ok(
         json!({"kind":job.kind,"host":source.host,"output_format":"gguf","gguf_type":options.gguf_type,
         "source_sha256":source_sha,"source_digest_scope":"role-qualified physical source bundles",
         "inputs":ids.iter().zip(&job.inputs).map(|(id,input)| id.input(input)).collect::<Vec<_>>(),
         "artifact":artifact,"report":report,"disk_preflight":disk,"file_verification":file_verification,
-        "backend_receipt":{"tool":"llama-quantize","executable_sha256":quantizer.sha,"hf_exporter_sha256":exporter_sha,"threads":threads,"requested_options":job.options},
+        "backend_receipt":backend_receipt,
         "release_qualified":false}),
     )
 }

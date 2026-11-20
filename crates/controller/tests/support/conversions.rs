@@ -125,6 +125,139 @@ fn await_conversion(app: &Fixture, created: &Value) -> Value {
 }
 
 #[test]
+fn gguf_rocmfpx_selection_requires_a_fork_worker_and_pins_mixed_profiles() {
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts":{
+            "alpha":{"local":true,"capabilities":{"gguf_output":true}},
+            "beta":{"local":true,"capabilities":{"gguf_output":true,"gguf_rocmfpx_output":true}}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    app.touch("conversion-fixture");
+    let alpha = app.register("alpha", "gguf", "/source/base.gguf");
+    let beta = app.register("beta", "gguf", "/source/base.gguf");
+    let catalog = app.json("GET", "/api/profiles/gguf-catalog", None, 200);
+    let fork_revision = "fb08d7cdb67082ddda15a25e64dc7ec413afc41c";
+    assert_eq!(catalog["rocmfpx_encoder_revision"], fork_revision);
+    for (name, id) in [
+        ("Q4_0_ROCMFP4", 100),
+        ("Q4_0_ROCMFP4_FAST", 101),
+        ("Q6_0_ROCMFPX", 102),
+        ("Q8_0_ROCMFPX", 103),
+        ("Q3_0_ROCMFPX", 104),
+    ] {
+        assert!(
+            catalog["presets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == name && row["encoder_family"] == "rocmfpx")
+        );
+        assert!(
+            catalog["tensor_types"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == name
+                    && row["type_id"] == id
+                    && row["encoder_family"] == "rocmfpx")
+        );
+    }
+    let profile = app.json(
+        "POST",
+        "/api/profiles",
+        Some(json!({
+            "format":"gguf","name":"Mixed fork recipe","preset":"Q8_0",
+            "overrides":{"blk.0.attn_q.weight":"Q3_0_ROCMFPX","blk.0.attn_k.weight":"Q8_0"}
+        })),
+        201,
+    );
+    assert_eq!(profile["encoder_family"], "rocmfpx");
+    assert_eq!(profile["encoder_revision"], fork_revision);
+    for (preset, override_type) in [("Q2_0", "Q3_0_ROCMFPX"), ("Q4_0_ROCMFP4", "Q2_0")] {
+        app.json(
+            "POST",
+            "/api/profiles",
+            Some(json!({
+                "format":"gguf","name":"Unsupported mix","preset":preset,
+                "overrides":{"blk.0.attn_q.weight":override_type}
+            })),
+            400,
+        );
+    }
+    let stock = app.json(
+        "POST",
+        "/api/profiles",
+        Some(json!({
+            "format":"gguf","name":"Stock recipe","preset":"Q2_0"
+        })),
+        201,
+    );
+    assert_eq!(
+        stock["revision"],
+        "d0401d7780b8d80f42355009651e0acfa8f3d3e09eed37d1d0c15348e056cfef"
+    );
+    assert!(stock.get("encoder_family").is_none());
+    app.json("POST", "/api/conversions", Some(json!({
+        "format":"gguf","input_ids":[beta],"options":{"preset":"Q8_0","encoder_family":"rocmfpx"}
+    })), 400);
+    app.json(
+        "POST",
+        "/api/conversions",
+        Some(json!({
+            "format":"gguf","input_ids":[alpha],"options":{"preset":"Q4_0_ROCMFP4_FAST"}
+        })),
+        409,
+    );
+    app.json(
+        "POST",
+        "/api/conversions",
+        Some(json!({
+            "format":"gguf","input_ids":[alpha],"profile_revision":profile["revision"]
+        })),
+        409,
+    );
+    let done = await_conversion(
+        &app,
+        &app.json(
+            "POST",
+            "/api/conversions",
+            Some(json!({
+                "format":"gguf","input_ids":[beta],"profile_revision":profile["revision"]
+            })),
+            201,
+        ),
+    );
+    assert_eq!(done["state"], "succeeded", "{done}");
+    for stage in ["inspect", "plan", "convert", "verify"] {
+        let detail = app.detail(done["job_ids"][stage].as_str().unwrap());
+        let options = &detail["result"]["envelope"]["options"];
+        assert_eq!(options["encoder_family"], "rocmfpx");
+        assert_eq!(options["encoder_revision"], fork_revision);
+        assert_eq!(options["tensor_types"], profile["overrides"]);
+    }
+    app.touch("changed-rocmfpx-tool");
+    let stale = await_conversion(
+        &app,
+        &app.json(
+            "POST",
+            "/api/conversions",
+            Some(json!({
+                "format":"gguf","input_ids":[beta],"options":{"preset":"Q4_0_ROCMFP4_FAST"}
+            })),
+            201,
+        ),
+    );
+    assert_eq!(stale["state"], "failed", "{stale}");
+    assert_eq!(stale["stage"], "plan", "{stale}");
+    assert!(stale.get("artifact_model_id").is_none());
+}
+
+#[test]
 fn standalone_gguf_workflow_uses_registered_assets_and_imatrix() {
     let mut app = Fixture::new();
     fs::write(

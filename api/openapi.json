@@ -819,7 +819,7 @@
       "HostCapabilityMap": {
         "type": "object",
         "description": "Per-worker availability. It has one boolean for each job kind and the extra capabilities listed below. hf_download is false unless the operator opts in to managed Hugging Face downloads. convert_components is true only if the operator enabled component replacement for a Hugging Face source. custom_profiles is true only if the operator enabled custom profiles with a separate CPU-only converter. gguf_output is true only if the operator set up the GGUF quantizer. gguf_hf_output also requires the bounded Hugging Face exporter. gguf_safetensors_output is a separate opt-in for workers that can pass standalone SafeTensors and a registered assets directory to that exporter. It requires gguf_output; gguf_hf_output alone does not enable it. weight_visual enables inventory, tiles, and source-pinned proposals and tuning. weight_hgn enables native HGN sources. weight_packed allows packed weight jobs. weight_safetensors enables standalone SafeTensors and indexed HF weight jobs. The weight capabilities are additional to the per-job opt-in and are false by default. The reasons map can say why.",
-        "propertyNames": {"anyOf": [{"$ref": "#/components/schemas/JobKind"}, {"enum": ["convert_components", "custom_profiles", "gguf_output", "gguf_hf_output", "gguf_safetensors_output", "weight_visual", "weight_hgn", "weight_packed", "weight_safetensors"]}]},
+        "propertyNames": {"anyOf": [{"$ref": "#/components/schemas/JobKind"}, {"enum": ["convert_components", "custom_profiles", "gguf_output", "gguf_hf_output", "gguf_safetensors_output", "gguf_rocmfpx_output", "weight_visual", "weight_hgn", "weight_packed", "weight_safetensors"]}]},
         "additionalProperties": {"type": "boolean"}, "minProperties": 25
       },
       "ConfiguredToken": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
@@ -1360,6 +1360,7 @@
           "preset": {"$ref": "#/components/schemas/GgufPreset"},
           "overrides": {"type": "object", "additionalProperties": {"$ref": "#/components/schemas/GgufTensorType"}},
           "encoder_revision": {"type": "string", "description": "Revision of the pinned encoder catalog that the profile was checked against."},
+          "encoder_family": {"const": "rocmfpx", "description": "Present when a preset or tensor override requires the separate ROCmFPX encoder. Absent for upstream llama.cpp."},
           "requires_imatrix": {"type": "boolean", "description": "True if the preset or any override needs an imatrix. The profile has no size estimate: the quantizer decides the exact types per tensor."}
         }
       },
@@ -1395,14 +1396,15 @@
         "type": "object", "required": ["schema", "format", "encoder_revision", "default_preset", "presets", "tensor_types"],
         "properties": {
           "schema": {"const": 1}, "format": {"const": "gguf"},
-          "encoder_revision": {"type": "string", "description": "Revision of the pinned upstream encoder source that the lists come from."},
+          "encoder_revision": {"type": "string", "description": "Revision of the pinned upstream encoder."},
+          "rocmfpx_encoder_revision": {"type": "string", "description": "Revision of the separate ROCmFPX encoder. A preset or override tagged with this family requires a worker with gguf_rocmfpx_output, in addition to the applicable source capabilities. ROCmFPX files require a compatible reader."},
           "default_preset": {"type": "string"},
           "presets": {"type": "array", "description": "Named presets, including aliases. Each is a whole-model recipe; the quantizer picks a type for each tensor.", "items": {
-            "type": "object", "required": ["id", "requires_imatrix"], "properties": {"id": {"type": "string"}, "requires_imatrix": {"type": "boolean"}}
+            "type": "object", "required": ["id", "requires_imatrix"], "properties": {"id": {"type": "string"}, "requires_imatrix": {"type": "boolean"}, "encoder_family": {"const": "rocmfpx"}, "rocmfpx_supported": {"const": false}}
           }},
           "tensor_types": {"type": "array", "description": "Raw tensor types that the encoder can write. Only these can be an override.", "items": {
             "type": "object", "required": ["id", "type_id", "block_size", "block_bytes", "requires_imatrix"],
-            "properties": {"id": {"type": "string"}, "type_id": {"type": "integer"}, "block_size": {"type": "integer"}, "block_bytes": {"type": "integer"}, "requires_imatrix": {"type": "boolean"}}
+            "properties": {"id": {"type": "string"}, "type_id": {"type": "integer"}, "block_size": {"type": "integer"}, "block_bytes": {"type": "integer"}, "requires_imatrix": {"type": "boolean"}, "encoder_family": {"const": "rocmfpx"}, "rocmfpx_supported": {"const": false}}
           }}
         }
       },
