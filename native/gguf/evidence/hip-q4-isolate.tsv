@@ -1,0 +1,8 @@
+stock	none	FAIL	-	-	-	-	dequant_dot_mismatch
+rocmfpx	none	FAIL	-	-	-	-	dequant_dot_mismatch
+stock	GGML_CUDA_DISABLE_GRAPHS=1	FAIL	-	-	-	-	dequant_dot_mismatch
+rocmfpx	GGML_CUDA_DISABLE_GRAPHS=1	FAIL	-	-	-	-	dequant_dot_mismatch
+stock	AMD_SERIALIZE_KERNEL=3	PASS	ROCm0	195	0	0	-
+rocmfpx	AMD_SERIALIZE_KERNEL=3	PASS	ROCm0	195	0	0	-
+stock	AMD_SERIALIZE_COPY=3	FAIL	-	-	-	-	dequant_dot_mismatch
+rocmfpx	AMD_SERIALIZE_COPY=3	FAIL	-	-	-	-	dequant_dot_mismatch

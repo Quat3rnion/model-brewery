@@ -1,0 +1,8 @@
+stock	0	1	FAIL	-	-	-	-	dequant_dot_mismatch
+rocmfpx	0	1	FAIL	-	-	-	-	dequant_dot_mismatch
+stock	1	1	FAIL	-	-	-	-	dequant_dot_mismatch
+rocmfpx	1	1	FAIL	-	-	-	-	dequant_dot_mismatch
+stock	2	0	PASS	ROCm0	195	0	0	-
+rocmfpx	2	0	PASS	ROCm0	195	0	0	-
+stock	3	0	PASS	ROCm0	195	0	0	-
+rocmfpx	3	0	PASS	ROCm0	195	0	0	-

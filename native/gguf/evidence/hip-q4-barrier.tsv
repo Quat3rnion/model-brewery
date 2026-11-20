@@ -1,0 +1,7 @@
+family	barrier	exit	status	device	outputs	max_abs_error	max_tolerance_ratio	reason
+stock	none	1	FAIL	-	-	-	-	dequant_dot_mismatch
+stock	before	1	FAIL	-	-	-	-	dequant_dot_mismatch
+stock	after	0	PASS	ROCm0	195	0	0	-
+rocmfpx	none	1	FAIL	-	-	-	-	dequant_dot_mismatch
+rocmfpx	before	1	FAIL	-	-	-	-	dequant_dot_mismatch
+rocmfpx	after	0	PASS	ROCm0	195	0	0	-
