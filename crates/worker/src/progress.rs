@@ -26,6 +26,24 @@ pub fn read(path: &Path, since: u64) -> Option<ProgressDetail> {
     .then_some(detail)
 }
 
+pub fn hy4_encode(base: &Path, since: u64) -> Option<ProgressDetail> {
+    let detail = read(&base.join(hy4::PROGRESS_FILE), since)?;
+    let (unit, limit) = match detail.phase.as_str() {
+        "hy4_encode_gate" => (ProgressUnit::Items, 8192),
+        "hy4_copy_spans" | "hy4_verify_readback" => (ProgressUnit::Bytes, 224_299_813_888),
+        _ => return None,
+    };
+    (detail.unit == unit
+        && detail.total.is_some_and(|n| (1..=limit).contains(&n))
+        && detail.current_file.is_none()
+        && detail.files_total.is_none()
+        && detail.files_completed.is_none()
+        && detail.input_index.is_none()
+        && detail.input_count.is_none()
+        && detail.threads.is_empty())
+    .then_some(detail)
+}
+
 pub fn engine(base: &Path, since: u64) -> Option<ProgressDetail> {
     let detail = read(&base.join("work/progress.json"), since)?;
     matches!(
@@ -169,6 +187,9 @@ pub fn apply(reply: &mut Reply, detail: ProgressDetail) {
         "verify_output" => "Verifying engine output",
         "hf_download_transfer" => "Downloading complete files",
         "hf_download_verify" => "Checking download checksums",
+        "hy4_encode_gate" => "Encoding Hy4 gate",
+        "hy4_copy_spans" => "Writing Hy4 artifact",
+        "hy4_verify_readback" => "Verifying Hy4 readback and checksums",
         _ => {
             reply.progress_detail = Some(detail);
             return;
@@ -177,6 +198,7 @@ pub fn apply(reply: &mut Reply, detail: ProgressDetail) {
     let units = match detail.unit {
         ProgressUnit::Bytes => "bytes",
         ProgressUnit::Files => "files",
+        ProgressUnit::Items if detail.phase == "hy4_encode_gate" => "rows",
         _ => "items",
     };
     reply.progress = match detail.total {

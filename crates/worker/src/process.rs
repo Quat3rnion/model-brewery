@@ -243,6 +243,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
             .arg(&plan.halo_tools);
         if let Some(encode) = &plan.encode {
             c.args([&encode.control, &encode.preflight, &encode.quantizer])
+                .env("BREWERY_HY4_PROGRESS", base.join(hy4::PROGRESS_FILE))
                 .env("OPENBLAS_NUM_THREADS", "1")
                 .env("OMP_NUM_THREADS", "1");
         }

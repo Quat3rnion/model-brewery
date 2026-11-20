@@ -11,6 +11,8 @@ import resource
 import signal
 import struct
 import sys
+import tempfile
+import time
 
 spec = importlib.util.spec_from_file_location("hy4_plan", Path(__file__).with_name("hy4_plan.py"))
 helpers = importlib.util.module_from_spec(spec)
@@ -31,6 +33,46 @@ MAX_FILE = 224299813888
 CHUNK = 16 << 20
 OLD = helpers.OLD
 NEW = b"Q8_0 block1 attn_gate; Q4_K experts; raw".ljust(len(OLD))
+
+
+class Progress:
+    INTERVAL = 0.3
+
+    def __init__(self, path):
+        self.path = Path(path) if path else None
+
+    def start(self, phase, unit, total):
+        self.detail = dict(phase=phase, unit=unit, completed=0, total=total)
+        self.publish()
+
+    def advance(self, count):
+        self.detail["completed"] += count
+        # A full count is published only after the phase's checks succeed.
+        if (self.path and self.detail["completed"] < self.detail["total"]
+                and time.monotonic() - self.last >= self.INTERVAL):
+            self.publish()
+
+    def publish(self):
+        if not self.path:
+            return
+        self.last = time.monotonic()
+        self.detail["updated_at_ms"] = time.time_ns() // 1_000_000
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=self.path.parent, prefix=".hy4-progress-",
+                                             delete=False) as f:
+                tmp = f.name
+                json.dump(self.detail, f, separators=(",", ":"))
+            os.replace(tmp, self.path)
+        except OSError as error:
+            # Reporting failure must not alter verification or publication.
+            self.path = None
+            print(f"Hy4 progress unavailable: {error}", file=sys.stderr)
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
 
 def read(fd, n, at):
@@ -133,7 +175,7 @@ def source_gate(root, common, pins, shape):
         return read(fd, gate["nbytes"], gate["offset"])
 
 
-def copy_span(src, dst, start, length, shift, block):
+def copy_span(src, dst, start, length, shift, block, progress):
     lo = (start + block - 1) // block * block
     hi = (start + length) // block * block
     cloned = 0
@@ -144,24 +186,30 @@ def copy_span(src, dst, start, length, shift, block):
         except OSError as error:
             if error.errno not in (errno.EXDEV, errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTTY):
                 raise
+    if cloned:
+        progress.advance(cloned)
     ranges = [(start, lo - start), (hi, start + length - hi)] if cloned else [(start, length)]
     for a, size in ranges:
         for p, n in chunks(a, size):
             write(dst, read(src, n, p), p + shift)
+            progress.advance(n)
     return cloned
 
 
-def encode(quant, raw, shape, tile=128):
+def encode(quant, raw, shape, tile=128, progress=None):
     np = quant.np
     width, rows = shape
     for row in range(0, rows, tile):
         block = raw[2 * width * row:2 * width * (row + tile)]
         values = (np.frombuffer(block, "<u2").astype(np.uint32) << 16).view(np.float32)
         require(np.isfinite(values).all(), "Nonfinite source gate")
-        yield quant.encode(values.reshape(-1, width), 8)
+        encoded = quant.encode(values.reshape(-1, width), 8)
+        if progress is not None:
+            progress.advance(min(tile, rows - row))
+        yield encoded
 
 
-def convert(control, preflight, library, source, common, pin, pins):
+def convert(control, preflight, library, source, common, pin, pins, progress):
     with helpers.directory(preflight.parent) as root:
         report = json.loads(pinned(root, preflight.name, pins["preflight"], 1 << 20))
     tensors = report["tensors"]
@@ -200,8 +248,10 @@ def convert(control, preflight, library, source, common, pin, pins):
             require(n <= 1 << 20 and helpers.sha(read(lib.fileno(), n, 0)) == pins["quantizer"],
                     "Pinned quantizer SHA-256 mismatch")
             quant = common.Quantizer(f"/proc/self/fd/{lib.fileno()}")
-            q8 = b"".join(encode(quant, bf16, shape))
+            progress.start("hy4_encode_gate", "items", shape[1])
+            q8 = b"".join(encode(quant, bf16, shape, progress=progress))
             require(len(q8) == new_bytes, "Wrong encoded gate extent")
+            progress.publish()
             candidate = bytearray(header)
             _, a, b = slots["halo.hy4.quantization"]
             require(header[a+8:b] == OLD, "Unexpected control quantization description")
@@ -217,27 +267,33 @@ def convert(control, preflight, library, source, common, pin, pins):
                 struct.pack_into("<IQ", candidate, fields[j], new["qtype"], new["offset"])
                 updated.append(new)
             return write_verified(src, header, bytes(candidate), data, at, end, size,
-                                  shift, bf16, q8, quant, shape, common, updated, old_tables, pins, pin)
+                                  shift, bf16, q8, quant, shape, common, updated, old_tables, pins, pin,
+                                  progress)
 
 
 def write_verified(src, header, candidate, data, at, end, size, shift, bf16, q8,
-                   quant, shape, common, updated, old_tables, pins, pin):
+                   quant, shape, common, updated, old_tables, pins, pin, progress):
     partial = Path(".gate.partial")
     fs = os.statvfs(".")
     require(fs.f_bavail * fs.f_frsize >= size + shift + (1 << 30), "Insufficient Hy4 scratch space")
+    progress.start("hy4_copy_spans", "bytes", size + shift)
     with partial.open("x+b", buffering=0) as f:
         dst = f.fileno()
         os.ftruncate(dst, size + shift)
         write(dst, candidate, 0)
         write(dst, q8, at)
-        clones = copy_span(src, dst, data, at - data, 0, fs.f_frsize)
-        clones += copy_span(src, dst, end, size - end, shift, fs.f_frsize)
+        progress.advance(data + len(q8))
+        clones = copy_span(src, dst, data, at - data, 0, fs.f_frsize, progress)
+        clones += copy_span(src, dst, end, size - end, shift, fs.f_frsize, progress)
         os.fsync(dst)
+        progress.publish()
+        progress.start("hy4_verify_readback", "bytes", size + shift)
         actual = read(dst, data, 0)
         require(actual == candidate and os.fstat(dst).st_size == size + shift, "Bad Hy4 output header/size")
         _, _, tables = layout(actual, common, updated, old_tables[0]["file_offset"] + shift, size + shift)
         hc, hn = hashlib.sha256(header), hashlib.sha256(actual)
         prefix, suffix = hashlib.sha256(), hashlib.sha256()
+        progress.advance(data)
 
         def same(start, length, delta, *hashes):
             for pos, count in chunks(start, length):
@@ -245,6 +301,7 @@ def write_verified(src, header, candidate, data, at, end, size, shift, bf16, q8,
                 require(b == read(dst, count, pos + delta), f"Unchanged bytes differ at {pos}")
                 for digest in (*hashes, hc, hn):
                     digest.update(b)
+                progress.advance(count)
 
         same(data, at - data, 0, prefix)
         hc.update(bf16)
@@ -254,6 +311,7 @@ def write_verified(src, header, candidate, data, at, end, size, shift, bf16, q8,
             require(b == block, "Readback does not match source-derived Q8_0")
             hn.update(b)
             pos += len(block)
+            progress.advance(len(block))
         require(pos == end + shift, "Wrong target end")
         same(end, old_tables[0]["file_offset"] - end, shift, suffix)
         for old, new in zip(old_tables, tables, strict=True):
@@ -263,6 +321,7 @@ def write_verified(src, header, candidate, data, at, end, size, shift, bf16, q8,
         require(hc.hexdigest() == pins["control"], "Immutable control SHA-256 mismatch")
         os.fchmod(dst, 0o444)
         os.fsync(dst)
+        progress.publish()
     return dict(
         kind="hy4_gate_encode", verified=True, runtime_ready=False, source_revision=pin.REVISION,
         control_sha256=hc.hexdigest(), preflight_sha256=pins["preflight"],
@@ -305,7 +364,8 @@ def main(*, pins=PINS):
             "Invalid dedicated Hy4 encode request")
     _, pin = helpers.halo_modules(Path(tools))
     common = sys.modules["gguf_common"]
-    result = convert(Path(control), Path(preflight), Path(library), Path(source), common, pin, pins)
+    progress = Progress(os.getenv("BREWERY_HY4_PROGRESS"))
+    result = convert(Path(control), Path(preflight), Path(library), Path(source), common, pin, pins, progress)
     payload = json.dumps(result, indent=2).encode() + b"\n"
     require(len(payload) <= 1 << 20, "Hy4 receipt exceeds its bound")
     with open("hy4-gate-q8.json", "xb") as f:

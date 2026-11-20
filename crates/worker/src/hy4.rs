@@ -5,6 +5,7 @@ pub const CAPABILITY: &str = "hy4_plan";
 pub const ENCODE: &str = "hy4_encode";
 pub const FILE: &str = "hy4-gate-q8.gguf";
 pub const RECEIPT: &str = "hy4-gate-q8.json";
+pub const PROGRESS_FILE: &str = "hy4-progress.json";
 
 pub fn capability(kind: &str, options: &Value) -> Option<&'static str> {
     match kind {

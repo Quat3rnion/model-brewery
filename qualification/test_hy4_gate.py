@@ -85,9 +85,20 @@ def exercise(root, binaries, tools, codec):
     pins["quantizer"] = sha(codec.read_bytes())
     runner = root / "fixture-engine.py"
     runner.write_text(
-        "import importlib.util\n"
+        "import importlib.util, os, pathlib\n"
         f"spec=importlib.util.spec_from_file_location('hy4_gate', {str(ROOT / 'tools/hy4_gate.py')!r})\n"
         "m=importlib.util.module_from_spec(spec)\nspec.loader.exec_module(m)\n"
+        # Record atomically published samples; disable the time throttle so a
+        # tiny fixture can verify actual partial counts without large I/O.
+        "path = pathlib.Path(os.environ['BREWERY_HY4_PROGRESS'])\n"
+        "replace = os.replace\n"
+        "def trace(src, dst, *args, **kwargs):\n"
+        "    replace(src, dst, *args, **kwargs)\n"
+        "    if dst == path:\n"
+        "        with path.with_suffix('.trace').open('a') as f:\n"
+        "            f.write(path.read_text() + '\\n')\n"
+        "os.replace = trace\n"
+        "if hasattr(m, 'Progress'): m.Progress.INTERVAL = 0\n"
         f"m.main(pins={pins!r})\n"
     )
     worker = root / "worker.json"
@@ -155,6 +166,8 @@ def exercise(root, binaries, tools, codec):
         assert bad["state"] == "failed", bad
         assert "Immutable control SHA-256 mismatch" in (job_dir / "engine-stderr.log").read_text()
         assert not list((job_dir / "work").iterdir())
+        failed_readback = [r for r in progress_trace(job_dir) if r["phase"] == "hy4_verify_readback"]
+        assert failed_readback and failed_readback[-1]["completed"] < failed_readback[-1]["total"]
         control.chmod(0o644)
         control.write_bytes(original)
         control.chmod(0o444)
@@ -169,6 +182,20 @@ def exercise(root, binaries, tools, codec):
         end = at + len(bf16)
         delta = len(want_q8) - len(bf16)
         assert len(actual) == size + delta == result["artifact"]["bytes"]
+        assert good.get("progress_detail") is None
+        trace = progress_trace(job_dir)
+        phases = {
+            "hy4_encode_gate": ("items", 4096),
+            "hy4_copy_spans": ("bytes", len(actual)),
+            "hy4_verify_readback": ("bytes", len(actual)),
+        }
+        assert list(dict.fromkeys(r["phase"] for r in trace)) == list(phases)
+        for phase, (unit, total) in phases.items():
+            rows = [r for r in trace if r["phase"] == phase]
+            counts = [r["completed"] for r in rows]
+            assert counts == sorted(set(counts)) and len(counts) > 2 and counts[0] == 0 and counts[-1] == total, rows
+            assert all(r["unit"] == unit and r["total"] == total for r in rows), rows
+        assert [r["completed"] for r in trace if r["phase"] == "hy4_encode_gate"][:2] == [0, 128]
         assert sha(actual) == result["artifact"]["sha256"]
         assert actual[len(head):at] == original[len(head):at]
         assert actual[at:at+len(want_q8)] == want_q8
@@ -180,13 +207,17 @@ def exercise(root, binaries, tools, codec):
         assert (source / SHARD).read_bytes() == shard_head + bf16
         again, job_dir = run()
         assert again["state"] == "failed" and not (job_dir / "work").exists(), again
-        print("PASS: public job rejects source mismatch, exact Q8_0 known answer, unchanged spans, Engram, control hardlink, and one-output limit")
+        print("PASS: exact Q8_0, unchanged spans, progress counters, control hardlink, and one-output limit")
     finally:
         proc.terminate()
         proc.wait(timeout=5)
 
 
+def progress_trace(job_dir):
+    return [json.loads(line) for line in (job_dir / "hy4-progress.trace").read_text().splitlines()]
+
+
 if __name__ == "__main__":
     binaries, tools, codec = (Path(p).resolve(strict=True) for p in sys.argv[1:])
-    with tempfile.TemporaryDirectory(prefix="brewery-hy4-gate-", dir="/arboretum") as d:
+    with tempfile.TemporaryDirectory(prefix="brewery-hy4-gate-", dir=os.getenv("TMPDIR", "/arboretum")) as d:
         exercise(Path(d), binaries, tools, codec)

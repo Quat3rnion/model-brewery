@@ -1443,11 +1443,15 @@ impl Worker {
                         })
                     }
                     "running" => r.started_ms.and_then(|started| {
-                        progress::read(&base.join("worker-progress.json"), started)
-                            .filter(|p| {
-                                matches!(p.phase.as_str(), "inventory_output" | "verify_output")
-                            })
-                            .or_else(|| progress::engine(&base, started))
+                        if self.cfg.hy4_plan.as_ref().is_some_and(|p| p.encode.is_some()) {
+                            progress::hy4_encode(&base, started)
+                        } else {
+                            progress::read(&base.join("worker-progress.json"), started)
+                                .filter(|p| {
+                                    matches!(p.phase.as_str(), "inventory_output" | "verify_output")
+                                })
+                                .or_else(|| progress::engine(&base, started))
+                        }
                     }),
                     _ => None,
                 };
