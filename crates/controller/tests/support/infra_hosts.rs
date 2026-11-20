@@ -96,6 +96,13 @@ fn discovers_the_loopback_sshd_public_key_without_enrolling_it() {
         text.contains("Server listening on").then_some(())
     });
     app.launch();
+    let state_paths = || {
+        fs::read_dir(app.path("state/ssh-hosts"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let before = state_paths();
     assert_eq!(
         app.json(
             "POST",
@@ -109,6 +116,92 @@ fn discovers_the_loopback_sshd_public_key_without_enrolling_it() {
         })
     );
     assert_eq!(app.json("GET", ROUTE, None, 200)["hosts"], json!([]));
+    assert_eq!(state_paths(), before);
+}
+
+#[test]
+fn host_key_discovery_only_accepts_one_host_and_port() {
+    let mut app = Fixture::new();
+    app.launch();
+    let invalid_hosts = [
+        "",
+        "-f",
+        " 127.0.0.1",
+        "127.0.0.1 127.0.0.2",
+        "127.0.0.1,127.0.0.2",
+        "127.0.0.0/24",
+        "127.0.0.1:22",
+        "ssh://127.0.0.1",
+        "user@127.0.0.1",
+        "127.0.0.1\n127.0.0.2",
+    ];
+    for host in invalid_hosts {
+        app.json("POST", DISCOVERY, Some(json!({"host":host,"port":22})), 400);
+    }
+    for (body, status) in [
+        (json!({"host":"127.0.0.1","port":0}), 400),
+        (json!({"host":"127.0.0.1","port":65536}), 422),
+        (json!({"host":"127.0.0.1"}), 422),
+        (json!(["127.0.0.1", 22]), 422),
+        (json!({"host":["127.0.0.1"],"port":22}), 422),
+        (json!({"host":"127.0.0.1","port":"22-23"}), 422),
+        (json!({"host":"127.0.0.1","port":22,"user":"brewery"}), 422),
+        (
+            json!({"host":"127.0.0.1","port":22,"algorithm":"ssh-rsa"}),
+            422,
+        ),
+        (json!({"host":"x".repeat(9000),"port":22}), 413),
+    ] {
+        app.json("POST", DISCOVERY, Some(body), status);
+    }
+    assert_eq!(
+        app.request(
+            "POST",
+            DISCOVERY,
+            Some(json!({"host":"127.0.0.1","port":22})),
+            "Origin: http://other.test\r\n",
+        )
+        .0,
+        403
+    );
+    assert_eq!(
+        app.request("POST", DISCOVERY, None, "Content-Type: text/plain\r\n")
+            .0,
+        415
+    );
+    let mut malformed = app.open_request(
+        "POST",
+        DISCOVERY,
+        None,
+        "Content-Type: application/json\r\nContent-Length: 1\r\n",
+    );
+    malformed.write_all(b"!").unwrap();
+    let mut response = String::new();
+    malformed.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.0 400 "), "{response}");
+}
+
+#[test]
+#[ignore = "requires local OpenSSH ssh-keyscan"]
+fn host_key_discovery_does_not_queue_and_releases_its_slot_after_timeout() {
+    let mut app = Fixture::new();
+    app.launch();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let target = json!({"host":"127.0.0.1","port":listener.local_addr().unwrap().port()});
+    let mut probe = app.open_request("POST", DISCOVERY, Some(target.clone()), "");
+    let (silent, _) = wait_for(|| match listener.accept() {
+        Ok(connection) => Some(connection),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
+        Err(e) => panic!("loopback server failed: {e}"),
+    });
+    app.json("POST", DISCOVERY, Some(target.clone()), 429);
+    let mut response = String::new();
+    probe.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.0 502 "), "{response}");
+    drop(silent);
+    drop(listener);
+    app.json("POST", DISCOVERY, Some(target), 502);
 }
 
 #[test]

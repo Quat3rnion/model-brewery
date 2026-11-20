@@ -53,9 +53,17 @@ fn endpoint_valid(host: &str, port: u16) -> bool {
             || (host.len() <= 253
                 && host.split('.').all(|label| {
                     label.len() <= 63
-                        && label.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
-                        && label.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
-                        && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                        && label
+                            .as_bytes()
+                            .first()
+                            .is_some_and(u8::is_ascii_alphanumeric)
+                        && label
+                            .as_bytes()
+                            .last()
+                            .is_some_and(u8::is_ascii_alphanumeric)
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
                 })))
 }
 
