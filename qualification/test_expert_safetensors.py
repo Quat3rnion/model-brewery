@@ -120,6 +120,28 @@ class ExpertSafeTensorsTests(unittest.TestCase):
                                     "provenance": {"profile": "fixture"}}))
         return ("--plan", path, "--plan-sha256", sha(path.read_bytes()))
 
+    def planner_stdout(self, digest):
+        # Both splits observe every expert; calibration ranks the two layers differently.
+        common = {"schema": "brewery.expert-activations.v1", "source_sha256": digest,
+                  "observer_sha256": sha(b"fixture-observer"), "n_layers": 2,
+                  "routed_layers": [0, 1], "n_experts": 3, "top_k": 2}
+        scores = ([4, 1, 5], [5, 4, 1])
+        positions = [{str(layer): [{"expert": i, "applied_gate": 0.5, "output_l2": weights[i]}
+                                   for i in experts] for layer, weights in enumerate(scores)}
+                     for experts in ([0, 1], [1, 2])]
+        calibration, held_out = self.root / "calibration.json", self.root / "held-out.json"
+        for path, split, tokens in ((calibration, "calibration", [5, 6]), (held_out, "held-out", [2, 3])):
+            path.write_text(json.dumps(common | {"split": split,
+                                                 "samples": [{"tokens": tokens, "positions": positions}]}))
+        run = subprocess.run([sys.executable, PLANNER, "reap", "--calibration", calibration,
+                              "--held-out", held_out, "--source-sha256", digest, "--keep", "2"],
+                             capture_output=True, check=False)
+        self.assertEqual(run.returncode, 0, run.stderr.decode())
+        self.assertEqual(json.loads(run.stdout)["layers"], {"0": [2, 0], "1": [0, 1]})
+        path = self.root / "reviewed-stdout.json"
+        path.write_bytes(run.stdout)
+        return "--plan", path, "--plan-sha256", sha(run.stdout)
+
     def indexed(self):
         source = self.root / "indexed"
         source.mkdir()
@@ -149,16 +171,18 @@ class ExpertSafeTensorsTests(unittest.TestCase):
         self.assertEqual(self.cli("source-digest", "--source", source, *pin).stdout.strip(), digest)
         dest = self.root / "reordered"
         self.cli("apply", "--source", source, *pin,
-                 *self.plan(digest, {"0": [2, 0, 1]}), "--output", dest)
+                 *self.plan(digest, {"0": [2, 0, 1], "1": [1, 2, 0]}), "--output", dest)
         transformed = read_weights(dest / WEIGHTS)
         self.assertEqual(transformed[TRUNK + "gate.bias"][1], (1, -5, 0))
-        for token in ((.25, 1), (2, -1), (-1, .5)):
-            old_ids, before = layer_forward(original, TRUNK, token)
-            new_ids, after = layer_forward(transformed, TRUNK, token)
-            self.assertEqual([[2, 0, 1][i] for i in new_ids], old_ids)
-            self.assertEqual(after, before)
+        self.assertEqual(transformed[MTP + "gate.bias"][1], (0, 1, -5))
+        for prefix, reorder in ((TRUNK, [2, 0, 1]), (MTP, [1, 2, 0])):
+            for token in ((.25, 1), (2, -1), (-1, .5)):
+                old_ids, before = layer_forward(original, prefix, token)
+                new_ids, after = layer_forward(transformed, prefix, token)
+                self.assertEqual([reorder[i] for i in new_ids], old_ids)
+                self.assertEqual(after, before)
         for name in original:
-            if name.startswith(MTP) or "shared_expert" in name:
+            if "shared_expert" in name:
                 self.assertEqual(original[name], transformed[name])
         self.assertEqual(json.loads((dest / "config.json").read_text()), config())
         self.assertEqual(sha(source.read_bytes()), digest)
@@ -171,8 +195,7 @@ class ExpertSafeTensorsTests(unittest.TestCase):
                               for n in sorted(files)))
         self.assertEqual(self.cli("source-digest", "--source", source).stdout.strip(), digest)
         dest = self.root / "pruned"
-        self.cli("apply", "--source", source, *self.plan(digest, {"0": [2, 0], "1": [0, 1]}),
-                 "--output", dest)
+        self.cli("apply", "--source", source, *self.planner_stdout(digest), "--output", dest)
         cfg = json.loads((dest / "config.json").read_text())["text_config"]
         self.assertEqual(cfg["num_experts"], 2)
         self.assertEqual(cfg["mtp"]["num_experts"], 2)
