@@ -158,6 +158,7 @@ impl Helper {
         row: &Row,
         op: &str,
         confirmation: Option<&str>,
+        identity: &str,
     ) -> Option<Reply> {
         let mut data = serde_json::json!({
             "op":op,"id":row.id,"host":row.target.host,"user":row.target.user,
@@ -168,6 +169,7 @@ impl Helper {
         }
         let payload = serde_json::to_vec(&data).ok()?;
         let mut child = Command::new(&self.0)
+            .env("BREWERY_PROVISION_IDENTITY", identity)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -237,6 +239,7 @@ pub(super) fn ssh_config(
     row: &Row,
     key: &str,
     install: &Install,
+    identity: Option<&str>,
 ) -> Result<PathBuf, crate::Error> {
     if !key_matches(key, &row.target.fingerprint) || !install.valid(&row.id) {
         return Err("invalid saved SSH pin or install target".into());
@@ -247,7 +250,7 @@ pub(super) fn ssh_config(
         "Host {id}\nHostName {host}\nUser {user}\nPort {port}\nHostKeyAlias {id}\n\
         UserKnownHostsFile \"{known}\"\nGlobalKnownHostsFile /dev/null\n\
         StrictHostKeyChecking yes\nHostKeyAlgorithms ssh-ed25519\nUpdateHostKeys no\nCheckHostIP no\n\
-        IdentityAgent none\nIdentitiesOnly yes\nPreferredAuthentications publickey\n\
+         IdentityAgent none\nIdentitiesOnly yes\nBatchMode yes\nPreferredAuthentications publickey\n\
         PasswordAuthentication no\nKbdInteractiveAuthentication no\n",
         id = row.id,
         host = row.target.host,
@@ -255,12 +258,8 @@ pub(super) fn ssh_config(
         port = row.target.port,
         known = ssh_path(&known)?,
     );
-    if let Some(identity) = env::var_os("BREWERY_PROVISION_IDENTITY") {
-        config.push_str(&format!(
-            "IdentityFile \"{}\"\n",
-            ssh_path(Path::new(&identity))?
-        ));
-    }
+    let identity = identity.unwrap_or("none");
+    config.push_str(&format!("IdentityFile \"{identity}\"\n"));
     private_write(&known, format!("{} {key}\n", row.id).as_bytes())?;
     private_write(&file, config.as_bytes())?;
     Ok(file)

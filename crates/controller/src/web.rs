@@ -212,7 +212,10 @@ async fn suggest_paths(
             "prefix must be empty or a normalized absolute path of at most 4096 bytes",
         ));
     }
-    let dispatch_config = app.ssh_hosts.config_for(&[&query.host]);
+    let dispatch_config = app
+        .ssh_hosts
+        .config_for(&[&query.host])
+        .map_err(|message| ApiError(StatusCode::CONFLICT, message.into()))?;
     app.suggestions
         .get(query, dispatch_config)
         .await

@@ -220,9 +220,11 @@ fingerprint with one from the host console or administrator before accepting
 it. You can also enter a known fingerprint manually. The probe does not log
 in, save a host, or install a worker.
 
-If the installer needs a separate SSH identity, request only the local path to
-an existing private-key file for `BREWERY_PROVISION_IDENTITY`. Do not ask for
-the key contents or a password. The SSH host form does not accept either.
+Select a login key from the controller account's `~/.ssh/` directory, or
+enter the absolute path to a key elsewhere on the controller. Use a key
+whose public key is authorized for the remote SSH account. To change a
+defined host, select **Edit definition**. Enter a path, not a password or
+the contents of the key.
 
 Use **Settings > Infrastructure > SSH hosts** to define an authorized host.
 Saving a definition does not connect to it. Test the connection, review the

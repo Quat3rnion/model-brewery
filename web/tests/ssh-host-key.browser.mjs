@@ -81,6 +81,60 @@ try {
   await panel.getByRole('heading',{name:'Manual (manual)'}).waitFor();
   assert.deepEqual(requests.slice(4),[{path:'/api/admin/ssh-hosts',body:{
     host:'manual.example',port:22,user:'worker',id:'manual',name:'Manual',fingerprint:'SHA256:'+'B'.repeat(43)}}]);
+  const discovered = '/controller/.ssh/frame_ed25519';
+  let frame = {name:'Frame',id:'frame',host:'frame.example',user:'operator',port:22,
+    fingerprint,status:'defined',revision:9};
+  await page.route('**/api/admin/ssh-identities',r=>r.fulfill({json:{
+    default_configured:false,identities:[{label:'Frame key',path:discovered}]}}));
+  await page.route('**/api/admin/ssh-hosts',r=>r.request().method()==='GET'
+    ? r.fulfill({json:{available:true,hosts:[frame]}}) : r.fallback());
+  await page.route('**/api/admin/ssh-hosts/frame',r=>{
+    assert.equal(r.request().method(),'PUT');
+    const body = r.request().postDataJSON();
+    requests.push({path:'/api/admin/ssh-hosts/frame',body});
+    frame={...frame,...body,revision:frame.revision+1};
+    return r.fulfill({json:frame});
+  });
+  await button('Refresh SSH hosts').click();
+  await panel.getByRole('heading',{name:'Frame (frame)'}).waitFor();
+  await panel.getByText('No SSH login identity. Edit this definition to select a key before testing.').waitFor();
+  await button('Edit definition').press('Enter');
+  const identity = label('SSH login identity');
+  assert.equal(await identity.inputValue(),'');
+  await identity.selectOption(discovered);
+  await save.press('Enter');
+  await button('Edit definition').press('Enter');
+  assert.equal(await identity.inputValue(),discovered);
+  assert.equal(requests.at(-1).body.identity_file,discovered);
+  assert.equal(await pin.inputValue(),fingerprint);
+  await identity.selectOption('custom');
+  const custom = label('Identity file path');
+  await custom.fill('~/.ssh/frame');
+  assert.equal(await save.isDisabled(),true);
+  await custom.fill('/controller/keys/alternate');
+  await capture('custom');
+  await save.press('Enter');
+  await button('Edit definition').press('Enter');
+  assert.equal(await custom.inputValue(),'/controller/keys/alternate');
+  await identity.selectOption('');
+  await save.press('Enter');
+  await button('Edit definition').press('Enter');
+  assert.equal(requests.at(-1).body.identity_file,null);
+  assert.equal(await identity.inputValue(),'');
+  await save.press('Enter');
+  await button('Add SSH host').press('Enter');
+  assert.equal('identity_file' in requests.at(-1).body,false);
+  assert.equal(await identity.inputValue(),'');
+  await label('Host ID').fill('extra');
+  await label('Display name').fill('Extra');
+  await label('SSH account').fill('test');
+  await label('Host address').fill('extra.example');
+  await pin.fill(fingerprint);
+  await identity.selectOption(discovered);
+  await save.press('Enter');
+  await panel.getByRole('heading',{name:'Extra (extra)'}).waitFor();
+  assert.equal(requests.at(-1).body.identity_file,discovered);
+  assert.ok(!requests.some(r=>r.path.endsWith('/action')));
   assert.deepEqual(errors,[]);
 } finally {
   await browser?.close();

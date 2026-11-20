@@ -1,4 +1,4 @@
-export interface Definition { id: string; name: string; host: string; user: string; port: number; fingerprint: string }
+export interface Definition { id: string; name: string; host: string; user: string; port: number; fingerprint: string; identity_file?: string|null }
 export interface SshHost extends Definition { revision: number; status: 'defined'|'verified'|'planned'|'installed'; confirmation?: string }
 export type Action = 'test'|'plan'|'install';
 const base = '/api/admin/ssh-hosts';
@@ -23,12 +23,17 @@ export function problem(d: Definition) {
   if (!d.user.trim() || /[\s/@]/.test(d.user)) return 'Enter the SSH account name.';
   if (!Number.isInteger(d.port) || d.port < 1 || d.port > 65535) return 'Use a port from 1 to 65535.';
   if (!fp.test(d.fingerprint)) return 'Enter the complete SHA256 fingerprint from a trusted source.';
+  if (d.identity_file != null && (!d.identity_file.startsWith('/') || d.identity_file.endsWith('/') ||
+    d.identity_file.trim() !== d.identity_file || /[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/u.test(d.identity_file)))
+    return 'Enter an absolute path to a login key file on the controller.';
   return '';
 }
 async function request(url: string, method = 'GET', body?: unknown): Promise<unknown> {
   const r = await fetch(url,{method,mode:'same-origin',referrerPolicy:'same-origin',credentials:'same-origin',redirect:'error',cache:'no-store',
     headers:body ? {'Content-Type':'application/json'} : undefined,body:body ? JSON.stringify(body) : undefined});
   if (!r.ok) {
+    if (body && typeof body === 'object' && 'identity_file' in body && typeof body.identity_file === 'string' && [400,422].includes(r.status))
+      throw new Error(`HTTP ${r.status}: Check the host fields and login identity. Select a listed key or enter the absolute path to a private key the controller can read.`);
     if (url === '/api/admin/ssh-host-key') {
       const issue: Record<number,string> = {
         429:'Another host key probe is running. Try again when it finishes.',
@@ -56,8 +61,8 @@ export async function listHosts() {
 export async function saveHost(d:Definition, revision?:number) {
   const issue = problem(d);
   if (issue) throw new Error(issue);
-  const {name,host,user,port,fingerprint} = d;
-  const body = {name,host,user,port,fingerprint};
+  const {name,host,user,port,fingerprint,identity_file} = d;
+  const body = {name,host,user,port,fingerprint,identity_file};
   return row(await (revision === undefined ? request(base,'POST',{...body,id:d.id}) : request(path(d.id),'PUT',{...body,revision})));
 }
 export function permitted(h:SshHost, action:Action) {
@@ -70,3 +75,11 @@ export async function sshAction(h:SshHost, action:Action, confirmed=false) {
   return row(await request(`${path(h.id)}/action`,'POST',{action,revision:h.revision,...(action === 'install' ? {confirmation:h.confirmation} : {})}));
 }
 export const removeHost = (h:SshHost) => request(path(h.id),'DELETE',{revision:h.revision});
+
+export async function listIdentities() {
+  const result = await request('/api/admin/ssh-identities') as {identities:{path:string;label:string}[];default_configured:boolean};
+  if (!Array.isArray(result?.identities) || typeof result.default_configured !== 'boolean' ||
+    !result.identities.every(i=>typeof i?.path === 'string' && i.path.startsWith('/') && typeof i.label === 'string'))
+    throw new Error('The controller did not report SSH login identities.');
+  return result;
+}

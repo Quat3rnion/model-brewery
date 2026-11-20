@@ -1,6 +1,6 @@
 use super::{
-    Provision, Registry, Row, State as RegistryState, Target, endpoint_valid, id_valid, name_valid,
-    transport,
+    Provision, Registry, Row, State as RegistryState, Target, endpoint_valid, id_valid, identity,
+    name_valid, transport,
 };
 use crate::{App, store::Store, web::ApiError};
 use axum::{
@@ -19,6 +19,7 @@ type Shared = Arc<App>;
 pub fn router() -> Router<Shared> {
     Router::new()
         .route("/admin/ssh-host-key", post(discover_key))
+        .route("/admin/ssh-identities", get(identities))
         .route("/admin/ssh-hosts", get(list).post(create))
         .route("/admin/ssh-hosts/{id}", put(update).delete(remove))
         .route("/admin/ssh-hosts/{id}/action", post(action))
@@ -44,6 +45,23 @@ struct Definition {
     user: String,
     port: u16,
     fingerprint: String,
+    #[serde(default, deserialize_with = "present_identity")]
+    identity_file: Option<Option<String>>,
+}
+
+fn present_identity<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+fn validate_identity(path: Option<&str>) -> Result<()> {
+    if path.is_some_and(|path| !identity::usable(path)) {
+        return Err(ApiError::bad(
+            "SSH identity must be an absolute path to a readable private key owned by the controller user, with no group or other access",
+        ));
+    }
+    Ok(())
 }
 impl Definition {
     fn target(&self) -> Target {
@@ -189,6 +207,13 @@ async fn list(State(app): State<Shared>) -> Result<Json<Value>> {
     ))
 }
 
+async fn identities(State(app): State<Shared>) -> Json<Value> {
+    Json(json!({
+        "identities": identity::catalog(),
+        "default_configured": app.ssh_hosts.default_identity.as_deref().is_some_and(identity::usable)
+    }))
+}
+
 async fn create(State(app): State<Shared>, payload: Payload) -> Result<(StatusCode, Json<Value>)> {
     let definition: Definition = body(payload)?;
     let target = definition.target();
@@ -202,6 +227,8 @@ async fn create(State(app): State<Shared>, payload: Payload) -> Result<(StatusCo
     {
         return Err(ApiError::bad("invalid SSH host fields"));
     }
+    let identity_file = definition.identity_file.flatten();
+    validate_identity(identity_file.as_deref())?;
     let ssh = &app.ssh_hosts;
     let _change = ssh.mutate()?;
     let store = app.store.lock().map_err(ApiError::storage)?;
@@ -221,6 +248,8 @@ async fn create(State(app): State<Shared>, payload: Payload) -> Result<(StatusCo
         id: id.clone(),
         name: definition.name,
         target,
+        identity_file,
+        checked_identity: None,
         revision: 1,
         provision: Provision::Defined,
     };
@@ -249,13 +278,21 @@ async fn update(
     let mut state = ssh.lock()?;
     let mut row = ssh.row(&state, &id, revision)?.clone();
     busy(&store, &id)?;
-    if !row.target.matches(&target) {
+    let identity_file = definition
+        .identity_file
+        .unwrap_or_else(|| row.identity_file.clone());
+    if !row.target.matches(&target) || row.identity_file != identity_file {
         if matches!(row.provision, Provision::Installed { .. }) {
             return Err(conflict(
                 "installed SSH identity cannot change; use a new host ID",
             ));
         }
+        if row.identity_file != identity_file {
+            validate_identity(identity_file.as_deref())?;
+        }
+        row.identity_file = identity_file;
         row.target = target;
+        row.checked_identity = None;
         row.provision = Provision::Defined;
     }
     row.name = definition.name;
@@ -328,9 +365,24 @@ async fn action(
                 ));
             }
         };
+    let identity = row
+        .identity_file
+        .as_deref()
+        .or(ssh.default_identity.as_deref())
+        .ok_or_else(|| conflict("Select an SSH identity file or configure BREWERY_PROVISION_IDENTITY before testing this host"))?;
+    if !identity::usable(identity) {
+        return Err(conflict(
+            "SSH identity is missing or unsafe; select a readable private key with no group or other access",
+        ));
+    }
+    if !matches!(action, Operation::Test) && row.checked_identity.as_deref() != Some(identity) {
+        return Err(conflict(
+            "SSH identity changed; test this host before planning or installing",
+        ));
+    }
     let helper = ssh.helper.as_ref().ok_or_else(unavailable)?;
     let reply = helper
-        .call(&row, operation, confirmation.as_deref())
+        .call(&row, operation, confirmation.as_deref(), identity)
         .await
         .ok_or_else(refused)?;
     let key = reply
@@ -343,6 +395,7 @@ async fn action(
     if reply.state != expected_state {
         return Err(refused());
     }
+    row.checked_identity = Some(identity.into());
     row.provision = match action {
         Operation::Test => Provision::Verified { key },
         Operation::Plan => Provision::Planned {

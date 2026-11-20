@@ -497,6 +497,19 @@
         }
       }
     },
+    "/api/admin/ssh-identities": {
+      "get": {
+        "operationId": "listSshIdentities",
+        "summary": "List local SSH login key paths available to the controller.",
+        "description": "Lists eligible files in the controller account's .ssh directory. Returns paths and labels, not private key contents. Does not contact a host or select a key.",
+        "responses": {"200": {"description": "Available choices and controller default status.", "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false, "required": ["identities","default_configured"],
+          "properties": {"identities": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["path","label"], "properties": {
+            "path": {"type": "string", "pattern": "^/"}, "label": {"type": "string"}
+          }}}, "default_configured": {"type": "boolean"}}
+        }}}}, "403": {"$ref": "#/components/responses/Forbidden"}}
+      }
+    },
     "/api/admin/ssh-host-key": {
       "post": {
         "operationId": "probeSshHostKey",
@@ -1184,6 +1197,7 @@
           "name": {"$ref": "#/components/schemas/Name"},
           "host": {"type": "string", "minLength": 1, "maxLength": 253, "description": "ASCII DNS name or literal IPv4 or IPv6 address, without scheme, brackets or scope."},
           "user": {"type": "string", "pattern": "^[a-z_][a-z0-9_-]{0,31}$"},
+          "identity_file": {"type": ["string","null"], "pattern": "^/", "description": "Absolute controller-side path to an existing SSH login key. Omit on update to preserve the selection; null clears it. Never send key contents."},
           "port": {"type": "integer", "minimum": 1, "maximum": 65535},
           "fingerprint": {"type": "string", "pattern": "^SHA256:[A-Za-z0-9+/]{43}$", "description": "OpenSSH Ed25519 fingerprint accepted by the operator. Later connections must match this pin."}
         }

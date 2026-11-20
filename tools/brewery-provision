@@ -255,10 +255,9 @@ def ssh(req, known):
             "-o", "BatchMode=yes", "-o", "PreferredAuthentications=publickey",
             "-o", "GSSAPIAuthentication=no", "-o", "ConnectTimeout=6",
             "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]
-    identity = os.environ.get("BREWERY_PROVISION_IDENTITY")
-    if identity:
-        need(safe_home(identity), "Invalid local SSH identity configuration")
-        argv.extend(["-i", identity])
+    identity = os.environ.get("BREWERY_PROVISION_IDENTITY", "")
+    need(safe_home(identity), "Select or configure a local SSH private key")
+    argv.extend(["-i", identity])
     return [*argv, "-p", str(req["port"]), "-l", req["user"], "--", req["host"],
             "exec /usr/bin/python3 -I -B -c " + shlex.quote(REMOTE)]
 

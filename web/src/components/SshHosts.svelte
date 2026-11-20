@@ -1,12 +1,16 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { listHosts, permitted, probeHostKey, problem, removeHost, saveHost, sshAction, validEndpoint, type Action, type Definition, type HostKey, type SshHost } from '../lib/ssh-hosts';
+  import { listHosts, listIdentities, permitted, probeHostKey, problem, removeHost, saveHost, sshAction, validEndpoint, type Action, type Definition, type HostKey, type SshHost } from '../lib/ssh-hosts';
   const blank = ():Definition => ({id:'',name:'',host:'',user:'',port:22,fingerprint:''});
   let hosts = $state<SshHost[]>([]);
   let available = $state(false), ready = $state(false), busy = $state(false);
   let error = $state(''), note = $state('');
   let editing = $state(false), revision = $state<number>();
   let draft = $state<Definition>(blank());
+  let inventory = $state<Awaited<ReturnType<typeof listIdentities>>>();
+  let choice = $state(''), custom = $state('');
+  const selection = $derived(choice === 'custom' ? custom : choice || (draft.identity_file ? null : undefined));
+  const issue = $derived(problem({...draft,identity_file:selection}));
   let candidate = $state<HostKey>(), accepted = $state(false), probing = $state(false);
   let removing = $state(''), approved = $state('');
   const key = (h:SshHost) => JSON.stringify([h.id,h.revision,h.confirmation]);
@@ -18,13 +22,16 @@
   }
   function refresh() { return run(async () => {
     ready = false; editing = false;
-    const state = await listHosts();
+    const [state, keys] = await Promise.all([listHosts(),listIdentities().catch(()=>undefined)]);
+    inventory = keys;
     hosts = state.hosts; available = state.available; ready = true;
   }); }
   onMount(()=>{ void refresh(); });
   function edit(h?:SshHost) {
     candidate = undefined; accepted = false;
     draft = h ? {...h} : blank(); revision = h?.revision; editing = true;
+    custom = h?.identity_file ?? '';
+    choice = custom && !inventory?.identities.some(i=>i.path === custom) ? 'custom' : custom;
     error = note = removing = approved = '';
   }
   function clearProbe() {
@@ -43,7 +50,7 @@
     note = 'Fingerprint added to the draft. Save the definition to keep it.';
   }
   function update(h:SshHost) { hosts = [...hosts.filter(x=>x.id !== h.id),h].sort((a,b)=>a.id.localeCompare(b.id)); }
-  function save() { return run(async () => { update(await saveHost(draft,revision)); editing = false; note = 'Host definition saved.'; }); }
+  function save() { return run(async () => { update(await saveHost({...draft,identity_file:selection === draft.identity_file ? undefined : selection},revision)); editing = false; note = 'Host definition saved.'; }); }
   function action(h:SshHost,a:Action) {
     const confirmed = approved === key(h);
     return run(async () => { update(await sshAction(h,a,confirmed)); note = {test:'Connection verified.',plan:'Installation plan ready for review.',install:'Installation complete.'}[a]; });
@@ -66,7 +73,7 @@
     {#if ready}
       {#if !available}<p class="note warn">The SSH helper is unavailable. You can probe host keys and save definitions, but cannot test connections or install workers.</p>{/if}
       {#if editing}
-        <form class="stack" onsubmit={(e)=>{e.preventDefault(); if (!problem(draft)) void save();}}>
+        <form class="stack" onsubmit={(e)=>{e.preventDefault(); if (!issue) void save();}}>
           <fieldset disabled={busy} class="stack">
             <legend>{revision === undefined ? 'New SSH host' : 'Edit SSH host'}</legend>
             <div class="grid-2">
@@ -93,10 +100,26 @@
                 </div>
               {/if}
             {/if}
+            <div class="field"><label for="ssh-login-identity">SSH login identity</label>
+              <select id="ssh-login-identity" class="input" bind:value={choice} disabled={!inventory} aria-describedby="ssh-identity-help">
+                <option value="">Use controller default</option>
+                {#each inventory?.identities ?? [] as i}<option value={i.path}>{i.label} · {i.path}</option>{/each}
+                <option value="custom">Custom controller path</option>
+              </select>
+            </div>
+            {#if choice === 'custom'}
+              <label class="field">Identity file path<input class="input mono" bind:value={custom} disabled={!inventory} autocomplete="off" spellcheck="false" aria-describedby="ssh-identity-help" /></label>
+            {/if}
+            <p id="ssh-identity-help" class="xs muted">
+              {#if !inventory}The controller did not report login identities. Refresh SSH hosts to try again.
+              {:else if !choice && !inventory.default_configured}No default login identity is configured. Select a key or enter its path before testing the connection.
+              {:else}The controller uses this key to sign in to the SSH account.{/if}
+              Enter only a file path on the controller, never a password or key contents.
+            </p>
             <div class="row">
-              <button class="btn primary" disabled={!!problem(draft)} type="submit">Save definition</button>
+              <button class="btn primary" disabled={!!issue} type="submit">Save definition</button>
               <button class="btn" type="button" onclick={()=>editing=false}>Cancel edit</button>
-              {#if problem(draft)}<span class="xs muted">{problem(draft)}</span>{/if}
+              {#if issue}<span class="xs muted">{issue}</span>{/if}
             </div>
           </fieldset>
         </form>
@@ -107,6 +130,11 @@
           <div class="small break"><strong>{h.status}</strong> · {h.user}@{h.host} · port {h.port} · revision {h.revision}</div>
           <div class="xs mono break">{h.fingerprint}</div>
           {#if !editing}
+            {#if h.identity_file}
+              <div class="xs break">SSH login identity: <code>{h.identity_file}</code></div>
+            {:else if inventory && !inventory.default_configured}
+              <p class="small">No SSH login identity. Edit this definition to select a key before testing.</p>
+            {/if}
             <div class="row">
               <button class="btn small" type="button" disabled={busy} onclick={()=>edit(h)}>Edit definition</button>
               <button class="btn small" type="button" disabled={busy || !available || !permitted(h,'test')} onclick={()=>action(h,'test')}>Test connection</button>

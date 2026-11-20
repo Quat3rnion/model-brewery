@@ -2,12 +2,16 @@ use super::*;
 
 const ROUTE: &str = "/api/admin/ssh-hosts";
 const DISCOVERY: &str = "/api/admin/ssh-host-key";
+const IDENTITIES: &str = "/api/admin/ssh-identities";
 const FINGERPRINT: &str = "SHA256:kmYlmuZBwV+t4tJiZRRDQWzVv848g2LMqV6K5JdW6X8";
 const HELPER: &str = r#"#!/usr/bin/python3
 import json, pathlib, sys
 here = pathlib.Path(__file__).parent
 request = json.load(sys.stdin)
 op = request["op"]
+import os
+with (here / "identities").open("a") as f:
+    print(os.environ["BREWERY_PROVISION_IDENTITY"], file=f)
 with (here / "calls").open("a") as f:
     print(op, file=f)
 key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f"
@@ -181,6 +185,138 @@ fn host_key_discovery_only_accepts_one_host_and_port() {
     assert!(response.starts_with("HTTP/1.0 400 "), "{response}");
 }
 
+fn generate_identity(path: &std::path::Path) {
+    assert!(
+        Command::new("/usr/bin/ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(path)
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn identity_catalog_returns_only_eligible_local_paths() {
+    let mut app = Fixture::new();
+    let home = app.path("home");
+    let ssh = home.join(".ssh");
+    fs::create_dir_all(&ssh).unwrap();
+    let good = ssh.join("approved");
+    let outside = app.path("custom");
+    generate_identity(&good);
+    generate_identity(&outside);
+    generate_identity(&ssh.join("loose"));
+    fs::set_permissions(ssh.join("loose"), fs::Permissions::from_mode(0o644)).unwrap();
+    generate_identity(&ssh.join("linked"));
+    fs::hard_link(ssh.join("linked"), app.path("other-link")).unwrap();
+    std::os::unix::fs::symlink(&outside, ssh.join("symlink")).unwrap();
+    fs::write(ssh.join("config"), "Host *\n").unwrap();
+    app.launch_with(&[("HOME", home), ("BREWERY_PROVISION_IDENTITY", outside)]);
+    assert_eq!(
+        app.json("GET", IDENTITIES, None, 200),
+        json!({"identities":[{"path":good,"label":"approved"}],"default_configured":true})
+    );
+    assert_eq!(
+        app.request("GET", IDENTITIES, None, "Origin: http://other.test\r\n")
+            .0,
+        403
+    );
+}
+
+#[test]
+fn definition_identity_changes_invalidate_verification_and_missing_keys_block_login() {
+    let mut app = Fixture::new();
+    let helper = app.path("provision");
+    fs::write(&helper, HELPER).unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    let home = app.path("home");
+    fs::create_dir(&home).unwrap();
+    let client = app.path("custom-client");
+    let next = app.path("next-client");
+    generate_identity(&client);
+    generate_identity(&next);
+    let symlink = app.path("symlink");
+    std::os::unix::fs::symlink(&client, &symlink).unwrap();
+    let symlink_dir = app.path("alias");
+    std::os::unix::fs::symlink(app.root.path(), &symlink_dir).unwrap();
+    let env = [
+        ("HOME", home),
+        ("BREWERY_SSH_PROVISION", helper),
+        ("BREWERY_PROVISION_IDENTITY", app.path("absent-default")),
+    ];
+    app.launch_with(&env);
+    assert_eq!(
+        app.json("GET", IDENTITIES, None, 200),
+        json!({"identities":[],"default_configured":false})
+    );
+    let setup = json!({
+        "id":"reader","name":"Reader","host":"127.0.0.1","user":"brewery","port":2222,
+        "fingerprint":"SHA256:ZkAslGjFiUHdGf/WUL8rQvkib4PTvQatUV0OUQSncCA"
+    });
+    for bad in [
+        json!("relative"),
+        json!("~/.ssh/id_ed25519"),
+        json!(format!("{}/../custom-client", client.display())),
+        json!(app.path("%h")),
+        json!(app.path("${HOME}")),
+        json!(app.path("injection\nIdentityAgent")),
+        json!(app.path("custom-client.pub")),
+        json!(symlink),
+        json!(symlink_dir.join("custom-client")),
+    ] {
+        let mut invalid = setup.clone();
+        invalid["identity_file"] = bad;
+        app.json("POST", ROUTE, Some(invalid), 400);
+    }
+    let row = app.json("POST", ROUTE, Some(setup.clone()), 201);
+    assert!(row["identity_file"].is_null());
+    let resource = format!("{ROUTE}/reader");
+    let action = format!("{resource}/action");
+    let err = app.json(
+        "POST",
+        &action,
+        Some(json!({"revision":1,"action":"test"})),
+        409,
+    );
+    assert!(err["error"].as_str().unwrap().contains("SSH identity"));
+    assert!(!app.path("calls").exists());
+    let mut edit = setup;
+    edit.as_object_mut().unwrap().remove("id");
+    edit["revision"] = json!(1);
+    edit["identity_file"] = json!(client);
+    let row = app.json("PUT", &resource, Some(edit.clone()), 200);
+    assert_eq!(row["identity_file"], json!(client));
+    app.stop();
+    app.launch_with(&env);
+    assert_eq!(app.json("GET", ROUTE, None, 200)["hosts"][0], row);
+    let test = json!({"revision":2,"action":"test"});
+    fs::set_permissions(&client, fs::Permissions::from_mode(0o644)).unwrap();
+    app.json("POST", &action, Some(test.clone()), 409);
+    assert!(!app.path("calls").exists());
+    fs::set_permissions(&client, fs::Permissions::from_mode(0o600)).unwrap();
+    let verified = app.json("POST", &action, Some(test), 200);
+    assert_eq!(verified["status"], "verified");
+    assert_eq!(
+        fs::read_to_string(app.path("identities")).unwrap().trim(),
+        client.to_str().unwrap()
+    );
+    edit["revision"] = verified["revision"].clone();
+    edit.as_object_mut().unwrap().remove("identity_file");
+    let preserved = app.json("PUT", &resource, Some(edit.clone()), 200);
+    assert_eq!(preserved["identity_file"], json!(client));
+    assert_eq!(preserved["status"], "verified");
+    edit["revision"] = preserved["revision"].clone();
+    edit["identity_file"] = json!(next);
+    let changed = app.json("PUT", &resource, Some(edit.clone()), 200);
+    assert_eq!(changed["identity_file"], json!(next));
+    assert_eq!(changed["status"], "defined");
+    edit["revision"] = changed["revision"].clone();
+    edit["identity_file"] = Value::Null;
+    let cleared = app.json("PUT", &resource, Some(edit), 200);
+    assert!(cleared["identity_file"].is_null());
+}
+
 #[test]
 #[ignore = "requires local OpenSSH ssh-keyscan"]
 fn host_key_discovery_does_not_queue_and_releases_its_slot_after_timeout() {
@@ -236,7 +372,12 @@ fn provisioning_requires_verified_key_confirmed_plan_and_busy_checks() {
     let helper = app.path("provision");
     fs::write(&helper, HELPER).unwrap();
     fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
-    let env = [("BREWERY_SSH_PROVISION", helper)];
+    let identity = app.path("default-client");
+    generate_identity(&identity);
+    let env = [
+        ("BREWERY_SSH_PROVISION", helper),
+        ("BREWERY_PROVISION_IDENTITY", identity.clone()),
+    ];
     app.launch_with(&env);
     let target = json!({
         "id":"reader","name":"Reader","host":"reader.invalid","user":"brewery","port":2222,
@@ -287,6 +428,8 @@ fn provisioning_requires_verified_key_confirmed_plan_and_busy_checks() {
     fs::remove_file(app.path("substitute")).unwrap();
     let installed = app.json("POST", &action, Some(confirm), 200);
     assert_eq!(installed["status"], "installed");
+    let config = fs::read_to_string(app.path("state/ssh-hosts/reader.ssh")).unwrap();
+    assert!(config.contains(&format!("IdentityFile \"{}\"\n", identity.display())));
     // The installed worker must be manageable from Settings without restarting
     // the controller or enrolling it for evaluation.
     let settings = app.json("GET", "/api/settings", None, 200);
@@ -336,9 +479,12 @@ fn provisioning_requires_verified_key_confirmed_plan_and_busy_checks() {
     );
     let mut changed = target.clone();
     changed.as_object_mut().unwrap().remove("id");
-    changed["host"] = json!("other.invalid");
     changed["revision"] = installed["revision"].clone();
     let path = format!("{ROUTE}/reader");
+    changed["identity_file"] = json!(app.path("other-client"));
+    app.json("PUT", &path, Some(changed.clone()), 409);
+    changed.as_object_mut().unwrap().remove("identity_file");
+    changed["host"] = json!("other.invalid");
     app.json("PUT", &path, Some(changed), 409);
     let model = app.register("reader", "hf", "/shared/model");
     fs::write(app.path("hold"), "").unwrap();

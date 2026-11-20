@@ -1,4 +1,5 @@
 mod api;
+mod identity;
 pub(crate) mod transport;
 
 use crate::{
@@ -91,6 +92,11 @@ struct Row {
     id: String,
     name: String,
     target: Target,
+    #[serde(default)]
+    identity_file: Option<String>,
+    // Effective path used to verify or install (including the operator default).
+    #[serde(default)]
+    checked_identity: Option<String>,
     revision: u64,
     provision: Provision,
 }
@@ -106,7 +112,7 @@ impl Row {
         let mut view = json!({
             "id":self.id,"name":self.name,"host":self.target.host,"user":self.target.user,
             "port":self.target.port,"fingerprint":self.target.fingerprint,
-            "revision":self.revision,"status":status
+            "revision":self.revision,"status":status,"identity_file":self.identity_file
         });
         if let Provision::Planned { confirmation, .. } = &self.provision {
             view["confirmation"] = json!(confirmation);
@@ -145,6 +151,7 @@ pub struct Registry {
     reserved: BTreeSet<String>,
     state: Mutex<State>,
     helper: Option<transport::Helper>,
+    default_identity: Option<String>,
     changes: Semaphore,
     discovery: Semaphore,
 }
@@ -184,6 +191,8 @@ impl Registry {
             reserved,
             state: Mutex::new(state),
             helper,
+            default_identity: identity::configured_default()
+                .filter(|path| identity::safe_path(path)),
             changes: Semaphore::new(1),
             discovery: Semaphore::new(1),
         };
@@ -192,6 +201,14 @@ impl Registry {
             if id != &row.id
                 || !id_valid(id)
                 || !row.target.valid()
+                || row
+                    .identity_file
+                    .as_deref()
+                    .is_some_and(|p| !identity::safe_path(p))
+                || row
+                    .checked_identity
+                    .as_deref()
+                    .is_some_and(|p| !identity::safe_path(p))
                 || out.reserved.contains(&id.to_ascii_lowercase())
             {
                 return Err("invalid saved SSH definition".into());
@@ -231,11 +248,29 @@ impl Registry {
             && matches!(&row.provision, Provision::Installed { .. })
     }
 
-    pub fn config_for(&self, ids: &[&str]) -> Option<PathBuf> {
+    fn installed_identity<'a>(&'a self, row: &'a Row) -> Option<&'a str> {
+        row.checked_identity
+            .as_deref()
+            .or(row.identity_file.as_deref())
+            .or(self.default_identity.as_deref())
+    }
+
+    pub fn config_for(&self, ids: &[&str]) -> Result<Option<PathBuf>, &'static str> {
         let state = self.state.lock().expect("SSH registry lock");
-        ids.iter()
-            .any(|id| state.rows.get(*id).is_some_and(|r| self.dispatchable(r)))
-            .then(|| self.dir.join("dispatch.json"))
+        let mut managed = false;
+        for row in ids
+            .iter()
+            .filter_map(|id| state.rows.get(*id))
+            .filter(|r| self.dispatchable(r))
+        {
+            if !self.installed_identity(row).is_some_and(identity::usable) {
+                return Err(
+                    "Installed SSH identity is missing or unsafe; restore the configured private key",
+                );
+            }
+            managed = true;
+        }
+        Ok(managed.then(|| self.dir.join("dispatch.json")))
     }
 
     /// The editor installer must use the already defined transport identity.
@@ -260,7 +295,8 @@ impl Registry {
             let Provision::Installed { key, install } = &row.provision else {
                 unreachable!()
             };
-            let config = transport::ssh_config(&self.dir, row, key, install)?;
+            let config =
+                transport::ssh_config(&self.dir, row, key, install, self.installed_identity(row))?;
             hosts.insert(row.id.clone(), json!({
                 "ssh":row.id,"ssh_config":config,"remote_worker":install.worker,"remote_config":install.config
             }));

@@ -1697,6 +1697,13 @@ prove the host's identity. Accept the key to use it in the form, or enter a
 known fingerprint manually. Neither probing nor accepting saves the host.
 The form does not accept a password or private key.
 
+The SSH login key identifies the controller to the remote account. It is
+separate from the host key fingerprint. In **Add SSH host** or **Edit
+definition**, select a login key from the controller account's `~/.ssh/`
+directory, or enter the absolute path to a private key on the controller.
+Save the definition before testing it. Saving does not try the key, change
+the server fingerprint, or authorize the public key on the remote host.
+
 1. Save the host definition. This does not connect to the host.
 2. Select **Test connection**. The helper checks the fingerprint and tests
    key-based SSH login to a non-root Linux account.
@@ -1729,7 +1736,8 @@ Set these variables in the controller service environment:
 3. Set `BREWERY_PROVISION_MANIFEST_SHA256` to the SHA-256 digest of the exact
    `manifest.json` file.
 4. Optional: set `BREWERY_PROVISION_IDENTITY` to an existing SSH private-key
-   file.
+   file as a service default. A login key saved in a host definition takes
+   precedence for that host and does not require a service restart.
 5. Restart the controller.
 
 The manifest pins the bundle architecture and each binary hash. The helper

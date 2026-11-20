@@ -114,7 +114,7 @@ impl Dispatcher {
             if let Some(envelope) = envelope {
                 ids.extend(envelope.inputs.iter().map(|model| model.host.as_str()));
             }
-            if let Some(config) = self.ssh_hosts.config_for(&ids) {
+            if let Some(config) = self.ssh_hosts.config_for(&ids)? {
                 command.env("BREWERY_DISPATCH_CONFIG", config);
             }
         }
