@@ -8,6 +8,8 @@ None of these kernels needs Python or PyTorch to run.
 | --- | --- |
 | `hgn` | BF16, F32, F16, Q4C-P, Q8G64, Q6G64, HT3, HT4 and I4R matrix-vector products. Includes HT3/HT4 and I4R expert layouts with rotation sidecars. FP8G uses a row gather; I64 is host metadata, not a GPU contraction. |
 | `gyro` | Agention wire IDs 144 through 151. Both original and rotated inputs were tested with signed rotation and identity rotation. The build checks the upstream codebook before use. |
+| `ik-kt` | IQ1_KT (158), IQ2_KT (153), IQ3_KT (154), IQ4_KT (155). Each backend passed 112 matrix cases against the pinned ik CPU decoder and an independent FP64 dot product. This does not test the ik graph runtime. |
+| `exl3` | All 27 legal rate and codebook pairs. The CPU decoder was checked against ExLlamaV3 v1.6.7; worst absolute GPU difference from native CPU on the 128-by-128 block test was `9.54e-6`. SafeTensors CLI checks also ran on both GPUs, including packed rotations and bias on a 256-by-256 layer. |
 | `trellis-ref/glq*` | GLQ 3INST, 2 through 8 bits per weight, with a batch of three 32-by-64 products per rate and one 96-by-96 case at 5 bits. Maximum absolute GPU error: `1.05e-5`. |
 | `trellis-ref/qtip*` | 31 Cornell QTIP cases, including reference and swizzled layouts. Maximum absolute error: `4.77e-7`. The public interface specifies the supported axes, scale and sidecars. |
 
@@ -19,6 +21,25 @@ then run the result. Those tests use the included vectors; the Python oracle
 scripts are for regenerating vectors, not for running the kernels.
 These results do not enable a worker, verify model generation, or qualify a
 conversion for release.
+
+`native/exl3` has a baseline CPU encoder and a C ABI for packed forward. The
+encoder writes one 128-by-128 input-major F32 block to a **new** SafeTensors
+file. It does not reproduce the upstream calibrated quantizer. Forward reads
+aligned layers with co-located companions; it does not load a model or run a
+token generator. Build with C++17 and json-c. For example:
+
+```sh
+make -C native/exl3 test-cpu
+make -C native/exl3 CUDA_ARCH=sm_120 test-cuda
+make -C native/exl3 HIP_ARCH=gfx1036 test-rocm
+native/exl3/build/exl3-checkpoint --help
+```
+
+Use distinct `BUILD` directories when changing device architectures. Select
+the backend explicitly: an unavailable backend fails instead of running on
+CPU. Separately, the [GGUF ternary tests](../native/gguf-ternary/RESULTS.md)
+exercise direct CUDA and HIP operations for `TQ1_0` and `TQ2_0`. Their
+success does not change the pinned stock ggml CUDA graph's rejection of both.
 
 # Derived FP32 replay experiment
 
