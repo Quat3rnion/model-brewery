@@ -634,6 +634,13 @@ has no inventory. The engine checks them when the conversion runs. A GGUF
 profile has no size estimate. Use `profile_revision` or `options.preset`, not
 both.
 
+In **Profiles → GGUF**, select a Library model to load its tensor names.
+You do not need to select an inspect job. The editor uses exact GGUF names
+when a saved report or a matching header plan supplies them. For Flash-Next,
+the plan lists the main GGUF tensors, not the separate vision projector or
+metadata arrays. A name in the plan does not mean conversion has passed.
+When only the source inventory is available, its unmapped names are read-only.
+
 **Imatrix.** An importance matrix is a Library entry of the kind `imatrix`.
 You register a path on the worker, as for other inputs. A low-bit preset or
 type needs it: in the catalog these have `requires_imatrix: true` (for

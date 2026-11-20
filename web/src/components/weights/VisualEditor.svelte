@@ -22,7 +22,7 @@
     legend,
     niceRanges,
     plan as planOf,
-    readInventory,
+    walkInventory,
     readTile,
     roundTo,
     short,
@@ -30,7 +30,6 @@
     tileJob,
     tileRequest,
 
-    type InventoryPage,
     type TensorInfo,
     type Tile,
   } from '../../lib/weightmap';
@@ -87,32 +86,7 @@
   }
 
   // ---- Inventory, page by page. ----
-  type Inv = { pages: InventoryPage[]; job?: JobSummary; need?: { offset: number; sha?: string }; error?: string };
-  const inv = $derived.by((): Inv => {
-    const pages: InventoryPage[] = [];
-    let offset = 0;
-    let sha: string | undefined;
-    for (;;) {
-      const options = inventoryJob(source.id, source.host, offset, sha, packedHost).options!;
-      const j = findRead(usable, source.id, options);
-      if (!j) return { pages, need: { offset, sha } };
-      if (j.state !== 'succeeded') return { pages, job: j, error: isActive(j.state) ? undefined : (j.error ?? 'The tensor list could not be read.') };
-      const d = brewery.details[j.id];
-      if (!d) return { pages, job: j };
-      const p = readInventory(d.result, isSafeSource(source.kind) ? source.kind : undefined);
-      if (p && packedHost && (d.result as {packed?:unknown} | null)?.packed !== true) return { pages, job:j, error:'The worker did not confirm packed inspection.' };
-      if (!p) return { pages, job: j, error: 'The tensor list has an unknown shape.' };
-      if (sha && p.source_sha256 !== sha) return { pages, job: j, error: 'The source file changed while the tensor list was read. Read it again.' };
-      const end = offset + p.tensors.length;
-      if (p.offset !== offset || end > p.total || (pages.length && p.total !== pages[0].total) ||
-        (p.next_offset === null ? end !== p.total : p.next_offset !== end || end <= offset || end >= p.total))
-        return { pages, job: j, error: 'The worker returned inconsistent tensor inventory pages. Read the list again.' };
-      sha = p.source_sha256;
-      pages.push(p);
-      if (p.next_offset === null) return { pages };
-      offset = p.next_offset;
-    }
-  });
+  const inv = $derived(walkInventory(source, usable, brewery.details, { packed: packedHost, format: isSafeSource(source.kind) ? source.kind : undefined }));
   const sha = $derived(inv.pages[0]?.source_sha256 ?? null);
   const total = $derived(inv.pages[0]?.total ?? 0);
   const tensors = $derived(inv.pages.flatMap((p) => p.tensors.map(t => isPacked(t.dtype) && (!packedHost || (source.kind === 'hgn') !== (t.dtype === 'Q8G64')) ? {...t, reason: t.reason ?? 'Packed editing is not enabled for this source and worker.'} : t)));

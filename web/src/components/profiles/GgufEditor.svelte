@@ -1,15 +1,17 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  // GGUF profile: a llama.cpp preset plus exact per-tensor type overrides.
-  // Tensor names come from an inspect/plan result of the chosen source, or are
-  // typed explicitly; the worker validates every name and type.
+  import { SvelteMap } from 'svelte/reactivity';
   import { api, errorText } from '../../lib/api';
   import { brewery } from '../../lib/store.svelte';
   import { profileStore } from '../../lib/profiles.svelte';
-  import { formatBytes, formatTime, isTerminal, modelLabel, newestFirst } from '../../lib/format';
+  import { WEIGHT_SOURCES, isSafeSource, formatBytes, formatTime } from '../../lib/format';
   import { parseGgufProfiles, shortRev, type SavedGgufProfile } from '../../lib/profiles';
-  import { buildGgufProfileBody, ggufTensorsFromResult, imatrixRequired, rangeOverrides, tensorBytes, forkSelected, profileMatches, FORK_NOTICE, type GgufCatalog, type GgufTensor } from '../../lib/gguf';
+  import { buildGgufProfileBody, imatrixRequired, layerOf, rangeOverrides, tensorBytes, forkSelected, profileMatches, FORK_NOTICE, type GgufCatalog } from '../../lib/gguf';
+  import { ggufEvidenceIds, inventoryBlocker, resolveGgufSource, validSha, type ExactInventory } from '../../lib/ggufSource';
+  import { inventoryJob, walkInventory } from '../../lib/weightmap';
+  import type { JobDetail, JobSummary } from '../../lib/types';
   import Badge from '../Badge.svelte';
+  import ModelSelect from '../ModelSelect.svelte';
 
   let { catalog }: { catalog: GgufCatalog } = $props();
   const PAGE = 60;
@@ -21,16 +23,78 @@
   let overrides = $state<Record<string, string>>({});
   let start = $state<SavedGgufProfile | null>(null);
 
-  // Tensor names: from the newest finished inspect/plan of a chosen source that reports gguf_tensors.
-  const models = $derived(brewery.state?.models ?? []);
+  // Choose the first available supported Library entry until the user selects one.
+  const models = $derived((brewery.state?.models ?? []).filter(m => WEIGHT_SOURCES.includes(m.kind)));
   const jobs = $derived(brewery.state?.jobs ?? []);
-  const sourceJobs = $derived(newestFirst(jobs.filter((j) => (j.kind === 'inspect' || j.kind === 'plan') && j.state === 'succeeded')));
-  let jobId = $state('');
-  let loadErr = $state<string | null>(null);
+  let sourceId = $state('');
+  const source = $derived(models.find(m => m.id === sourceId));
   $effect(() => {
-    if (jobId && !brewery.details[jobId]) void brewery.loadJob(jobId).catch((e) => (loadErr = errorText(e)));
+    if (!source) sourceId = (models.find(m => m.available !== false) ?? models[0])?.id ?? '';
   });
-  const tensors = $derived<GgufTensor[] | null>(jobId ? ggufTensorsFromResult(brewery.details[jobId]?.result) : null);
+  const sourceKey = $derived(source ? JSON.stringify([source.id, source.kind, source.host, source.path, source.sha256, source.bundle_sha256]) : '');
+  const evidenceKey = $derived(source ? JSON.stringify(ggufEvidenceIds(source, jobs)) : '');
+  const lookupKey = $derived(sourceKey ? JSON.stringify([sourceKey, evidenceKey]) : '');
+  let resolved = $state<{ key: string; exact: ExactInventory | null } | null>(null);
+  const evidence = new Map<string, Promise<JobDetail>>();
+  function loadDetail(id: string): Promise<JobDetail> {
+    let pending = evidence.get(id);
+    if (!pending) {
+      pending = brewery.loadJob(id);
+      evidence.set(id, pending);
+    }
+    return pending;
+  }
+  $effect(() => {
+    const key = lookupKey;
+    const ids = evidenceKey;
+    const model = untrack(() => source);
+    if (!key || !model) return;
+    let active = true;
+    const current = () => active && lookupKey === key;
+    void resolveGgufSource(model, JSON.parse(ids), loadDetail, current).then(exact => {
+      if (current()) resolved = { key, exact };
+    });
+    return () => { active = false; };
+  });
+  const lookup = $derived(resolved?.key === lookupKey ? resolved : null);
+  const host = $derived(brewery.state?.hosts.find(h => h.id === source?.host));
+  const blocked = $derived(source ? inventoryBlocker(source, host) : null);
+  const packed = $derived(!!source && !isSafeSource(source.kind) && host?.capabilities?.weight_packed === true);
+  const submitted = new SvelteMap<string, JobSummary | string | null>();
+  const detailErrors = new SvelteMap<string, string>();
+  const inventoryJobs = $derived([...jobs, ...[...submitted.values()].filter((j): j is JobSummary =>
+    !!j && typeof j !== 'string' && !jobs.some(row => row.id === j.id))]);
+  const inv = $derived(source && lookup && !lookup.exact ? walkInventory(source, inventoryJobs, brewery.details, {
+    format: source.kind, packed, matchHost: true,
+    sha: source.kind === 'hf' ? validSha(source.bundle_sha256) ?? validSha(source.sha256) : validSha(source.sha256),
+  }) : null);
+  const need = $derived(source && inv?.need ? inventoryJob(source.id, source.host, inv.need.offset, inv.need.sha, packed) : null);
+  const needKey = $derived(need ? JSON.stringify([sourceKey, need.options]) : '');
+  const invError = $derived(inv?.error || (inv?.job && detailErrors.get(inv.job.id)) ||
+    (typeof submitted.get(needKey) === 'string' ? submitted.get(needKey) as string : null));
+  $effect(() => {
+    const job = inv?.job;
+    if (job?.state !== 'succeeded' || brewery.details[job.id]) return;
+    void loadDetail(job.id).catch(error => detailErrors.set(job.id, errorText(error)));
+  });
+  $effect(() => {
+    const key = needKey;
+    const request = need;
+    if (!key || !request || blocked || submitted.has(key)) return;
+    submitted.set(key, null);
+    void api.submitJob(request).then(job => {
+      submitted.set(key, job);
+      void brewery.refresh();
+    }).catch(error => submitted.set(key, errorText(error)));
+  });
+  const native = $derived(inv?.pages.flatMap(p => p.tensors) ?? []);
+  const nativeNames = $derived(new Set(source?.kind === 'gguf' ? [] : native.map(t => t.name)));
+  const tensors = $derived(lookup?.exact?.tensors ??
+    (source?.kind === 'gguf' && native.length ? native.map(t => {
+      const layer = layerOf(t.name);
+      return { name: t.name, layer, role: layer === null ? t.name : t.name.split('.').slice(2).join('.'), shape: t.shape, currentType: t.dtype };
+    }) : null));
+  const exactNames = $derived(new Set(tensors?.map(t => t.name)));
   const layers = $derived(tensors ? [...new Set(tensors.filter((t) => t.layer !== null).map((t) => t.layer as number))].sort((a, b) => a - b) : []);
   const roles = $derived(tensors ? [...new Set(tensors.filter((t) => t.layer !== null).map((t) => t.role))].sort() : []);
 
@@ -47,10 +111,13 @@
   // Explicit name entry (when no inspect result lists names)
   let manualName = $state('');
   let manualType = $state('');
-  const manualProblem = $derived(manualName && !/^[A-Za-z0-9_.\-]{1,200}$/.test(manualName.trim()) ? 'Use the exact GGUF tensor name, for example blk.12.ffn_down.weight.' : null);
+  const manualProblem = $derived(nativeNames.has(manualName.trim())
+    ? 'This is a native source name, not a GGUF override.'
+    : manualName && !/^[A-Za-z0-9_.\-]{1,200}$/.test(manualName.trim()) ? 'Use the exact GGUF tensor name, for example blk.12.ffn_down.weight.' : null);
+  const discovering = $derived(!!source && (!lookup || (!!inv && !blocked && !invError && !!(inv.need || inv.job))));
   function addManual() {
     const n = manualName.trim();
-    if (!n || manualProblem || !manualType) return;
+    if (!n || manualProblem || !manualType || discovering) return;
     overrides = Object.fromEntries(Object.entries({ ...overrides, [n]: manualType }).sort(([a], [b]) => a.localeCompare(b)));
     manualName = '';
   }
@@ -59,20 +126,25 @@
   let q = $state('');
   let page = $state(0);
   const listed = $derived.by(() => {
-    const names = tensors ? tensors.map((t) => t.name) : [];
-    const extra = Object.keys(overrides).filter((n) => !names.includes(n));
-    const all = [...(tensors ?? []), ...extra.map((n) => ({ name: n, layer: null, role: n, shape: null, currentType: null }) as GgufTensor)];
+    const exact = (tensors ?? []).map(t => ({ ...t, kind: 'exact' as const }));
+    const readonly = native.filter(t => nativeNames.has(t.name)).map(t => ({ name: t.name, shape: t.shape, currentType: t.dtype, kind: 'native' as const }));
+    const extra = Object.keys(overrides).filter(n => !exactNames.has(n) && !nativeNames.has(n))
+      .map(name => ({ name, shape: null, currentType: null, kind: 'typed' as const }));
+    const all = [...exact, ...readonly, ...extra];
     const k = q.toLowerCase().split(/\s+/).filter(Boolean);
     return k.length ? all.filter((t) => k.every((x) => `${t.name} ${t.currentType ?? ''} ${overrides[t.name] ?? ''}`.toLowerCase().includes(x))) : all;
   });
   $effect(() => {
     void q;
+    void sourceKey;
     page = 0;
   });
   const pages = $derived(Math.max(1, Math.ceil(listed.length / PAGE)));
+  const visiblePage = $derived(Math.min(page, pages - 1));
 
   const needsImatrix = $derived(imatrixRequired(catalog, preset, overrides));
   const built = $derived(buildGgufProfileBody(catalog, name, preset, overrides));
+  const nativeOverrides = $derived(Object.keys(overrides).some(n => nativeNames.has(n)));
   const startJson = $derived(start ? JSON.stringify([start.name, start.preset, start.overrides]) : JSON.stringify(['', catalog.presets[0]?.id ?? '', {}]));
   const dirty = $derived(JSON.stringify([name.trim(), preset, overrides]) !== startJson);
 
@@ -99,7 +171,7 @@
   let saveErr = $state<string | null>(null);
   let saved = $state<SavedGgufProfile | null>(null);
   async function save() {
-    if (!built.body || saving) return;
+    if (!built.body || saving || discovering || nativeOverrides) return;
     saving = true;
     saveErr = null;
     try {
@@ -161,15 +233,17 @@
       <span class="hint" id="{uid}-preset-h">A llama.cpp quantization preset. It is not an HGN profile.</span>
       {#if forkSelected(catalog,preset,overrides)}<p class="note warn small">{FORK_NOTICE} Conversion requires a worker with ROCmFPX output support.</p>{/if}
     </div>
-    <div class="field">
-      <label for="{uid}-src">Tensor names from</label>
-      <select id="{uid}-src" class="input" bind:value={jobId} aria-describedby="{uid}-src-h">
-        <option value="">No inspect result (type names yourself)</option>
-        {#each sourceJobs as j (j.id)}<option value={j.id}>{j.kind} · {j.input_ids.map((id) => modelLabel(models.find((m) => m.id === id))).join(', ')} · {j.id.slice(0, 8)}</option>{/each}
-      </select>
-      <span class="hint" id="{uid}-src-h">
-        {#if jobId && !brewery.details[jobId]}Loading…{:else if jobId && !tensors}This result lists no GGUF tensor names. Run inspect again on a worker that reports them, or type names below.{:else if tensors}{tensors.length} tensors in {layers.length} layers, names as written to the GGUF.{:else}Names in GGUF form (blk.N.…). The worker checks each name.{/if}
-        {#if loadErr}{' '}{loadErr}{/if}
+    <div class="stack">
+      <ModelSelect bind:value={sourceId} kinds={WEIGHT_SOURCES} label="Source model" hint="Choose a Library model to list its tensors." />
+      <span class="hint" role="status">
+        {#if discovering}<span>Reading the tensor inventory{inv?.pages.length ? ` (${native.length} of ${inv.pages[0].total})` : ''}…</span>
+        {:else if lookup?.exact?.planned}{tensors?.length} planned main GGUF tensor names in {layers.length} layers. This plan does not confirm conversion or list separate outputs.
+        {:else if tensors}{tensors.length} exact GGUF tensor names in {layers.length} layers.
+        {:else if native.length}{native.length} native source tensors (read-only). No verified GGUF tensor mapping is available.
+        {:else if blocked}{blocked}
+        {:else if source && !invError}No tensor names were found for this source.
+        {/if}
+        {#if invError}{' '}{invError}{/if}
       </span>
     </div>
   </div>
@@ -181,7 +255,7 @@
     <button type="button" class="btn small" onclick={reset} disabled={!dirty}>Reset changes</button>
   </div>
 
-  {#if tensors && layers.length}
+  {#if tensors && layers.length && !discovering}
     <fieldset class="tool">
       <legend>Layer range</legend>
       <div class="field"><label for="{uid}-from">From layer</label><input id="{uid}-from" class="input num" type="number" min={layers[0]} max={layers[layers.length - 1]} bind:value={rFrom} /></div>
@@ -205,38 +279,46 @@
       <label for="{uid}-mn">GGUF tensor name</label>
       <input id="{uid}-mn" class="input mono" bind:value={manualName} list={tensors ? `${uid}-names` : undefined} autocomplete="off" spellcheck="false" aria-invalid={manualProblem ? 'true' : undefined} aria-describedby="{uid}-mn-h" placeholder="blk.12.ffn_down.weight" />
       {#if tensors}<datalist id="{uid}-names">{#each tensors as t (t.name)}<option value={t.name}></option>{/each}</datalist>{/if}
-      <span class="hint" id="{uid}-mn-h">{manualProblem ?? (tensors ? 'Names from the inspect result are suggested.' : 'Not checked here; the worker rejects names that do not exist in the source.')}</span>
+      <span class="hint" id="{uid}-mn-h">{manualProblem ?? (tensors ? 'Known GGUF names are suggested.' : 'The worker checks that this name is part of the GGUF output.')}</span>
     </div>
     <div class="field">
       <label for="{uid}-mt">Type</label>
       <select id="{uid}-mt" class="input" bind:value={manualType}><option value="" disabled>Choose a type</option>{#each catalog.types as t (t.id)}<option value={t.id}>{t.id}{typeNote(t.id)}</option>{/each}</select>
     </div>
-    <button type="button" class="btn" disabled={!manualName.trim() || !!manualProblem || !manualType} onclick={addManual}>Add override</button>
+    <button type="button" class="btn" disabled={discovering || !manualName.trim() || !!manualProblem || !manualType} onclick={addManual}>Add override</button>
   </fieldset>
 
-  {#if listed.length}
+  {#if tensors?.length || native.length || Object.keys(overrides).length}
     <div class="field">
       <label for="{uid}-q">Search tensors and overrides</label>
       <input id="{uid}-q" class="input" type="search" bind:value={q} autocomplete="off" spellcheck="false" />
     </div>
+    {#if !listed.length}
+      <p class="xs muted">No tensors match this search.</p>
+    {:else}
     <div class="table-wrap">
       <table class="data stackable">
-        <caption class="sr-only">GGUF tensors and their type overrides</caption>
+        <caption class="sr-only">Source tensors and GGUF overrides</caption>
         <thead><tr><th scope="col">Tensor</th><th scope="col">Shape</th><th scope="col">Source type</th><th scope="col">Output type</th><th scope="col" class="r">Bytes</th></tr></thead>
         <tbody>
-          {#each listed.slice(page * PAGE, page * PAGE + PAGE) as t (t.name)}
-            {@const ov = overrides[t.name] ?? ''}
-            {@const bytes = ov ? tensorBytes(catalog, ov, t.shape) : null}
-            <tr class:changed={!!ov}>
-              <th scope="row" class="mono xs break">{t.name}{#if !tensors?.some((x) => x.name === t.name)}<div><Badge tone="muted" label="Typed name, checked by the worker" /></div>{/if}</th>
+          {#each listed.slice(visiblePage * PAGE, visiblePage * PAGE + PAGE) as t (t.name)}
+            {@const ov = Object.hasOwn(overrides, t.name) ? overrides[t.name] : ''}
+            {@const bytes = ov && t.kind !== 'native' ? tensorBytes(catalog, ov, t.shape) : null}
+            <tr class:changed={!!ov && t.kind !== 'native'}>
+              <th scope="row" class="mono xs break">{t.name}{#if t.kind === 'typed'}<div><Badge tone="muted" label="Typed name, checked by the worker" /></div>{/if}</th>
               <td class="mono xs" data-label="Shape">{t.shape ? t.shape.join('×') : '—'}</td>
               <td class="mono xs" data-label="Source type">{t.currentType ?? '—'}</td>
               <td data-label="Output type">
+                {#if t.kind === 'native'}
+                  <span class="xs muted">Read-only</span>
+                  {#if ov}<button type="button" class="btn small" onclick={() => setOne(t.name, '')}>Remove draft override</button>{/if}
+                {:else}
                 <label class="sr-only" for="{uid}-o-{t.name}">Output type for {t.name}</label>
-                <select id="{uid}-o-{t.name}" class="input sel" value={ov} onchange={(e) => setOne(t.name, e.currentTarget.value)}>
+                <select id="{uid}-o-{t.name}" class="input sel" value={ov} disabled={discovering} onchange={(e) => setOne(t.name, e.currentTarget.value)}>
                   <option value="">Preset ({preset})</option>
                   {#each catalog.types as ty (ty.id)}<option value={ty.id}>{ty.id}{typeNote(ty.id)}</option>{/each}
                 </select>
+                {/if}
               </td>
               <td class="num r xs" data-label="Bytes">{ov ? (bytes === null ? '—' : formatBytes(bytes)) : '—'}</td>
             </tr>
@@ -246,12 +328,13 @@
     </div>
     {#if pages > 1}
       <nav class="pager" aria-label="Tensor pages">
-        <button type="button" class="btn small" disabled={page === 0} onclick={() => (page -= 1)}>Previous</button>
-        <span class="xs muted">Page {page + 1} of {pages}</span>
-        <button type="button" class="btn small" disabled={page >= pages - 1} onclick={() => (page += 1)}>Next</button>
+        <button type="button" class="btn small" disabled={visiblePage === 0} onclick={() => (page = visiblePage - 1)}>Previous</button>
+        <span class="xs muted">Page {visiblePage + 1} of {pages}</span>
+        <button type="button" class="btn small" disabled={visiblePage >= pages - 1} onclick={() => (page = visiblePage + 1)}>Next</button>
       </nav>
     {/if}
     <p class="xs muted">Bytes: payload of an overridden tensor from the catalog block size, when the shape is known. Preset tensor sizes are not estimated here.</p>
+    {/if}
   {/if}
 
   <div class="row end">
@@ -260,9 +343,10 @@
       <input id="{uid}-name" class="input" bind:value={name} maxlength="80" autocomplete="off" aria-describedby="{uid}-name-h" />
       <span class="hint" id="{uid}-name-h">Saving with the same name adds a new revision; the imatrix is chosen at conversion time.</span>
     </div>
-    <button type="button" class="btn primary" disabled={!built.body || saving || (!dirty && !!start)} onclick={save}>{saving ? 'Saving…' : 'Save GGUF revision'}</button>
+    <button type="button" class="btn primary" disabled={!built.body || saving || discovering || nativeOverrides || (!dirty && !!start)} onclick={save}>{saving ? 'Saving…' : 'Save GGUF revision'}</button>
   </div>
   {#if built.problems.length}<p class="why xs"><strong>Needed:</strong> {built.problems.join(' ')}</p>{/if}
+  {#if nativeOverrides}<p class="why xs">Remove the draft overrides for read-only source names to save this profile.</p>{/if}
   <div aria-live="polite">
     {#if saveErr}<p class="note bad" role="alert">{saveErr} Your changes are kept.</p>{/if}
     {#if saved}<div class="note info"><p>Saved <strong>{saved.name}</strong>, revision <span class="mono">{shortRev(saved.revision)}</span>. No job was started.</p><button type="button" class="btn small primary" onclick={() => useInConvert(saved!)}>Use in Convert</button></div>{/if}

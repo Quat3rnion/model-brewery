@@ -12,7 +12,8 @@
 //   Host needs weight_inspect and weight_visual.
 
 import { obj } from './reports';
-import type { JobSummary, NewJob } from './types';
+import { isActive } from './format';
+import type { JobDetail, JobSummary, NewJob } from './types';
 
 export const INVENTORY_PAGE = 128;
 export const TILE = 32;
@@ -97,7 +98,8 @@ export interface InventoryPage {
 
 export function readInventory(result: unknown, expectedFormat?: string): InventoryPage | null {
   const r = obj(obj(result)?.report);
-  if (!r || (expectedFormat && r.source_format !== expectedFormat) || r.mode !== 'inventory' || typeof r.source_sha256 !== 'string' || !SHA.test(r.source_sha256)) return null;
+  if (!r || (expectedFormat && r.source_format !== expectedFormat && !(expectedFormat === 'gguf' && r.source_format === undefined)) ||
+      r.mode !== 'inventory' || typeof r.source_sha256 !== 'string' || !SHA.test(r.source_sha256)) return null;
   const { offset, total, next_offset } = r;
   if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(total) || (next_offset !== null && !Number.isSafeInteger(next_offset))) return null;
   if (!Array.isArray(r.tensors)) return null;
@@ -272,16 +274,60 @@ export const keyOf = (index: number[]) => index.join(',');
 const eq = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 /** Newest job for this source whose options equal the request; succeeded or active first. */
-export function findRead(jobs: JobSummary[], source: string, options: Record<string, unknown>): JobSummary | null {
+export function findRead(jobs: readonly JobSummary[], source: string, options: Record<string, unknown>, host?: string): JobSummary | null {
   let best: JobSummary | null = null;
   const rank = (j: JobSummary) => (j.state === 'succeeded' ? 3 : j.state === 'queued' || j.state === 'running' ? 2 : 1);
   for (const j of jobs) {
-    if (j.kind !== 'weight_inspect' || j.input_ids[0] !== source) continue;
+    if (j.kind !== 'weight_inspect' || j.input_ids.length !== 1 || j.input_ids[0] !== source || (host && j.host !== host)) continue;
     const o = obj(j.options);
     if (!o || Object.keys(o).length !== Object.keys(options).length || !Object.entries(options).every(([k, v]) => eq(o[k], v))) continue;
     if (!best || rank(j) > rank(best) || (rank(j) === rank(best) && (j.created_at ?? 0) > (best.created_at ?? 0))) best = j;
   }
   return best;
+}
+
+export interface InventoryWalk {
+  pages: InventoryPage[];
+  job?: JobSummary;
+  need?: { offset: number; sha?: string };
+  error?: string;
+}
+
+/** Reuse saved reads and accept only one ordered, fingerprint-consistent inventory. */
+export function walkInventory(
+  source: { id: string; host: string },
+  jobs: readonly JobSummary[],
+  details: Readonly<Record<string, JobDetail>>,
+  { packed = false, format, sha: expectedSha, matchHost = false }: { packed?: boolean; format?: string; sha?: string; matchHost?: boolean } = {},
+): InventoryWalk {
+  const pages: InventoryPage[] = [];
+  const seen = new Set<string>();
+  let offset = 0;
+  let sha: string | undefined;
+  for (;;) {
+    const options = inventoryJob(source.id, source.host, offset, sha, packed).options!;
+    const job = findRead(jobs, source.id, options, matchHost ? source.host : undefined);
+    if (!job) return { pages, need: { offset, sha } };
+    if (job.state !== 'succeeded') return { pages, job, error: isActive(job.state) ? undefined : (job.error ?? 'The tensor list could not be read.') };
+    const detail = details[job.id];
+    if (!detail) return { pages, job };
+    const p = readInventory(detail.result, format);
+    if (p && packed && obj(detail.result)?.packed !== true) return { pages, job, error: 'The worker did not confirm packed inspection.' };
+    if (!p) return { pages, job, error: 'The tensor list has an unknown shape.' };
+    if ((sha ?? expectedSha) && p.source_sha256 !== (sha ?? expectedSha)) return { pages, job, error: 'The source file changed while the tensor list was read. Read it again.' };
+    const end = offset + p.tensors.length;
+    if (p.offset !== offset || p.tensors.length > INVENTORY_PAGE || end > p.total || (pages.length && p.total !== pages[0].total) ||
+        (p.next_offset === null ? end !== p.total : p.next_offset !== end || end <= offset || end >= p.total))
+      return { pages, job, error: 'The worker returned inconsistent tensor inventory pages. Read the list again.' };
+    for (const { name } of p.tensors) {
+      if (seen.has(name)) return { pages, job, error: 'The worker returned duplicate tensor names. Read the list again.' };
+      seen.add(name);
+    }
+    sha = p.source_sha256;
+    pages.push(p);
+    if (p.next_offset === null) return { pages };
+    offset = p.next_offset;
+  }
 }
 
 // ---- Stored-type arithmetic. Matches tools/weight_edit.py encode_value. ----
