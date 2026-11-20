@@ -7,11 +7,21 @@ export const limits = {
   min_free_ram_bytes: 'Minimum free RAM (bytes)',
   disk_reserve_bytes: 'Disk reserve (bytes)',
 };
-export interface WeightEditorPolicy { available:boolean; enabled:boolean; capabilities:Record<string,boolean>; reason?:string }
+interface Credential { id:string; label:string }
+interface EditorSetup { status:string; model_directory:string|null; credentials:Credential[]; reason?:string }
+function isCredential(value:unknown):value is Credential {
+  const c=obj(value);
+  return typeof c?.id==='string' && c.id.length>0 && typeof c.label==='string';
+}
+export interface WeightEditorPolicy { available:boolean; enabled:boolean; capabilities:Record<string,boolean>; reason?:string; setup?:EditorSetup }
 function readWeightEditor(raw:unknown):WeightEditorPolicy|null {
   const w=obj(raw), caps=obj(w?.capabilities);
   if (!w || typeof w.available !== 'boolean' || typeof w.enabled !== 'boolean' || !caps || Object.values(caps).some(v=>typeof v !== 'boolean')) return null;
-  return {available:w.available, enabled:w.enabled, capabilities:caps as Record<string,boolean>, ...(typeof w.reason === 'string' ? {reason:w.reason} : {})};
+  const setup=obj(w.setup);
+  return {available:w.available, enabled:w.enabled, capabilities:caps as Record<string,boolean>, ...(typeof w.reason === 'string' ? {reason:w.reason} : {}),
+    ...(setup && typeof setup.status==='string' && Array.isArray(setup.credentials) && setup.credentials.every(isCredential)
+      ? {setup:{status:setup.status, model_directory:typeof setup.model_directory==='string'?setup.model_directory:null,
+        credentials:setup.credentials, ...(typeof setup.reason==='string' ? {reason:setup.reason} : {})}} : {})};
 }
 export interface HostPolicy {
   directories:Directories|null;
@@ -64,6 +74,7 @@ export function resourceValues(h: HostPolicy, input: Record<string,string>): Rec
   return out;
 }
 export type PolicyAction =
+  | {action:'setup_weight_editor'; worker:string; revision:number; model_directory:string; credential:string}
   | {action:'set_weight_editor'; worker:string; revision:number; enabled:boolean}
   | {action:'set_host_policy'; worker:string; revision:number; paused:boolean; disabled_jobs:string[]}
   | {action:'set_host_resources'; worker:string; revision:number; resources:Record<string,number>};
