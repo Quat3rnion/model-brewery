@@ -53,30 +53,8 @@ python=/usr/bin/python3
 bootstrap='
 import hashlib, json, os, pathlib, sys
 helper, probe, pin, packed, proof_fds, *args = sys.argv[1:]
-root = pathlib.Path("/helper")
-receipt = (root / "manifest.json").read_bytes()
-if hashlib.sha256(receipt).hexdigest() != pin:
-    sys.exit("weight runtime manifest pin does not match")
-manifest = json.loads(receipt)
-if manifest["abi"] != sys.implementation.cache_tag:
-    sys.exit("weight runtime Python ABI changed; rebuild the release")
-files = manifest["files"]
-actual = set()
-for path in root.rglob("*"):
-    if path.is_symlink():
-        sys.exit("symlink in weight runtime")
-    if not path.is_dir():
-        actual.add(str(path.relative_to(root)))
-if actual != set(files) | {"manifest.json"}:
-    sys.exit("weight runtime file set does not match")
-for name, digest in files.items():
-    path = root / name
-    if not path.is_file() or path.is_symlink():
-        sys.exit("nonregular file in weight runtime")
-    with path.open("rb") as stream:
-        if hashlib.file_digest(stream, "sha256").hexdigest() != digest:
-            sys.exit("weight runtime file does not match manifest: " + name)
-sys.path.insert(0, str(root))
+@VERIFY_RUNTIME@
+verify_runtime(pathlib.Path("/helper"), pin)
 os.environ["BREWERY_WEIGHT_PACKED"] = packed
 from importlib import import_module
 module = import_module(helper)

@@ -15,10 +15,11 @@ PACKAGER = ["/usr/bin/python3", "-IB", REPO / "tools/brewery-weight-runtime.py"]
 ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
 
 
-def command(args, *, cwd=None, env=ENV, ok=True, pass_fds=()):
+def command(args, *, cwd=None, env=ENV, ok=True, pass_fds=(), error=None):
     p = subprocess.run(args, cwd=cwd, env=env, text=True, capture_output=True,
                        timeout=25, pass_fds=pass_fds)
     assert (p.returncode == 0) == ok, (args, p.returncode, p.stderr)
+    assert error is None or error in p.stderr, (args, p.stderr)
     return p.stdout.strip()
 
 
@@ -76,6 +77,70 @@ def pinned_source_smoke(edit, root):
         os.close(fd)
 
 
+def confined_source_smoke(release, changed_release, root):
+    name = "brewery-weight-edit-confined.py"
+    edit = release / name
+    state = root / "sandbox-state"
+    state.mkdir()
+    work = state / ".weight-safetensors-smoke"
+    work.mkdir()
+    original = root / "fixture.safetensors"
+    header = b'{"layer.weight":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}'
+    header += b" " * (-len(header) % 8)
+    sample = struct.pack("<Q", len(header)) + header + struct.pack("<f", 7)
+    original.write_bytes(sample)
+    source = work / "source.safetensors"
+    source.write_bytes(sample)
+    digest = hashlib.sha256(sample).hexdigest()
+    manifest = work / "source-manifest.json"
+    save(manifest, [{"path": source.name, "bytes": len(sample), "sha256": digest}])
+    # Match the Hy4 service confinement, including an exact read-only model
+    # member and no /usr/bin/sh or nested bubblewrap.
+    sandbox = [
+        "/usr/bin/bwrap", "--unshare-user", "--unshare-all", "--disable-userns", "--cap-drop", "ALL",
+        "--die-with-parent", "--new-session", "--clearenv", "--ro-bind", "/usr/lib", "/usr/lib",
+        "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib", "/lib64",
+        "--ro-bind", Path("/usr/bin/python3").resolve(), "/usr/bin/python3",
+        "--proc", "/proc", "--remount-ro", "/proc",
+        "--dev-bind", "/dev/null", "/dev/null", "--dev-bind", "/dev/urandom", "/dev/urandom",
+        "--ro-bind", release, release, "--ro-bind", changed_release, changed_release,
+        "--ro-bind", original, original, "--bind", state, state, "--chdir", work,
+        "--remount-ro", "/", "--",
+    ]
+
+    def run(args, **kwargs):
+        return command([*sandbox, edit, *args], **kwargs)
+
+    status = json.loads(run(["--capabilities"]))
+    assert status == {"schema": "brewery.weight-runtime.v1",
+                      "jobs": ["weight_inspect", "weight_propose", "weight_apply"],
+                      "formats": ["safetensors", "hf"], "visual": True,
+                      "packed": False, "proof_source_fds": False}
+    command([edit, "--capabilities"], ok=False, error="requires the restricted worker sandbox")
+    command([*sandbox, changed_release / name, "--capabilities"], ok=False,
+            error="weight runtime file does not match manifest: weight_edit.py")
+    pin = ["--source-sha256", digest]
+    proof = ["--source-manifest", manifest]
+    inspect = [*pin, "--tensor=layer.weight", "--index=[0]", *proof]
+    assert json.loads(run(["inspect", source.name, *inspect]))["value"] == 7
+    run(["inspect", original, *inspect], ok=False)
+    source.unlink()
+    source.symlink_to(original)
+    run(["inspect", source.name, *inspect], ok=False)
+    source.unlink()
+    source.write_bytes(sample)
+    save(work / "request.json", [{"tensor": "layer.weight", "index": [0],
+                                  "op": "set", "value": 8}])
+    proposal = json.loads(run(["propose", source.name, "request.json", *pin, *proof]))
+    save(work / "proposal.json", proposal)
+    output = work / "output.safetensors"
+    run(["apply", source.name, "proposal.json", original, *proof], ok=False)
+    run(["apply", source.name, "proposal.json", output, *proof])
+    assert output.read_bytes() == sample[:-4] + struct.pack("<f", 8)
+    run(["apply", source.name, "proposal.json", output, *proof], ok=False)
+    assert source.read_bytes() == original.read_bytes() == sample
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gguf-python", type=Path, required=True)
@@ -97,7 +162,7 @@ def main():
     assert not list(a.iterdir()), "unapproved dependencies published files"
     manifest = install(a, pin)
     assert install(b, pin) == manifest
-    for name in ("brewery-weight-edit", "brewery-weight-tune"):
+    for name in ("brewery-weight-edit", "brewery-weight-tune", "brewery-weight-edit-confined.py"):
         assert (a / name).read_bytes() == (b / name).read_bytes()
 
     edit, tune = a / "brewery-weight-edit", a / "brewery-weight-tune"
@@ -143,9 +208,11 @@ def main():
     tampered.chmod(0o600)
     tampered.write_text("raise RuntimeError('untrusted helper loaded')\n")
     command([b / edit.name, "--capabilities"], ok=False)
+    confined_source_smoke(a, b, root)
     print(json.dumps({"dependency_sha256": pin, "manifest_sha256": manifest,
                       "reproducible": True, "tamper_rejected": True, "outside_source_rejected": True,
-                      "readonly_pinned_member": True, "pinned_apply_no_clobber": True}))
+                      "readonly_pinned_member": True, "pinned_apply_no_clobber": True,
+                      "hy4_confined_edit": True}))
 
 
 if __name__ == "__main__":
