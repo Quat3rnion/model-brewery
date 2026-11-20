@@ -1779,10 +1779,9 @@ or install a worker.
 
 ## Offline usage and profile preview
 
-Two offline scripts help you plan a selective quantization recipe. They run
-on one host. They do not load a model and do not call the controller. The
-Calibration page shows their output. These tools produce reports. They do not
-convert a model.
+Offline tools produce reports and apply reviewed expert maps. They run on one
+host and do not call the controller. The planner does not load a model. The
+Calibration page reads reports. It does not change a checkpoint.
 
 ### Expert usage
 
@@ -1819,6 +1818,173 @@ Read the numbers with care:
 - The counts and fractions describe one workload. They are not accuracy,
   importance, or probability. They do not show that an expert can be removed
   or quantized more.
+
+### Expert-map planning and offline rewrites
+
+`qualification/expert_plan.py` ranks experts from a usage report or REAP
+activation captures. It prints one line of `brewery.expert-map.v1` JSON to
+stdout. The map has `source_sha256`, `layers`, top-level `top_k`, and `review`.
+The map sets `review.required` to `true` and
+`review.release_qualified` to `false`. Each value in `layers` lists old expert
+IDs in new slot order. The first ID moves to slot 0. Each ranking method
+rejects maps with more than 32,768 layer-expert rows.
+
+Review the map before you apply it. Keep its exact bytes. Each writer checks
+the map SHA-256. The source SHA-256 must match the exact input file or tree
+digest.
+Use `sha256sum` for a single-file GGUF or HGN source. Use
+`expert_safetensors.py source-digest` for a SafeTensors source.
+
+#### Frequency ranking
+
+Use a complete `brewery-expert-usage-v1` report from the exact GGUF that
+Lanternfish ran:
+
+```sh
+python3 qualification/expert_plan.py frequency \
+  --usage usage.json \
+  --source-sha256 "$SOURCE_SHA256" \
+  > expert-map.json
+```
+
+Set `SOURCE_SHA256` to the exact source SHA-256 from trusted inventory. If the
+source has dense layers, add `--layers` with a comma-separated list of every
+routed layer ID. Add `--keep N` to retain `N` experts per layer. Without
+`--keep`, the planner reorders all experts. Frequency ranks experts by
+selection count. It sorts from highest count to lowest and breaks ties by
+ascending old expert ID.
+
+The planner rejects missing routing in mapped layers. Frequency describes
+only the captured workload. It does not measure expert importance or quality.
+
+#### REAP ranking
+
+Use separate calibration and held-out activation captures:
+
+```sh
+python3 qualification/expert_plan.py reap \
+  --calibration calibration.json \
+  --held-out held-out.json \
+  --source-sha256 "$SOURCE_SHA256" \
+  > expert-map.json
+```
+
+Both files must use `brewery.expert-activations.v1` and stay within 64 MiB.
+They must have the same source SHA-256, observer SHA-256, and routing
+dimensions. Set `split` to `calibration` in the first file and `held-out` in
+the second. Record every selected expert at each token and routed layer.
+`applied_gate` is the actual combination coefficient. `output_l2` is the
+expert output's L2 norm before the gate is applied.
+
+Use disjoint token sequences from independent workloads. The planner rejects
+exact repeated sequences. It cannot prove that the workloads are independent.
+Every expert must be selected at least once in calibration. Calibration
+scores set the rank. Held-out scores do not. The score is the mean of
+`applied_gate * output_l2` over tokens that selected each expert. A null
+held-out score means no selection. It does not mean a measured zero.
+
+Add `--keep N` to retain `N` experts per layer. The planner requires
+at least `top_k` experts and no more than the source expert count. REAP
+describes routing on the source. It does not predict routing or quality after
+pruning.
+
+#### Apply a map
+
+Calculate the SHA-256 of the reviewed map's exact bytes:
+
+```sh
+MAP_SHA256=$(sha256sum expert-map.json | cut -d' ' -f1)
+```
+
+Do not edit the map after you calculate its SHA-256. Each writer checks this
+digest and the source digest. Each writer creates a new output path. None
+overwrites the source or an existing destination.
+
+**GGUF.** The writer accepts one unsharded GGUF v3 file with a `qwen2moe` or
+`qwen3moe` layout. The map must include every routed layer. Each layer must
+retain the same number of experts, and that number must be at least the
+native `expert_used_count`. The plan limit is 8 MiB. The writer supports up
+to 512 layers, 1,024 experts per layer, 16,384 tensors, and a 32 MiB header.
+
+```sh
+python3 tools/expert_gguf.py preview \
+  --source "$SOURCE" --plan expert-map.json --plan-sha256 "$MAP_SHA256"
+python3 tools/expert_gguf.py apply \
+  --source "$SOURCE" --plan expert-map.json --plan-sha256 "$MAP_SHA256" \
+  --output "$NEW_GGUF"
+python3 tools/expert_gguf.py verify \
+  --source "$SOURCE" --plan expert-map.json --plan-sha256 "$MAP_SHA256" \
+  --output "$NEW_GGUF"
+```
+
+`preview` reports the projected size and does not write a file. `apply`
+rewrites packed tensor slices without decoding or requantizing them. It reads
+the staged output back and checks its header and tensor bytes before it
+publishes the file. `verify` repeats those checks on an existing output. These
+checks do not decode the model or measure quality.
+
+**SafeTensors.** The writer accepts a standalone `.safetensors` file with a
+separately pinned config, or an indexed Hugging Face directory with its index
+and config. The config must declare the unquantized Flash-Next architecture
+and one integrated MTP block. A standalone source requires `--config` and
+`--config-sha256`; an indexed source must get its config from the source
+directory.
+
+```sh
+SOURCE_SHA256=$(python3 tools/expert_safetensors.py source-digest \
+  --source "$SOURCE_DIR")
+python3 tools/expert_safetensors.py apply \
+  --source "$SOURCE_DIR" --plan expert-map.json \
+  --plan-sha256 "$MAP_SHA256" --output "$NEW_DIR"
+```
+
+Use the `source-digest` output as `SOURCE_SHA256` when you build the map. For
+an indexed source, it is a tree digest.
+
+For a standalone source, pass the same pinned config to both commands:
+
+```sh
+CONFIG_SHA256=$(sha256sum "$CONFIG" | cut -d' ' -f1)
+SOURCE_SHA256=$(python3 tools/expert_safetensors.py source-digest \
+  --source "$WEIGHTS" --config "$CONFIG" --config-sha256 "$CONFIG_SHA256")
+python3 tools/expert_safetensors.py apply \
+  --source "$WEIGHTS" --config "$CONFIG" --config-sha256 "$CONFIG_SHA256" \
+  --plan expert-map.json --plan-sha256 "$MAP_SHA256" --output "$NEW_DIR"
+```
+
+Use decimal layer keys. Trunk layers are `0` through `N-1`; MTP uses `N`.
+The total source file set is limited to 2 TiB, 16,384 files and directories,
+and 100,000 tensors. Each header, index, and config is limited to 4 MiB.
+Combined index and shard-header metadata is limited to 16 MiB. Expert tensors
+must use BF16, F16, or F32. A reorder can map selected layers. A prune must map
+every trunk layer and the MTP layer, with one retained expert count across
+those layers. The writer copies the source to the new directory. A prune also
+updates the config and, for an indexed source, the index size.
+
+**HGN.** The writer accepts one native HGN v2 file, not a model bundle. It
+supports canonical fused `layers.N.mlp` expert tensors, including I4R and
+Q4CP planes and Q8G64 or Q6G64 rows. The source limit is 32 MiB, with at most
+4,096 tensors and 8,388,608 elements per tensor. Pruning requires a top-level
+`top_k` in the map. The writer does not change config or load the output in a
+runtime.
+
+```sh
+python3 tools/expert_hgn.py "$SOURCE" expert-map.json "$NEW_HGN" \
+  --reviewed-sha256 "$MAP_SHA256"
+```
+
+#### Evidence limits
+
+Fixture tests check map validation, source and map digests, output structure,
+and retained bytes. SafeTensors tests also calculate forward values for
+synthetic tensors. These checks do not load SafeTensors or HGN outputs in an
+inference runtime.
+
+A separate CPU `llama.cpp` probe loaded tiny `qwen2moe` and `qwen3moe` GGUF
+fixtures, then decoded reordered and pruned files. Reordered logits matched
+exactly in both fixtures. The pruned files produced finite logits for three
+decode steps. This probe does not establish production runtime support or
+measure pruning quality. None of these checks qualifies a release.
 
 ### Profile preview
 
@@ -1918,13 +2084,16 @@ to the controller and does not load a model.
 The page accepts these schemas:
 
 - `brewery-expert-usage-v1` (from `expert_usage.py`)
+- `brewery.expert-map.v1` (from `expert_plan.py`)
 - `brewery.profile_preview.v1` (from `profile_preview.py`)
 - `brewery-halogen-speculation-v1` (from `halogen_speculation.py`)
 
-The page shows one error line for any other file. Each report stands alone.
-The page shows descriptive usage statistics, size predictions, and draft
-acceptance counts. These are not calibration or quality results. A preview is
-not a runnable profile.
+The page shows one error line for any other file. For a map, it shows the
+source SHA-256, map file SHA-256 when browser crypto is available, ranking
+method, and proposed layer order. It does not apply the map. Each report
+stands alone. The page shows descriptive usage statistics, size predictions,
+draft acceptance counts, and map orders. These are not calibration or quality
+results. A preview is not a runnable profile.
 
 Keep the files local. Use only your own traces and plans. Do not upload
 production data to the workbench or to another service for this workflow.
