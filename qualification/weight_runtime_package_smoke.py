@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import struct
 import subprocess
+import tarfile
 from tempfile import mkdtemp
 
 from managed_weight_smoke import TENSOR, checksum, matrix, save
@@ -21,6 +22,38 @@ def command(args, *, cwd=None, env=ENV, ok=True, pass_fds=(), error=None):
     assert (p.returncode == 0) == ok, (args, p.returncode, p.stderr)
     assert error is None or error in p.stderr, (args, p.stderr)
     return p.stdout.strip()
+
+
+def editor_archive_smoke(runtime, binaries, manifest, evidence):
+    import shutil
+    worker, engine = ("brewery-worker", "brewery-engine")
+    for name in (worker, engine):
+        shutil.copyfile(binaries / name, runtime / name)
+    digests = {}
+    for name in (worker, engine):
+        with (runtime / name).open("rb") as stream:
+            digests[name] = hashlib.file_digest(stream, "sha256").hexdigest()
+
+    def archive(dest, digest=digests[worker], ok=True):
+        return command([*PACKAGER, "editor-archive", "--bin-dir", runtime, "--output", dest,
+                        "--worker-sha256", digest, "--engine-sha256", digests[engine],
+                        "--runtime-sha256", manifest], ok=ok)
+
+    first = evidence / "editor-first.tar"
+    second = evidence / "editor-second.tar"
+    pin = archive(first)
+    assert archive(second) == pin and first.read_bytes() == second.read_bytes()
+    with tarfile.open(first, "r:") as package:
+        members = package.getmembers()
+        assert all(m.isfile() and m.mtime == m.uid == m.gid == 0 for m in members)
+        expected = {worker, engine, "brewery-weight-edit", "brewery-weight-tune"}
+        assert {m.name for m in members if "/" not in m.name} == expected
+    forbidden = evidence / "editor-rejected.tar"
+    archive(forbidden, "0" * 64, ok=False)
+    assert not forbidden.exists()
+    archive(first, ok=False)
+    assert first.read_bytes() == second.read_bytes()
+    print("Editor archive: repeatable, allowlisted members, rejects bad digest and overwrite")
 
 
 def pinned_source_smoke(edit, root):
@@ -144,6 +177,7 @@ def confined_source_smoke(release, changed_release, root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gguf-python", type=Path, required=True)
+    parser.add_argument("--editor-bin-dir", type=Path, help="locked worker and engine release binaries")
     args = parser.parse_args()
     os.umask(0o077)
     root = Path(mkdtemp(prefix="weight-runtime-smoke.", dir="/arboretum"))
@@ -162,6 +196,8 @@ def main():
     assert not list(a.iterdir()), "unapproved dependencies published files"
     manifest = install(a, pin)
     assert install(b, pin) == manifest
+    if args.editor_bin_dir:
+        editor_archive_smoke(a, args.editor_bin_dir.resolve(strict=True), manifest, root)
     for name in ("brewery-weight-edit", "brewery-weight-tune", "brewery-weight-edit-confined.py"):
         assert (a / name).read_bytes() == (b / name).read_bytes()
 
