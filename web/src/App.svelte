@@ -53,7 +53,7 @@
   });
 </script>
 
-<a class="skip" href="#main">Skip to content</a>
+<a class="skip" href="#main" onclick={(event) => { event.preventDefault(); main?.focus(); }}>Skip to content</a>
 <header class="top">
   <div class="brand">
     <span class="mark" aria-hidden="true"></span>
@@ -103,7 +103,7 @@
   <ActiveJob jobs={runningJobs} {queued} />
 {/if}
 
-<main id="main" bind:this={main}>
+<main id="main" tabindex="-1" bind:this={main}>
   {#if !brewery.state}
     <div class="boot">
       {#if brewery.lastError}

@@ -50,7 +50,7 @@
             <div class="row">
               <JobState {job} />
               <a class="title" href="#/jobs/{encodeURIComponent(job.id)}">{kindTitle(job.kind)}</a>
-              <span class="xs muted mono">{job.id}</span>
+              <span class="xs muted mono break">{job.id}</span>
             </div>
             <p class="xs muted break">
               {hostName(hosts, job.host)}{#if job.requested_host === 'auto' && job.host && job.host !== 'auto'} (assigned from pool){/if}{#if job.input_ids.length} · {inputs(job.input_ids)}{/if}{#if job.created_at} · {formatTime(job.created_at)}{/if}

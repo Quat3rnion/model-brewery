@@ -38,5 +38,6 @@ For ROCmFPX formats and worker requirements, see [ROCmFPX GGUF qualification](qu
 ## Reference
 
 - [Operator guide](OPERATOR.md): worker setup, supported formats, job rules, Settings and troubleshooting.
+- [Design guide](DESIGN.md): current web interface tokens, layout, interaction and accessibility patterns for contributors.
 - [API contract](api/openapi.json) and [command-line client](tools/brewery-agent).
 - [Project skills](.opencode/skills/): workbench operation, calibration and benchmarking, and release qualification.

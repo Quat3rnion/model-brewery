@@ -36,7 +36,7 @@
   --line: #2e2643;
   --line-soft: #231c33;
   /* Control borders: stronger than Halogen's --line for 3:1 non-text contrast. */
-  --line-strong: #5a4d7a;
+  --line-strong: #706390;
   --text: #ece8f5;
   --text-2: #a79dbd;
   --muted: #8b81a2;
@@ -63,7 +63,7 @@
   --surface-2: #f0ecf8;
   --line: #ddd5ec;
   --line-soft: #ebe6f4;
-  --line-strong: #8f84a8;
+  --line-strong: #8e83a7;
   --text: #1b1430;
   --text-2: #5b5070;
   --muted: #6c6283;
