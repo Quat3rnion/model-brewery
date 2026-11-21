@@ -853,7 +853,7 @@
           "truncated": {"type": "boolean"}
         }
       },
-      "JobKind": {"type": "string", "enum": ["compare", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply"]},
+      "JobKind": {"type": "string", "enum": ["compare", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer"]},
       "JobState": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled"]},
       "CapabilityMap": {
         "type": "object", "description": "Map from each known job kind to its availability.",
@@ -938,7 +938,8 @@
               {"$ref": "#/components/schemas/VerifyOptions"}, {"$ref": "#/components/schemas/GenerateOptions"},
               {"$ref": "#/components/schemas/BaselineOptions"}, {"$ref": "#/components/schemas/BenchmarkOptions"},
               {"$ref": "#/components/schemas/CacheCleanupOptions"}, {"$ref": "#/components/schemas/EmptyOptions"},
-              {"$ref": "#/components/schemas/GgufLayerRecipeOptions"}
+              {"$ref": "#/components/schemas/GgufLayerRecipeOptions"},
+              {"$ref": "#/components/schemas/Exl3LayerOptions"}
             ]
           },
           "prompt_id": {"$ref": "#/components/schemas/Id"},
@@ -990,7 +991,8 @@
           {"$ref": "#/components/schemas/TransferJob"}, {"$ref": "#/components/schemas/TransferPreviewJob"}, {"$ref": "#/components/schemas/CacheCleanupJob"},
           {"$ref": "#/components/schemas/HfDownloadJob"},
           {"$ref": "#/components/schemas/WeightInspectJob"}, {"$ref": "#/components/schemas/WeightProposeJob"},
-          {"$ref": "#/components/schemas/WeightTuneJob"}, {"$ref": "#/components/schemas/WeightApplyJob"}
+          {"$ref": "#/components/schemas/WeightTuneJob"}, {"$ref": "#/components/schemas/WeightApplyJob"},
+          {"$ref": "#/components/schemas/Exl3LayerJob"}
         ],
         "discriminator": {
           "propertyName": "kind",
@@ -1001,7 +1003,8 @@
             "transfer": "#/components/schemas/TransferJob", "transfer_preview": "#/components/schemas/TransferPreviewJob", "cache_cleanup": "#/components/schemas/CacheCleanupJob",
             "hf_download": "#/components/schemas/HfDownloadJob",
             "weight_inspect": "#/components/schemas/WeightInspectJob", "weight_propose": "#/components/schemas/WeightProposeJob",
-            "weight_tune": "#/components/schemas/WeightTuneJob", "weight_apply": "#/components/schemas/WeightApplyJob"
+            "weight_tune": "#/components/schemas/WeightTuneJob", "weight_apply": "#/components/schemas/WeightApplyJob",
+            "exl3_layer": "#/components/schemas/Exl3LayerJob"
           }
         }
       },
@@ -1774,6 +1777,32 @@
         "required": ["input_ids", "options"],
         "properties": {"input_ids": {"minItems": 1, "maxItems": 1}, "host": {"not": {"const": "auto"}}}
       },
+      "Exl3LayerJob": {
+        "description": "Encode one exact dense F16/BF16/F32 128x128 [out,in] tensor from a standalone SafeTensors file on the source worker. This is uncalibrated layer encoding, not model conversion. The worker requires BREWERY_WEIGHT_SAFETENSORS=1, an explicit BREWERY_WEIGHT_SAFETENSORS_VERIFY_BYTES limit of at most 64 MiB, and a canonical native CLI configured in BREWERY_EXL3_CHECKPOINT. Encoding uses CPU; the requested backend performs forward verification without fallback. The result is one layer artifact, not a Library model.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/NoPrompt"}, {"$ref": "#/components/schemas/DefaultInputHost"}],
+        "required": ["input_ids", "options"],
+        "properties": {"kind": {"const": "exl3_layer"}, "input_ids": {"minItems": 1, "maxItems": 1},
+          "options": {"$ref": "#/components/schemas/Exl3LayerOptions"}}
+      },
+      "Exl3LayerOptions": {
+        "type": "object",
+        "allOf": [{"$ref": "#/components/schemas/Exl3LayerSpec"}],
+        "unevaluatedProperties": false
+      },
+      "Exl3LayerSpec": {
+        "type": "object",
+        "required": ["source_sha256", "tensor", "shape", "codebook", "twice_bits", "backend"],
+        "properties": {
+          "source_sha256": {"$ref": "#/components/schemas/Sha256", "maxLength": 64, "description": "File SHA-256 from the weight inventory."},
+          "tensor": {"type": "string", "minLength": 1, "maxLength": 95, "pattern": "^[ -~]+(?![\\s\\S])", "not": {"const": "__metadata__"}},
+          "shape": {"type": "array", "items": {"type": "integer"}, "const": [128, 128]},
+          "codebook": {"type": "string", "enum": ["3inst", "mcg", "mul1"]},
+          "twice_bits": {"type": "integer", "enum": [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16]},
+          "backend": {"type": "string", "enum": ["cpu", "cuda", "rocm"]}
+        },
+        "if": {"properties": {"twice_bits": {"enum": [3, 5, 7]}}},
+        "then": {"properties": {"codebook": {"const": "mul1"}}}
+      },
       "WeightInspectJob": {
         "description": "Read one scalar, a tensor inventory page, or a tensor tile from a registered weight source. Inventory and tiles also require weight_visual on the selected worker. Tiles use the inventory's source digest; later inventory pages can use that digest too. For standalone SafeTensors, the digest is the file SHA-256. For indexed HF, it is the canonical bundle SHA-256. A source mismatch fails the job without publishing values.",
         "allOf": [{"$ref": "#/components/schemas/WeightSingleSource"}],
@@ -1915,16 +1944,40 @@
           {"$ref": "#/components/schemas/CacheCleanupResult"},
           {"$ref": "#/components/schemas/WeightApplyResult"},
           {"$ref": "#/components/schemas/HfDownloadResult"},
+          {"$ref": "#/components/schemas/Exl3LayerResult"},
           {"type": "object", "not": {"anyOf": [
             {"$ref": "#/components/schemas/CompareResult"}, {"$ref": "#/components/schemas/ConversionResult"},
             {"$ref": "#/components/schemas/GenerateResult"}, {"$ref": "#/components/schemas/Gsm8kResult"},
             {"$ref": "#/components/schemas/BenchmarkResult"}, {"$ref": "#/components/schemas/TransferResult"},
              {"$ref": "#/components/schemas/CacheCleanupResult"}, {"$ref": "#/components/schemas/WeightApplyResult"},
-             {"required": ["kind"], "properties": {"kind": {"const": "hf_download"}}}
+             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer"]}}}
           ]}}
         ]
       },
       "ByteCount": {"type": "integer", "minimum": 0},
+      "Exl3LayerResult": {
+        "type": "object", "required": ["kind", "host", "source_sha256", "source_format", "verified", "release_qualified", "artifact", "report"],
+        "properties": {
+          "kind": {"const": "exl3_layer"}, "host": {"$ref": "#/components/schemas/HostId"},
+          "source_sha256": {"$ref": "#/components/schemas/Sha256"}, "source_format": {"const": "safetensors"},
+          "verified": {"const": true}, "release_qualified": {"const": false},
+          "artifact": {"allOf": [{"$ref": "#/components/schemas/Artifact"}],
+            "properties": {"kind": {"const": "exl3-layer"}, "bytes": {"minimum": 1, "maximum": 32768}}},
+          "report": {"type": "object",
+            "allOf": [{"$ref": "#/components/schemas/Exl3LayerSpec"}],
+            "required": ["schema", "module", "verification", "source_dtype",
+              "relative_l2_error", "max_abs_error", "backend_max_abs_error"],
+            "properties": {
+              "schema": {"const": "brewery.exl3-layer.v1"}, "module": {"const": "layer"},
+              "verification": {"const": "independent-decode-and-forward"},
+              "source_dtype": {"enum": ["F16", "BF16", "F32"]},
+              "relative_l2_error": {"type": "number", "minimum": 0, "maximum": 1},
+              "max_abs_error": {"type": "number", "minimum": 0},
+              "backend_max_abs_error": {"type": "number", "minimum": 0}
+            }
+          }
+        }
+      },
       "Artifact": {
         "type": "object", "required": ["kind", "path", "sha256", "bytes"],
         "properties": {

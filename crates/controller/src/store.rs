@@ -604,6 +604,34 @@ impl Store {
     }
     pub fn update(&mut self, job: &mut Job, mut result: Option<Value>) -> Result<()> {
         // One transaction: no reader can see a terminal success without its immutable result.
+        if job.state == State::Succeeded && job.kind == brewery_worker::exl3_layer::JOB {
+            let receipt = result.as_ref().unwrap_or(&Value::Null);
+            let envelope = self.envelope(&job.id)?;
+            let observed = &receipt["inputs"][0];
+            let check = brewery_worker::exl3_layer::Spec::parse(&Value::Object(envelope.options))
+                .and_then(|spec| spec.check_receipt(&job.host, receipt));
+            // cancel_requested is intent, not a worker acknowledgement. If
+            // the worker committed success first, keep its verified receipt.
+            if check.is_err()
+                || !receipt["inputs"]
+                    .as_array()
+                    .is_some_and(|rows| rows.len() == 1)
+                || !matches!(envelope.inputs.as_slice(), [source] if
+                    observed["id"] == source.id
+                    && observed["path"] == source.path
+                    && observed["host"] == source.host
+                    && observed["source_host"] == source.host
+                    && observed["kind"] == source.kind
+                    && receipt["artifact"]["path"] != source.path)
+                || observed["sha256"] != receipt["source_sha256"]
+            {
+                job.state = State::Failed;
+                job.progress = "EXL3 layer artifact was not accepted".into();
+                job.error = Some("Invalid EXL3 layer receipt".into());
+                job.has_result = false;
+                result = None;
+            }
+        }
         if job.state == State::Succeeded
             && let Err(error) =
                 crate::weights::check_source_receipt(job, result.as_ref().unwrap_or(&Value::Null))

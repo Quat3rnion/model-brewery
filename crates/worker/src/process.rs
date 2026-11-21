@@ -90,12 +90,25 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
     } else {
         Ok(None)
     };
+    let mut created_work = false;
     let result = match &held {
-        Ok(_) => execute(w, id, &base, &job),
+        Ok(_) => execute(w, id, &base, &job, &mut created_work),
         Err(e) => Err(anyhow::anyhow!("{e}")),
     };
     let _guard = w.state_lock()?;
     let mut r = w.require(id)?;
+    // The state lock orders cancellation against the durable terminal reply.
+    // A failed create_dir never gives this run ownership of existing output.
+    if job.kind == brewery_worker::exl3_layer::JOB
+        && created_work
+        && (r.cancel || result.is_err())
+        && let Err(error) =
+            fs::remove_dir_all(base.join("work")).and_then(|()| File::open(&base)?.sync_all())
+    {
+        eprintln!("EXL3 work directory cleanup failed: {error}");
+        r.reply = Reply::error("EXL3 work directory cleanup failed");
+        return w.put(id, &r);
+    }
     if hy4_encode && held.is_ok() && (r.cancel || result.is_err()) {
         for name in [hy4::FILE, hy4::RECEIPT, ".gate.partial"] {
             if let Err(e) = fs::remove_file(base.join("work").join(name))
@@ -203,7 +216,7 @@ fn publish_download(w: &Worker, base: &Path) -> Result<()> {
     Ok(())
 }
 
-fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
+fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool) -> Result<Value> {
     let download = w.cfg.hf_download.as_ref();
     ensure!(
         (job.kind == "hf_download") == download.is_some(),
@@ -221,6 +234,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
     };
     let work = base.join("work");
     fs::create_dir(&work)?;
+    *created_work = true;
     let jobfile = base.join("engine-input.json");
     atomic(&jobfile, job)?;
     let output = base.join("engine-output.json");
@@ -229,7 +243,29 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
         let r = w.require(id)?;
         ensure!(!r.cancel, "cancel requested");
     }
-    let mut command = if let Some(plan) = &w.cfg.hy4_plan {
+    let mut command = if job.kind == exl3_layer::JOB {
+        let spec = exl3_layer::Spec::parse(&job.options)?;
+        if spec.backend == exl3_layer::Backend::Cpu {
+            Command::new(&w.cfg.engine)
+        } else {
+            let queue = w
+                .cfg
+                .exl3_gpu_queue
+                .as_ref()
+                .context("EXL3 GPU admission is not configured on this worker")?;
+            // The queue starts the engine only after acquiring the shared GPU.
+            // Do not add the generic admission wrapper inside or outside this run.
+            let mut c = Command::new(queue);
+            c.args(["run", "--resource", "gpu", "--exclusive", "--flock", "gpu"])
+                .arg("--holder")
+                .arg(format!("brewery-exl3-{}-{id}", std::process::id()))
+                .arg("--purpose")
+                .arg(format!("EXL3 {} layer verification", spec.backend.name()))
+                .args(["--wait", "30", "--max-hold", "120", "--"])
+                .arg(&w.cfg.engine);
+            c
+        }
+    } else if let Some(plan) = &w.cfg.hy4_plan {
         ensure!(
             plan.validate("start", job),
             "Invalid pinned Hy4 plan request"
@@ -320,6 +356,30 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
             "BREWERY_WEIGHT_SAFETENSORS_DISK_RESERVE_BYTES",
             w.disk_floor(job.resources.disk_reserve_bytes).to_string(),
         );
+    }
+    if job.kind == brewery_worker::exl3_layer::JOB {
+        resources::disk_check(
+            &work,
+            w.disk_floor(job.resources.disk_reserve_bytes)
+                .checked_add(256 << 10)
+                .context("EXL3 disk reserve overflow")?,
+        )?;
+        command.env(
+            brewery_worker::exl3_layer::HELPER,
+            w.cfg
+                .engine_env
+                .get(brewery_worker::exl3_layer::HELPER)
+                .context("EXL3 helper is not configured")?,
+        );
+        for key in [weight_source::GATE, weight_source::VERIFY_BYTES] {
+            command.env(
+                key,
+                w.cfg
+                    .engine_env
+                    .get(key)
+                    .context("EXL3 source verification is not configured")?,
+            );
+        }
     }
     if let Some(policy) = &w.cfg.managed_settings
         && matches!(
@@ -522,6 +582,19 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job) -> Result<Value> {
             bail!("Download artifact failed worker validation");
         }
         return Ok(value);
+    }
+    if job.kind == brewery_worker::exl3_layer::JOB {
+        use brewery_worker::exl3_layer::{FILE, MAX_OUTPUT, Spec};
+        let source = &job.inputs[0];
+        Spec::parse(&job.options)?.check_receipt(&source.host, &value)?;
+        let path = work.join(FILE);
+        ensure!(
+            value["artifact"]["path"].as_str().map(Path::new) == Some(&path)
+                && fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && m.len() <= MAX_OUTPUT)
+                && value["inputs"][0]["sha256"] == source.extra["sha256"]
+                && value["inputs"][0]["bundle_sha256"] == source.extra["bundle_sha256"],
+            "EXL3 artifact is not the verified layer from the resolved source"
+        );
     }
     if job.kind == "weight_apply" {
         let source = job.inputs.first().context("weight apply has no source")?;

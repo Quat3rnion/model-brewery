@@ -324,7 +324,7 @@ fn stage(cfg: &Config, action: &str, dest: &str, id: &str, job: Job) -> Wire<Rep
     for (index, input) in job.inputs.into_iter().enumerate() {
         ensure_wire(
             index != 0
-                || !weight_source::job(&job.kind)
+                || !(weight_source::job(&job.kind) || job.kind == brewery_worker::exl3_layer::JOB)
                 || !weight_source::supports(&input.kind)
                 || input.host == dest,
             "SafeTensors weight jobs require a direct local source",

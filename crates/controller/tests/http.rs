@@ -28,6 +28,9 @@ use std::{
 #[path = "support/conversions.rs"]
 mod conversions;
 
+#[path = "support/exl3_layer.rs"]
+mod exl3_layer;
+
 struct Fixture {
     root: tempfile::TempDir,
     addr: Option<SocketAddr>,

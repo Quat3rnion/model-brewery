@@ -268,6 +268,14 @@ changed key fails; do not turn checking off.
 | `source_roots` | Absolute directories that model paths may use. A path outside these directories is refused. |
 | `engine` | Absolute path of `brewery-engine`. |
 | `admission` | Optional. Absolute path of a GPU admission wrapper (for example `gpu-thermal-run`). |
+| `exl3_gpu_queue` | Optional. Absolute path of the host's `resource-queue` executable. Required for managed CUDA and ROCm EXL3 layer jobs. |
+
+For EXL3, the worker runs CUDA and ROCm jobs under an exclusive `gpu`
+reservation. The queue can wait up to 30 seconds for a reservation and lets
+the engine run for up to 120 seconds after admission. Use the same queue
+store and GPU lock configuration as other GPU jobs on that host. Do not
+reserve the GPU outside the worker for these jobs. EXL3 does not use the
+generic `admission` wrapper; CPU EXL3 does not use either GPU gate.
 
 The worker owns its cache. The workbench never changes or deletes an original
 model file. Unregistering a library entry removes only the entry.

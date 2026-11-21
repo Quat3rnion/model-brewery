@@ -1,6 +1,7 @@
 mod benchmark;
 mod compare;
 mod converter;
+mod exl3_layer;
 mod gguf;
 mod gguf_conversion;
 mod hf_download;
@@ -389,6 +390,7 @@ fn run() -> Result<i32> {
         "benchmark" => benchmark::run(&job, &cwd, &progress)?,
         "compare" => compare::run(&job, &cwd, &progress)?,
         "hf_download" => hf_download::run(&job, &cwd, &progress)?,
+        brewery_worker::exl3_layer::JOB => exl3_layer::run(&job, &cwd, &progress)?,
         "weight_inspect" | "weight_propose" | "weight_tune" | "weight_apply" => {
             weight::run(&job, &cwd, &progress)?
         }

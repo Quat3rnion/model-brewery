@@ -31,6 +31,7 @@ struct Config {
     source_grant_protected: Vec<PathBuf>,
     engine: PathBuf,
     admission: Option<PathBuf>,
+    exl3_gpu_queue: Option<PathBuf>,
     #[serde(default = "reserve")]
     disk_reserve_bytes: u64,
     #[serde(default)]
@@ -142,6 +143,9 @@ impl Config {
             );
         }
         if let Some(p) = &cfg.admission {
+            absolute(p)?;
+        }
+        if let Some(p) = &cfg.exl3_gpu_queue {
             absolute(p)?;
         }
         if let Some(plan) = &cfg.hy4_plan {
@@ -809,6 +813,53 @@ impl Worker {
                 return self.record_prepare(id, action, job, Reply::error(error));
             }
         }
+        if job.kind == brewery_worker::exl3_layer::JOB {
+            use brewery_worker::exl3_layer::{Backend, HELPER, Spec};
+            let reply = if action != "start"
+                || job.prompt.is_some()
+                || job.inputs.len() != 1
+                || job.inputs[0].kind != "safetensors"
+            {
+                Some("EXL3 requires one direct standalone SafeTensors input and no prompt")
+            } else if self.cfg.pinned_publication.is_some()
+                || self
+                    .cfg
+                    .engine_env
+                    .contains_key("BREWERY_EXPECTED_SOURCE_SHA256")
+                || !self
+                    .cfg
+                    .engine_env
+                    .get(weight_source::GATE)
+                    .is_some_and(|v| v == "1")
+                || !self
+                    .cfg
+                    .engine_env
+                    .get(HELPER)
+                    .is_some_and(|v| Path::new(v).is_absolute())
+                || weight_source::verify_limit(
+                    self.cfg
+                        .engine_env
+                        .get(weight_source::VERIFY_BYTES)
+                        .map(String::as_str),
+                )
+                .is_err()
+            {
+                Some("bounded EXL3 layer encoding is not configured on this worker")
+            } else {
+                match Spec::parse(&job.options) {
+                    Ok(spec)
+                        if spec.backend != Backend::Cpu && self.cfg.exl3_gpu_queue.is_none() =>
+                    {
+                        Some("EXL3 GPU admission is not configured on this worker")
+                    }
+                    Ok(_) => None,
+                    Err(_) => Some("invalid EXL3 layer options"),
+                }
+            };
+            if let Some(error) = reply {
+                return self.record_prepare(id, action, job, Reply::error(error));
+            }
+        }
         if matches!(
             job.kind.as_str(),
             "weight_inspect" | "weight_propose" | "weight_tune" | "weight_apply"
@@ -950,6 +1001,11 @@ impl Worker {
                 r.cancel = true;
                 r.reply.progress = "cancelling; waiting for process tree".into();
             }
+            // EXL3 cancellation only changes queued/running records. A late
+            // cancel returns the already durable outcome and its receipt.
+            _ if r.job.as_ref().is_some_and(|job| job.kind == brewery_worker::exl3_layer::JOB) => {
+                return Ok(r.reply);
+            }
             _ => {}
         }
         self.put(id, &r)?;
@@ -999,8 +1055,10 @@ impl Worker {
             !standalone || provided.is_none(),
             "standalone SafeTensors GGUF requires direct inputs"
         );
-        let native_safe =
-            index == 0 && weight_source::job(&job.kind) && weight_source::supports(&input.kind);
+        let exl3 = job.kind == brewery_worker::exl3_layer::JOB;
+        let native_safe = index == 0
+            && (weight_source::job(&job.kind) || exl3)
+            && weight_source::supports(&input.kind);
         ensure!(
             !native_safe || provided.is_none(),
             "SafeTensors weight jobs require a direct local source"
@@ -1132,7 +1190,7 @@ impl Worker {
                     &mut emit as &mut dyn FnMut(&ProgressDetail) -> Result<()>,
                     Some((index, count)),
                 );
-                let proof = if native_safe {
+                let proof = if native_safe && !exl3 {
                     weight_source::proof(&p, &input.kind, |key| {
                         self.cfg.engine_env.get(key).map(std::ffi::OsString::from)
                     })
@@ -1215,6 +1273,15 @@ impl Worker {
             r = self.pending(id)?;
             (bundle, true)
         };
+        if exl3 {
+            let spec = brewery_worker::exl3_layer::Spec::parse(&r.job.as_ref().unwrap().options)?;
+            ensure!(
+                bundle.files.len() == 1
+                    && bundle.files[0].path == bundle.entry
+                    && bundle.files[0].sha256 == spec.source_sha256,
+                "EXL3 source SHA-256 does not match the selected fingerprint"
+            );
+        }
         input.extra = original.extra.clone();
         for k in [
             "sha256",
@@ -1405,8 +1472,13 @@ impl Worker {
                 && !r.cancel
                 && let (Some(started), Some(job)) = (r.started, r.job.as_ref())
             {
-                r.reply.progress =
-                    report::live(&base, &job.kind, self.cfg.admission.is_some(), started);
+                let admission = if job.kind == exl3_layer::JOB {
+                    exl3_layer::Spec::parse(&job.options)
+                        .is_ok_and(|spec| spec.backend != exl3_layer::Backend::Cpu)
+                } else {
+                    self.cfg.admission.is_some()
+                };
+                r.reply.progress = report::live(&base, &job.kind, admission, started);
             }
             if !r.cancel {
                 let detail = match r.reply.state.as_str() {

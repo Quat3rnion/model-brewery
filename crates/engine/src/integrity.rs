@@ -193,6 +193,48 @@ impl Identity {
         Ok(())
     }
 
+    // Hash the same private bytes the caller will parse. The expected stamp
+    // and extent come from weight_manifest, not from a replacement file.
+    pub(crate) fn snapshot_single_weight_member(
+        &self,
+        limit: u64,
+        progress: &Progress,
+    ) -> Result<Vec<u8>> {
+        ensure!(
+            self.entry && self.files.len() == 1,
+            "expected one weight member"
+        );
+        let (path, stamp) = &self.stamps[0];
+        let expected = &self.files[0];
+        ensure!(
+            expected.bytes <= limit,
+            "SafeTensors source exceeds explicit verification limit"
+        );
+        let mut file = brewery_worker::weight_source::open_regular(path)?;
+        self.check_open_weight_member(0, &file)?;
+        let len = usize::try_from(expected.bytes).context("weight source extent overflow")?;
+        let mut snapshot = Vec::new();
+        snapshot.try_reserve_exact(len)?;
+        snapshot.resize(len, 0);
+        let mut phase = progress.start("verify_input", "bytes", Some(expected.bytes));
+        let mut hash = Sha256::new();
+        for chunk in snapshot.chunks_mut(1 << 20) {
+            file.read_exact(chunk)?;
+            hash.update(&*chunk);
+            phase.advance(chunk.len() as u64);
+        }
+        ensure!(
+            *stamp == Stamp::new(&file.metadata()?),
+            "weight source changed while reading"
+        );
+        self.check()?;
+        ensure!(
+            format!("{:x}", hash.finalize()) == expected.sha256,
+            "weight source SHA-256 changed"
+        );
+        Ok(snapshot)
+    }
+
     pub fn with_added_file(mut self, root: &Path, name: &str) -> Result<Self> {
         ensure!(
             !self.entry && !self.files.iter().any(|f| f.path == name),

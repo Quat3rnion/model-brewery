@@ -149,6 +149,7 @@ pub fn engine_job(kind: &str) -> bool {
             | "weight_propose"
             | "weight_tune"
             | "weight_apply"
+            | crate::exl3_layer::JOB
     )
 }
 

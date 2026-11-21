@@ -24,6 +24,7 @@ pub const KINDS: &[&str] = &[
     "weight_propose",
     "weight_tune",
     "weight_apply",
+    brewery_worker::exl3_layer::JOB,
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -503,7 +504,12 @@ impl Host {
         for &kind in KINDS {
             let opt_in = matches!(
                 kind,
-                "generate" | "evaluate" | "baseline" | "benchmark" | "hf_download"
+                "generate"
+                    | "evaluate"
+                    | "baseline"
+                    | "benchmark"
+                    | "hf_download"
+                    | brewery_worker::exl3_layer::JOB
             ) || crate::weights::is_kind(kind);
             let enabled = options.remove(kind).unwrap_or(!opt_in)
                 && (kind != "benchmark" || benchmark_configured);
@@ -514,6 +520,8 @@ impl Host {
                         "Configure benchmark targets and suites and opt in on this worker"
                     } else if kind == "hf_download" {
                         "Configure Hugging Face downloads and opt in on this worker"
+                    } else if kind == brewery_worker::exl3_layer::JOB {
+                        "Configure a native EXL3 helper and opt in on this worker"
                     } else if crate::weights::is_kind(kind) {
                         "Weight editing is not configured on this worker"
                     } else if opt_in {
@@ -801,6 +809,11 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
                     && (!needs_hgn || host.capabilities["weight_hgn"])
                     && (!needs_safetensors || host.capabilities["weight_safetensors"])
                     && (!needs_packed || host.capabilities["weight_packed"])
+                    && (job.kind != brewery_worker::exl3_layer::JOB
+                        || (!host.local_edit
+                            && host.remote_editor.is_none()
+                            && (!host.component_cpu_only
+                                || envelope.options.get("backend").is_some_and(|b| b == "cpu"))))
                     && (!crate::weights::needs_visual(&job.kind, &job.options)
                         || host.capabilities["weight_visual"])
                     && components_allowed(host)
@@ -897,6 +910,9 @@ impl NewJob {
                 "transfer" | "transfer_preview" => (1..=32).contains(&n),
                 "cache_cleanup" | "benchmark" | "hf_download" => n == 0,
                 "weight_inspect" | "weight_propose" | "weight_apply" => weight_source && n == 1,
+                brewery_worker::exl3_layer::JOB => {
+                    n == 1 && main == "safetensors" && host == inputs[0].host && host != "auto"
+                }
                 "weight_tune" => {
                     weight_source
                         && n == 3
@@ -927,7 +943,10 @@ impl NewJob {
                 return Err("Hy4 jobs require one same-worker HF source and the exact operation-specific Q8_0 override".into());
             }
         } else if format.is_hgn() {
-            if crate::weights::is_kind(&self.kind) {
+            if self.kind == brewery_worker::exl3_layer::JOB {
+                brewery_worker::exl3_layer::Spec::parse(&Value::Object(self.options.clone()))
+                    .map_err(|e| format!("{e:#}"))?;
+            } else if crate::weights::is_kind(&self.kind) {
                 if inputs.iter().any(|input| input.host != host) {
                     return Err(
                         "all weight inputs must be registered on the destination worker".into(),

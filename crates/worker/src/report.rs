@@ -43,6 +43,14 @@ pub fn live(base: &Path, kind: &str, admission: bool, started: u64) -> String {
             line if line.starts_with("gpu-thermal-run: waiting for thermal gate: ") => {
                 "Waiting for thermal admission"
             }
+            line if line.starts_with("resource-queue: ticket ") && line.contains(": waiting,") => {
+                "Waiting for GPU reservation"
+            }
+            line if line.starts_with("resource-queue: ticket ")
+                && line.ends_with(": granted, running") =>
+            {
+                stage(kind)
+            }
             _ => return None,
         })
     });
@@ -83,7 +91,9 @@ pub fn engine_exit(base: &Path, status: ExitStatus) -> String {
     } else if log.lines().any(|s| {
         s.starts_with("gpu-thermal-run:")
             && (s.contains("permission denied") || s.contains("scope") || s.contains("lock"))
-    }) {
+    }) || (log.contains("resource-queue:")
+        && (status.code() == Some(75) || !log.contains(": granted, running")))
+    {
         "GPU admission failed; check the worker admission lock and scope"
     } else if log.contains("no space left on device") || log.contains("disk quota exceeded") {
         "Worker disk space exhausted; check free space and cache"
