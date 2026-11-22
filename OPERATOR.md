@@ -190,10 +190,12 @@ the controller on a public interface: it has no login. See
 [Web settings](#web-settings) for infrastructure controls.
 
 The optional HTTPS gateway checks the client's source address, the exact
-Host and browser origin, and the password before it forwards requests to
-the loopback controller. It does not bypass worker permissions or GPU
-admission. Without endpoint overrides, the gateway binds to `127.0.0.1`
-and accepts only `127.0.0.1` clients and `Host: 127.0.0.1:8443`.
+Host, and browser request headers before it forwards requests to the
+loopback controller. The gateway does not ask for a login. Allow only
+trusted client networks: clients on these networks have controller
+operator permissions. The gateway does not bypass worker permissions or
+GPU admission. Without endpoint overrides, the gateway binds to
+`127.0.0.1` and accepts only `127.0.0.1` clients and `Host: 127.0.0.1:8443`.
 
 For LAN access, add a user systemd drop-in for `model-brewery-lan.service`:
 
@@ -218,23 +220,20 @@ alternate. Use brackets around an IPv6 literal in a host value, but not in
 `BREWERY_BIND`. The HTTPS certificate must cover the names or addresses
 that clients use.
 
-Open `https://<configured-LAN-host>:8443/`. Transfer the
-public `~/.local/state/model-brewery-lan/tls/lan-ca.crt` to your client over
-a trusted channel. Trust that certificate before entering the `brewery`
-login. The password is in `~/.local/state/model-brewery-lan/password` on
-the host. Do not copy `tls/server.key` or put the password in a URL.
-Each logged-in user has controller operator permissions.
+Transfer the public `~/.local/state/model-brewery-lan/tls/lan-ca.crt` to
+your client over a trusted channel. Trust that certificate on the client.
+Then open `https://<configured-LAN-host>:8443/`. Do not copy
+`tls/server.key`.
 
 For Tailscale, `model-brewery-tailnet.service` requires
 `~/.config/model-brewery/tailnet.env`. Set the same four variables for your
 tailnet: use this machine's Tailscale addresses for `BREWERY_BIND`, the
 allowed tailnet client CIDRs for `BREWERY_CLIENT_NETS`, and the Tailscale IP
-or DNS name that clients use for each host value. Open the configured
-tailnet host on HTTPS port `8443`. Copy the public certificate
+or DNS name that clients use for each host value. Copy the public certificate
 `~/.local/state/model-brewery-lan/tls/tailnet-ca.crt` from the host over
-a trusted channel. Trust it on the client, then use the same `brewery`
-login. Do not copy any `.key` file. The tailnet gateway does not use
-public Funnel access. To remove only tailnet access, run
+a trusted channel. Trust it on the client. Then open the configured tailnet
+host on HTTPS port `8443`. Do not copy any `.key` file. The tailnet gateway
+does not use public Funnel access. To remove only tailnet access, run
 `systemctl --user disable --now model-brewery-tailnet.service`.
 
 Check the services with `systemctl --user status model-brewery-lan.service
@@ -1639,7 +1638,8 @@ It does not accept arbitrary commands.
 
 Both sections use the same API request protections.
 Infrastructure has no second admin key.
-The loopback listener has no login. Use the authenticated gateway for network access.
+The loopback listener has no login. For network access, use the HTTPS
+gateway and limit access to trusted client networks.
 
 ### What the operator can set
 
