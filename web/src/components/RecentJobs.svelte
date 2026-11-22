@@ -2,7 +2,7 @@
   import JobProgress from './JobProgress.svelte';
   import { brewery } from '../lib/store.svelte';
   import { errorText } from '../lib/api';
-  import { formatTime, hostName, isTerminal, kindTitle, modelLabel, newestFirst } from '../lib/format';
+  import { formatTime, hostName, isCancelling, isTerminal, kindTitle, modelLabel, newestFirst, shortHash } from '../lib/format';
   import JobState from './JobState.svelte';
   import CancelButton from './CancelButton.svelte';
   import JobResult from './results/JobResult.svelte';
@@ -55,19 +55,20 @@
   {:else}
     <ul class="list">
       {#each jobs as job (job.id)}
+        {@const problemId = job.error ? `${uid}-error-${encodeURIComponent(job.id)}` : undefined}
         <li>
           <div class="line">
             <div class="info">
               <div class="row">
                 <JobState {job} />
-                <a class="name" href="#/jobs/{encodeURIComponent(job.id)}">{kindTitle(job.kind)}</a>
+                <a class="name" href="#/jobs/{encodeURIComponent(job.id)}" aria-describedby={problemId}>{kindTitle(job.kind)} <span class="xs muted mono" title={job.id}>{shortHash(job.id)}</span></a>
                 <span class="xs muted">on {where(job.host, job.requested_host)}</span>
               </div>
               <p class="xs muted break">
                 {job.input_ids.map((id) => modelLabel(models.find((m) => m.id === id))).join(' · ') || 'No inputs'}{#if job.created_at} · {formatTime(job.created_at)}{/if}
               </p>
-              {#if job.state === 'running'}<JobProgress {job} label="Progress of job {job.id}" />{/if}
-              {#if job.error}<p class="xs err break">{job.error}</p>{/if}
+              {#if job.state === 'running' || isCancelling(job)}<JobProgress {job} label="Progress of job {job.id}" />{/if}
+              {#if job.error}<p class="xs err break" id={problemId}>{job.error}</p>{/if}
             </div>
             <div class="row side">
               <CancelButton {job} />
@@ -76,7 +77,8 @@
                   type="button"
                   class="btn small"
                   aria-expanded={open === job.id}
-                  aria-controls="{uid}-r-{job.id}"
+                  aria-controls={open === job.id ? `${uid}-r-${job.id}` : undefined}
+                  aria-label="{open === job.id ? 'Hide result' : 'Show result'}: {kindTitle(job.kind)} {shortHash(job.id)}"
                   onclick={() => (open = open === job.id ? null : job.id)}>{open === job.id ? 'Hide result' : 'Show result'}</button
                 >
               {/if}

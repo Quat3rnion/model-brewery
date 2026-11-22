@@ -28,11 +28,5 @@ export const knownViolations = {
     },
   },
   weights: runningJobStatus,
-  job: {
-    ...runningJobStatus,
-    'scrollable-region-focusable': {
-      projects: ['390-light', '390-dark'],
-      nodes: ['main section[aria-labelledby="res-h"] .table-wrap'],
-    },
-  },
+  job: runningJobStatus,
 };

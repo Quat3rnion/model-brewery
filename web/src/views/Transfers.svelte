@@ -3,16 +3,39 @@
   import { Submitter } from '../lib/submit.svelte';
   import { capability, hostName, kindLabel, modelLabel } from '../lib/format';
   import HostSelect from '../components/HostSelect.svelte';
-  import { visibleChecklist } from '../lib/pickers';
-  import Submit from '../components/Submit.svelte';
+  import Combobox from '../components/Combobox.svelte';
+  import Blockers from '../components/Blockers.svelte';
+  import WorkflowGate from '../components/WorkflowGate.svelte';
+  import { hostOptions, visibleChecklist } from '../lib/pickers';
+  import { globalJobEligibility, hostWorkflowEligibility } from '../lib/eligibility';
+  import { hashParam, route } from '../lib/route.svelte';
+  import { readRetry } from '../lib/rerun';
+  import type { Blocker } from '../lib/blockers';
+  import type { Host } from '../lib/types';
   import SubmitStatus from '../components/SubmitStatus.svelte';
   import RecentJobs from '../components/RecentJobs.svelte';
 
   const models = $derived(brewery.state?.models ?? []);
   const hosts = $derived(brewery.state?.hosts ?? []);
+  type CopyKind = 'transfer_preview' | 'transfer';
+  const decision = (h: Host, kind: CopyKind) => hostWorkflowEligibility(brewery.state?.eligibility, h.id, kind);
+  const allows = (h: Host, kind: CopyKind) => decision(h, kind)?.eligible ?? capability(h, kind).allowed;
+  const destinationOptions = $derived(hostOptions(hosts.filter((h) => allows(h, 'transfer') || allows(h, 'transfer_preview'))));
+  const setup = $derived.by(() => {
+    const copy = globalJobEligibility(brewery.state, 'transfer');
+    const preview = globalJobEligibility(brewery.state, 'transfer_preview');
+    // Preview and copy share the form; either action can make it useful.
+    if (copy?.eligible === false && preview?.eligible === false) {
+      const reasons = [...copy.reasons, ...preview.reasons];
+      return { eligible: false, reasons: [...new Map(reasons.map((r) => [`${r.text}\n${r.fix_anchor}`, r])).values()] };
+    }
+    return { eligible: true, reasons: [] };
+  });
 
   let dest = $state('');
   let selected = $state<string[]>([]);
+  let retryMessage = $state('');
+  let retryLoading = $state(false);
   const destHost = $derived(hosts.find((h) => h.id === dest));
   const candidates = $derived(models.filter((m) => m.host !== dest));
   let txFilter = $state('');
@@ -30,17 +53,28 @@
     if (selected.some((id) => !ok.has(id))) selected = selected.filter((id) => ok.has(id));
   });
 
-  function blockers(kind: 'transfer_preview' | 'transfer') {
-    const out: string[] = [];
-    if (!dest) out.push('Select a destination host.');
-    else {
-      const c = capability(destHost, kind);
-      if (!c.allowed && c.reason) out.push(c.reason);
-    }
-    if (selected.length === 0) out.push('Select at least one entry to copy.');
+  function blockers(): Blocker[] {
+    const out: Blocker[] = [];
+    if (!destHost) out.push({ text: 'Select a destination host.' });
+    if (selected.length === 0) out.push({ text: 'Select at least one entry to copy.' });
     return out;
   }
 
+  function hostBlockers(kind: CopyKind): Blocker[] {
+    if (!destHost || allows(destHost, kind)) return [];
+    const name = hostName(hosts, destHost.id);
+    const reasons = decision(destHost, kind)?.reasons ?? [];
+    const action = kind === 'transfer' ? 'Transfer' : 'Preview';
+    if (reasons.length) {
+      return reasons.map((r) => ({ host: name, text: `${action}: ${r.text}`, fixAnchor: r.fix_anchor }));
+    }
+    const reason = destHost.capability_reasons?.[kind];
+    return [{ host: name, text: `${action}: ${reason?.text ?? capability(destHost, kind).reason ?? 'This action is not available.'}`, fixAnchor: reason?.fix_anchor }];
+  }
+
+  const copyBlockers = $derived(blockers());
+  const previewHostBlockers = $derived(hostBlockers('transfer_preview'));
+  const transferHostBlockers = $derived(hostBlockers('transfer'));
   const preview = new Submitter();
   const transfer = new Submitter();
 
@@ -51,14 +85,43 @@
   const cleaner = new Submitter();
   const digestProblem = $derived(digest.trim() && !/^[0-9a-f]{64}$/.test(digest.trim()) ? 'Use a 64-character lowercase SHA-256 hex digest.' : null);
   const cleanBlockers = $derived.by(() => {
-    const out: string[] = [];
-    if (!cleanHost) out.push('Select a host.');
+    const out: Blocker[] = [];
+    if (!cleanHost) out.push({ text: 'Select a host.' });
     else {
       const c = capability(hosts.find((h) => h.id === cleanHost), 'cache_cleanup');
-      if (!c.allowed && c.reason) out.push(c.reason);
+      if (!c.allowed && c.reason) out.push({ text: c.reason });
     }
-    if (digestProblem) out.push(digestProblem);
+    if (digestProblem) out.push({ text: digestProblem });
     return out;
+  });
+
+  $effect(() => {
+    const hash = route.hash;
+    retryMessage = '';
+    if (!hashParam(hash, 'retry')) {
+      retryLoading = false;
+      return;
+    }
+    const controller = new AbortController();
+    retryLoading = true;
+    readRetry(hash, ['transfer', 'transfer_preview', 'cache_cleanup'], controller.signal).then((job) => {
+      if (!job || controller.signal.aborted) return;
+      if (job.kind === 'cache_cleanup') {
+        cleanHost = job.host ?? '';
+        const sha = job.options?.bundle_sha256;
+        digest = typeof sha === 'string' ? sha : '';
+        confirmClean = false;
+      } else {
+        dest = destinationOptions.some((item) => item.value === job.host) ? job.host ?? '' : '';
+        selected = [...job.input_ids];
+      }
+      retryMessage = 'Review the previous job options before you queue a job.';
+    }).catch(() => {
+      if (!controller.signal.aborted) retryMessage = 'Could not open the previous job options. Enter the options again.';
+    }).finally(() => {
+      if (!controller.signal.aborted) retryLoading = false;
+    });
+    return () => controller.abort();
   });
 
   async function runCleanup() {
@@ -80,14 +143,17 @@
     </p>
   </div>
 
+  {#if retryMessage || retryLoading}
+    <p class="small muted" role="status">{retryLoading ? 'Loading the previous job options.' : retryMessage}</p>
+  {/if}
   <section class="panel" aria-labelledby="tx-h">
     <header><h2 id="tx-h">Copy to a host</h2></header>
+    <WorkflowGate workflow="transfer" decision={setup}>
     <div class="body stack">
       <div class="grid-2">
-        <HostSelect bind:value={dest} kind="transfer" label="Destination host" />
-        <div></div>
+        <Combobox bind:value={dest} options={destinationOptions} label="Destination host" disabled={retryLoading} placeholder="Select or type a host" emptyText="No eligible destination matches." />
       </div>
-      <fieldset class="pick">
+      <fieldset class="pick" disabled={retryLoading}>
         <legend class="small">Entries to copy</legend>
         {#if !dest}
           <p class="xs muted">Select a destination first.</p>
@@ -104,8 +170,10 @@
               <li>
                 <label>
                   <input type="checkbox" value={m.id} bind:group={selected} />
-                  <span class="truncate">{modelLabel(m)}</span>
-                  <span class="xs muted nowrap">{kindLabel(m.kind)} · from {hostName(hosts, m.host)}</span>
+                  <span class="entry">
+                    <span>{modelLabel(m)}</span>
+                    <span class="xs muted">{kindLabel(m.kind)} · from {hostName(hosts, m.host)}</span>
+                  </span>
                 </label>
               </li>
             {/each}
@@ -114,13 +182,21 @@
         {/if}
       </fieldset>
       <div class="row actions">
-        <Submit variant="secondary" blockers={blockers('transfer_preview')} busy={preview.busy} onclick={() => preview.submit({ kind: 'transfer_preview', host: dest, input_ids: selected })}>Preview</Submit>
-        <Submit blockers={blockers('transfer')} busy={transfer.busy} onclick={() => transfer.submit({ kind: 'transfer', host: dest, input_ids: selected })}>Transfer</Submit>
+        <button type="button" class="btn" aria-describedby={copyBlockers.length || previewHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={preview.busy}
+          disabled={retryLoading || preview.busy || copyBlockers.length > 0 || previewHostBlockers.length > 0}
+          onclick={() => preview.submit({ kind: 'transfer_preview', host: dest, input_ids: selected })}>{preview.busy ? 'Submitting…' : 'Preview'}</button>
+        <button type="button" class="btn primary" aria-describedby={copyBlockers.length || transferHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={transfer.busy}
+          disabled={retryLoading || transfer.busy || copyBlockers.length > 0 || transferHostBlockers.length > 0}
+          onclick={() => transfer.submit({ kind: 'transfer', host: dest, input_ids: selected })}>{transfer.busy ? 'Submitting…' : 'Transfer'}</button>
       </div>
+      {#if copyBlockers.length || previewHostBlockers.length || transferHostBlockers.length}
+        <Blockers id="copy-blockers" blockers={[...copyBlockers, ...previewHostBlockers, ...transferHostBlockers]} />
+      {/if}
       <SubmitStatus s={preview} />
       <SubmitStatus s={transfer} />
       <p class="xs muted">Preview and transfer are queued jobs. Open a job to see the preview result, progress and cancel.</p>
     </div>
+    </WorkflowGate>
   </section>
 
   <RecentJobs kinds={['transfer_preview', 'transfer']} title="Recent previews and transfers" />
@@ -141,13 +217,17 @@
         <div class="note warn" role="group" aria-label="Confirm cleanup">
           <p class="small">Remove {digest.trim() ? 'this cached bundle' : 'all unused cached copies'} on {hostName(hosts, cleanHost)}? Later jobs copy the files again.</p>
           <div class="row" style="margin-top:8px">
-            <button type="button" class="btn danger" disabled={cleaner.busy || cleanBlockers.length > 0} onclick={runCleanup}>{cleaner.busy ? 'Submitting…' : 'Queue cleanup'}</button>
+          <button type="button" class="btn danger" disabled={retryLoading || cleaner.busy || cleanBlockers.length > 0} onclick={runCleanup}>{cleaner.busy ? 'Submitting…' : 'Queue cleanup'}</button>
             <button type="button" class="btn ghost" onclick={() => (confirmClean = false)}>Keep cache</button>
           </div>
         </div>
       {:else}
-        <Submit variant="secondary" blockers={cleanBlockers} onclick={() => (confirmClean = true)}>Clean cache…</Submit>
+        <div class="row">
+          <button type="button" class="btn" aria-describedby={cleanBlockers.length ? 'cleanup-blockers' : undefined}
+            disabled={retryLoading || cleanBlockers.length > 0} onclick={() => (confirmClean = true)}>Clean cache…</button>
+        </div>
       {/if}
+      <Blockers id="cleanup-blockers" blockers={cleanBlockers} />
       <SubmitStatus s={cleaner} />
     </div>
   </section>
@@ -191,28 +271,26 @@
     max-height: 280px;
     overflow: auto;
   }
-  .pick label {
-    display: flex;
-    align-items: center;
+  .pick li label {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
     gap: 10px;
     padding: 6px 4px;
     min-height: 36px;
     cursor: pointer;
     border-radius: var(--r-sm);
   }
-  .pick label:hover {
+  .pick li label:hover {
     background: var(--surface-2);
   }
-  .pick .truncate {
-    flex: 1;
+  .entry {
+    display: flex;
+    flex-direction: column;
+    overflow-wrap: anywhere;
   }
   .actions {
     align-items: flex-start;
     gap: var(--s-3);
-  }
-  @media (max-width: 560px) {
-    .pick label {
-      flex-wrap: wrap;
-    }
   }
 </style>

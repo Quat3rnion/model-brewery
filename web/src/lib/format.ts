@@ -11,6 +11,10 @@ export function isActive(state: JobState | undefined): boolean {
   return state !== undefined && ACTIVE.has(state);
 }
 
+export function isCancelling(job: Pick<JobSummary, 'state' | 'cancel_requested'>): boolean {
+  return job.state === 'cancelling' || (isActive(job.state) && job.cancel_requested === true);
+}
+
 export type Tone = 'ok' | 'bad' | 'warn' | 'info' | 'muted';
 
 export function stateTone(state: JobState): Tone {
