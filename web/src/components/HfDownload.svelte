@@ -3,6 +3,7 @@
   import { Submitter } from '../lib/submit.svelte';
   import { hashParam, route } from '../lib/route.svelte';
   import { loadRetryJob, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
+  import SubmitStatus from './SubmitStatus.svelte';
   import RetryOffer from './RetryOffer.svelte';
   import { unsavedChanges } from '../lib/unsaved-changes.svelte';
   import { hostName } from '../lib/format';
@@ -54,16 +55,16 @@
   });
   async function start() {
     if (submitter.busy || retry.loading || blockers.length) return;
-    const { entry, hash } = route;
+    const visit = route.capture();
     const submitted = draft();
     const job = await submitter.submit({
       kind: 'hf_download', input_ids: [],
       host: host === 'backend-hf' ? undefined : host,
       options: { repo_id: repo.trim(), revision: revision.trim(), filename: scope === 'file' ? filename.trim() : undefined },
     }, retry.action('hf_download'));
-    if (job && route.entry === entry && route.hash === hash) {
+    if (job && visit.canPresent()) {
       savedDraft = submitted;
-      location.hash = `#/jobs/${encodeURIComponent(job.id)}`;
+      if (!submitter.replayed) location.hash = `#/jobs/${encodeURIComponent(job.id)}`;
     }
   }
 </script>
@@ -102,7 +103,7 @@
     {#if host !== 'backend-hf'}<p class="hint">Download on {hostName(hosts, host)}.</p>{/if}
     <p class="hint">Track progress or cancel in Jobs. The download service verifies the files before it adds the entry to Library.</p>
     <Submit {blockers} busy={submitter.busy} disabled={retry.loading} onclick={start}>Start download</Submit>
-    {#if submitter.error}<p class="note bad" role="alert">{submitter.error}</p>{/if}
+    <SubmitStatus s={submitter} replayOnly />
   </div>
 </details>
 

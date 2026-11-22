@@ -8,9 +8,12 @@
   import TensorMap from './TensorMap.svelte';
   import HeatGrid from './HeatGrid.svelte';
   import Submit from '../Submit.svelte';
+  import SubmitStatus from '../SubmitStatus.svelte';
   import JobState from '../JobState.svelte';
   import { brewery } from '../../lib/store.svelte';
   import { Submitter } from '../../lib/submit.svelte';
+  import { route } from '../../lib/route.svelte';
+  import type { RetrySubmission } from '../../lib/retry-keys';
   import { theme } from '../../lib/theme.svelte';
   import { isSafeSource, hostName, isActive, shortHash } from '../../lib/format';
   import { MAX_COORDINATES, MAX_EDITS, coord, exact, percent, relChange, signed, tuneJob, parseValue, parseMaxUpdate } from '../../lib/weights';
@@ -44,6 +47,7 @@
     calibrationId,
     heldOutId,
     tuneReason,
+    tuneRetry,
     mode = $bindable('manual'),
     onproposal,
     pending,
@@ -55,6 +59,7 @@
     calibrationId: string;
     heldOutId: string;
     tuneReason: string | null;
+    tuneRetry: RetrySubmission;
     mode?: 'manual' | 'auto';
     onproposal: (jobId: string) => void;
     pending: SvelteMap<string, DraftEdit>;
@@ -326,11 +331,12 @@
   });
   async function tune() {
     if (!tensor || !sha || !maxUpdate.ok || tuneBlockers.length) return;
+    const visit = route.capture();
     const indices = [...selected].map((k) => k.split(',').map(Number) as [number, number]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
     const job = tuneJob(source.id, source.host, calibrationId, heldOutId, tensor.name, indices, maxUpdate.value);
     job.options = { ...job.options, source_sha256: sha, ...(!float ? {packed:true} : {}) };
-    const created = await tuneSub.submit(job);
-    if (created) onproposal(created.id);
+    const created = await tuneSub.submit(job, tuneRetry);
+    if (created && !tuneSub.replayed && visit.canPresent()) onproposal(created.id);
   }
 
   const selectable = $derived((index: number[]) => canChange && (mode === 'manual' || index.length === 2));
@@ -560,8 +566,8 @@
 
     {#if canChange && mode === 'auto' && tensor}
       <section class="step">
-        {#if tuneSub.error}<p class="note bad" role="alert">{tuneSub.error}</p>{/if}
-        <Submit blockers={tuneBlockers} busy={tuneSub.busy} onclick={tune}>Tune {selected.size || ''} selected {selected.size === 1 ? 'weight' : 'weights'}</Submit>
+        <SubmitStatus s={tuneSub} />
+        <Submit blockers={tuneBlockers} busy={tuneSub.busy} disabled={tuneRetry.blocked} onclick={tune}>Tune {selected.size || ''} selected {selected.size === 1 ? 'weight' : 'weights'}</Submit>
       </section>
     {/if}
   </div>

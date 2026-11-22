@@ -8,7 +8,8 @@ export class Submitter {
   busy = $state(false);
   error = $state<string | null>(null);
   job = $state<JobSummary | null>(null);
-  #keys = new RetryKeys();
+  replayed = $state(false);
+  #keys = new RetryKeys<JobSummary>();
 
   async submit(job: NewJob, retry?: RetrySubmission): Promise<JobSummary | null> {
     if (this.busy || retry?.blocked) return null;
@@ -16,12 +17,13 @@ export class Submitter {
     this.error = null;
     try {
       const body = stripEmpty(job);
-      const attempt = this.#keys.take(body, retry?.history);
-      const created = await api.submitJob(body, attempt.key);
+      const attempt = this.#keys.take(body.kind, body, retry?.history);
+      const created = attempt.result ?? await api.submitJob(body, attempt.key);
       if (!created?.id) throw new Error('The controller did not return a job ID.');
-      attempt.accept();
+      attempt.accept(created);
       this.job = created;
-      void brewery.refresh();
+      this.replayed = !!attempt.result;
+      if (!attempt.result) void brewery.refresh();
       return created;
     } catch (e) {
       this.error = submissionError(e);

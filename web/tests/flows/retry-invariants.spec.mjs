@@ -21,6 +21,145 @@ function gate() {
   return { pending, release };
 }
 
+test('Inspect on a Plan retry route queues new work each time', async ({ page, controller: c }) => {
+  const accepted = new Map();
+  c.respond('POST', '/api/jobs', ({ body, headers }) => {
+    const key = headers['idempotency-key'];
+    if (!accepted.has(key)) accepted.set(key, job(`inspect-${accepted.size + 1}`, body.kind, body));
+    return { json: accepted.get(key) };
+  });
+  await openRetry(page, c, 'plan', 'Convert', { input_ids: ['source-a'], options: { profile: 'v2' } });
+  await expect(button(page, 'Queue plan')).toBeEnabled();
+  await page.getByRole('tab', { name: 'Inspect', exact: true }).click();
+  const queue = button(page, 'Queue inspect');
+  for (let i = 1; i <= 2; i++) {
+    await queue.click();
+    await expect.poll(() => posts(c).length).toBe(i);
+    await expect(queue).toBeEnabled();
+  }
+  expect(posts(c)[0].body).toEqual(posts(c)[1].body);
+  expect([...accepted.values()].map(j => j.id)).toEqual(['inspect-1', 'inspect-2']);
+});
+
+test('late previous weight reply does not navigate after leaving', async ({ page, controller: c }) => {
+  const post = gate();
+  const fields = { input_ids: ['gguf-a'], options: { tensor: 'blk.0.ffn_down.weight', index: [0, 0] } };
+  const created = detail(job('accepted-after-leave', 'weight_inspect', fields));
+  c.respond('POST', '/api/jobs', async () => { await post.pending; return { json: created }; });
+  c.respond('GET', `/api/jobs/${created.id}`, { json: created });
+  try {
+    await openRetry(page, c, 'weight_inspect', 'Weights', fields);
+    await button(page, 'Queue previous request').click();
+    await expect.poll(() => posts(c).length).toBe(1);
+    await nav(page, 'Library').click();
+    await expect(page.getByRole('heading', { level: 1, name: 'Library', exact: true })).toBeVisible();
+    const refreshed = page.waitForResponse(r => r.url().endsWith('/api/state'));
+    post.release();
+    await (await refreshed).finished();
+    await expect(page).toHaveURL(/#\/library$/);
+  } finally { post.release(); }
+});
+
+test('a delayed conversion result does not take focus from another control', async ({ page, controller: c }) => {
+  const response = gate();
+  const run = conversion('slow-linked-run', { state: 'failed' });
+  c.respond('GET', '/api/conversions', async () => { await response.pending; return { json: [run] }; });
+  try {
+    await c.open(page, `convert?run=${run.id}`);
+    await expect.poll(() => c.requests('GET', '/api/conversions').length).toBe(1);
+    const profile = page.locator('#wf-profile');
+    await profile.press('Escape');
+    await expect(profile).toBeFocused();
+    response.release();
+    await expect(page.locator(`#run-${run.id}`)).toBeVisible();
+    await expect(profile).toBeFocused();
+  } finally { response.release(); }
+});
+
+test('changing Recipe output during retry loading does not strand the pending request', async ({ page, controller: c }) => {
+  const response = gate();
+  let reads = 0;
+  try {
+    await openRetry(page, c, 'convert', 'Convert', { format: 'gguf', input_ids: ['source-a'], options: {
+      layer_recipe: { schema: 'brewery.layer-quant.v1', source_sha256: 'a'.repeat(64), default_type: 'F16' },
+    } }, async prior => {
+      if (++reads > 1) await response.pending;
+      return { json: prior };
+    });
+    const loading = page.getByText('Loading the previous job options.');
+    await expect(loading).toBeVisible();
+    const output = page.getByLabel('Recipe output');
+    await output.selectOption('hgn');
+    await expect(output).toHaveValue('hgn');
+    response.release();
+    await expect(button(page, 'Use previous inputs')).toBeVisible();
+    await expect(loading).toHaveCount(0);
+  } finally { response.release(); }
+});
+
+test('visual tuning retains an unconfirmed retry key across Back and replays acceptance', async ({ page, controller: c }) => {
+  const tensor = 'blk.0.ffn_down.weight';
+  const state = scenario('weight-reads');
+  for (const [id, name] of [['fit', 'Fit split'], ['held', 'Held split']])
+    state.models.push({ id, name, kind: 'weight-calibration', host: 'worker-a', path: `/fixtures/${id}` });
+  c.respond('GET', '/api/state', () => ({ json: state }));
+  const accepted = new Map();
+  const tunes = () => posts(c).filter(r => r.body.kind === 'weight_tune');
+  c.respond('POST', '/api/jobs', req => {
+    if (req.body.kind === 'weight_inspect') {
+      const read = weightRead(`read-${state.jobs.length + 1}`, req.body, state.models.find(m => m.id === 'gguf-a'));
+      state.jobs.push(read);
+      c.respond('GET', `/api/jobs/${read.id}`, { json: read });
+      return { json: read };
+    }
+    const key = req.headers['idempotency-key'];
+    if (!accepted.has(key)) accepted.set(key, job(`tune-${accepted.size + 1}`, req.body.kind, req.body));
+    return tunes().length === 1
+      ? { status: 502, json: { error: 'Reply lost.' } }
+      : { json: accepted.get(key) };
+  });
+  const setup = async () => {
+    await page.getByRole('radio', { name: 'Automatic' }).check();
+    await page.getByRole('combobox', { name: 'Calibration data', exact: true }).selectOption('fit');
+    await page.getByRole('combobox', { name: 'Held-out data', exact: true }).selectOption('held');
+    const read = button(page, 'Read tensor list');
+    if (await read.isVisible()) await read.click();
+    await page.getByRole('option', { name: /^blk\.0\.ffn_down\.weight,/ }).click();
+    const tile = button(page, 'Read tile');
+    if (await tile.isVisible()) await tile.click();
+    await page.getByRole('gridcell').first().click();
+    await page.locator('#vw-max-x').fill('0.02');
+    await page.locator('#vw-max-x').press('Enter');
+    return button(page, 'Tune 1 selected weight');
+  };
+  const awayAndBack = async () => {
+    const url = page.url();
+    await nav(page, 'Library').click();
+    await expect(page.getByRole('heading', { level: 1, name: 'Library', exact: true })).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(url);
+    await expect(button(page, 'Queue previous request')).toBeEnabled();
+  };
+  await openRetry(page, c, 'weight_tune', 'Weights', {
+    input_ids: ['gguf-a', 'fit', 'held'],
+    options: { tensor, indices: [[0, 0]], max_update: .01, source_sha256: 'a'.repeat(64) },
+  });
+  await expect(button(page, 'Queue previous request')).toBeEnabled();
+  await (await setup()).click();
+  await expect(page.getByRole('alert').filter({ hasText: 'Reply lost.' })).toBeVisible();
+  await awayAndBack();
+  await (await setup()).click();
+  await expect.poll(() => tunes().length).toBe(2);
+  expect(tunes()[1].body).toEqual(tunes()[0].body);
+  expect(tunes()[1].headers['idempotency-key']).toBe(tunes()[0].headers['idempotency-key']);
+  expect(accepted.size).toBe(1);
+  await expect(page.getByRole('link', { name: /tune-1/ }).first()).toBeVisible();
+  await awayAndBack();
+  await (await setup()).click();
+  await expect(page.getByText(/already queued/i)).toBeVisible();
+  expect(tunes()).toHaveLength(2);
+});
+
 test('edited partial transfer still requires acknowledgment on the plain route', async ({ page, controller: c }) => {
   const state = scenario('live-shaped');
   state.hosts.push({ ...state.hosts[1], id: 'worker-c', name: 'Worker C' });

@@ -23,40 +23,45 @@ export interface RetrySubmission {
   history?: RetryIdentity;
 }
 
-type Attempt = { key: string; accepted: boolean };
+type Attempt<T> = { key: string; request?: string; result?: T };
+const attempts = new Map<string, Attempt<unknown>>();
 // Retry entries outlive a mounted launcher, but not the browser document.
-const entries = new Map<string, Attempt>();
-const unconfirmed = new Map<string, Attempt>();
+const unconfirmed = new Map<string, Attempt<unknown>>();
 
-/** Each launcher owns its last body. History sharing is limited to that
- * logical action and the exact retry body, including after a remount. */
-export class RetryKeys {
-  #last?: { body: string | undefined; attempt: Attempt; retry: boolean };
+/** One instance per launcher. History sharing requires the same action, job
+ * kind and wire body, including after a remount. */
+export class RetryKeys<T extends object> {
+  #last?: { request: string; attempt: Attempt<T>; retry: boolean };
 
   constructor(private mint = newKey, private replayAccepted = false) {}
 
-  take(body: unknown, history?: RetryIdentity, supplied?: string) {
-    const json = bodyKey(body);
+  take(kind: string, body: unknown, history?: RetryIdentity) {
+    const request = JSON.stringify([kind, bodyKey(body)]);
     const last = this.#last;
-    const make = (key = this.mint()): Attempt => ({ key, accepted: false });
-    const request = history && JSON.stringify([history.slot, history.action, history.id, json]);
-    const entry = history && JSON.stringify([request, history.entry]);
-    let attempt: Attempt;
-    if (request && entry) {
-      attempt = entries.get(entry) ?? unconfirmed.get(request) ?? make();
-      entries.set(entry, attempt);
-      if (!attempt.accepted) unconfirmed.set(request, attempt);
-    } else if (supplied) {
-      attempt = make(supplied);
-    } else if (last && last.body === json && (!last.attempt.accepted || last.retry || this.replayAccepted)) {
+    const retryRequest = history && JSON.stringify([history.slot, history.action, history.id, request]);
+    const entry = history && JSON.stringify([retryRequest, history.entry]);
+    const make = (): Attempt<T> => ({ key: this.mint(), request: retryRequest });
+    let attempt: Attempt<T>;
+    if (retryRequest && entry) {
+      // The same action and kind in the same slot use one response type.
+      const prior = (attempts.get(entry) ?? unconfirmed.get(retryRequest)) as Attempt<T> | undefined;
+      attempt = prior ?? make();
+      attempts.set(entry, attempt);
+      if (!attempt.result) unconfirmed.set(retryRequest, attempt);
+    } else if (last && last.request === request && (!last.attempt.result || last.retry || this.replayAccepted)) {
       attempt = last.attempt;
     } else {
       attempt = make();
     }
-    this.#last = { body: json, attempt, retry: !!history || !!supplied || (last?.attempt === attempt && last.retry) };
-    return { key: attempt.key, accept: () => {
-      attempt.accepted = true;
-      if (request && unconfirmed.get(request) === attempt) unconfirmed.delete(request);
-    } };
+    this.#last = { request, attempt, retry: !!history || (last?.attempt === attempt && last.retry) };
+    return {
+      key: attempt.key,
+      result: attempt.result,
+      accept: (result: T) => {
+        attempt.result ??= result;
+        const request = attempt.request;
+        if (request && unconfirmed.get(request) === attempt) unconfirmed.delete(request);
+      },
+    };
   }
 }
