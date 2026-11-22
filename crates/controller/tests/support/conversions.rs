@@ -160,15 +160,18 @@ fn gguf_workflow_accepts_direct_default_and_rejects_private_options() {
     let verify = app.detail(done["job_ids"]["verify"].as_str().unwrap());
     assert_eq!(verify["result"]["gguf_type"], "Q4_K_M");
     let state = app.json("GET", "/api/state", None, 200);
-    assert!(
-        state["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m["id"] == done["artifact_model_id"]
-                && m["kind"] == "gguf"
-                && m["path"].as_str().unwrap().ends_with("/converted.gguf"))
-    );
+    let model = state["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == done["artifact_model_id"])
+        .unwrap();
+    assert_eq!(model["kind"], "gguf");
+    assert!(model["path"].as_str().unwrap().ends_with("/converted.gguf"));
+    assert_eq!(model["sha256"], "b".repeat(64));
+    assert_eq!(model["bytes"], 9);
+    assert_eq!(model["job_id"], done["job_ids"]["convert"]);
+    assert_eq!(model.get("available"), Some(&Value::Null));
     app.json(
         "POST",
         "/api/jobs",

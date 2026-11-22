@@ -268,7 +268,7 @@ impl Config {
             return Err(Error::Transport(e.into()));
         }
         drop(stdin);
-        let limit = if matches!(request, Rpc::SuggestPaths(_)) {
+        let limit = if matches!(request, Rpc::SuggestPaths(_) | Rpc::Stat(_)) {
             SUGGEST_JSON_LIMIT
         } else {
             LIMIT
@@ -563,14 +563,20 @@ fn run() -> Wire<Value> {
             let reply: PathSuggestions = cfg.rpc(dest, Rpc::SuggestPaths(request))?;
             Ok(serde_json::to_value(reply).context("serialize path suggestions")?)
         }
-        [action, dest, id] if action != "suggest-paths" => {
+        [action, dest] if action == "stat" => {
+            let cfg = config(dest)?;
+            let request: StatRequest = decode_limited(std::io::stdin().lock(), SUGGEST_JSON_LIMIT)?;
+            let reply: PathState = cfg.rpc(dest, Rpc::Stat(request))?;
+            Ok(serde_json::to_value(reply).context("serialize path state")?)
+        }
+        [action, dest, id] if !matches!(action.as_str(), "suggest-paths" | "stat") => {
             token(id)?;
             let cfg = config(dest)?;
             let reply = run_job(&cfg, action, dest, id)?;
             Ok(serde_json::to_value(reply).context("serialize reply")?)
         }
         _ => Err(anyhow::anyhow!(
-            "usage: brewery-dispatch ACTION HOST JOB_ID | brewery-dispatch suggest-paths HOST"
+            "usage: brewery-dispatch ACTION HOST JOB_ID | brewery-dispatch (suggest-paths|stat) HOST"
         )
         .into()),
     }

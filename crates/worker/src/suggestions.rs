@@ -15,18 +15,26 @@ const SCAN_TIME: Duration = Duration::from_millis(200);
 
 pub fn run(prefix: String) -> Result<PathSuggestions> {
     validate_suggest_prefix(&prefix)?;
+    within_limit(move || suggest(&prefix)).map(|reply| {
+        reply.unwrap_or(PathSuggestions {
+            items: vec![],
+            truncated: true,
+        })
+    })
+}
+
+pub(crate) fn within_limit<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<Option<T>> {
     // The worker runs one RPC per process. A watchdog also bounds a lookup
     // stalled in kernel filesystem I/O, where the scan budget cannot be checked.
     let (send, receive) = mpsc::sync_channel(1);
     std::thread::Builder::new().spawn(move || {
-        let _ = send.send(suggest(&prefix));
+        let _ = send.send(work());
     })?;
     match receive.recv_timeout(Duration::from_secs(1)) {
-        Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Ok(PathSuggestions {
-            items: vec![],
-            truncated: true,
-        }),
+        Ok(result) => result.map(Some),
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
         Err(e) => Err(e.into()),
     }
 }

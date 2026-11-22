@@ -1,6 +1,7 @@
 mod cache;
 mod progress;
 mod publication;
+mod stat;
 mod suggestions;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -1725,6 +1726,7 @@ impl Worker {
             Rpc::Describe { .. }
             | Rpc::Read { .. }
             | Rpc::SuggestPaths(_)
+            | Rpc::Stat(_)
             | Rpc::DescribeProgress { .. }
             | Rpc::StageProgress { .. } => unreachable!(),
         }
@@ -1747,6 +1749,11 @@ fn main() {
                     // Do not initialize or lock worker state for this read-only RPC.
                     Rpc::SuggestPaths(SuggestRequest { prefix }) => {
                         to_value(suggestions::run(prefix)?)?
+                    }
+                    Rpc::Stat(StatRequest { path }) => {
+                        let reply = suggestions::within_limit(move || stat::get(&path))?
+                            .context("worker path check timed out")?;
+                        to_value(reply)?
                     }
                     Rpc::DescribeProgress {
                         input,

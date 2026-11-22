@@ -1,6 +1,11 @@
 use crate::dispatch::read_limited;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    collections::BTreeSet,
+    path::PathBuf,
+    process::{ExitStatus, Stdio},
+    time::Duration,
+};
 use tokio::{io::AsyncWriteExt as _, process::Command, sync::Semaphore, time::timeout};
 
 const MAX_PATH: usize = 4096;
@@ -70,41 +75,12 @@ impl PathSuggestions {
         let _permit = self.permits.try_acquire().map_err(|_| SuggestError::Busy)?;
         let payload = serde_json::to_vec(&serde_json::json!({ "prefix": query.prefix }))
             .map_err(|_| SuggestError::Unavailable)?;
-        // Keep the child in the request future. Axum drops that future on
-        // disconnect; timeout and invalid output also drop the child.
         let mut command = Command::new(&self.command);
         if let Some(config) = dispatch_config {
             command.env("BREWERY_DISPATCH_CONFIG", config);
         }
-        let mut child = command
-            .args(["suggest-paths", &query.host])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|_| SuggestError::Unavailable)?;
-        let mut group = ProcessGroup(child.id().expect("unreaped child") as libc::pid_t);
-        let mut stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let (bytes, status) = timeout(SUGGEST_TIMEOUT, async {
-            let write = async move {
-                stdin.write_all(&payload).await?;
-                drop(stdin);
-                Ok(())
-            };
-            // Drain output before reaping the group leader. If a hung
-            // transport keeps stdout open, the group can still be killed
-            // without risking a reused process group ID.
-            let (_, bytes) = tokio::try_join!(write, read_limited(stdout, MAX_STDOUT))?;
-            let status = child.wait().await?;
-            group.0 = 0;
-            Ok::<_, std::io::Error>((bytes, status))
-        })
-        .await
-        .map_err(|_| SuggestError::Timeout)?
-        .map_err(|_| SuggestError::Unavailable)?;
+        command.args(["suggest-paths", &query.host]);
+        let (bytes, status) = read_only_dispatch(command, payload).await?;
         if !status.success() {
             return Err(SuggestError::Unavailable);
         }
@@ -129,6 +105,43 @@ impl PathSuggestions {
         }
         Ok(reply)
     }
+}
+
+pub(crate) async fn read_only_dispatch(
+    mut command: Command,
+    payload: Vec<u8>,
+) -> Result<(Vec<u8>, ExitStatus), SuggestError> {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| SuggestError::Unavailable)?;
+    let mut group = ProcessGroup(child.id().expect("unreaped child") as libc::pid_t);
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+    timeout(SUGGEST_TIMEOUT, async {
+        let write = async move {
+            // An older dispatcher can reject the action without reading stdin.
+            if let Err(e) = stdin.write_all(&payload).await
+                && e.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                return Err(e);
+            }
+            Ok(())
+        };
+        // Drain output before reaping the group leader so a hung transport
+        // can be killed without risking a reused process group ID.
+        let (_, bytes) = tokio::try_join!(write, read_limited(stdout, MAX_STDOUT))?;
+        let status = child.wait().await?;
+        group.0 = 0;
+        Ok::<_, std::io::Error>((bytes, status))
+    })
+    .await
+    .map_err(|_| SuggestError::Timeout)?
+    .map_err(|_| SuggestError::Unavailable)
 }
 
 struct ProcessGroup(libc::pid_t);

@@ -34,6 +34,39 @@ pub struct Model {
     pub host: String,
     pub path: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(default)]
+    pub available: Option<bool>,
+    #[serde(
+        default = "unknown_availability_reason",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+}
+
+fn unknown_availability_reason() -> Option<String> {
+    Some("The controller has not checked this path on the worker.".into())
+}
+
+impl Model {
+    // Call only after the controller has accepted the producer's receipt.
+    pub fn attest_output(&mut self, artifact: &Value) {
+        if artifact["path"] == self.path
+            && artifact["kind"] == self.kind
+            && let Some(sha256) = artifact["sha256"]
+                .as_str()
+                .filter(|s| brewery_worker::is_digest(s))
+            && let Some(bytes) = artifact["bytes"].as_u64().filter(|&n| n > 0)
+        {
+            self.sha256 = Some(sha256.into());
+            self.bytes = Some(bytes);
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -93,6 +126,11 @@ impl NewModel {
             host: self.host,
             path: self.path,
             kind,
+            sha256: None,
+            bytes: None,
+            available: None,
+            reason: unknown_availability_reason(),
+            job_id: None,
         })
     }
 }
@@ -113,10 +151,14 @@ pub struct NewPrompt {
 
 impl NewPrompt {
     pub fn validate(self) -> Result<Prompt, String> {
+        self.validate_with_id(id())
+    }
+
+    pub fn validate_with_id(self, id: String) -> Result<Prompt, String> {
         check_name(&self.name)?;
         check_prompt(&self.text)?;
         Ok(Prompt {
-            id: id(),
+            id,
             name: self.name,
             text: self.text,
         })
@@ -287,10 +329,33 @@ impl ProgressDetail {
 #[derive(Serialize, Deserialize)]
 pub struct Envelope {
     pub kind: String,
+    // Library metadata is not a worker input or an attestation of current data.
+    #[serde(serialize_with = "serialize_worker_inputs")]
     pub inputs: Vec<Model>,
     pub options: Map<String, Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+}
+
+fn serialize_worker_inputs<S: serde::Serializer>(
+    inputs: &[Model],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Input<'a> {
+        id: &'a str,
+        name: &'a str,
+        host: &'a str,
+        path: &'a str,
+        kind: &'a str,
+    }
+    serializer.collect_seq(inputs.iter().map(|model| Input {
+        id: &model.id,
+        name: &model.name,
+        host: &model.host,
+        path: &model.path,
+        kind: &model.kind,
+    }))
 }
 
 #[derive(Deserialize, Serialize)]

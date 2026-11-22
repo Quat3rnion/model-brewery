@@ -1127,6 +1127,14 @@ operator control; the API does not expose an arbitrary command runner.
 
 All JSON POST requests need `Content-Type: application/json`.
 
+`GET /api/state` reports model availability from the owning worker. These
+checks run in the background and are cached for 30 seconds. A missing path,
+a path outside the worker's allowed model roots, or a disabled or removed
+worker reports `available: false`. A check that is pending, fails, or is not
+supported reports `available: null`. Update older dispatchers and workers to
+get file state. The check does not hash or read model data. A reported
+`sha256` comes from a verified output receipt, not from the file check.
+
 ```sh
 curl -s http://127.0.0.1:4141/api/state
 curl -s -X POST http://127.0.0.1:4141/api/suggestions/paths \
