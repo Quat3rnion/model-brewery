@@ -48,12 +48,12 @@
       {@const label=source.kind==='gguf' && r.kind!=='ngram' ? 'Matching Library input required' : fact.status==='detected' ? `Use checkpoint ${r.label.toLowerCase()}` : fact.status==='none' ? 'No checkpoint component reported' : defaultText(source,r.kind)}
       <div class="field">
         {#if gguf}
-          <strong class="small">{r.label}</strong>
+          <strong class="small" title={r.kind === 'mtp' ? 'Multi-token prediction head' : undefined}>{r.label}</strong>
         {:else if value}
-          <label for="{idPrefix}-{r.kind}">{r.label}</label>
+          <label for="{idPrefix}-{r.kind}" title={r.kind === 'mtp' ? 'Multi-token prediction head' : undefined}>{r.label}</label>
           <select id="{idPrefix}-{r.kind}" class="input" bind:value={value[r.kind]} aria-describedby="{idPrefix}-{r.kind}-hint">
             <option value="">{label}</option>
-            {#if value[r.kind] && !options.some(m=>m.id===value?.[r.kind])}<option value={value[r.kind]}>Unavailable Library entry · {value[r.kind]}</option>{/if}
+            {#if value[r.kind] && !options.some(m=>m.id===value?.[r.kind])}<option value={value[r.kind]}>Unavailable Library entry</option>{/if}
             {#if options.length}<optgroup label="Registered replacements">
               {#each options as m (m.id)}<option value={m.id}>{modelLabel(m)} · {hostName(brewery.state?.hosts ?? [],m.host)}</option>{/each}
             </optgroup>{/if}
