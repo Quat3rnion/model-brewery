@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import subprocess
 import sys
 
 sys.dont_write_bytecode = True
@@ -72,11 +73,31 @@ def private_policy(path, fields):
 
 
 def local_config():
-    config = (private_policy(STANDALONE, {"imports", "state", "runtime", "llama"}) or
-              private_policy(LOCAL_ROOTS, {"imports", "state"}))
+    config = private_policy(LOCAL_ROOTS, {"imports", "state"})
     if not config:
         return None
     return {k: canonical_path(v) for k, v in config.items()}
+
+
+def standalone_job(job):
+    return job["kind"] in KINDS and job["inputs"] and job["inputs"][0]["kind"] == "safetensors"
+
+
+def job_config(job):
+    roots = local_config()
+    if not standalone_job(job):
+        return roots
+    config = private_policy(STANDALONE, {"imports", "state", "runtime", "llama"})
+    if config is None:
+        return roots
+    config = {k: canonical_path(v) for k, v in config.items()}
+    require(config["imports"] == (roots["imports"] if roots else IMPORTS)
+            and config["state"] == (roots["state"] if roots else STATE),
+            "standalone GGUF policy does not match worker roots")
+    interpreter = config["runtime"] / "bin/python"
+    require(interpreter.is_file() and interpreter.resolve(strict=True).is_relative_to(config["runtime"]),
+            "standalone runtime requires a Python interpreter inside its runtime")
+    return config
 
 
 def catalog():
@@ -222,7 +243,7 @@ def precheck(req):
     op = req["op"]
     if op == "prepare":
         require(req["action"] == "start", "local-gguf does not stage transfers")
-        check(req["job"], local_config())
+        check(req["job"], job_config(req["job"]))
         rocmfpx_pin(req["job"])
     else:
         require(op in {"resolve", "start", "status", "cancel", "finish", "suggest_paths"},
@@ -257,21 +278,38 @@ def sandbox(work, paths, command, config=None, binary=None, *, fork_sha=None):
     return args, env
 
 
+def check_runtime(work, config):
+    command = [str(config["runtime"] / "bin/python"), "-IB", "-c",
+               "import torch, transformers; "
+               "raise SystemExit(not (torch.__version__ == '2.11.0+cpu' "
+               "and torch.version.cuda is None and torch.version.hip is None "
+               "and transformers.__version__ == '4.57.6'))"]
+    args, env = sandbox(work, [], command, config)
+    try:
+        result = subprocess.run(args, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise ValueError("standalone runtime version check timed out") from None
+    require(result.returncode == 0, "standalone runtime requires CPU PyTorch 2.11.0+cpu and Transformers 4.57.6")
+
+
 def admit():
     require(sys.argv[1:] == ["--wait", "--", str(ENGINE)], "unexpected local-gguf admission invocation")
     data = os.pread(0, LIMIT + 1, 0)
     require(len(data) <= LIMIT, "local-gguf engine request too large")
     job = json.loads(data)
-    config = local_config()
+    config = job_config(job)
     paths = check(job, config)
     pinned_native(QUANTIZER, PIN)
     fork_sha = rocmfpx_pin(job)
-    native = config if job["inputs"][0]["kind"] == "safetensors" else None
+    native = config if standalone_job(job) else None
     if native:
         pinned_native(EXPORTER, EXPORTER_PIN)
     work = Path.cwd()
     require(work.name == "work" and work.parent.parent == (config["state"] if config else STATE) / "jobs",
             "unexpected local-gguf job directory")
+    if native:
+        check_runtime(work, native)
     args, env = sandbox(work, paths, [str(ENGINE)], native, fork_sha=fork_sha)
     os.execve(args[0], args, env)
 

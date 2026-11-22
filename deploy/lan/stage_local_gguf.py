@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 
 from local_gguf import (KINDS, ROCMFPX_QUANTIZER_ENV, ROCMFPX_QUANTIZER_NAME, ROCMFPX_REVISION,
                         ROCMFPX_SHA_ENV, canonical_path, metadata_bytes, pinned_native, require, sandbox)
@@ -36,42 +37,123 @@ def trusted_dir(path):
     return path
 
 
-def probe_export(root, config, source, assets):
+def probe_export(root, worker, policy, source, assets):
     source = canonical_path(str(source))
     assets = canonical_path(str(assets))
     require(source.suffix == ".safetensors" and source.is_file() and source.stat().st_nlink == 1
             and 0 < source.stat().st_size <= 32 << 20 and metadata_bytes(assets) <= 32 << 20,
             "probe requires a tiny standalone SafeTensors fixture with bounded metadata")
     binary = root / "bin"
-    exporter = binary / "gguf-export-hf"
+    wrapper = worker["admission"]
+    before = {path: file_sha(path) for path in (source, *assets.iterdir())}
     with tempfile.TemporaryDirectory(prefix="probe-", dir=root) as name:
         base = Path(name)
-        work = base / "work"
-        work.mkdir()
-        runtime_check = [str(config["runtime"] / "bin/python"), "-IB", "-c",
-                         "import torch,transformers; assert torch.__version__=='2.11.0+cpu' "
-                         "and torch.version.cuda is None and torch.version.hip is None "
-                         "and transformers.__version__=='4.57.6'"]
-        args, env = sandbox(work, [], runtime_check, config, binary)
-        subprocess.run(args, env=env, check=True, capture_output=True, timeout=30)
-        output = work / "converted"
-        command = [str(exporter), "export", "--source", str(source), "--assets", str(assets),
-                   "--outtype", "bf16", "--output", str(output)]
-        args, env = sandbox(work, [source, assets], command, config, binary)
-        with (root / "standalone-probe.log").open("wb") as log:
-            result = subprocess.run(args, env=env, capture_output=True, timeout=90)
-            log.write(result.stderr)
-        require(result.returncode == 0, f"pinned adapter probe failed: {result.stderr[-2048:].decode(errors='replace')}")
-        report = json.loads(result.stdout)
-        model = output / "model.gguf"
-        artifact = report["artifact"]
-        require(report["source_format"] == "safetensors" and report["export_runtime_checked"] is True
-                and report["tensor_payloads_read"] is True and report["llama_cpp_commit"] == REVISION
-                and report["gguf_inventory"] and artifact["path"] == str(model)
-                and artifact["bytes"] == model.stat().st_size and file_sha(model) == artifact["sha256"],
-                "invalid standalone adapter probe receipt")
+        imports, state = base / "imports", base / "worker"
+        imports.mkdir()
+        state.mkdir()
+        weights, metadata = imports / source.name, imports / "metadata"
+        metadata.mkdir()
+        shutil.copyfile(source, weights)
+        expected_assets = {p.name: before[p] for p in before if p != source}
+        for leaf in expected_assets:
+            shutil.copyfile(assets / leaf, metadata / leaf, follow_symlinks=False)
+        require(metadata_bytes(metadata) <= 32 << 20
+                and {p.name: file_sha(p) for p in metadata.iterdir()} == expected_assets
+                and file_sha(weights) == before[source],
+                "standalone probe fixture changed while copying")
+        # Use the exact staged binaries and admission wrapper, but never
+        # register probe inputs or jobs in the destination's worker roots.
+        roots = {"imports": str(imports), "state": str(state)}
+        (root / "local-roots.json").write_text(json.dumps(roots) + "\n")
+        (root / "standalone.json").write_text(json.dumps(policy | roots, default=str) + "\n")
+        config = base / "worker.json"
+        config.write_text(json.dumps(worker | {"root": str(state), "source_roots": [str(imports)]}) + "\n")
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(base), "TMPDIR": str(base),
+               "BREWERY_WORKER_CONFIG": str(config)}
+
+        def rpc(op, **args):
+            with (root / "standalone-probe.log").open("ab") as log:
+                run = subprocess.run([wrapper, "rpc"], input=json.dumps({"op": op, **args}).encode(),
+                                     stdout=subprocess.PIPE, stderr=log, env=env, timeout=15)
+            require(run.returncode == 0 and run.stdout, f"standalone worker {op} probe exited {run.returncode}")
+            response = json.loads(run.stdout)
+            require("ok" in response, f"standalone worker {op} probe failed: {response.get('error')}")
+            reply = response["ok"]
+            if op != "status":
+                require(not reply.get("error"), f"standalone worker {op} probe failed: {reply.get('error')}")
+            return reply
+
+        def wait(id, seconds):
+            until = time.monotonic() + seconds
+            while time.monotonic() < until:
+                reply = rpc("status", id=id)
+                if reply["state"] not in {"queued", "running"}:
+                    return reply
+                time.sleep(0.2)
+            raise ValueError(f"standalone worker {id} probe timed out")
+
+        def conversion(kind, inputs):
+            id = f"standalone-probe-{kind}"
+            job = {"kind": kind, "options": {"output_format": "gguf", "gguf_type": "BF16", "threads": 2},
+                   "inputs": [{"path": str(path), "kind": role, "host": HOST} for role, path in inputs]}
+            require(rpc("prepare", id=id, action="start", job=job)["state"] == "queued",
+                    f"standalone worker did not prepare {kind}")
+            for i, item in enumerate(job["inputs"]):
+                reply = rpc("resolve", id=id, index=i, input=item)
+                require(all(reply[key] == item[key] for key in ("host", "path", "kind")),
+                        "standalone worker substituted a probe input")
+            try:
+                rpc("start", id=id)
+                reply = wait(id, 150)
+            except (ValueError, OSError, subprocess.TimeoutExpired):
+                rpc("cancel", id=id)
+                wait(id, 10)
+                raise
+            if reply["state"] != "succeeded":
+                error = reply.get("error", reply["state"])
+                stderr = state / "jobs" / id / "engine-stderr.log"
+                if stderr.is_file():
+                    with stderr.open("rb") as log:
+                        log.seek(max(0, stderr.stat().st_size - 2048))
+                        error += ": " + log.read(2048).decode(errors="replace").strip()
+                raise ValueError(f"standalone worker {kind} probe failed: {error}")
+            report = reply["result"]
+            backend = report["backend_receipt"]
+            require(report["kind"] == kind and report["output_format"] == "gguf" and report["gguf_type"] == "BF16"
+                    and report["file_verification"]["status"] == "passed"
+                    and report["report"]["source_format"] == "safetensors"
+                    and report["report"]["tensor_payloads_read"] is True
+                    and report["report"]["hf_export"]["llama_cpp_commit"] == REVISION
+                    and backend["executable_sha256"] == QUANT_SHA
+                    and backend["hf_exporter_sha256"] == (root / "exporter.sha256").read_text().strip()
+                    and [(row["kind"], row["path"]) for row in report["inputs"]]
+                    == [(role, str(path)) for role, path in inputs],
+                    f"invalid standalone worker {kind} probe receipt")
+            require(report["inputs"][0]["sha256"] == before[source]
+                    and {f["path"]: f["sha256"] for f in report["inputs"][-1]["files"]} == expected_assets,
+                    f"standalone worker {kind} probed different source bytes")
+            return report
+
+        convert = conversion("convert", [("safetensors", weights), ("assets", metadata)])
+        model = state / "jobs/standalone-probe-convert/work/converted.gguf"
+        artifact = convert["artifact"]
+        info = model.lstat()
+        require(stat.S_ISREG(info.st_mode) and 0 < info.st_size <= 128 << 20
+                and artifact["kind"] == "gguf" and artifact["path"] == str(model)
+                and artifact["bytes"] == info.st_size and artifact["sha256"] == file_sha(model),
+                "invalid standalone worker probe output")
         with model.open("rb") as stream:
-            require(stream.read(4) == b"GGUF", "standalone probe did not export GGUF")
+            require(stream.read(4) == b"GGUF", "standalone worker probe did not produce GGUF")
+        verify = conversion("verify", [("safetensors", weights), ("gguf", model), ("assets", metadata)])
+        require(verify["source_sha256"] == convert["source_sha256"]
+                and verify["inputs"][1]["sha256"] == artifact["sha256"]
+                and file_sha(model) == artifact["sha256"]
+                and file_sha(weights) == before[source] and metadata_bytes(metadata) <= 32 << 20
+                and {p.name: file_sha(p) for p in metadata.iterdir()} == expected_assets
+                and {p: file_sha(p) for p in (source, *assets.iterdir())} == before,
+                "standalone worker probe inputs or output changed")
+        report = {"convert": convert, "verify": verify,
+                  "binary_sha256": {n: file_sha(binary / n) for n in ("brewery-worker", "brewery-engine")}}
         (root / "standalone-probe.json").write_text(json.dumps(report, indent=2) + "\n")
 
 
@@ -203,8 +285,7 @@ def stage(root, release, quantizer, catalog, dispatch_path, *, runtime=None, lla
                     "expected the existing local-gguf admission wrapper")
             packed = trusted_dir(old_wrapper.parent / "weight-runtime-packed")
             shutil.copytree(packed, binary / packed.name, symlinks=True)
-        if existing and not runtime:
-            (root / "local-roots.json").write_text(json.dumps(dict(imports=imports, state=state), default=str) + "\n")
+        local_roots = dict(imports=imports, state=state)
         if runtime:
             runtime, llama = trusted_dir(runtime), trusted_dir(llama)
             require(len(runtime.parts) >= 3 and len(llama.parts) >= 3
@@ -219,16 +300,16 @@ def stage(root, release, quantizer, catalog, dispatch_path, *, runtime=None, lla
             shutil.copyfile(here.parents[1] / "tools/gguf-export-hf", exporter)
             exporter.chmod(0o700)
             (root / "exporter.sha256").write_text(file_sha(exporter) + "\n")
-            policy = dict(imports=imports, state=state, runtime=runtime, llama=llama)
-            probe_export(root, policy, probe_source, probe_assets)
-            (root / "standalone.json").write_text(json.dumps(policy, default=str) + "\n")
+            policy = dict(runtime=runtime, llama=llama)
             worker["engine_env"] = {**worker.get("engine_env", {}),
                                     "BREWERY_GGUF_SAFETENSORS": "1",
                                     "BREWERY_GGUF_QUANTIZER": str(binary / "llama-quantize"),
                                     "BREWERY_GGUF_HF_EXPORTER": str(exporter)}
-            # The proposal is emitted only after the actual pinned exporter
-            # succeeds through the same sandbox used for admitted jobs.
+            probe_export(root, worker, policy, probe_source, probe_assets)
+            (root / "standalone.json").write_text(json.dumps(policy | local_roots, default=str) + "\n")
             caps["gguf_safetensors_output"] = True
+        if existing or runtime:
+            (root / "local-roots.json").write_text(json.dumps(local_roots, default=str) + "\n")
         if rocmfpx_quantizer:
             staged_fork = binary / ROCMFPX_QUANTIZER_NAME
             shutil.copyfile(rocmfpx_quantizer, staged_fork)

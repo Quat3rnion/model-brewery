@@ -756,7 +756,19 @@ binary whose SHA-256 does not match. Stock `llama-quantize` remains separate.
 **Staging a local worker.** `deploy/lan/stage_local_gguf.py` requires
 `--root`, `--release`, `--quantizer`, `--catalog` and `--dispatch`. Use a new
 staging directory for `--root`. Pass the approved stock CPU binary to
-`--quantizer`; the stager checks its pin. For ROCmFPX, pass all three fork flags:
+`--quantizer`; the stager checks its pin.
+
+For standalone SafeTensors, pass `--runtime`, `--llama`, `--probe-source` and
+`--probe-assets`. Use a dedicated CPU Python runtime with PyTorch `2.11.0+cpu`
+and Transformers `4.57.6`, the pinned llama.cpp checkout, and a matching
+fixture (at most 32 MiB each for weights and assets). The staged worker and
+engine must convert and verify the fixture before the stager proposes
+`gguf_safetensors_output`. The probe uses private copies and scratch worker
+state, and requires the normal RAM and disk admission limits. The worker
+checks the runtime versions again for standalone jobs. Stock GGUF and weight
+jobs do not require the standalone runtime.
+
+For ROCmFPX, pass all three fork flags:
 
 | Flag | Value |
 | --- | --- |

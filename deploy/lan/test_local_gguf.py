@@ -9,6 +9,82 @@ import stage_local_gguf as stages
 
 
 class Admission(unittest.TestCase):
+    def test_stock_and_weight_prepare_ignore_unavailable_optional_paths(self):
+        with tempfile.TemporaryDirectory(dir="/arboretum") as name:
+            root = Path(name)
+            imports, state = root / "imports", root / "state"
+            imports.mkdir()
+            state.mkdir()
+            source = imports / "model.gguf"
+            source.write_bytes(b"GGUF")
+            policy = {"imports": str(imports), "state": str(state)}
+            local, standalone = root / "local-roots.json", root / "standalone.json"
+            local.write_text(json.dumps(policy))
+            standalone.write_text(json.dumps(policy | {
+                "runtime": str(root / "removed-runtime"), "llama": str(root / "removed-llama"),
+            }))
+            for p in (local, standalone):
+                p.chmod(0o600)
+            work = state / "jobs/test/work"
+            work.mkdir(parents=True)
+            with patch.multiple(ops, LOCAL_ROOTS=local, STANDALONE=standalone), \
+                    patch.object(ops, "headroom") as gate, \
+                    patch.object(ops, "pinned_native"), \
+                    patch.object(ops.sys, "argv", ["local_gguf.py", "--wait", "--", str(ops.ENGINE)]), \
+                    patch.object(ops.Path, "cwd", return_value=work), \
+                    patch.object(ops.os, "pread") as stdin, patch.object(ops.os, "execve") as launch, \
+                    patch.object(ops, "catalog", return_value={"presets": [{"id": "Q4_0"}], "tensor_types": []}):
+                for kind, options in (("convert", {"output_format": "gguf", "gguf_type": "Q4_0"}),
+                                      ("weight_inspect", {"mode": "inventory", "offset": 0, "limit": 4})):
+                    job = {"kind": kind, "options": options,
+                           "inputs": [{"host": "local-gguf", "kind": "gguf", "path": str(source)}]}
+                    ops.precheck({"op": "prepare", "action": "start", "job": job})
+                    self.assertEqual(gate.call_args.args[-1], state)
+                    stdin.return_value = json.dumps(job).encode()
+                    ops.admit()
+                    _, argv, env = launch.call_args.args
+                    self.assertFalse(any("removed-runtime" in arg or "removed-llama" in arg for arg in argv))
+                    self.assertTrue({"BREWERY_GGUF_HF_EXPORTER", "BREWERY_GGUF_PYTHON", "BREWERY_LLAMA_CPP"}
+                                    .isdisjoint(env))
+
+    def test_standalone_execution_refuses_changed_runtime_before_engine(self):
+        with tempfile.TemporaryDirectory(dir="/arboretum") as name:
+            root = Path(name)
+            state, imports = root / "state", root / "imports"
+            work = state / "jobs/test/work"
+            work.mkdir(parents=True)
+            imports.mkdir()
+            source, assets = imports / "model.safetensors", imports / "assets"
+            source.write_bytes(b"payload")
+            assets.mkdir()
+            (assets / "config.json").write_text("{}")
+            runtime, llama = root / "runtime", root / "llama"
+            (runtime / "bin").mkdir(parents=True)
+            llama.mkdir()
+            # Emulate a runtime whose version preflight exits nonzero.
+            python = runtime / "bin/python"
+            python.write_text("#!/bin/sh\nexit 1\n")
+            python.chmod(0o700)
+            job = {"kind": "convert", "options": {"output_format": "gguf", "gguf_type": "BF16"},
+                   "inputs": [{"host": "local-gguf", "kind": kind, "path": str(path)}
+                              for kind, path in (("safetensors", source), ("assets", assets))]}
+            standalone = root / "standalone.json"
+            standalone.write_text(json.dumps({
+                        "imports": str(imports), "state": str(state), "runtime": str(runtime), "llama": str(llama),
+            }))
+            standalone.chmod(0o600)
+            with patch.multiple(ops, IMPORTS=imports, STATE=state, STANDALONE=standalone), \
+                    patch.object(ops, "headroom"), patch.object(ops, "pinned_native"), \
+                    patch.object(ops, "catalog", return_value={"presets": [{"id": "BF16"}], "tensor_types": []}), \
+                    patch.object(ops.sys, "argv", ["local_gguf.py", "--wait", "--", str(ops.ENGINE)]), \
+                    patch.object(ops.os, "pread", return_value=json.dumps(job).encode()), \
+                    patch.object(ops.Path, "cwd", return_value=work), \
+                    patch.object(ops, "sandbox", side_effect=lambda work, paths, cmd, *a, **k: (cmd, {})), \
+                    patch.object(ops.os, "execve") as launch:
+                with self.assertRaisesRegex(ValueError, "runtime"):
+                    ops.admit()
+                launch.assert_not_called()
+
     def test_standalone_accepts_only_explicit_direct_assets(self):
         with tempfile.TemporaryDirectory(dir="/arboretum") as name:
             root = Path(name)
@@ -159,6 +235,9 @@ class Admission(unittest.TestCase):
             self.assertEqual(cfg["source_roots"], [str(old / "imports")])
             self.assertEqual(cfg["root"], str(old / "worker"))
             self.assertEqual(cfg["disk_reserve_bytes"], 20 << 30)
+            self.assertEqual(json.loads((staged / "local-roots.json").read_text()), {
+                "imports": str(old / "imports"), "state": str(old / "worker"),
+            })
             self.assertEqual(cfg["engine_env"]["KEEP"], "untouched")
             self.assertNotIn("BREWERY_GGUF_ROCMFPX_QUANTIZER", cfg["engine_env"])
             self.assertNotIn("BREWERY_GGUF_ROCMFPX_SHA256", cfg["engine_env"])
