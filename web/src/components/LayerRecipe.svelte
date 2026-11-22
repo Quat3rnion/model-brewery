@@ -1,3 +1,16 @@
+<script module lang="ts">
+  const common = ['BF16', 'F16', 'F32'] as const;
+  export const trellis = ['HT3', 'HT4'] as const;
+  export type OutputType = typeof common[number] | 'Q8_0' | 'Q8G64' | typeof trellis[number];
+  export const recipeTypes = (format: 'gguf' | 'hgn'): readonly OutputType[] =>
+    [...common, format === 'gguf' ? 'Q8_0' : 'Q8G64'];
+  export interface RecipeDraft {
+    defaultType: OutputType;
+    overrides: Record<number, OutputType | ''>;
+    assetId: string;
+  }
+</script>
+
 <script lang="ts">
   import { SvelteMap } from 'svelte/reactivity';
   import { api, errorText } from '../lib/api';
@@ -15,9 +28,11 @@
   import Blockers from './Blockers.svelte';
   import Submit from './Submit.svelte';
   import { trellisProblem } from '../lib/trellis-layer';
+  import type { RetrySubmission } from '../lib/retry-prefill.svelte';
 
-  let { source, format, starter, retry = null }: { source: Model; format: 'gguf' | 'hgn'; starter: ConversionStarter;
-    retry?: { id: string; inputIds: string[]; recipe: unknown } | null;
+  let { source, format, starter, draft = $bindable(), retry, originalSha, loading }: {
+    source: Model; format: 'gguf' | 'hgn'; starter: ConversionStarter; draft: RecipeDraft;
+    retry?: RetrySubmission; originalSha?: string; loading: boolean;
   } = $props();
 
   const submitted = new SvelteMap<number, JobSummary | null>();
@@ -95,12 +110,7 @@
     }).catch(e => reject(errorText(e)));
   });
 
-  const common = ['BF16', 'F16', 'F32'] as const;
-  const trellis = ['HT3','HT4'] as const;
-  type OutputType = typeof common[number] | 'Q8_0' | 'Q8G64' | typeof trellis[number];
-  const formatTypes = $derived<readonly OutputType[]>([...common, format === 'gguf' ? 'Q8_0' : 'Q8G64']);
-  let defaultType = $state<OutputType>('BF16');
-  let overrides = $state<Record<number, OutputType | ''>>({});
+  const formatTypes = $derived(recipeTypes(format));
   const complete = $derived(!flash && !error && !inventory.need && !inventory.job && inventory.pages.length > 0);
   const problem = $derived(flash ? 'The layer-recipe exporters do not support this Flash-Next checkpoint.'
     : error || (source.available === false || (!complete && !inventory.job) ? blocked : null) ||
@@ -118,35 +128,22 @@
   });
   const trellisReasons = $derived([...new Set(Object.values(trellisIssues).filter(Boolean))]);
   const incompatible = $derived([...new Set([
-    ...(!formatTypes.includes(defaultType) ? [defaultType] : []),
-    ...layers.map(n=>overrides[n]).filter(type=>type && !formatTypes.includes(type) && !(format==='hgn' && (type==='HT3' || type==='HT4'))),
+    ...(!formatTypes.includes(draft.defaultType) ? [draft.defaultType] : []),
+    ...layers.map(n=>draft.overrides[n]).filter(type=>type && !formatTypes.includes(type) && !(format==='hgn' && (type==='HT3' || type==='HT4'))),
   ])]);
-  const badGeometry = $derived(layers.some(n=>trellisIssues[n] && (overrides[n]==='HT3' || overrides[n]==='HT4')));
-  const layerTypes = $derived(Object.fromEntries(layers.filter(layer => overrides[layer]).map(layer => [layer, overrides[layer]])));
+  const badGeometry = $derived(layers.some(n=>trellisIssues[n] && (draft.overrides[n]==='HT3' || draft.overrides[n]==='HT4')));
+  const layerTypes = $derived(Object.fromEntries(layers.filter(layer => draft.overrides[layer]).map(layer => [layer, draft.overrides[layer]])));
   const tooMany = $derived(Object.keys(layerTypes).length > 256);
   const recipe = $derived(!problem && sourceSha && layers.length && !incompatible.length && !badGeometry && !tooMany ? {
     schema: 'brewery.layer-quant.v1',
     source_sha256: sourceSha,
-    default_type: defaultType,
+    default_type: draft.defaultType,
     layers: layerTypes,
   } : null);
 
   const standalone = $derived(source.kind === 'safetensors');
   const assets = $derived((brewery.state?.models ?? []).filter(m => m.kind === 'assets' && m.host === source.host && m.available !== false));
-  let assetId = $state('');
-  const priorRecipe = $derived(retry?.inputIds[0] === source.id ? obj(retry.recipe) : null);
-  let restored = '';
-  $effect(() => {
-    if (!retry || !priorRecipe || retry.id === restored || retry.inputIds[0] !== source.id) return;
-    restored = retry.id;
-    const types = [...formatTypes, ...trellis];
-    const type = (value: unknown): value is OutputType => types.some((type) => type === value);
-    if (type(priorRecipe.default_type)) defaultType = priorRecipe.default_type;
-    overrides = Object.fromEntries(Object.entries(obj(priorRecipe.layers) ?? {})
-      .filter(([index, value]) => /^(0|[1-9]\d*)$/.test(index) && type(value))) as typeof overrides;
-    assetId = assets.find((m) => retry?.inputIds.includes(m.id))?.id ?? '';
-  });
-  const selectedAsset = $derived(assets.find(asset => asset.id === assetId));
+  const selectedAsset = $derived(assets.find(asset => asset.id === draft.assetId));
   const requirements = $derived(format === 'hgn' ? ['hgn_layer_recipe', ...STAGES]
     : ['gguf_layer_recipe', 'gguf_output', standalone ? 'gguf_safetensors_output' : 'gguf_hf_output', ...STAGES]);
   const setup = $derived.by((): Blocker[] => {
@@ -169,8 +166,8 @@
     if (!recipe && !problem) out.push(!complete ? 'Read the source layers first.' : !layers.length
       ? 'Choose a source with recognized layer matrices.' : tooMany ? 'Use at most 256 layer overrides.' : 'Change the incompatible types.');
     if (problem) out.push('Resolve the source inventory problem above.');
-    if (recipe && priorRecipe && sourceSha !== priorRecipe.source_sha256) out.push('The source file changed. Select the original source or start a new recipe.');
-    if (complete && priorRecipe && Object.keys(overrides).some((index) => !layers.includes(Number(index)))) out.push('The source does not contain all layers in the previous recipe.');
+    if (recipe && originalSha && sourceSha !== originalSha) out.push('The source file changed. Select the original source or start a new recipe.');
+    if (complete && originalSha && Object.keys(draft.overrides).some((index) => !layers.includes(Number(index)))) out.push('The source does not contain all layers in the previous recipe.');
     if (format === 'hgn' && recipe && !Object.values(recipe.layers).some(type => type === 'HT3' || type === 'HT4')) {
       out.push('Select HT3 or HT4 for at least one layer to run a managed HGN recipe.');
     }
@@ -187,9 +184,9 @@
   const currentSubmission = $derived(body !== null && lastBody === JSON.stringify(body));
 
   async function run() {
-    if (!body || starter.busy) return;
+    if (loading || !body || starter.busy) return;
     lastBody = JSON.stringify(body);
-    await starter.start(body);
+    await starter.start(body, retry);
   }
 
   function download() {
@@ -214,8 +211,8 @@
 {/snippet}
 
 <Blockers blockers={setup} />
-{#if priorRecipe && !complete}
-  <p class="hint">Previous recipe: {String(priorRecipe.default_type)} default{#each Object.entries(obj(priorRecipe.layers) ?? {}) as [layer, type]} · Layer {layer}: {String(type)}{/each}. Read the source layers to check the recipe.</p>
+{#if originalSha && !complete}
+  <p class="hint">Previous recipe: {draft.defaultType} default{#each Object.entries(draft.overrides) as [layer, type]} · Layer {layer}: {type}{/each}. Read the source layers to check the recipe.</p>
 {/if}
 <p class="hint">Supported architectures: {format === 'gguf' ? 'GPT-2 and Qwen2' : 'dense Llama and Qwen2'}. The exporter checks the architecture and assets before it writes output.</p>
 {#if readJob && !flash}
@@ -245,16 +242,16 @@
   <div class="grid-3">
     <label class="field">
       Default type
-      <select class="input" bind:value={defaultType}>
-        {@render typeOptions(defaultType)}
+      <select class="input" bind:value={draft.defaultType}>
+        {@render typeOptions(draft.defaultType)}
       </select>
     </label>
     {#each layers as layer (layer)}
       <div class="field">
         <label for="recipe-layer-{layer}">Layer {layer} type</label>
-        <select id="recipe-layer-{layer}" class="input" aria-describedby={trellisIssues[layer] ? 'recipe-ht-help' : undefined} bind:value={overrides[layer]}>
-          <option value="">Default ({defaultType})</option>
-          {@render typeOptions(overrides[layer] ?? '', layer)}
+        <select id="recipe-layer-{layer}" class="input" aria-describedby={trellisIssues[layer] ? 'recipe-ht-help' : undefined} bind:value={draft.overrides[layer]}>
+          <option value="">Default ({draft.defaultType})</option>
+          {@render typeOptions(draft.overrides[layer] ?? '', layer)}
         </select>
       </div>
     {/each}
@@ -276,14 +273,14 @@
 {#if standalone}
   <label class="field">
     {roleLabel('assets')}
-    <select class="input" bind:value={assetId} disabled={!assets.length}>
+    <select class="input" bind:value={draft.assetId} disabled={!assets.length}>
       <option value="">Select matching assets</option>
       {#each assets as asset (asset.id)}<option value={asset.id}>{modelLabel(asset)} · {asset.path}</option>{/each}
     </select>
   </label>
   {#if !assets.length}<p class="hint"><a href="#/library">Register the matching assets in Library</a> on {host?.name ?? source.host}.</p>{/if}
 {/if}
-<Submit blockers={runBlockers} busy={starter.busy} onclick={run}>Run layer recipe</Submit>
+<Submit blockers={runBlockers} busy={starter.busy} disabled={loading} onclick={run}>Run layer recipe</Submit>
 <div aria-live="polite" class="xs">
   {#if currentSubmission && starter.error}
     <p class="note bad" role="alert">{starter.error} Run the same recipe again to retry the same request.</p>

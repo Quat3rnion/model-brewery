@@ -161,6 +161,7 @@ export interface BrewState {
   jobs: JobSummary[];
   capabilities?: Record<string, unknown>;
   eligibility?: WorkflowEligibility;
+  event_cursor?: number;
   [extra: string]: unknown;
 }
 

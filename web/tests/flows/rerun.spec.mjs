@@ -66,6 +66,7 @@ test('Generate offers delayed previous inputs without replacing a typed draft', 
   await expect(text).toHaveValue('New draft.');
   await use.click();
   await expect(text).toHaveValue('Earlier prompt.');
+  await expect(form.getByRole('combobox', { name: 'Bundle' })).toBeFocused();
   expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
 });
 
@@ -78,6 +79,7 @@ test('Generate resubmits the previous API token limit', async ({ page, controlle
   expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
   await submit.click();
   await expect.poll(() => controller.requests('POST', '/api/jobs').map(({ body }) => body.options?.max_tokens)).toEqual([73]);
+  expect(controller.requests('POST', '/api/jobs')[0].headers['idempotency-key']).toBeTruthy();
 });
 
 test('Transfer names omitted entries and waits for acknowledgment before copying', async ({ page, controller }) => {

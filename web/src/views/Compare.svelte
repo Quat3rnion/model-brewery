@@ -8,8 +8,8 @@
   import { globalJobEligibility, hostWorkflowEligibility } from '../lib/eligibility';
   import { unsavedChanges } from '../lib/unsaved-changes.svelte';
   import { focusAfterRemoval } from '../lib/focus';
-  import { hashParam, route } from '../lib/route.svelte';
-  import { readRetry } from '../lib/rerun';
+  import { loadRetryJob, omittedInputs, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
+  import RetryOffer from '../components/RetryOffer.svelte';
   import WorkflowGate from '../components/WorkflowGate.svelte';
   import Blockers from '../components/Blockers.svelte';
   import FieldError from '../components/FieldError.svelte';
@@ -21,6 +21,7 @@
   import BuildDiffReport from '../components/results/BuildDiffReport.svelte';
   import PairedQualityReport from '../components/results/PairedQualityReport.svelte';
   import { readBuildFileBounded, MAX_BUILD_FILE_BYTES, BUILD_DIFF_SCHEMA, PAIRED_QUALITY_SCHEMA, type BuildParsed } from '../lib/buildreports';
+  import type { JobDetail } from '../lib/types';
 
   const GGUF = ['gguf'];
   const prompts = $derived(brewery.state?.prompts ?? []);
@@ -48,47 +49,35 @@
   const touched = $state<Record<string, boolean>>({});
   let attempted = $state(false);
   let lastSubmittedPrompt = $state('');
-  let retryMessage = $state('');
-  let retryLoading = $state(false);
   unsavedChanges(() => promptText !== '' && promptText !== lastSubmittedPrompt);
 
-  $effect(() => {
-    const hash = route.hash;
-    retryMessage = '';
-    if (!hashParam(hash, 'retry')) {
-      retryLoading = false;
-      return;
-    }
-    const controller = new AbortController();
-    retryLoading = true;
-    readRetry(hash, ['compare'], controller.signal).then((job) => {
-      if (!job || controller.signal.aborted) return;
+  const defaults = { a: '', b: '', host: '', promptId: '', promptText: '', promptMode: 'saved' as typeof promptMode,
+    n: 16 as number | undefined, threads: undefined as number | undefined, think: false, raw: false, useGpu: false,
+    gpuDevice: '', gpuLayers: undefined as number | undefined };
+  const retry = new RetryPrefill<typeof defaults, JobDetail, { a: string; b: string; omitted: string[] }>({
+    slot: 'compare', defaults,
+    read: () => ({ a, b, host, promptId, promptText, promptMode, n, threads, think, raw, useGpu, gpuDevice, gpuLayers }),
+    write: value => { ({ a, b, host, promptId, promptText, promptMode, n, threads, think, raw, useGpu, gpuDevice, gpuLayers } = value); },
+    load: loadRetryJob(['compare']),
+    restore: job => {
       const [first, second] = job.input_ids;
-      a = models.some((m) => m.id === first && m.kind === 'gguf') ? first : '';
-      b = models.some((m) => m.id === second && m.kind === 'gguf') ? second : '';
-      host = job.requested_host ?? job.host ?? '';
-      promptId = job.prompt_id ?? '';
-      promptText = job.prompt_text ?? '';
-      promptMode = promptId && (job.prompt_text == null || prompts.some((prompt) => prompt.id === promptId && prompt.text === promptText))
-        ? 'saved' : 'text';
-      // A restored prompt is not a new edit.
-      lastSubmittedPrompt = promptText;
+      const available = (id: string) => models.some(m => m.id === id && m.kind === 'gguf' && m.available !== false) ? id : '';
+      const a = available(first), b = available(second);
+      const promptId = job.prompt_id ?? '';
+      const promptText = job.prompt_text ?? '';
       const o = job.options;
-      n = typeof o?.n === 'number' ? o.n : 16;
-      threads = typeof o?.threads === 'number' ? o.threads : undefined;
-      think = o?.think === true;
-      raw = o?.raw === true;
-      gpuDevice = typeof o?.gpu_device === 'string' ? o.gpu_device : '';
-      gpuLayers = typeof o?.gpu_layers === 'number' ? o.gpu_layers : undefined;
-      useGpu = !!gpuDevice || gpuLayers !== undefined;
-      retryMessage = 'Review the previous job options before you queue a comparison.';
-    }).catch(() => {
-      if (!controller.signal.aborted) retryMessage = 'Could not open the previous job options. Enter the options again.';
-    }).finally(() => {
-      if (!controller.signal.aborted) retryLoading = false;
-    });
-    return () => controller.abort();
+      const gpuDevice = typeof o?.gpu_device === 'string' ? o.gpu_device : '';
+      const gpuLayers = typeof o?.gpu_layers === 'number' ? o.gpu_layers : undefined;
+      return { patch: { a, b, host: job.requested_host ?? job.host ?? '', promptId, promptText,
+        promptMode: promptId && (job.prompt_text == null || prompts.some(prompt => prompt.id === promptId && prompt.text === promptText)) ? 'saved' : 'text',
+        n: typeof o?.n === 'number' ? o.n : 16, threads: typeof o?.threads === 'number' ? o.threads : undefined,
+        think: o?.think === true, raw: o?.raw === true, gpuDevice, gpuLayers, useGpu: !!gpuDevice || gpuLayers !== undefined },
+        context: { a, b, omitted: omittedInputs(job.input_ids, [a, b]) }, focus: 'cmp-a' };
+    },
+    applied: patch => { lastSubmittedPrompt = patch.promptText ?? ''; },
+    clear: () => { lastSubmittedPrompt = ''; },
   });
+  watchPrefill(retry, () => !!brewery.state);
 
   const blockers = $derived.by((): Blocker[] => {
     const out: Blocker[] = [];
@@ -144,7 +133,7 @@
   const s = new Submitter();
   async function submit() {
     attempted = true;
-    if (blockers.length || s.busy || retryLoading) return;
+    if (blockers.length || s.busy || retry.loading) return;
     const text = promptMode === 'text' ? promptText : undefined;
     const job = await s.submit({
       kind: 'compare',
@@ -160,8 +149,11 @@
         gpu_device: useGpu ? gpuDevice || undefined : undefined,
         gpu_layers: useGpu ? (gpuLayers ?? undefined) : undefined,
       },
-    });
-    if (job && text !== undefined) lastSubmittedPrompt = text;
+    }, retry.submission);
+    if (job) {
+      retry.markClean();
+      if (text !== undefined) lastSubmittedPrompt = text;
+    }
   }
 </script>
 
@@ -176,13 +168,18 @@
   <section class="panel" aria-labelledby="cmp-h">
     <header><h2 id="cmp-h">New comparison</h2></header>
     <WorkflowGate workflow="compare" decision={setup}>
-    <div class="body stack">
-      {#if retryLoading || retryMessage}
-        <p class="small muted" role="status">{retryLoading ? 'Loading the previous job options.' : retryMessage}</p>
+    <div class="body stack" oninputcapture={retry.touchField} onchangecapture={retry.touchField} onclickcapture={retry.touchField} onkeydowncapture={retry.touchField}>
+      {#if retry.loading || retry.failed || retry.context}
+        <p class="small muted" role="status">{retry.loading ? 'Loading the previous job options.' : retry.failed
+          ? 'Could not open the previous job options. Enter the options again.' : 'Review the previous job options before you queue a comparison.'}</p>
       {/if}
-      <fieldset class="retry-fields" disabled={retryLoading}>
+      {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
+      {#if retry.context?.omitted.length && a === retry.context.a && b === retry.context.b}
+        <p class="note warn" role="status">Previous models not restored: {retry.context.omitted.join(', ')}.</p>
+      {/if}
+      <fieldset class="retry-fields" disabled={retry.loading}>
       <div class="grid-2">
-        <ModelSelect bind:value={a} kinds={GGUF} label="Model A" exclude={b ? [b] : []} error={error('model-a')} onblur={touch('model-a')} />
+        <ModelSelect id="cmp-a" bind:value={a} kinds={GGUF} label="Model A" exclude={b ? [b] : []} error={error('model-a')} onblur={touch('model-a')} />
         <ModelSelect bind:value={b} kinds={GGUF} label="Model B" exclude={a ? [a] : []} error={error('model-b')} onblur={touch('model-b')} />
       </div>
 
@@ -248,7 +245,7 @@
       </Advanced>
 
       <div class="row">
-        <button type="button" class="btn primary" onclick={submit} disabled={s.busy || retryLoading} aria-busy={s.busy}>{s.busy ? 'Submitting…' : 'Queue comparison'}</button>
+        <button type="button" class="btn primary" onclick={submit} disabled={s.busy || retry.loading} aria-busy={s.busy}>{s.busy ? 'Submitting…' : 'Queue comparison'}</button>
       </div>
       <Blockers blockers={visible} />
       <SubmitStatus {s} />

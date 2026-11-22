@@ -13,10 +13,11 @@
   import Blockers from '../components/Blockers.svelte';
   import KeyValues from '../components/KeyValues.svelte';
   import { brewery } from '../lib/store.svelte';
-  import { errorText } from '../lib/api';
+  import { api, errorText } from '../lib/api';
   import { Submitter } from '../lib/submit.svelte';
   import { hashParam, route } from '../lib/route.svelte';
-  import { watchRetry } from '../lib/rerun';
+  import { loadRetryJob, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
+  import RetryOffer from '../components/RetryOffer.svelte';
   import { fieldError, visibleBlockers, type Blocker } from '../lib/blockers';
   import { WEIGHT_SOURCES, isSafeSource, formatTime, hostName, isActive, isTerminal, kindTitle, modelLabel, newestFirst, shortHash } from '../lib/format';
   import { canInspectVisually, weightAccess, weightCapability, weightFormat } from '../lib/weight-access';
@@ -251,8 +252,8 @@
   }
 
   // ---- Review and apply. ----
-  let retryProposal = $state<JobDetail | null>(null);
   const proposals = $derived.by(() => {
+    const retryProposal = retry.context?.proposal;
     const list = newestFirst(jobsFor(jobs, sourceId, PROPOSAL_KINDS)).slice(0, 20);
     return retryProposal && !list.some((job) => job.id === retryProposal?.id) ? [...list, retryProposal] : list;
   });
@@ -300,7 +301,7 @@
   async function applyNow() {
     if (!reviewed || !source || applyBlockers.length) return;
     // The controller requires the exact source of the proposal job.
-    await applySub.submit(applyJob(reviewed.input_ids[0], source.host, reviewed.id));
+    await applySub.submit(applyJob(reviewed.input_ids[0], source.host, reviewed.id), retry.submission);
   }
   let appliedDetail = $state<JobDetail | null>(null);
   $effect(() => {
@@ -315,29 +316,31 @@
   const applied = $derived(appliedDetail ? readApplied(appliedDetail.result) : null);
   const appliedModel = $derived(applied?.library_model_id ? models.find((m) => m.id === applied.library_model_id) : undefined);
 
-  let previous = $state<JobDetail | null>(null);
-  let retryError = $state(false);
   const retrySub = new Submitter();
-  $effect(() => {
-    previous = null;
-    retryProposal = null;
-    retryError = false;
-    return watchRetry(route.hash, WEIGHT_KINDS, async (job, signal) => {
+  const loadWeightsRetry = loadRetryJob(WEIGHT_KINDS);
+  type WeightRetry = { job: JobDetail; proposal?: JobDetail };
+  const defaults = { reviewId: null as string | null, confirmed: false };
+  const retry = new RetryPrefill<typeof defaults, WeightRetry, WeightRetry>({
+    slot: 'weights', defaults,
+    read: () => ({ reviewId, confirmed }),
+    write: value => { ({ reviewId, confirmed } = value); },
+    load: async (id, signal) => {
+      const job = await loadWeightsRetry(id, signal);
+      if (job.kind !== 'weight_apply') return { job };
+      const proposalId = job.options?.proposal_job_id;
+      if (typeof proposalId !== 'string') throw new Error('No prior proposal.');
+      const proposal = await api.job(proposalId, signal);
+      if (proposal.id !== proposalId || proposal.input_ids[0] !== job.input_ids[0] || !PROPOSAL_KINDS.has(proposal.kind)) throw new Error('Proposal mismatch.');
+      return { job, proposal };
+    },
+    restore: ({ job, proposal }) => {
       if (sourceId !== job.input_ids[0]) throw new Error('Source mismatch.');
-      if (job.kind !== 'weight_apply') {
-        previous = job;
-        return;
-      }
-      const id = job.options?.proposal_job_id;
-      if (typeof id !== 'string') throw new Error('No prior proposal.');
-      const proposal = await brewery.loadJob(id);
-      if (signal.aborted) return;
-      if (proposal.id !== id || proposal.input_ids[0] !== sourceId || !PROPOSAL_KINDS.has(proposal.kind)) throw new Error('Proposal mismatch.');
-      retryProposal = proposal;
-      reviewId = id;
-      confirmed = false;
-    }, () => { retryError = true; });
+      return { patch: proposal ? { reviewId: proposal.id, confirmed: false } : {}, context: { job, proposal }, focus: 'w-source' };
+    },
+    clear: () => { confirmed = false; },
   });
+  watchPrefill(retry);
+  const previous = $derived(retry.context && !retry.context.proposal ? retry.context.job : undefined);
   const previousBlockers = $derived.by(() => {
     if (!previous || !source) return ['Select an available source entry.'];
     const kind = WEIGHT_KINDS.find((kind) => kind === previous?.kind);
@@ -361,7 +364,7 @@
   async function queuePrevious() {
     if (!previous || !source || previousBlockers.length || retrySub.busy) return;
     const { kind, input_ids, options } = previous;
-    const queued = await retrySub.submit({ kind, host: source.host, input_ids, options });
+    const queued = await retrySub.submit({ kind, host: source.host, input_ids, options }, retry.submission);
     if (queued) location.hash = `#/jobs/${encodeURIComponent(queued.id)}`;
   }
 
@@ -385,7 +388,7 @@
   });
 </script>
 
-<div class="stack">
+<div class="stack" oninputcapture={retry.touchField} onchangecapture={retry.touchField} onclickcapture={retry.touchField} onkeydowncapture={retry.touchField}>
   <div class="head">
     <h1 tabindex="-1">Weight edits</h1>
     <p class="muted small">
@@ -428,7 +431,8 @@
     </div>
   </section>
 
-  {#if retryError}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
+  {#if retry.failed}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
+  {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
   {#if previous}
     <section class="panel" aria-labelledby="w-previous-h">
       <header><h2 id="w-previous-h">Previous weight request</h2></header>

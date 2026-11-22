@@ -38,6 +38,7 @@ export function parse(hash: string): { view: View; jobId: string | null } {
 
 class Route {
   hash = $state('');
+  entry = $state('');
   view = $state<View>('library');
   jobId = $state<string | null>(null);
   #guards = new Set<() => boolean>();
@@ -57,10 +58,14 @@ class Route {
     if (typeof window === 'undefined') return;
     const entryIndex = (): number | undefined => history.state?.breweryRouteIndex;
     let index = entryIndex() ?? 0;
-    const setEntry = (entry: number, url?: string) => history.replaceState({ ...history.state, breweryRouteIndex: entry }, '', url);
+    const entryId = (): string | undefined => history.state?.breweryRouteEntry;
+    const setEntry = (entry: number, url?: string, id = entryId() ?? crypto.getRandomValues(new Uint32Array(4)).join('-')) => {
+      history.replaceState({ ...history.state, breweryRouteIndex: entry, breweryRouteEntry: id }, '', url);
+      return id;
+    };
     let restoring = false;
     const apply = () => {
-      setEntry(index, window.location.hash === '#/admin' ? '#/settings/infrastructure' : undefined);
+      this.entry = setEntry(index, window.location.hash === '#/admin' ? '#/settings/infrastructure' : undefined);
       this.hash = window.location.hash;
       const r = parse(this.hash);
       this.view = r.view;
@@ -70,8 +75,33 @@ class Route {
     window.addEventListener('popstate', () => {
       // Back or Forward can move between entries with identical hashes.
       // Different hashes are handled once, by hashchange below.
-      if (this.hash === window.location.hash) index = entryIndex() ?? index;
+      if (this.hash !== window.location.hash) return;
+      if (entryId() === this.entry) {
+        // The hash need not change when returning from a blocked popstate.
+        if (restoring) restoring = false;
+        return;
+      }
+      if (accept()) apply();
     });
+    const accept = () => {
+      if (restoring) return false;
+      const target = entryIndex() ?? index + 1;
+      if ([...this.#guards].some((allow) => !allow())) {
+        const delta = index - target;
+        if (!delta) {
+          setEntry(index, this.hash || `${location.pathname}${location.search}`, this.entry);
+          return false;
+        }
+        // Remember the new entry and return to the accepted one. Back and
+        // Forward still work if the user changes their mind.
+        setEntry(target);
+        restoring = true;
+        history.go(delta);
+        return false;
+      }
+      index = target;
+      return true;
+    };
     window.addEventListener('hashchange', (event) => {
       if (restoring && this.hash === window.location.hash) {
         restoring = false;
@@ -79,23 +109,8 @@ class Route {
         return;
       }
       if (this.hash === window.location.hash) return;
-      const target = entryIndex() ?? index + 1;
-      if ([...this.#guards].some((allow) => !allow())) {
-        event.stopImmediatePropagation();
-        const delta = index - target;
-        if (!delta) {
-          setEntry(index, this.hash || `${location.pathname}${location.search}`);
-          return;
-        }
-        // Remember the new entry and return to the accepted one. Back and
-        // Forward still work if the user changes their mind.
-        setEntry(target);
-        restoring = true;
-        history.go(delta);
-        return;
-      }
-      index = target;
-      apply();
+      if (accept()) apply();
+      else event.stopImmediatePropagation();
     }, { capture: true });
   }
 }

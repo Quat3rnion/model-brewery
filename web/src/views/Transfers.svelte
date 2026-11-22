@@ -8,8 +8,8 @@
   import WorkflowGate from '../components/WorkflowGate.svelte';
   import { hostOptions, visibleChecklist } from '../lib/pickers';
   import { globalJobEligibility, hostWorkflowEligibility } from '../lib/eligibility';
-  import { hashParam, route } from '../lib/route.svelte';
-  import { readRetry } from '../lib/rerun';
+  import { loadRetryJob, omittedInputs, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
+  import RetryOffer from '../components/RetryOffer.svelte';
   import type { Blocker } from '../lib/blockers';
   import type { Host } from '../lib/types';
   import SubmitStatus from '../components/SubmitStatus.svelte';
@@ -34,20 +34,16 @@
 
   let dest = $state('');
   let selected = $state<string[]>([]);
-  let retryMessage = $state('');
-  let retryLoading = $state(false);
-  let previousEntries = $state<string[]>([]);
   let acknowledgeOmissions = $state(false);
   const destHost = $derived(hosts.find((h) => h.id === dest));
   const candidates = $derived(models.filter((m) => m.host !== dest));
-  const omitted = $derived(previousEntries.flatMap((id) => {
+  const omitted = $derived.by(() => omittedInputs(retry.context ?? [], selected).map((id) => {
     const model = models.find((m) => m.id === id);
-    return !model ? [{ id, reason: 'Not in Library.' }]
-      : model.host === dest ? [{ id, reason: 'Already on the destination host.' }]
-      : !selected.includes(id) ? [{ id, reason: 'Not selected.' }] : [];
+    return { id, reason: !model ? 'Not in Library.'
+      : model.host === dest ? 'Already on the destination host.' : 'Not selected.' };
   }));
   // A new set of omissions requires a new acknowledgment.
-  const omittedKey = $derived(JSON.stringify(omitted));
+  const omittedKey = $derived(JSON.stringify(omitted.map(({ id }) => id)));
   $effect(() => { void omittedKey; acknowledgeOmissions = false; });
   let txFilter = $state('');
   const listed = $derived(
@@ -61,7 +57,10 @@
   // Drop selections that are no longer in the library or are already on the destination.
   $effect(() => {
     const ok = new Set(candidates.map((m) => m.id));
-    if (selected.some((id) => !ok.has(id))) selected = selected.filter((id) => ok.has(id));
+    if (selected.some((id) => !ok.has(id))) {
+      retry.prune('selected', values => values.filter(id => ok.has(id)));
+      selected = selected.filter(id => ok.has(id));
+    }
   });
 
   function blockers(): Blocker[] {
@@ -107,36 +106,24 @@
     return out;
   });
 
-  $effect(() => {
-    const hash = route.hash;
-    retryMessage = '';
-    previousEntries = [];
-    if (!hashParam(hash, 'retry')) {
-      retryLoading = false;
-      return;
-    }
-    const controller = new AbortController();
-    retryLoading = true;
-    readRetry(hash, ['transfer', 'transfer_preview', 'cache_cleanup'], controller.signal).then((job) => {
-      if (!job || controller.signal.aborted) return;
+  const retry = new RetryPrefill({
+    slot: 'transfers', defaults: { dest: '', selected: [] as string[], cleanHost: '', digest: '' },
+    read: () => ({ dest, selected, cleanHost, digest }),
+    write: value => { ({ dest, selected, cleanHost, digest } = value); },
+    load: loadRetryJob(['transfer', 'transfer_preview', 'cache_cleanup']),
+    restore: job => {
       if (job.kind === 'cache_cleanup') {
-        cleanHost = job.host ?? '';
         const sha = job.options?.bundle_sha256;
-        digest = typeof sha === 'string' ? sha : '';
-        confirmClean = false;
-      } else {
-        dest = destinationOptions.some((item) => item.value === job.host) ? job.host ?? '' : '';
-        previousEntries = [...job.input_ids];
-        selected = [...job.input_ids];
+        return { patch: { cleanHost: job.host ?? '', digest: typeof sha === 'string' ? sha : '' }, context: [], focus: 'cl-host' };
       }
-      retryMessage = 'Review the previous job options before you queue a job.';
-    }).catch(() => {
-      if (!controller.signal.aborted) retryMessage = 'Could not open the previous job options. Enter the options again.';
-    }).finally(() => {
-      if (!controller.signal.aborted) retryLoading = false;
-    });
-    return () => controller.abort();
+      const dest = destinationOptions.some(item => item.value === job.host) ? job.host ?? '' : '';
+      const selected = job.input_ids.filter(id => models.some(model => model.id === id && model.host !== dest));
+      return { patch: { dest, selected }, context: job.input_ids, focus: 'tx-host' };
+    },
+    applied: () => { confirmClean = false; acknowledgeOmissions = false; },
+    clear: () => { confirmClean = false; },
   });
+  watchPrefill(retry, () => !!brewery.state);
 
   async function runCleanup() {
     const job = await cleaner.submit({
@@ -144,12 +131,12 @@
       host: cleanHost,
       input_ids: [],
       options: digest.trim() ? { bundle_sha256: digest.trim() } : undefined,
-    });
+    }, retry.submission);
     if (job) confirmClean = false;
   }
 </script>
 
-<div class="stack">
+<div class="stack" oninputcapture={retry.touchField} onchangecapture={retry.touchField} onclickcapture={retry.touchField} onkeydowncapture={retry.touchField}>
   <div class="head">
     <h1 tabindex="-1">Transfers</h1>
     <p class="muted small">
@@ -157,17 +144,19 @@
     </p>
   </div>
 
-  {#if retryMessage || retryLoading}
-    <p class="small muted" role="status">{retryLoading ? 'Loading the previous job options.' : retryMessage}</p>
+  {#if retry.loading || retry.failed || retry.context}
+    <p class="small muted" role="status">{retry.loading ? 'Loading the previous job options.' : retry.failed
+      ? 'Could not open the previous job options. Enter the options again.' : 'Review the previous job options before you queue a job.'}</p>
   {/if}
+  {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
   <section class="panel" aria-labelledby="tx-h">
     <header><h2 id="tx-h">Copy to a host</h2></header>
     <WorkflowGate workflow="transfer" decision={setup}>
     <div class="body stack">
       <div class="grid-2">
-        <Combobox bind:value={dest} options={destinationOptions} label="Destination host" disabled={retryLoading} placeholder="Select or type a host" emptyText="No eligible destination matches." />
+        <Combobox id="tx-host" bind:value={dest} options={destinationOptions} label="Destination host" disabled={retry.loading} placeholder="Select or type a host" emptyText="No eligible destination matches." />
       </div>
-      <fieldset class="pick" disabled={retryLoading}>
+      <fieldset class="pick" disabled={retry.loading}>
         <legend class="small">Entries to copy</legend>
         {#if !dest}
           <p class="xs muted">Select a destination first.</p>
@@ -204,11 +193,11 @@
       {/if}
       <div class="row actions">
         <button type="button" class="btn" aria-describedby={copyBlockers.length || previewHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={preview.busy}
-          disabled={retryLoading || preview.busy || copyBlockers.length > 0 || previewHostBlockers.length > 0}
-          onclick={() => preview.submit({ kind: 'transfer_preview', host: dest, input_ids: selected })}>{preview.busy ? 'Submitting…' : 'Preview'}</button>
+          disabled={retry.loading || preview.busy || copyBlockers.length > 0 || previewHostBlockers.length > 0}
+          onclick={() => preview.submit({ kind: 'transfer_preview', host: dest, input_ids: selected }, retry.submission)}>{preview.busy ? 'Submitting…' : 'Preview'}</button>
         <button type="button" class="btn primary" aria-describedby={copyBlockers.length || transferHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={transfer.busy}
-          disabled={retryLoading || transfer.busy || copyBlockers.length > 0 || transferHostBlockers.length > 0}
-          onclick={() => transfer.submit({ kind: 'transfer', host: dest, input_ids: selected })}>{transfer.busy ? 'Submitting…' : 'Transfer'}</button>
+          disabled={retry.loading || transfer.busy || copyBlockers.length > 0 || transferHostBlockers.length > 0}
+          onclick={() => transfer.submit({ kind: 'transfer', host: dest, input_ids: selected }, retry.submission)}>{transfer.busy ? 'Submitting…' : 'Transfer'}</button>
       </div>
       {#if copyBlockers.length || previewHostBlockers.length || transferHostBlockers.length}
         <Blockers id="copy-blockers" blockers={[...copyBlockers, ...previewHostBlockers, ...transferHostBlockers]} />
@@ -227,7 +216,7 @@
     <div class="body stack">
       <p class="small muted">Removes worker-owned cached copies only. Registered originals and produced bundles in the library are not touched.</p>
       <div class="grid-2">
-        <HostSelect bind:value={cleanHost} kind="cache_cleanup" />
+        <HostSelect id="cl-host" bind:value={cleanHost} kind="cache_cleanup" />
         <div class="field">
           <label for="cl-digest">Bundle SHA-256 <span class="muted">(optional)</span></label>
           <input id="cl-digest" class="input mono" bind:value={digest} autocomplete="off" spellcheck="false" aria-invalid={digestProblem ? 'true' : undefined} aria-describedby="cl-digest-h" />
@@ -238,14 +227,14 @@
         <div class="note warn" role="group" aria-label="Confirm cleanup">
           <p class="small">Remove {digest.trim() ? 'this cached bundle' : 'all unused cached copies'} on {hostName(hosts, cleanHost)}? Later jobs copy the files again.</p>
           <div class="row" style="margin-top:8px">
-          <button type="button" class="btn danger" disabled={retryLoading || cleaner.busy || cleanBlockers.length > 0} onclick={runCleanup}>{cleaner.busy ? 'Submitting…' : 'Queue cleanup'}</button>
+          <button type="button" class="btn danger" disabled={retry.loading || cleaner.busy || cleanBlockers.length > 0} onclick={runCleanup}>{cleaner.busy ? 'Submitting…' : 'Queue cleanup'}</button>
             <button type="button" class="btn ghost" onclick={() => (confirmClean = false)}>Keep cache</button>
           </div>
         </div>
       {:else}
         <div class="row">
           <button type="button" class="btn" aria-describedby={cleanBlockers.length ? 'cleanup-blockers' : undefined}
-            disabled={retryLoading || cleanBlockers.length > 0} onclick={() => (confirmClean = true)}>Clean cache…</button>
+            disabled={retry.loading || cleanBlockers.length > 0} onclick={() => (confirmClean = true)}>Clean cache…</button>
         </div>
       {/if}
       <Blockers id="cleanup-blockers" blockers={cleanBlockers} />
