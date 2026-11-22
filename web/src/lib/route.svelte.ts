@@ -47,6 +47,12 @@ class Route {
     return () => { this.#guards.delete(allow); };
   }
 
+  /** Update an accepted query selection without adding a history entry. */
+  replaceQuery(hash: string) {
+    history.replaceState(history.state, '', hash);
+    this.hash = hash;
+  }
+
   constructor() {
     if (typeof window === 'undefined') return;
     const entryIndex = (): number | undefined => history.state?.breweryRouteIndex;

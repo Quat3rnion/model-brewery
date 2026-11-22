@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import ModelSelect from '../components/ModelSelect.svelte';
   import Submit from '../components/Submit.svelte';
   import Badge from '../components/Badge.svelte';
@@ -9,11 +9,18 @@
   import WeightReport from '../components/weights/WeightReport.svelte';
   import VisualEditor from '../components/weights/VisualEditor.svelte';
   import CalibrationSplit from '../components/weights/CalibrationSplit.svelte';
+  import FieldError from '../components/FieldError.svelte';
+  import Blockers from '../components/Blockers.svelte';
   import { brewery } from '../lib/store.svelte';
   import { errorText } from '../lib/api';
   import { Submitter } from '../lib/submit.svelte';
-  import { hashParam } from '../lib/route.svelte';
-  import { WEIGHT_SOURCES, isSafeSource, capability, formatTime, hostName, isActive, isTerminal, kindTitle, modelLabel, newestFirst, shortHash } from '../lib/format';
+  import { hashParam, route } from '../lib/route.svelte';
+  import { fieldError, visibleBlockers, type Blocker } from '../lib/blockers';
+  import { WEIGHT_SOURCES, isSafeSource, formatTime, hostName, isActive, isTerminal, kindTitle, modelLabel, newestFirst, shortHash } from '../lib/format';
+  import { weightAccess, weightCapability, weightFormat } from '../lib/weight-access';
+  import { addDraftEdits, editKey, type DraftEdit } from '../lib/weight-draft';
+  import { focusAfterRemoval } from '../lib/focus';
+  import { unsavedChanges } from '../lib/unsaved-changes.svelte';
   import {
     MAX_COORDINATES,
     MAX_EDITS,
@@ -22,6 +29,7 @@
     appliesOf,
     applyJob,
     checkEdits,
+    coord,
     exact,
     inspectJob,
     jobsFor,
@@ -40,44 +48,37 @@
     type EditRow,
     type Op,
   } from '../lib/weights';
-  import type { JobDetail } from '../lib/types';
+  import type { JobDetail, Model } from '../lib/types';
 
   const models = $derived(brewery.state?.models ?? []);
   const hosts = $derived(brewery.state?.hosts ?? []);
   const jobs = $derived(brewery.state?.jobs ?? []);
 
   // ---- Source (shared by both modes). ----
-  let sourceId = $state(hashParam(window.location.hash, 'source') ?? '');
-  onMount(() => {
-    const read = () => {
-      const s = hashParam(window.location.hash, 'source');
-      if (s) sourceId = s;
-    };
-    window.addEventListener('hashchange', read);
-    return () => window.removeEventListener('hashchange', read);
-  });
-  $effect(() => {
-    // Keep the address shareable without a new history entry.
-    const want = sourceId ? `#/weights?source=${encodeURIComponent(sourceId)}` : '#/weights';
-    if (window.location.hash !== want) history.replaceState(null, '', want);
-  });
+  const sourceId = $derived(hashParam(route.hash, 'source') ?? '');
+  function selectSource(id: string) {
+    if (id === sourceId || !draftGuard.confirm()) return;
+    route.replaceQuery(id ? `#/weights?source=${encodeURIComponent(id)}` : '#/weights');
+  }
 
   const source = $derived(models.find((m) => m.id === sourceId && WEIGHT_SOURCES.includes(m.kind)));
   const sourceHost = $derived(source ? hosts.find((h) => h.id === source.host) : undefined);
   const hgn = $derived(source?.kind === 'hgn');
   const safe = $derived(isSafeSource(source?.kind));
-  const native = $derived(capability(sourceHost, safe ? 'weight_safetensors' : 'weight_hgn'));
-  const formatAllowed = $derived(!(hgn || safe) || native.allowed);
+  const native = $derived(source ? weightFormat(source, sourceHost) : undefined);
+  const formatAllowed = $derived(native?.allowed !== false);
   const sourceFormat = $derived(source?.kind === 'hf' ? 'HF checkpoint' : safe ? 'SafeTensors file' : hgn ? 'HGN' : 'GGUF');
-  const caps = $derived(Object.fromEntries(WEIGHT_KINDS.map((k) => [k, capability(sourceHost, k)])) as Record<(typeof WEIGHT_KINDS)[number], ReturnType<typeof capability>>);
+  const caps = $derived(Object.fromEntries(WEIGHT_KINDS.map((k) => [k, weightCapability(sourceHost, k, source?.host)])) as Record<(typeof WEIGHT_KINDS)[number], ReturnType<typeof weightCapability>>);
   const capLabels = { weight_inspect: 'Inspect', weight_propose: 'Manual proposal', weight_tune: 'Automatic tuning', weight_apply: 'Apply' } as const;
-  const visual = $derived(capability(sourceHost, 'weight_visual'));
+  const visual = $derived(weightCapability(sourceHost, 'weight_visual', source?.host));
+  const access = $derived(source ? weightAccess(source, sourceHost) : null);
+  const unavailable = (model: Model) => weightAccess(model, hosts.find((host) => host.id === model.host)).reason;
   const canVisual = $derived(!!source && source.available !== false && caps.weight_inspect.allowed && visual.allowed && formatAllowed);
   const sourceBlockers = $derived.by(() => {
     if (!sourceId) return ['Select a registered source.'];
-    if (!source) return ['This Library entry is not a supported weight source.'];
-    if (!formatAllowed) return [sentence(native.reason ?? 'Editing this format is disabled on this worker.')];
+    if (!source) return ['This Library entry is missing or does not have a supported weight format.'];
     if (source.available === false) return [sentence(source.reason ?? 'The source file is not available.')];
+    if (!formatAllowed) return [sentence(native?.reason ?? 'Editing this format is disabled on this host.')];
     return [];
   });
   function gate(kind: (typeof WEIGHT_KINDS)[number]): string[] {
@@ -88,14 +89,25 @@
 
   // ---- Mode. ----
   let mode = $state<'manual' | 'auto'>('manual');
+  let autoEntry = $state<'visual' | 'text'>('visual');
+  const showText = $derived(source?.kind === 'gguf' && (mode === 'manual' || !canVisual || autoEntry === 'text'));
+  const showVisual = $derived(mode === 'manual' || source?.kind !== 'gguf' || autoEntry === 'visual');
 
   // ---- Manual edits. ----
   let seq = 0;
   const nextKey = () => `e${seq++}`;
   const blankRow = (tensor = ''): EditRow => ({ key: nextKey(), tensor, index: '', op: 'set', value: '' });
   let rows = $state<EditRow[]>([blankRow()]);
-  let touched = $state(false);
+  const pending = new SvelteMap<string, DraftEdit>();
+  const draft = $derived([...pending.values()]);
+  let touched = $state<Record<string, boolean>>({});
+  let textError = $state<string | null>(null);
   const manual = $derived(checkEdits(rows));
+  const hasText = (r: EditRow) => !!(r.tensor.trim() || r.index.trim() || r.value.trim());
+  const draftGuard = unsavedChanges(() => pending.size > 0 || rows.some(hasText) || !!bulkText.trim());
+  const manualFields = $derived(manual.errors.flatMap((errors, i) =>
+    Object.entries(errors).map(([key, text]) => ({ text, field: `${rows[i].key}-${key}` }))));
+  const visibleManual = $derived(visibleBlockers(manualFields, touched));
   function addRow() {
     if (rows.length >= MAX_EDITS) return;
     rows.push(blankRow(rows.at(-1)?.tensor ?? ''));
@@ -103,8 +115,10 @@
     queueMicrotask(() => document.getElementById(`w-${key}-index`)?.focus());
   }
   function removeRow(i: number) {
-    rows.splice(i, 1);
-    if (rows.length === 0) rows.push(blankRow());
+    void focusAfterRemoval(() => {
+      rows.splice(i, 1);
+      if (rows.length === 0) rows.push(blankRow());
+    }, () => document.getElementById(`w-${(rows[i] ?? rows[i - 1]).key}-tensor`));
   }
   let bulkText = $state('');
   let bulkError = $state<string | null>(null);
@@ -114,7 +128,7 @@
       bulkError = parsed.error;
       return;
     }
-    const kept = rows.filter((r) => r.tensor.trim() || r.index.trim() || r.value.trim());
+    const kept = rows.filter(hasText);
     if (kept.length + parsed.value.length > MAX_EDITS) {
       bulkError = `That makes ${kept.length + parsed.value.length} edits. Use at most ${MAX_EDITS}.`;
       return;
@@ -122,15 +136,44 @@
     rows = [...kept, ...parsed.value];
     bulkText = '';
     bulkError = null;
-    touched = true;
+  }
+  function stageText() {
+    if (!manual.edits || gate('weight_propose').length) return;
+    textError = addDraftEdits(pending, manual.edits);
+    if (textError) return;
+    rows = [blankRow()];
+    touched = {};
+    document.getElementById('w-draft-h')?.focus();
   }
   const proposeSub = new Submitter();
-  const proposeBlockers = $derived([...gate('weight_propose'), ...(manual.blocker ? [manual.blocker] : [])]);
+  const draftPin = $derived(draft.find((edit) => edit.observed)?.observed?.sha);
+  const draftPacked = $derived(draft.some((edit) => edit.observed?.packed));
+  const proposeBlockers = $derived([
+    ...gate('weight_propose'),
+    ...(draft.length ? [] : ['Add one or more edits.']),
+    ...(rows.some(hasText) || bulkText.trim() ? ['Add or clear the text edits before you submit.'] : []),
+    ...(draftPin ? gate('weight_inspect').concat(visual.allowed ? [] : [visual.reason!]) : []),
+    ...(draft.some((edit) => edit.observed && edit.observed.sha !== draftPin) ? ['Read the source again before you submit.'] : []),
+    ...(draftPacked && sourceHost?.capabilities?.weight_packed !== true ? ['Packed editing is not enabled on this host.'] : []),
+  ]);
   async function propose() {
-    touched = true;
-    if (!source || !manual.edits) return;
-    const job = await proposeSub.submit(proposeJob(source.id, source.host, manual.edits));
-    if (job) reviewId = job.id;
+    if (!source || proposeBlockers.length) return;
+    const id = source.id;
+    const submitted = draft;
+    const request = proposeJob(id, source.host, submitted);
+    if (draftPin) request.options = { ...request.options, source_sha256: draftPin, ...(draftPacked ? { packed: true } : {}) };
+    const job = await proposeSub.submit(request);
+    if (job && sourceId === id) {
+      for (const edit of submitted) {
+        const key = editKey(edit);
+        if (pending.get(key) === edit) pending.delete(key);
+      }
+      openReview(job.id);
+    }
+  }
+  function openReview(id: string) {
+    reviewId = id;
+    queueMicrotask(() => document.getElementById('w-rev-h')?.focus());
   }
 
   // ---- Inspect helper. ----
@@ -144,7 +187,7 @@
     ...(inspectParsed.i.ok ? [] : [inspectParsed.i.error]),
   ]);
   async function inspect() {
-    if (!source || !inspectParsed.t.ok || !inspectParsed.i.ok) return;
+    if (!source || inspectBlockers.length || !inspectParsed.t.ok || !inspectParsed.i.ok) return;
     await inspectSub.submit(inspectJob(source.id, source.host, inspectParsed.t.value, inspectParsed.i.value));
   }
   const lastInspect = $derived(newestFirst(jobsFor(jobs, sourceId, new Set(['weight_inspect'])))[0]);
@@ -175,16 +218,20 @@
   let calibrationId = $state('');
   let heldOutId = $state('');
   $effect(() => { void sourceId; calibrationId = ''; heldOutId = ''; });
-  let tuneTouched = $state(false);
+  let tuneTouched = $state<Record<string, boolean>>({});
   const tuneParsed = $derived({ t: parseTensor(tuneTensor), c: parseCoordinates(tuneCoords), m: parseMaxUpdate(tuneMax) });
   const coordCount = $derived(tuneCoords.split('\n').filter((l) => l.trim()).length);
   const tuneSub = new Submitter();
+  const tuneFields = $derived<Blocker[]>([
+    ...(tuneParsed.t.ok ? [] : [{ field: 'tensor', text: tuneParsed.t.error }]),
+    ...(tuneParsed.c.ok ? [] : [{ field: 'coordinates', text: tuneParsed.c.error }]),
+    ...(tuneParsed.m.ok ? [] : [{ field: 'max', text: tuneParsed.m.error }]),
+  ]);
+  const visibleTune = $derived(visibleBlockers(tuneFields, tuneTouched));
   const sameHost = (id: string) => models.find((m) => m.id === id)?.host === source?.host;
   const tuneBlockers = $derived.by(() => {
     const out = [...gate('weight_tune')];
-    if (!tuneParsed.t.ok) out.push(tuneParsed.t.error);
-    if (!tuneParsed.c.ok) out.push(tuneParsed.c.error);
-    if (!tuneParsed.m.ok) out.push(tuneParsed.m.error);
+    out.push(...tuneFields.map((error) => error.text));
     if (!calibrationId) out.push('Select a calibration split.');
     if (!heldOutId) out.push('Select a held-out split.');
     else if (heldOutId === calibrationId) out.push('Use a different entry for the held-out split.');
@@ -192,10 +239,9 @@
     return out;
   });
   async function tune() {
-    tuneTouched = true;
     if (!source || !tuneParsed.t.ok || !tuneParsed.c.ok || !tuneParsed.m.ok || tuneBlockers.length) return;
     const job = await tuneSub.submit(tuneJob(source.id, source.host, calibrationId, heldOutId, tuneParsed.t.value, tuneParsed.c.value, tuneParsed.m.value));
-    if (job) reviewId = job.id;
+    if (job) openReview(job.id);
   }
 
   // ---- Review and apply. ----
@@ -259,7 +305,24 @@
   const applied = $derived(appliedDetail ? readApplied(appliedDetail.result) : null);
   const appliedModel = $derived(applied?.library_model_id ? models.find((m) => m.id === applied.library_model_id) : undefined);
 
-  const err = (show: boolean, msg: string | undefined) => (show && msg ? msg : undefined);
+  $effect.pre(() => {
+    void sourceId;
+    pending.clear();
+    rows = [blankRow()];
+    touched = {};
+    bulkText = '';
+    bulkError = null;
+    textError = null;
+    autoEntry = 'visual';
+    mode = 'manual';
+    inspectTensor = '';
+    inspectIndex = '';
+    tuneTensor = '';
+    tuneCoords = '';
+    tuneMax = '';
+    tuneTouched = {};
+    reviewId = null;
+  });
 </script>
 
 <div class="stack">
@@ -271,37 +334,36 @@
   </div>
 
   <p class="note info small">
-    Each proposal can contain at most {MAX_EDITS} manual edits or {MAX_COORDINATES} tuned weights in one rank-2 tensor per proposal. Measured errors describe one layer output. They do not show model quality, and an edited file is not release-qualified.
+    A manual proposal can contain up to {MAX_EDITS} edits across tensors. Automatic tuning can change up to {MAX_COORDINATES} weights in one rank-2 tensor. Tuning measures one layer, not model quality. Edited files are not release-qualified.
   </p>
 
   <section class="panel" aria-labelledby="w-src-h">
     <header><h2 id="w-src-h">Source</h2>{#if source}<a class="xs" href="#/library">Library</a>{/if}</header>
     <div class="body stack">
-      <ModelSelect bind:value={sourceId} kinds={WEIGHT_SOURCES} label="Source model" id="w-source" hint="Choose a GGUF, native HGN, standalone SafeTensors file or indexed HF checkpoint. Jobs run on the host of that entry." />
+      <ModelSelect bind:value={() => sourceId, selectSource} {unavailable} kinds={WEIGHT_SOURCES} label="Source model" id="w-source" hint="Choose a GGUF, native HGN, SafeTensors file or indexed Hugging Face checkpoint. Jobs run on the source host." />
       {#if sourceId && !source}
-        <p class="note warn">This entry is missing or has an unsupported source format.</p>
+        <p class="note warn">{sourceBlockers[0]}</p>
       {:else if source}
         <dl class="kv small">
           <dt>Host</dt><dd>{hostName(hosts, source.host)}</dd>
           <dt>Path</dt><dd class="mono xs break">{source.path}</dd>
-          <dt>Format</dt><dd>{sourceFormat}{#if source.kind === 'hf'} · indexed SafeTensors directory. Apply preserves the index and shard layout.{/if}</dd>
+          <dt class="format">Format</dt><dd class="format">{sourceFormat}{#if source.kind === 'hf'}. Apply keeps the index and shard layout.{/if}</dd>
           <dt>{source.kind === 'hf' ? 'Bundle SHA-256' : 'SHA-256'}</dt><dd>{#if source.sha256}<span class="mono" title={source.sha256}>{shortHash(source.sha256)}</span>{:else}<span class="muted">No digest in the Library record. The worker binds edits to the source fingerprint.</span>{/if}</dd>
-          {#if source.job_id}<dt>Made by</dt><dd><a class="mono xs" href="#/jobs/{encodeURIComponent(source.job_id)}">{source.job_id}</a></dd>{/if}
+          {#if source.job_id}<dt>Output of job</dt><dd><a class="mono xs break" href="#/jobs/{encodeURIComponent(source.job_id)}">{source.job_id}</a></dd>{/if}
         </dl>
         <ul class="caps" aria-label="Weight editing on {hostName(hosts, source.host)}">
           {#each WEIGHT_KINDS as k (k)}
+            {@const status = formatAllowed ? caps[k] : native!}
             <li>
-              <Badge tone={caps[k].allowed && formatAllowed ? 'ok' : 'muted'} label="{capLabels[k]}: {caps[k].allowed && formatAllowed ? 'enabled' : 'not enabled'}" title={caps[k].reason ?? ''} />
+              <Badge tone={status.allowed ? 'ok' : 'muted'} label="{capLabels[k]}: {status.allowed ? 'enabled' : 'not enabled'}" />
+              {#if status.reason}<a class="xs break" href={status.fixAnchor}>{sentence(status.reason)}</a>{/if}
             </li>
           {/each}
         </ul>
         {#if caps.weight_inspect.allowed && formatAllowed}
-          <p class="xs muted">Visual reads: {visual.allowed ? 'enabled' : sentence(visual.reason ?? 'not enabled')}</p>
+          <p class="xs muted">Visual reads: {#if visual.allowed}enabled{:else}<a href={visual.fixAnchor}>{sentence(visual.reason!)}</a>{/if}</p>
         {/if}
-        <a class="small" href="#/settings/infrastructure?host={encodeURIComponent(source.host)}">Settings for {hostName(hosts, source.host)}</a>
-        {#if !WEIGHT_KINDS.some((k) => caps[k].allowed)}
-          <p class="xs muted">{sentence(caps.weight_propose.reason ?? 'Weight editing is not enabled on this host.')} An operator enables each job kind on the worker.</p>
-        {/if}
+        <a class="small" href="#/settings/infrastructure?host={encodeURIComponent(source.host)}&section=policy">Settings for {hostName(hosts, source.host)}</a>
       {/if}
     </div>
   </section>
@@ -309,55 +371,56 @@
   <section class="panel" aria-labelledby="w-make-h">
     <header>
       <h2 id="w-make-h">Choose and change weights</h2>
-      <div class="fmt" role="radiogroup" aria-label="Editing mode">
+      {#if access?.allowed}<div class="fmt" role="radiogroup" aria-label="Editing mode">
         <label class:on={mode === 'manual'}><input type="radio" name="w-mode" bind:group={mode} value="manual" /> Manual</label>
         <label class:on={mode === 'auto'}><input type="radio" name="w-mode" bind:group={mode} value="auto" /> Automatic</label>
-      </div>
+      </div>{/if}
     </header>
 
     <div class="body stack">
-      {#if source}
+      {#if source && access?.allowed}
         {#if mode === 'auto'}
           {#key source.id}
             <h3>Calibration and held-out data</h3>
             <p class="small muted">Choose two different splits on {hostName(hosts, source.host)}. Use one to fit the selected tensor and one to measure its error. Their activation rows must not overlap.</p>
-            {#if source.host === 'backend-hf' && caps.weight_tune.allowed && !sourceHost?.scheduling_paused}
-              <p class="xs muted">Selecting a JSON file uploads it to this worker’s Library. Each file must be at most 256 KiB and contain two numeric matrices: <code>activations</code> and <code>targets</code>. Use one activation and target row per example (up to 1,024 examples).</p>
-            {:else if source.host !== 'backend-hf'}
-              <p class="xs muted">To add a split, register its path as a <code>weight-calibration</code> entry for this host in the <a href="#/library">Library</a>.</p>
-            {/if}
+            <p class="xs muted">
+              Use JSON with two matrices of finite numbers: <code>activations</code> and <code>targets</code>.
+              Use the same number of rows in both matrices (1 to 1,024 rows). The column counts must match the input and output widths of the tensor.
+              {#if source.host === 'backend-hf'}Each upload, including its name, can be at most 256 KiB. Each matrix can have at most 16,384 columns. The upload adds a split to Library.
+              {:else}Each file can be at most 8 MiB. Register the file as <code>weight-calibration</code> on this host in <a href="#/library">Library</a>.{/if}
+            </p>
             <div class="grid-2">
               <CalibrationSplit host={sourceHost} label="Calibration split (fitting)" bind:value={calibrationId} other={heldOutId} />
               <CalibrationSplit host={sourceHost} label="Held-out split (measurement only)" bind:value={heldOutId} other={calibrationId} />
             </div>
           {/key}
         {/if}
-        {#if !formatAllowed}
-          <p class="note warn">{safe ? 'SafeTensors' : 'Native HGN'} editing is unavailable on {hostName(hosts, source.host)}. {sentence(native.reason ?? 'This source host is not enrolled.')} Check <code>{safe ? 'weight_safetensors' : 'weight_hgn'}</code> in <a href="#/settings/infrastructure?host={encodeURIComponent(source.host)}">worker settings</a>.</p>
-        {:else}
+        {#if mode === 'auto' && source.kind === 'gguf' && canVisual}
+          <div class="field">
+            <label for="w-auto-entry">Automatic tuning input</label>
+            <select id="w-auto-entry" class="input" bind:value={autoEntry}>
+              <option value="visual">Select cells in the visual editor</option>
+              <option value="text">Type the tensor and coordinates</option>
+            </select>
+          </div>
+        {/if}
+        {#if showVisual}
         {#key source.id}
         <VisualEditor
           {source}
           {canVisual}
-          canPropose={caps.weight_propose.allowed}
           canTune={caps.weight_tune.allowed}
           {calibrationId}
           {heldOutId}
-          proposeReason={caps.weight_propose.reason}
           tuneReason={caps.weight_tune.reason}
           bind:mode
-          onproposal={(id) => {
-            reviewId = id;
-            queueMicrotask(() => document.getElementById('w-rev-h')?.scrollIntoView({ block: 'start' }));
-          }}
+          {pending}
+          onproposal={openReview}
         />
         {/key}
         {/if}
-      {:else}
-        <p class="empty">Select a registered source above.</p>
-      {/if}
-      {#if source?.kind === 'gguf'}
-      <details class="disclosure text-entry" open={!!source && !canVisual}>
+      {#if showText}
+      <details class="disclosure text-entry" open={!canVisual || mode === 'auto'}>
         <summary>Text entry: type tensor names and coordinates</summary>
     {#if mode === 'manual'}
       <div class="stack pad">
@@ -374,7 +437,7 @@
               <label for="w-ins-i">Coordinate</label>
               <input id="w-ins-i" class="input mono coord" bind:value={inspectIndex} autocomplete="off" spellcheck="false" placeholder="0, 0" />
             </div>
-            <Submit variant="secondary" blockers={inspectTensor || inspectIndex ? inspectBlockers : gate('weight_inspect')} busy={inspectSub.busy} onclick={inspect}>Inspect</Submit>
+             <Submit variant="secondary" blockers={inspectBlockers} busy={inspectSub.busy} onclick={inspect}>Inspect</Submit>
           </div>
           {#if inspectSub.error}<p class="note bad" role="alert">{inspectSub.error}</p>{/if}
           <div aria-live="polite">
@@ -400,18 +463,19 @@
             <caption class="sr-only">Manual edits</caption>
             <thead><tr><th scope="col" class="n">#</th><th scope="col">Tensor</th><th scope="col">Coordinate</th><th scope="col">Operation</th><th scope="col">Value</th><th scope="col"><span class="sr-only">Remove</span></th></tr></thead>
             <tbody>
-              {#each rows as r, i (r.key)}
-                {@const e = manual.errors[i] ?? {}}
-                {@const show = touched || !!(r.tensor && r.index && r.value)}
+               {#each rows as r, i (r.key)}
+                {@const tensorError = fieldError(visibleManual, `${r.key}-tensor`)}
+                {@const indexError = fieldError(visibleManual, `${r.key}-index`)}
+                {@const valueError = fieldError(visibleManual, `${r.key}-value`)}
                 <tr>
                   <td class="n num muted" data-label="Edit">{i + 1}</td>
                   <td data-label="Tensor">
-                    <input id="w-{r.key}-tensor" class="input mono" bind:value={r.tensor} aria-label="Tensor, edit {i + 1}" aria-invalid={!!err(show, e.tensor)} aria-describedby={err(show, e.tensor) ? `w-${r.key}-tensor-e` : undefined} autocomplete="off" spellcheck="false" placeholder="blk.0.attn_q.weight" />
-                    {#if err(show, e.tensor)}<span class="ferr xs" id="w-{r.key}-tensor-e">{e.tensor}</span>{/if}
+                    <input id="w-{r.key}-tensor" class="input mono" bind:value={r.tensor} aria-label="Tensor, edit {i + 1}" aria-invalid={!!tensorError} aria-describedby={tensorError ? `w-${r.key}-tensor-e` : undefined} onblur={() => { touched[`${r.key}-tensor`] = true; }} autocomplete="off" spellcheck="false" placeholder="blk.0.attn_q.weight" />
+                    <FieldError id="w-{r.key}-tensor-e" error={tensorError} />
                   </td>
                   <td data-label="Coordinate">
-                    <input id="w-{r.key}-index" class="input mono coord" bind:value={r.index} aria-label="Coordinate, edit {i + 1}" aria-invalid={!!err(show, e.index)} aria-describedby={err(show, e.index) ? `w-${r.key}-index-e` : undefined} autocomplete="off" spellcheck="false" placeholder="0, 0" />
-                    {#if err(show, e.index)}<span class="ferr xs" id="w-{r.key}-index-e">{e.index}</span>{/if}
+                    <input id="w-{r.key}-index" class="input mono coord" bind:value={r.index} aria-label="Coordinate, edit {i + 1}" aria-invalid={!!indexError} aria-describedby={indexError ? `w-${r.key}-index-e` : undefined} onblur={() => { touched[`${r.key}-index`] = true; }} autocomplete="off" spellcheck="false" placeholder="0, 0" />
+                    <FieldError id="w-{r.key}-index-e" error={indexError} />
                   </td>
                   <td data-label="Operation">
                     <select class="input" bind:value={r.op} aria-label="Operation, edit {i + 1}">
@@ -420,8 +484,8 @@
                     </select>
                   </td>
                   <td data-label="Value">
-                    <input id="w-{r.key}-value" class="input mono val" bind:value={r.value} inputmode="decimal" aria-label="Value, edit {i + 1}" aria-invalid={!!err(show, e.value)} aria-describedby={err(show, e.value) ? `w-${r.key}-value-e` : undefined} autocomplete="off" spellcheck="false" placeholder={r.op === 'set' ? '0.5' : '-0.002'} />
-                    {#if err(show, e.value)}<span class="ferr xs" id="w-{r.key}-value-e">{e.value}</span>{/if}
+                    <input id="w-{r.key}-value" class="input mono val" bind:value={r.value} inputmode="decimal" aria-label="Value, edit {i + 1}" aria-invalid={!!valueError} aria-describedby={valueError ? `w-${r.key}-value-e` : undefined} onblur={() => { touched[`${r.key}-value`] = true; }} autocomplete="off" spellcheck="false" placeholder={r.op === 'set' ? '0.5' : '-0.002'} />
+                    <FieldError id="w-{r.key}-value-e" error={valueError} />
                   </td>
                   <td class="rm">
                     <button type="button" class="btn ghost small" onclick={() => removeRow(i)} aria-label="Remove edit {i + 1}" disabled={rows.length === 1 && !r.tensor && !r.index && !r.value}>Remove</button>
@@ -449,40 +513,88 @@
           </div>
         </details>
 
-        {#if proposeSub.error}<p class="note bad" role="alert">{proposeSub.error}</p>{/if}
-        <Submit blockers={proposeBlockers} busy={proposeSub.busy} onclick={propose}>Create proposal</Submit>
+        {#if textError}<p class="note bad" role="alert">{textError}</p>{/if}
+        <Submit variant="secondary" blockers={[...gate('weight_propose'), ...(manual.blocker ? [manual.blocker] : [])]} busy={proposeSub.busy} onclick={stageText}>Add to proposal</Submit>
       </div>
     {:else}
       <div class="stack pad">
-        <p class="xs muted">The worker fits the selected weights to the calibration split with bounded coordinate descent, then measures the same layer on the held-out split. The held-out split is never used for fitting. Each split is a <span class="mono">weight-calibration</span> Library entry with activations and targets for this tensor.</p>
+        <p class="xs muted">The worker rejects a proposal if it does not decrease the calibration error.</p>
         <div class="grid-2">
           <div class="field">
             <label for="w-tune-t">Tensor (rank 2, [output, input])</label>
-            <input id="w-tune-t" class="input mono" bind:value={tuneTensor} autocomplete="off" spellcheck="false" placeholder="blk.0.ffn_down.weight" aria-invalid={tuneTouched && !tuneParsed.t.ok} />
+            <input id="w-tune-t" class="input mono" bind:value={tuneTensor} autocomplete="off" spellcheck="false" placeholder="blk.0.ffn_down.weight" onblur={() => { tuneTouched.tensor = true; }} aria-invalid={!!fieldError(visibleTune, 'tensor')} aria-describedby={fieldError(visibleTune, 'tensor') ? 'w-tune-t-e' : undefined} />
+            <FieldError id="w-tune-t-e" error={fieldError(visibleTune, 'tensor')} />
           </div>
           <div class="field">
             <label for="w-tune-m">Largest change per weight</label>
-            <input id="w-tune-m" class="input mono" bind:value={tuneMax} inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="0.01" aria-describedby="w-tune-m-hint" aria-invalid={tuneTouched && !tuneParsed.m.ok} />
+            <input id="w-tune-m" class="input mono" bind:value={tuneMax} inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="0.01" onblur={() => { tuneTouched.max = true; }} aria-describedby={fieldError(visibleTune, 'max') ? 'w-tune-m-e w-tune-m-hint' : 'w-tune-m-hint'} aria-invalid={!!fieldError(visibleTune, 'max')} />
             <span class="hint" id="w-tune-m-hint">Absolute limit after rounding to the stored type.</span>
+            <FieldError id="w-tune-m-e" error={fieldError(visibleTune, 'max')} />
           </div>
         </div>
         <div class="field">
           <label for="w-tune-c">Selected weights</label>
-          <textarea id="w-tune-c" class="input mono" rows="5" bind:value={tuneCoords} spellcheck="false" aria-describedby="w-tune-c-hint" aria-invalid={tuneTouched && !tuneParsed.c.ok} placeholder={'0, 3\n0, 4\n7, 12'}></textarea>
-          <span class="hint" id="w-tune-c-hint">One <span class="mono">row, column</span> pair per line, zero-based. <span class="num">{coordCount}</span> of {MAX_COORDINATES}.{#if tuneCoords.trim() && !tuneParsed.c.ok} <span class="ferr">{tuneParsed.c.error}</span>{/if}</span>
+          <textarea id="w-tune-c" class="input mono" rows="5" bind:value={tuneCoords} spellcheck="false" onblur={() => { tuneTouched.coordinates = true; }} aria-describedby={fieldError(visibleTune, 'coordinates') ? 'w-tune-c-e w-tune-c-hint' : 'w-tune-c-hint'} aria-invalid={!!fieldError(visibleTune, 'coordinates')} placeholder={'0, 3\n0, 4\n7, 12'}></textarea>
+          <span class="hint" id="w-tune-c-hint">One <span class="mono">row, column</span> pair per line. Start at 0. <span class="num">{coordCount}</span> of {MAX_COORDINATES}.</span>
+          <FieldError id="w-tune-c-e" error={fieldError(visibleTune, 'coordinates')} />
         </div>
-        <p class="xs muted">The worker refuses splits whose activation rows overlap, files over 8 MiB or 1,024 rows, and proposals that do not lower the calibration error.</p>
         {#if tuneSub.error}<p class="note bad" role="alert">{tuneSub.error}</p>{/if}
         <Submit blockers={tuneBlockers} busy={tuneSub.busy} onclick={tune}>Tune selected weights</Submit>
       </div>
     {/if}
       </details>
       {/if}
+        {#if mode === 'manual'}
+          <section class="stack draft" aria-labelledby="w-draft-h">
+            <div class="row between">
+              <h3 id="w-draft-h" tabindex="-1">Proposal <span class="muted num">({draft.length} of {MAX_EDITS} edits)</span></h3>
+              {#if draft.length}
+                <button type="button" class="btn ghost small" disabled={proposeSub.busy} onclick={() => {
+                  void focusAfterRemoval(() => pending.clear(), () => document.getElementById('w-draft-h'));
+                }}>Discard all</button>
+              {/if}
+            </div>
+            {#if draft.length}
+              <div class="table-wrap">
+                <table class="data stackable">
+                  <caption class="sr-only">Edits in this proposal</caption>
+                  <thead><tr><th scope="col">Tensor</th><th scope="col">Coordinate</th><th scope="col">Stored</th><th scope="col">Edit</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+                  <tbody>
+                    {#each draft as edit (editKey(edit))}
+                      <tr>
+                        <td class="mono xs break" data-label="Tensor">{edit.tensor}</td>
+                        <td class="mono num" data-label="Coordinate">{coord(edit.index)}</td>
+                        <td class="mono num" data-label="Stored">{edit.observed ? exact(edit.observed.before) : 'Not read'}</td>
+                        <td class="mono num" data-label="Edit">{edit.op === 'set' ? 'Set to' : 'Add'} {exact(edit.value)}</td>
+                        <td><button type="button" class="btn ghost small" disabled={proposeSub.busy} aria-label="Remove edit for {edit.tensor} at {coord(edit.index)}" onclick={() => {
+                          void focusAfterRemoval(() => { pending.delete(editKey(edit)); }, () => document.getElementById('w-draft-h'));
+                        }}>Remove</button></td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+              <p class="xs muted">The worker checks these values and returns a proposal for review. The source stays unchanged.</p>
+            {:else}
+              <p class="xs muted">No edits yet.{#if source.kind === 'gguf'} Add edits from the visual editor or text entry above.{/if}</p>
+            {/if}
+            {#if proposeSub.error}<p class="note bad" role="alert">{proposeSub.error}</p>{/if}
+            <Submit blockers={proposeBlockers} busy={proposeSub.busy} onclick={propose}>Create proposal</Submit>
+          </section>
+        {/if}
+      {:else if source && access?.reason}
+        <p class="note warn">{access.reason}</p>
+        {#if source.available !== false}
+          <Blockers blockers={[{ text: 'Check weight editing on the source host', fixAnchor: access.fixAnchor }]} />
+        {/if}
+      {:else}
+        <p class="empty">Select a source above.</p>
+      {/if}
     </div>
   </section>
 
   <section class="panel" aria-labelledby="w-rev-h">
-    <header><h2 id="w-rev-h">Review and apply</h2>{#if proposals.length}<span class="xs muted">{proposals.length} {proposals.length === 1 ? 'proposal' : 'proposals'} for this source</span>{/if}</header>
+    <header><h2 id="w-rev-h" tabindex="-1">Review and apply</h2>{#if proposals.length}<span class="xs muted">{proposals.length} {proposals.length === 1 ? 'proposal' : 'proposals'} for this source</span>{/if}</header>
     {#if !source}
       <p class="empty">Select a source to see its proposals.</p>
     {:else if proposals.length === 0}
@@ -588,13 +700,22 @@
     margin: 0;
     min-width: 0;
   }
+  .kv .format {
+    padding-block: var(--s-1);
+  }
   .caps {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
     gap: var(--s-2);
     margin: 0;
     padding: 0;
     list-style: none;
+  }
+  .caps li {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--s-1);
   }
   .fmt {
     display: inline-flex;
@@ -688,10 +809,9 @@
     width: 1%;
     white-space: nowrap;
   }
-  .ferr {
-    display: block;
-    margin-top: 2px;
-    color: var(--bad);
+  .draft {
+    border-top: 1px solid var(--line-soft);
+    padding-top: var(--s-3);
   }
   .pad {
     padding-top: var(--s-3);

@@ -22,16 +22,21 @@ export function hostOptions(hosts: Host[], kind?: string, eligibility?: (host: H
 }
 
 /** Library entries of the given kinds; the value is the model ID. */
-export function modelOptions(models: Model[], hosts: Host[], kinds: ReadonlySet<string>, exclude: string[]): ComboOption[] {
+export function modelOptions(models: Model[], hosts: Host[], kinds: ReadonlySet<string>, exclude: string[], unavailable?: (model: Model) => string | null): ComboOption[] {
   return disambiguate(
     models
       .filter((m) => kinds.has(m.kind) && !exclude.includes(m.id))
-      .map((m) => ({
-        value: m.id,
-        label: modelLabel(m),
-        detail: `${kindLabel(m.kind)} · ${hostName(hosts, m.host)} · ${m.path}${m.available === false ? ' · unavailable' : ''}`,
-        keywords: [m.id, m.host, m.kind, m.path],
-      })),
+      .map((m) => {
+        const reason = unavailable?.(m);
+        const status = reason ? ` · Unavailable: ${reason}` : m.available === false ? ' · unavailable' : '';
+        return {
+          value: m.id,
+          label: modelLabel(m),
+          detail: `${kindLabel(m.kind)} · ${hostName(hosts, m.host)} · ${m.path}${status}`,
+          keywords: [m.id, m.host, m.kind, m.path],
+          ...(reason ? { disabled: true } : {}),
+        };
+      }),
   );
 }
 
