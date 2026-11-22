@@ -69,6 +69,11 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/jobs/{id}", "getJob"),
         ("post", "/api/jobs/{id}/cancel", "cancelJob"),
         ("post", "/api/conversions", "createConversion"),
+        (
+            "post",
+            "/api/conversions/eligibility",
+            "checkConversionEligibility",
+        ),
         ("get", "/api/conversions", "listConversions"),
         ("get", "/api/conversions/{id}", "getConversion"),
         ("post", "/api/conversions/{id}/cancel", "cancelConversion"),

@@ -32,6 +32,27 @@ export interface FixReason {
   fix_anchor: string;
 }
 
+export interface EligibilityEntry {
+  eligible: boolean;
+  reasons: FixReason[];
+}
+
+export type Workflow =
+  | 'managed_conversion' | 'component_conversion' | 'custom_profile_conversion'
+  | 'pool_conversion' | 'pool_component_conversion' | 'pool_custom_profile_conversion'
+  | 'gguf_output' | 'compare' | 'generate' | 'baseline' | 'evaluate' | 'benchmark'
+  | 'register_manual' | 'transfer' | 'transfer_preview';
+
+export type GgufSourceKind = 'gguf' | 'hf' | 'safetensors';
+
+export interface WorkflowEligibility {
+  global: Record<Workflow, EligibilityEntry>;
+  hosts: Record<string, Record<Workflow, EligibilityEntry> & {
+    gguf_output_by_kind: Record<GgufSourceKind, EligibilityEntry>;
+    gguf_rocmfpx_by_kind: Record<GgufSourceKind, EligibilityEntry>;
+  }>;
+}
+
 export interface Host {
   id: string;
   name?: string;
@@ -135,6 +156,7 @@ export interface BrewState {
   prompts: Prompt[];
   jobs: JobSummary[];
   capabilities?: Record<string, unknown>;
+  eligibility?: WorkflowEligibility;
   [extra: string]: unknown;
 }
 
