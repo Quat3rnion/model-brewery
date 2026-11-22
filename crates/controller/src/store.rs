@@ -19,6 +19,12 @@ pub struct Store {
     _lock: File,
 }
 
+pub enum PromptDeletion {
+    Deleted,
+    Missing,
+    InUse(String),
+}
+
 impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
         std::fs::DirBuilder::new()
@@ -37,7 +43,7 @@ impl Store {
             .open(directory.join("controller.lock"))?;
         fs2::FileExt::try_lock_exclusive(&lock)
             .map_err(|e| format!("cannot lock the controller data directory: {e}"))?;
-        let conn = Connection::open(directory.join("controller.db"))?;
+        let mut conn = Connection::open(directory.join("controller.db"))?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=FULL;
@@ -75,6 +81,7 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS conversions_active ON conversions(state);",
         )?;
+        backfill_model_metadata(&mut conn)?;
         Ok(Self { conn, _lock: lock })
     }
 
@@ -163,6 +170,35 @@ impl Store {
     }
     pub fn prompts(&self) -> Result<Vec<Prompt>> {
         read_list(&self.conn, "SELECT body FROM prompts ORDER BY rowid", [])
+    }
+    pub fn update_prompt(&self, prompt: &Prompt) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE prompts SET body=? WHERE id=?",
+            params![encode(prompt)?, prompt.id],
+        )? == 1)
+    }
+    pub fn delete_prompt(&mut self, id: &str) -> Result<PromptDeletion> {
+        let tx = self.conn.transaction()?;
+        // A cancellation request leaves the job running until the worker
+        // confirms a terminal state.
+        let active = tx
+            .query_row(
+                "SELECT j.id FROM jobs j JOIN prompts p ON p.id=json_extract(j.body,'$.prompt_id')
+                 WHERE p.id=? AND j.state IN ('queued','running') ORDER BY j.seq LIMIT 1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(job) = active {
+            return Ok(PromptDeletion::InUse(job));
+        }
+        let deleted = tx.execute("DELETE FROM prompts WHERE id=?", [id])?;
+        tx.commit()?;
+        Ok(if deleted == 1 {
+            PromptDeletion::Deleted
+        } else {
+            PromptDeletion::Missing
+        })
     }
     pub fn enqueue(
         &mut self,
@@ -279,30 +315,50 @@ impl Store {
                     }
                 }
             };
-            let verified_output = if (row.format == crate::gguf::Format::Gguf
-                || row.native_layer_recipe())
-                && row.state == State::Succeeded
-            {
-                Some(
-                    self.envelope(&job.id)?
-                        .inputs
-                        .into_iter()
-                        .nth(1)
-                        .ok_or("verified conversion output missing")?,
-                )
+            let verified_output = if row.state == State::Succeeded {
+                let new_model =
+                    row.format == crate::gguf::Format::Gguf || row.native_layer_recipe();
+                let model = if new_model {
+                    self.envelope(&job.id)?.inputs.into_iter().nth(1)
+                } else if let Some(id) = &row.artifact_model_id {
+                    self.model(id)?
+                } else {
+                    None
+                };
+                if let Some(mut model) = model {
+                    let producer = &row.job_ids["convert"];
+                    let result = self
+                        .job_result(producer)?
+                        .ok_or("conversion receipt missing")?;
+                    model.job_id = Some(producer.clone());
+                    model.attest_output(&result["artifact"]);
+                    Some((model, new_model))
+                } else if new_model {
+                    return Err("verified conversion output missing".into());
+                } else {
+                    None
+                }
             } else {
                 None
             };
             let tx = self.conn.transaction()?;
-            if let Some(model) = verified_output {
-                tx.execute(
-                    "INSERT INTO models(id,body) VALUES (?,?)",
-                    params![model.id, encode(&model)?],
-                )?;
-                row.artifact_model_id = Some(model.id);
+            if let Some((model, new_model)) = verified_output {
+                if new_model {
+                    tx.execute(
+                        "INSERT INTO models(id,body) VALUES (?,?)",
+                        params![model.id, encode(&model)?],
+                    )?;
+                    row.artifact_model_id = Some(model.id);
+                } else {
+                    tx.execute(
+                        "UPDATE models SET body=? WHERE id=?",
+                        params![encode(&model)?, model.id],
+                    )?;
+                }
             }
             if let Some((next, envelope, artifact)) = next {
-                if let Some(model) = artifact {
+                if let Some(mut model) = artifact {
+                    model.job_id = Some(job.id.clone());
                     tx.execute(
                         "INSERT INTO models(id,body) VALUES (?,?)",
                         params![model.id, encode(&model)?],
@@ -874,7 +930,11 @@ impl Store {
             None
         };
         let tx = self.conn.transaction()?;
-        if let Some(model) = artifact {
+        if let Some(mut model) = artifact {
+            model.job_id = Some(job.id.clone());
+            if let Some(receipt) = &result {
+                model.attest_output(&receipt["artifact"]);
+            }
             tx.execute(
                 "INSERT INTO models(id,body) VALUES (?,?)",
                 params![model.id, encode(&model)?],
@@ -887,6 +947,55 @@ impl Store {
 }
 
 type NextConversion = (Job, Envelope, Option<Model>);
+
+fn backfill_model_metadata(conn: &mut Connection) -> Result<()> {
+    // The controller creates these model-ID links only when it publishes an
+    // output. Never infer identity from an arbitrary job input or path match.
+    let tx = conn.transaction()?;
+    {
+        let mut query = tx.prepare(
+            "WITH publications(model_id, job_id, artifact, verified, host) AS (
+                SELECT json_extract(j.result,'$.library_model_id'), j.id,
+                    json_extract(j.result,'$.artifact'), 1, json_extract(j.body,'$.host')
+                FROM jobs j WHERE j.state='succeeded'
+                    AND json_extract(j.body,'$.kind') IN ('hf_download','weight_apply')
+                    AND json_extract(j.body,'$.cancel_requested')=0
+                    AND json_extract(j.result,'$.verified')=1
+                UNION ALL
+                SELECT json_extract(c.body,'$.artifact_model_id'), j.id,
+                    json_extract(j.result,'$.artifact'), c.state='succeeded', json_extract(j.body,'$.host')
+                FROM conversions c JOIN jobs j ON j.id=json_extract(c.body,'$.job_ids.convert')
+                WHERE j.state='succeeded' AND json_extract(j.body,'$.kind')='convert'
+            )
+            SELECT m.body, p.job_id, p.artifact, p.verified FROM publications p
+            JOIN models m ON m.id=p.model_id
+              AND json_extract(m.body,'$.host')=p.host
+              AND json_extract(m.body,'$.path')=json_extract(p.artifact,'$.path')
+              AND json_extract(m.body,'$.kind')=json_extract(p.artifact,'$.kind')
+            WHERE json_extract(m.body,'$.job_id') IS NULL
+               OR (p.verified AND json_extract(m.body,'$.sha256') IS NULL)",
+        )?;
+        let mut rows = query.query([])?;
+        // Read the migration set before updating the table we are reading.
+        let mut models = Vec::new();
+        while let Some(row) = rows.next()? {
+            let mut model: Model = serde_json::from_str(&row.get::<_, String>(0)?)?;
+            model.job_id = Some(row.get(1)?);
+            if row.get::<_, bool>(3)? {
+                model.attest_output(&serde_json::from_str(&row.get::<_, String>(2)?)?);
+            }
+            models.push(model);
+        }
+        for model in models {
+            tx.execute(
+                "UPDATE models SET body=? WHERE id=?",
+                params![encode(&model)?, model.id],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
 
 fn save_conversion(tx: &Transaction<'_>, row: &Conversion) -> Result<()> {
     tx.execute(

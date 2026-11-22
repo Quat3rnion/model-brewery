@@ -1,0 +1,10 @@
+/home/quaternion/.local/share/opencode/worktree/cf741342e54a95bdb5f46ced9f6fc8a873d692e8/daring-yak/target/debug/deps/foldhash-6525bf1d272e1444.d: /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/lib.rs /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/fast.rs /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/quality.rs /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/seed.rs
+
+/home/quaternion/.local/share/opencode/worktree/cf741342e54a95bdb5f46ced9f6fc8a873d692e8/daring-yak/target/debug/deps/libfoldhash-6525bf1d272e1444.rlib: /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/lib.rs /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/fast.rs /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/quality.rs /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/seed.rs
+
+/home/quaternion/.local/share/opencode/worktree/cf741342e54a95bdb5f46ced9f6fc8a873d692e8/daring-yak/target/debug/deps/libfoldhash-6525bf1d272e1444.rmeta: /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/lib.rs /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/fast.rs /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/quality.rs /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/seed.rs
+
+/home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/lib.rs:
+/home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/fast.rs:
+/home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/quality.rs:
+/home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/foldhash-0.1.5/src/seed.rs:

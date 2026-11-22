@@ -65,6 +65,8 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ),
         ("delete", "/api/models/{id}", "deleteModel"),
         ("post", "/api/prompts", "createPrompt"),
+        ("put", "/api/prompts/{id}", "updatePrompt"),
+        ("delete", "/api/prompts/{id}", "deletePrompt"),
         ("post", "/api/jobs", "createJob"),
         ("get", "/api/jobs/{id}", "getJob"),
         ("post", "/api/jobs/{id}/cancel", "cancelJob"),

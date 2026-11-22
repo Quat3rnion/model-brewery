@@ -1,0 +1,9 @@
+/home/quaternion/.local/share/opencode/worktree/cf741342e54a95bdb5f46ced9f6fc8a873d692e8/daring-yak/target/debug/deps/signal_hook_registry-b9e49596c3630c9d.d: /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs
+
+/home/quaternion/.local/share/opencode/worktree/cf741342e54a95bdb5f46ced9f6fc8a873d692e8/daring-yak/target/debug/deps/libsignal_hook_registry-b9e49596c3630c9d.rlib: /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs
+
+/home/quaternion/.local/share/opencode/worktree/cf741342e54a95bdb5f46ced9f6fc8a873d692e8/daring-yak/target/debug/deps/libsignal_hook_registry-b9e49596c3630c9d.rmeta: /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs /home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs
+
+/home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs:
+/home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs:
+/home/quaternion/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs:

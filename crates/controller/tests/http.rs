@@ -180,6 +180,17 @@ impl Fixture {
         .into()
     }
 
+    fn model_records(&self) -> Value {
+        let mut state = self.json("GET", "/api/state", None, 200);
+        let mut models = state["models"].take();
+        for model in models.as_array_mut().unwrap() {
+            let model = model.as_object_mut().unwrap();
+            model.remove("available");
+            model.remove("reason");
+        }
+        models
+    }
+
     fn enqueue(&self, body: Value) -> String {
         id(&self.json("POST", "/api/jobs", Some(body), 201)).into()
     }
@@ -670,7 +681,10 @@ fn same_origin_library_survives_restart() {
     app.launch();
     let state = app.json("GET", "/api/state", None, 200);
     assert_eq!(state["hosts"][1]["reasons"]["plan"], "not installed");
-    assert_eq!(state["models"][0], model);
+    let mut model = model;
+    model.as_object_mut().unwrap().remove("available");
+    model.as_object_mut().unwrap().remove("reason");
+    assert_eq!(app.model_records(), json!([model]));
     assert_eq!(state["prompts"][0], created);
     app.json(
         "DELETE",
@@ -681,6 +695,233 @@ fn same_origin_library_survives_restart() {
     assert_eq!(
         app.json("GET", "/api/state", None, 200)["models"],
         json!([])
+    );
+}
+
+#[test]
+fn legacy_model_records_keep_their_identity_and_report_unknown_availability() {
+    let mut app = Fixture::new();
+    let state = app.path("state");
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    let db = rusqlite::Connection::open(state.join("controller.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE models(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+         INSERT INTO models VALUES
+         ('legacy-a','{\"id\":\"legacy-a\",\"name\":\"Manual\",\"host\":\"alpha\",\"path\":\"/models/a.gguf\",\"kind\":\"gguf\"}'),
+         ('legacy-b','{\"id\":\"legacy-b\",\"name\":\"Old host\",\"host\":\"gone\",\"path\":\"/models/b\",\"kind\":\"hf\"}');",
+    )
+    .unwrap();
+    drop(db);
+    app.launch();
+    let state = app.json("GET", "/api/state", None, 200);
+    let models = state["models"].as_array().unwrap();
+    assert_eq!(models.len(), 2);
+    for (model, (id, name, host, path, kind)) in models.iter().zip([
+        ("legacy-a", "Manual", "alpha", "/models/a.gguf", "gguf"),
+        ("legacy-b", "Old host", "gone", "/models/b", "hf"),
+    ]) {
+        assert_eq!(model["id"], id);
+        assert_eq!(model["name"], name);
+        assert_eq!(model["host"], host);
+        assert_eq!(model["path"], path);
+        assert_eq!(model["kind"], kind);
+        let expected = if host == "gone" {
+            json!(false)
+        } else {
+            Value::Null
+        };
+        assert_eq!(model.get("available"), Some(&expected));
+        if host == "gone" {
+            assert_eq!(
+                model["reason"],
+                "The owning worker is not configured or is disabled."
+            );
+        } else {
+            assert!(model["reason"].as_str().is_some_and(|s| !s.is_empty()));
+        }
+        for missing in ["sha256", "bytes", "job_id"] {
+            assert!(model.get(missing).is_none());
+        }
+    }
+}
+
+#[test]
+fn library_checks_models_asynchronously_and_caches_worker_replies() {
+    let mut app = Fixture::new();
+    app.touch("model-stat-fixture");
+    app.launch();
+    let paths = [
+        ("alpha", "/models/slow.gguf"),
+        ("alpha", "/models/current.gguf"),
+        ("beta", "/models/missing.gguf"),
+        ("beta", "/outside/outside.gguf"),
+        ("beta", "/models/unknown.gguf"),
+    ];
+    for (host, path) in paths {
+        app.register(host, "gguf", path);
+    }
+    let start = Instant::now();
+    let first = app.json("GET", "/api/state", None, 200);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "snapshot waited for worker"
+    );
+    assert!(first["models"][0]["available"].is_null());
+    let state = wait_for(|| {
+        let state = app.json("GET", "/api/state", None, 200);
+        (state["models"][0]["reason"] == "The controller could not check this path on the worker."
+            && state["models"][4]["reason"] == "Worker does not report file state. Update the worker."
+            && state["models"][1]["available"] == true
+            && state["models"][2]["available"] == false
+            && state["models"][3]["available"] == false)
+            .then_some(state)
+    });
+    let models = state["models"].as_array().unwrap();
+    assert!(models[0]["available"].is_null());
+    assert_eq!(models[1]["bytes"], 7);
+    assert!(models[1].get("sha256").is_none());
+    assert_eq!(
+        models[2]["reason"],
+        "The model path does not exist on the worker."
+    );
+    assert_eq!(
+        models[3]["reason"],
+        "The worker does not allow access to this path."
+    );
+    assert!(models[4]["available"].is_null());
+    for _ in 0..3 {
+        app.json("GET", "/api/state", None, 200);
+    }
+    let calls = fs::read_to_string(app.path("model-stat-calls")).unwrap();
+    for (_, path) in paths {
+        assert_eq!(
+            calls.lines().filter(|line| *line == path).count(),
+            1,
+            "{calls}"
+        );
+    }
+    assert_eq!(state["event_cursor"], first["event_cursor"]);
+    assert_eq!(state["jobs"], json!([]));
+}
+
+#[test]
+fn saved_prompt_put_replaces_fields_without_changing_id() {
+    let mut app = Fixture::new();
+    app.launch();
+    let saved = app.json(
+        "POST",
+        "/api/prompts",
+        Some(json!({"name":"Old name","text":"Old text"})),
+        201,
+    );
+    let path = format!("/api/prompts/{}", id(&saved));
+    let change = json!({"name":"New name","text":"New text\n"});
+    for (request, status) in [
+        (json!({"name":"","text":"Valid text"}), 400),
+        (json!({"name":"Valid name","text":""}), 400),
+        (json!({"name":"Valid name"}), 422),
+    ] {
+        app.json("PUT", &path, Some(request), status);
+    }
+    assert_eq!(
+        app.request(
+            "PUT",
+            &path,
+            Some(change.clone()),
+            "Sec-Fetch-Site: cross-site\r\n"
+        )
+        .0,
+        403
+    );
+    app.json("PUT", &path, None, 415);
+    let before = app.json("GET", "/api/state", None, 200);
+    assert_eq!(before["prompts"], json!([saved]));
+    let updated = app.json("PUT", &path, Some(change.clone()), 200);
+    assert_eq!(
+        updated,
+        json!({"id":id(&saved),"name":"New name","text":"New text\n"})
+    );
+    let updated_state = app.json("GET", "/api/state", None, 200);
+    assert_eq!(
+        updated_state["event_cursor"],
+        before["event_cursor"].as_i64().unwrap() + 1
+    );
+    assert_eq!(app.json("PUT", &path, Some(change.clone()), 200), updated);
+    assert_eq!(app.json("GET", "/api/state", None, 200), updated_state);
+    app.stop();
+    app.launch();
+    assert_eq!(
+        app.json("GET", "/api/state", None, 200)["prompts"],
+        json!([updated])
+    );
+    app.json("PUT", "/api/prompts/missing", Some(change), 404);
+}
+
+#[test]
+fn saved_prompt_delete_refuses_active_jobs_and_preserves_history() {
+    let mut app = Fixture::new();
+    app.launch();
+    let saved = app.json(
+        "POST",
+        "/api/prompts",
+        Some(json!({"name":"Test","text":"Keep this text in job history."})),
+        201,
+    );
+    let other = app.json(
+        "POST",
+        "/api/prompts",
+        Some(json!({"name":"Queued","text":"Text for the queued job."})),
+        201,
+    );
+    let path = format!("/api/prompts/{}", id(&saved));
+    let a = app.register("alpha", "gguf", "/models/a.gguf");
+    let b = app.register("beta", "gguf", "/models/b.gguf");
+    app.touch("hold");
+    let submit = |prompt: &Value| {
+        app.enqueue(json!({"kind":"compare","input_ids":[a,b],"prompt_id":id(prompt)}))
+    };
+    let running = submit(&saved);
+    app.await_job(&running, |job| job["progress"] == "worker progress");
+    let queued = submit(&other);
+    assert_eq!(app.detail(&queued)["state"], "queued");
+    let blocked = |path: &str, job: &str| {
+        assert_eq!(
+            app.json("DELETE", path, None, 409)["error"],
+            format!("Job {job} uses this prompt.")
+        );
+    };
+    blocked(&path, &running);
+    let other_path = format!("/api/prompts/{}", id(&other));
+    blocked(&other_path, &queued);
+    assert_eq!(app.request("DELETE", &path, None, "Origin: null\r\n").0, 403);
+    app.remove("hold");
+    let completed = app.await_job(&running, |job| job["state"] == "succeeded");
+    app.await_job(&queued, |job| job["state"] == "succeeded");
+    app.json("DELETE", &other_path, None, 204);
+
+    app.touch("hold");
+    let active = submit(&saved);
+    app.await_job(&active, |job| job["progress"] == "worker progress");
+    app.touch("offline");
+    let cancelling = app.cancel(&active);
+    assert_eq!(cancelling["state"], "running");
+    assert_eq!(cancelling["cancel_requested"], true);
+    blocked(&path, &active);
+    app.remove("offline");
+    app.await_job(&active, |job| job["state"] == "cancelled");
+    let cursor = app.json("GET", "/api/state", None, 200)["event_cursor"]
+        .as_i64()
+        .unwrap();
+    app.json("DELETE", &path, None, 204);
+    app.json("DELETE", &path, None, 404);
+    let state = app.json("GET", "/api/state", None, 200);
+    assert_eq!(state["prompts"], json!([]));
+    assert_eq!(state["event_cursor"], cursor + 1);
+    assert_eq!(app.detail(&running), completed);
+    assert_eq!(
+        completed["result"]["envelope"]["prompt"],
+        "Keep this text in job history."
     );
 }
 

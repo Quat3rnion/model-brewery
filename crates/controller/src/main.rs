@@ -12,6 +12,7 @@ mod hf_tokens;
 mod idempotency;
 mod infra_hosts;
 mod local_edit;
+mod model_availability;
 mod profiles;
 mod remote_edit;
 mod settings;
@@ -48,6 +49,7 @@ struct App {
     ssh_hosts: Arc<infra_hosts::Registry>,
     remote_edit: Arc<remote_edit::Installer>,
     suggestions: suggestions::PathSuggestions,
+    model_availability: Arc<model_availability::ModelAvailability>,
     feed_subscribers: Arc<tokio::sync::Semaphore>,
 }
 
@@ -149,6 +151,7 @@ async fn main() -> Result<(), Error> {
         ssh_hosts,
         remote_edit,
         suggestions: suggestions::PathSuggestions::new(dispatcher.command.clone()),
+        model_availability: Arc::new(model_availability::ModelAvailability::new(&dispatcher)),
         feed_subscribers: Arc::new(tokio::sync::Semaphore::new(feed::SUBSCRIBERS)),
     });
     let listener = TcpListener::bind(listen).await?;
