@@ -42,6 +42,7 @@ export function buildConvertJob(step: ConvertStep, f: ConvertForm, models: Model
   const problems: string[] = [];
   const src = models.find((m) => m.id === f.source);
   if (!src) problems.push('Select a source checkpoint.');
+  else if (src.available === false) problems.push(src.reason ?? 'Select an available source checkpoint.');
   else if (!CONVERT_SOURCE_KINDS.has(src.kind)) problems.push('The source must be a checkpoint, GGUF or HGN entry.');
 
   const input_ids = f.source ? [f.source] : [];
@@ -50,6 +51,7 @@ export function buildConvertJob(step: ConvertStep, f: ConvertForm, models: Model
   if (step === 'verify') {
     const bundle = models.find((m) => m.id === f.bundle);
     if (!bundle) problems.push('Select the bundle to verify.');
+    else if (bundle.available === false) problems.push('Select an available bundle to verify.');
     else if (!VERIFY_OUTPUT_KINDS.has(bundle.kind)) problems.push('The output must be registered as kind hgn.');
     else if (bundle.id === f.source) problems.push('Select a bundle that is not the source.');
     if (f.bundle) input_ids.push(f.bundle);
@@ -59,6 +61,10 @@ export function buildConvertJob(step: ConvertStep, f: ConvertForm, models: Model
     for (const k of EXTRA_INPUT_KINDS) {
       const id = f.extras[k];
       if (!id) continue;
+      if (!models.some(model => model.id === id && model.kind === k && model.available !== false)) {
+        problems.push(`The ${k} input ${id} is not available. Select another entry.`);
+        continue;
+      }
       if (input_ids.includes(id)) {
         problems.push(`The ${k} input repeats another input.`);
         continue;

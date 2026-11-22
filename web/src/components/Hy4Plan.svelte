@@ -1,7 +1,7 @@
 <script lang="ts">
   import { brewery } from '../lib/store.svelte';
-  import { newKey } from '../lib/conversion';
-  import { api, errorText } from '../lib/api';
+  import { api, submissionError } from '../lib/api';
+  import { RetryKeys } from '../lib/retry-keys';
   import type { NewJob } from '../lib/types';
   import type { RetrySubmission } from '../lib/retry-prefill.svelte';
   import JobLink from './JobLink.svelte';
@@ -16,7 +16,7 @@
   const capability = $derived(encode ? 'hy4_encode' : 'hy4_plan');
   const tensor = $derived(encode ? 'blk.1.attn_gate.weight' : 'blk.1.ffn_down_exps.weight');
   $effect(() => {
-    if (retry) open = true;
+    if (retry?.history) open = true;
   });
   const source = $derived(brewery.state?.models.find(m => m.id === sourceId));
   const host = $derived(brewery.state?.hosts.find(h => h.id === source?.host));
@@ -27,25 +27,23 @@
     : host?.capabilities?.[capability] !== true ? `Select a copy on a worker that supports this Hy4 ${action}. ${host?.reasons?.[capability] ?? ''}` : '');
   let busy = $state(false);
   let outcome = $state<{ source: string; error?: string; id?: string } | null>(null);
-  let lastBody = '', key = '';
+  const keys = new RetryKeys(undefined, true);
 
   async function queue() {
-    if (loading || busy || problem || !source) return;
+    if (loading || retry?.blocked || busy || problem || !source) return;
     const id = source.id;
     const body: NewJob = { kind: encode ? 'convert' : 'plan', host: source.host, input_ids: [id], options: { hy4_overrides: { [tensor]: 'Q8_0' } } };
-    const json = JSON.stringify(body);
-    const attempt = retry?.submission(`hy4:${body.kind}`, body);
-    if (!attempt && lastBody !== json) { key = newKey(); lastBody = json; }
+    const attempt = keys.take(body, retry?.history);
     busy = true;
     outcome = null;
     try {
-      const job = await api.submitJob(body, attempt?.key ?? key);
+      const job = await api.submitJob(body, attempt.key);
       if (typeof job?.id !== 'string' || !job.id) throw new Error('The controller did not return a job ID.');
-      attempt?.accept();
+      attempt.accept();
       outcome = { source: id, id: job.id };
       void brewery.refresh();
     } catch (e) {
-      outcome = { source: id, error: errorText(e) };
+      outcome = { source: id, error: submissionError(e) };
     } finally {
       busy = false;
     }
@@ -65,7 +63,7 @@
       <p class="small">Expected file size: <strong>224,927,386,624 bytes</strong>, including the <abbr title="Tables that store values for sequences of tokens">Engram</abbr> tables. The region that stays in memory grows by 603,979,776 bytes in the plan. These are layout sizes, not measured memory use.</p>
       <p class="xs muted">Reads metadata only. Does not read or verify weight payloads, write a GGUF file, or test runtime support or quality.</p>
     {/if}
-    <Submit blockers={problem ? [problem] : []} {busy} disabled={loading} onclick={queue}>Queue Hy4 {action}</Submit>
+    <Submit blockers={problem ? [problem] : []} {busy} disabled={loading || retry?.blocked} onclick={queue}>Queue Hy4 {action}</Submit>
     <div aria-live="polite">
       {#if outcome?.source === sourceId && outcome.error}
         <p class="note bad" role="alert">{outcome.error} Retry with the same source to reuse this request.</p>

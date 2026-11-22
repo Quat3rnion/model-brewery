@@ -221,6 +221,8 @@ for (const missing of ['deleted', 'unavailable']) {
     })), 'Convert');
     await expect(page.getByText(/Previous importance matrix matrix was not restored/)).toBeVisible();
     noQueue(c);
+    await expect(page.getByRole('button', { name: 'Start GGUF conversion' })).toBeDisabled();
+    await page.getByRole('button', { name: 'Acknowledge omitted matrix' }).click();
     await page.getByRole('button', { name: 'Start GGUF conversion' }).click();
     await expect.poll(() => c.requests('POST', '/api/conversions').map(r => r.body.input_ids)).toEqual([[source]]);
   });

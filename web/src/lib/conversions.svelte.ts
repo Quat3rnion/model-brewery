@@ -75,15 +75,13 @@ export class ConversionStarter {
   #inner = new ConversionSubmitter((body, key) => api.startConversion(body, key));
 
   async start(body: ConversionBody, retry?: RetrySubmission): Promise<Conversion | null> {
-    if (this.busy) return null;
+    if (this.busy || retry?.blocked) return null;
     this.busy = true;
     this.error = null;
-    const attempt = retry?.submission('conversion', body);
-    const c = await this.#inner.submit(body, attempt?.key);
+    const c = await this.#inner.submit(body, retry);
     this.busy = false;
     this.error = this.#inner.error;
     if (c) {
-      attempt?.accept();
       this.replayed = this.last?.id === c.id;
       this.last = c;
       conversions.upsert(c);

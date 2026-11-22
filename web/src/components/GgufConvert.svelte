@@ -24,11 +24,13 @@
   import ComponentPicker from './ComponentPicker.svelte';
   import Blockers from './Blockers.svelte';
   import Submit from './Submit.svelte';
-  import type { RetrySubmission } from '../lib/retry-prefill.svelte';
+  import RetryWarnings from './RetryWarnings.svelte';
+  import type { RetryOmission, RetrySubmission } from '../lib/retry-prefill.svelte';
 
-  let { catalog, source = $bindable(''), draft = $bindable(), retry, omittedImatrix, loading }: {
+  let { catalog, source = $bindable(''), draft = $bindable(), retry, omissions, acknowledge, acknowledged, previousMatrix, loading }: {
     catalog: GgufCatalog; source?: string; draft: GgufDraft;
-    retry?: RetrySubmission; omittedImatrix?: string; loading: boolean;
+    retry: RetrySubmission; omissions: readonly RetryOmission[]; acknowledge: () => void; acknowledged: boolean;
+    previousMatrix?: string; loading: boolean;
   } = $props();
   const hosts = $derived(brewery.state?.hosts ?? []);
   const models = $derived(brewery.state?.models ?? []);
@@ -45,12 +47,16 @@
   const standalone = $derived(src?.kind==='safetensors');
   const assetChoices = $derived(models.filter(m=>m.kind==='assets' && m.host===src?.host && m.available!==false));
   const sameHostMatrix = $derived(models.filter(m=>m.kind===IMATRIX_KIND && m.host===src?.host && m.available!==false));
+  $effect(() => {
+    if (!brewery.state) return;
+    if (draft.imatrix && !sameHostMatrix.some(m => m.id === draft.imatrix)) draft.imatrix = '';
+    if (draft.assets && !assetChoices.some(m => m.id === draft.assets)) draft.assets = '';
+  });
   function selectSource(id: string) {
     if (id === source) return;
     source = id;
     draft.assets = '';
     draft.imatrix = '';
-    acknowledged = omittedImatrix ?? '';
   }
   const rev = $derived(draft.choice.startsWith('rev:') ? profileStore.ggufSaved.find((p) => p.revision === draft.choice.slice(4)) : undefined);
   const preset = $derived(draft.choice.startsWith('preset:') ? draft.choice.slice(7) : '');
@@ -90,11 +96,9 @@
   });
   const starter = new ConversionStarter();
   async function start() {
-    if (loading || !built.body || starter.busy || blockers.length) return;
+    if (loading || retry.blocked || !built.body || starter.busy || blockers.length) return;
     await starter.start(built.body as unknown as ConversionBody, retry);
   }
-  let acknowledged = $state('');
-  $effect(() => { void omittedImatrix; acknowledged = ''; });
 </script>
 
 <div class="stack">
@@ -138,17 +142,12 @@
     <p class="xs muted">The weights alone do not identify a complete model. The exporter checks the weights, config, tokenizer and architecture; worker support does not guarantee that this model can be exported.</p>
   {:else if src}<ComponentPicker source={src} idPrefix="gg-comp" gguf />{/if}
   {#if src?.kind==='hf' || standalone}<p class="xs muted">The GGUF exporter does not support the Flash-Next layout. For a Flash-Next HF checkpoint, choose Managed HGN instead.</p>{/if}
-  {#if omittedImatrix && acknowledged !== omittedImatrix}
-    <div class="note warn">
-      <p role="status">Previous importance matrix {omittedImatrix} was not restored. It was not available on the source host.</p>
-      {#if !needsImatrix}
-        <button type="button" class="btn" onclick={() => { acknowledged = omittedImatrix ?? ''; document.getElementById('gg-choice')?.focus(); }}>Acknowledge omitted matrix</button>
-      {/if}
-    </div>
-  {/if}
+  <RetryWarnings items={omissions} {acknowledged} label="Acknowledge omitted matrix" acknowledge={needsImatrix ? undefined : () => {
+    acknowledge(); document.getElementById('gg-choice')?.focus();
+  }} />
   <div class="grid-2">
-    {#if needsImatrix || draft.imatrix || (omittedImatrix && sameHostMatrix.length)}
-      <ModelSelect bind:value={() => draft.imatrix, (value) => { draft.imatrix = value; acknowledged = omittedImatrix ?? ''; }} kinds={[IMATRIX_KIND]} exclude={models.filter(m=>!sameHostMatrix.some(x=>x.id===m.id)).map(m=>m.id)} label="Importance matrix (imatrix)" optional={!needsImatrix} hint="Register a matching importance matrix on the source host." id="gg-imatrix" />
+    {#if needsImatrix || draft.imatrix || (previousMatrix && sameHostMatrix.length)}
+      <ModelSelect bind:value={draft.imatrix} kinds={[IMATRIX_KIND]} exclude={models.filter(m=>!sameHostMatrix.some(x=>x.id===m.id)).map(m=>m.id)} label="Importance matrix (imatrix)" optional={!needsImatrix} hint="Register a matching importance matrix on the source host." id="gg-imatrix" />
   {/if}
     <div class="field">
       <label for="gg-threads">Threads <span class="muted">(optional)</span></label>
@@ -157,7 +156,7 @@
     </div>
   </div>
   <p class="xs muted">The output is a single .gguf file on the worker, registered in the Library when the workflow finishes. The workflow runs inspect, plan, convert and verify like an HGN conversion.</p>
-  <Submit {blockers} busy={starter.busy} disabled={loading} onclick={start}>Start GGUF conversion</Submit>
+  <Submit {blockers} busy={starter.busy} disabled={loading || retry.blocked} onclick={start}>Start GGUF conversion</Submit>
   <div aria-live="polite" class="xs">
     {#if starter.error}<p class="note bad" role="alert">{starter.error} Pressing Start again retries the same request.</p>
     {:else if starter.last}<p class="muted">{starter.replayed ? 'This request already started conversion' : 'Started conversion'} <a href={conversionRunHref(starter.last.id, 'gguf')}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : ''}</p>{/if}

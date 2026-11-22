@@ -6,8 +6,9 @@
   import { fieldError, visibleBlockers, type Blocker } from '../lib/blockers';
   import { hostWorkflowEligibility } from '../lib/eligibility';
   import { unsavedChanges } from '../lib/unsaved-changes.svelte';
-  import { loadRetryJob, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
+  import { availableId, historicalPrompt, loadRetryJob, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
   import RetryOffer from '../components/RetryOffer.svelte';
+  import RetryWarnings from '../components/RetryWarnings.svelte';
   import HostSelect from '../components/HostSelect.svelte';
   import Combobox from '../components/Combobox.svelte';
   import { idOptions, promptOptions } from '../lib/pickers';
@@ -91,7 +92,7 @@
   async function generate() {
     const text = gMode === 'text' ? gText : undefined;
     const job = await gen.submit({ kind: 'generate', host: gHost || undefined, input_ids: [gBundle], prompt_id: gMode === 'saved' ? gPromptId : undefined, prompt: text,
-      options: gMaxTokens === undefined ? undefined : { max_tokens: gMaxTokens } }, retry.submission);
+      options: gMaxTokens === undefined ? undefined : { max_tokens: gMaxTokens } }, retry.action('generate'));
     if (job && text !== undefined) submittedText = text;
   }
 
@@ -106,10 +107,8 @@
   const ev = new Submitter();
   const eHostBlockers = $derived(hostBlockers('evaluate', eWorker));
   const usableBundle = $derived(bundles.some((b) => b.id === eBundle && b.available !== false));
-  const missingPreviousBundle = $derived.by(() => eBundle && eBundle === retry.context && !usableBundle
-    ? `Previous bundle ${eBundle} is not available. Select another bundle.` : '');
   const eFields = $derived<Blocker[]>([
-    ...(!usableBundle ? [{ field: 'e-bundle', text: missingPreviousBundle || 'Select an available bundle.' }] : []),
+    ...(!usableBundle ? [{ field: 'e-bundle', text: 'Select an available bundle.' }] : []),
     ...(eBaseMode === 'file' && !models.some((m) => m.id === eBaseFile && refResults.includes(m.kind) && m.available !== false) ?
       [{ field: 'e-file', text: eBaseFile ? `Reference file ${eBaseFile} is not available. Select another file.` : 'Select reference results.' }] : []),
     ...(eBaseMode === 'source' && !eSources.some((s) => s.id === eSource) ? [{ field: 'e-src', text: 'Select a reference endpoint.' }] : []),
@@ -125,7 +124,8 @@
   const base = new Submitter();
   const bHostBlockers = $derived(hostBlockers('baseline', bWorker));
   const bFields = $derived<Blocker[]>([
-    ...(bMode === 'file' && !bFile ? [{ field: 'b-file', text: 'Select reference results or predictions.' }] : []),
+    ...(bMode === 'file' && !availableId(bFile, models.filter(m => refInputs.includes(m.kind))) ?
+      [{ field: 'b-file', text: 'Select available reference results or predictions.' }] : []),
     ...(bMode === 'source' && !bHost ? [{ field: 'b-host', text: 'Select a host.' }] : []),
     ...(bMode === 'source' && !bSources.some((s) => s.id === bSource) ? [{ field: 'b-src', text: 'Select a reference endpoint.' }] : []),
   ]);
@@ -136,26 +136,61 @@
     eBundle: '', eHost: '', eBaseFile: '', eSource: '', eBaseMode: 'none' as typeof eBaseMode,
     bHost: '', bFile: '', bSource: '', bMode: 'file' as typeof bMode,
   };
-  const retry = new RetryPrefill<typeof defaults, JobDetail, string>({
+  const retry = new RetryPrefill<typeof defaults, JobDetail>({
     slot: 'evaluate', defaults,
     read: () => ({ gBundle, gHost, gMode, gPromptId, gText, gMaxTokens, eBundle, eHost, eBaseFile, eSource, eBaseMode, bHost, bFile, bSource, bMode }),
     write: value => { ({ gBundle, gHost, gMode, gPromptId, gText, gMaxTokens, eBundle, eHost, eBaseFile, eSource, eBaseMode, bHost, bFile, bSource, bMode } = value); },
     load: loadRetryJob(['evaluate', 'baseline', 'generate']),
     restore: job => {
       const [first = '', second = ''] = job.input_ids;
-      const host = job.requested_host ?? job.host ?? '';
+      const priorHost = job.requested_host ?? job.host ?? '';
+      const host = availableId(priorHost, hosts);
       const endpoint = typeof job.options?.baseline_source === 'string' ? job.options.baseline_source : '';
+      const required = (id: string, resolved: string, what: string) => id && !resolved
+        ? [{ id: `${what}:${id}`, text: `Previous ${what} ${id} is not available. Select another ${what}.`, required: true }] : [];
       if (job.kind === 'generate') {
-        return { patch: { gBundle: first, gHost: host, gText: job.prompt_text ?? '', gPromptId: job.prompt_id ?? '',
-          gMode: job.prompt_text != null || !job.prompt_id ? 'text' : 'saved',
-          gMaxTokens: typeof job.options?.max_tokens === 'number' ? job.options.max_tokens : undefined }, focus: 'g-bundle' };
+        const prompt = historicalPrompt(job, prompts);
+        return { actions: ['generate'], patch: { gBundle: availableId(first, bundles), gHost: host,
+          gText: prompt.text, gPromptId: job.prompt_text == null ? prompt.id : '',
+          gMode: job.prompt_text != null ? 'text' : prompt.mode,
+          gMaxTokens: typeof job.options?.max_tokens === 'number' ? job.options.max_tokens : undefined }, focus: 'g-bundle',
+          omissions: draft => [
+            ...required(first, availableId(draft.gBundle, bundles), 'bundle'),
+            ...required(priorHost, availableId(draft.gHost, hosts) || host, 'host'),
+            ...(!job.prompt_text && draft.gMode === 'text' && !draft.gText.trim() ?
+              required(job.prompt_id ?? '', '', 'prompt') : []),
+          ],
+          retains: draft => !!(first && draft.gBundle === first),
+        };
       }
-      if (job.kind === 'evaluate') return {
-        patch: { eBundle: first, eHost: host, eBaseFile: second, eSource: endpoint, eBaseMode: endpoint ? 'source' : second ? 'file' : 'none' },
-        context: first, focus: 'e-bundle',
+      if (job.kind === 'evaluate') {
+        const eBundle = availableId(first, bundles);
+        const references = () => models.filter(m => refResults.includes(m.kind));
+        return {
+          actions: ['evaluate'], focus: 'e-bundle',
+          patch: { eBundle, eHost: host, eBaseFile: availableId(second, references()),
+            eSource: availableId(endpoint, sources(hostOf(eBundle, host))), eBaseMode: endpoint ? 'source' : second ? 'file' : 'none' },
+          omissions: draft => [
+            ...required(first, availableId(draft.eBundle, bundles), 'bundle'),
+            ...required(priorHost, availableId(draft.eHost, hosts) || (host ? host : ''), 'host'),
+            ...(draft.eBaseMode === 'file' ? required(second, availableId(draft.eBaseFile, references()), 'reference file') : []),
+            ...(draft.eBaseMode === 'source' ? required(endpoint, availableId(draft.eSource, sources(hostOf(draft.eBundle, draft.eHost))), 'reference endpoint') : []),
+            ...(draft.eBaseMode === 'none' && (endpoint || second) ?
+              [{ id: endpoint || second, text: `Previous reference input ${endpoint || second} will not be used.` }] : []),
+          ],
+          retains: draft => !!draft.eBundle && draft.eBundle === first,
+        };
+      }
+      const references = () => models.filter(m => refInputs.includes(m.kind));
+      return {
+        actions: ['baseline'], focus: endpoint ? 'b-host' : 'b-file',
+        patch: { bHost: host, bFile: availableId(first, references()), bSource: availableId(endpoint, sources(hostOf('', host))), bMode: endpoint ? 'source' : 'file' },
+        omissions: draft => [
+          ...(draft.bMode === 'file' ? required(first, availableId(draft.bFile, references()), 'reference file')
+            : required(endpoint, availableId(draft.bSource, sources(hostOf('', draft.bHost))), 'reference endpoint')),
+          ...required(priorHost, availableId(draft.bHost, hosts) || (host ? host : ''), 'host'),
+        ],
       };
-      return { patch: { bHost: host, bFile: first, bSource: endpoint, bMode: endpoint ? 'source' : 'file' },
-        focus: endpoint ? 'b-host' : 'b-file' };
     },
     applied: patch => { if (patch.gText !== undefined) submittedText = patch.gText; },
     clear: patch => {
@@ -165,7 +200,7 @@
       submittedText = '';
     },
   });
-  watchPrefill(retry);
+  watchPrefill(retry, () => !!brewery.state);
 </script>
 
 <div class="stack" oninputcapture={retry.touchField} onchangecapture={retry.touchField} onclickcapture={retry.touchField} onkeydowncapture={retry.touchField}>
@@ -176,6 +211,7 @@
     </p>
   </div>
   {#if retry.failed}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
+  {#if retry.loadingReason}<p class="hint" role="status">{retry.loadingReason}</p>{/if}
   {#if retry.offered && retry.pending?.kind !== 'generate'}<RetryOffer apply={retry.usePrevious} />{/if}
 
   <section class="panel" aria-labelledby="st-h">
@@ -222,7 +258,10 @@
     <WorkflowGate workflow="evaluate">
       <div class="body stack">
         <Blockers blockers={eHostBlockers} />
-        {#if missingPreviousBundle}<p class="note warn break" role="status">{missingPreviousBundle}</p>{/if}
+        <RetryWarnings items={retry.omissions('evaluate')} acknowledged={retry.acknowledged('evaluate')} acknowledge={() => {
+          retry.acknowledge('evaluate');
+          document.getElementById('e-bundle')?.focus();
+        }} />
         <ModelSelect id="e-bundle" bind:value={() => usableBundle ? eBundle : '', (value) => { eBundle = value; }} kinds={BUNDLE_KINDS} label="Bundle" error={error('e-bundle')} onblur={touch('e-bundle')} />
         <HostSelect bind:value={eHost} workflow="evaluate" kind="evaluate" label="Run on" optional optionalLabel="Host of the bundle" />
         <fieldset class="plain">
@@ -253,13 +292,13 @@
             </div>
           {/if}
         </fieldset>
-        {@render queue('Queue full GSM8K evaluation', eFields, eHostBlockers, ev, () =>
+        {@render queue('Queue full GSM8K evaluation', 'evaluate', eFields, eHostBlockers, ev, () =>
           ev.submit({
             kind: 'evaluate',
             host: eHost || undefined,
             input_ids: eBaseMode === 'file' ? [eBundle, eBaseFile] : [eBundle],
             options: eBaseMode === 'source' ? { baseline_source: eSource } : undefined,
-          }, retry.submission))}
+          }, retry.action('evaluate')))}
       </div>
     </WorkflowGate>
   </section>
@@ -269,6 +308,7 @@
     <WorkflowGate workflow="baseline">
       <div class="body stack">
         <Blockers blockers={bHostBlockers} />
+        <RetryWarnings items={retry.omissions('baseline')} />
         <p class="small muted">Import predictions from a reference model, or score a configured endpoint on the same questions.</p>
         <fieldset class="plain">
           <legend class="small muted">Reference input</legend>
@@ -295,11 +335,11 @@
             </div>
           {/if}
         </div>
-        {@render queue('Queue reference results', bFields, bHostBlockers, base, () => base.submit(
+        {@render queue('Queue reference results', 'baseline', bFields, bHostBlockers, base, () => base.submit(
           bMode === 'file'
             ? { kind: 'baseline', host: bHost || undefined, input_ids: [bFile] }
             : { kind: 'baseline', host: bHost, input_ids: [], options: { baseline_source: bSource } },
-          retry.submission,
+          retry.action('baseline'),
         ))}
       </div>
     </WorkflowGate>
@@ -311,6 +351,7 @@
     <WorkflowGate workflow="generate">
       <div class="body stack">
         <Blockers blockers={gHostBlockers} />
+        <RetryWarnings items={retry.omissions('generate')} />
         {#if retry.pending?.kind === 'generate'}<RetryOffer apply={retry.usePrevious} />{/if}
         <ModelSelect id="g-bundle" bind:value={gBundle} kinds={BUNDLE_KINDS} label="Bundle" error={error('g-bundle')} onblur={touch('g-bundle')} />
         <HostSelect bind:value={gHost} workflow="generate" kind="generate" label="Run on" optional optionalLabel="Host of the bundle" hint="Needs a worker with an approved Halogen runtime. The run records which files it opens." />
@@ -335,7 +376,7 @@
           {/if}
         </fieldset>
         {#if gMaxTokens !== undefined}<p class="hint">Maximum output tokens from previous request: {gMaxTokens}.</p>{/if}
-        {@render queue('Queue generation', gFields, gHostBlockers, gen, generate)}
+        {@render queue('Queue generation', 'generate', gFields, gHostBlockers, gen, generate)}
       </div>
     </WorkflowGate>
   </section>
@@ -343,9 +384,9 @@
   <RecentJobs kinds={['generate', 'evaluate', 'baseline']} title="Recent generation, evaluation and reference jobs" limit={8} />
 </div>
 
-{#snippet queue(label: string, fields: Blocker[], hosts: Blocker[], s: Submitter, submit: () => Promise<unknown>)}
+{#snippet queue(label: string, action: string, fields: Blocker[], hosts: Blocker[], s: Submitter, submit: () => Promise<unknown>)}
   <div>
-    <button type="button" class="btn primary" disabled={retry.loading || s.busy || fields.length > 0 || hosts.length > 0} aria-busy={s.busy} onclick={submit}>{s.busy ? 'Submitting…' : label}</button>
+    <button type="button" class="btn primary" disabled={retry.action(action).blocked || s.busy || fields.length > 0 || hosts.length > 0} aria-busy={s.busy} onclick={submit}>{s.busy ? 'Submitting…' : label}</button>
   </div>
   <SubmitStatus {s} />
 {/snippet}

@@ -434,12 +434,15 @@ enter an absolute path. The worker checks it when a job uses it.
    controller event log.
 
 **Run again** and the links that reopen a failed job in its form do not queue
-work. Review the inputs and any omissions before you submit. If you edited
-the form while the previous request loaded, select **Use previous inputs**
-to replace the draft. A plain form does not keep unchanged retry inputs.
-If the submission response is lost, submit the same inputs from the retry
-route in the same tab without reloading the page. The workbench reuses the
-request key.
+work. The form checks the previous inputs against the current Library and
+worker settings. If an input is missing, replace it or acknowledge the
+omission if the form permits it. An edited selection can still have omissions
+when you return to the plain form. If you edited the form while the previous
+request loaded, select **Use previous inputs** to replace the draft.
+
+If the submission response is lost, check **Jobs** first. To retry the
+submission, use the same inputs in the same tab without reloading. The
+workbench reuses the request key. Reloading loses this duplicate protection.
 
 ### Convert a model
 

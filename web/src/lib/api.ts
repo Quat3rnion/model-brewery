@@ -89,3 +89,10 @@ export function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
 }
+
+/** A network or server error does not tell us if the controller accepted the POST. */
+export function submissionError(error: unknown): string {
+  const text = errorText(error);
+  if (error instanceof ApiError && error.status >= 400 && error.status < 500) return text;
+  return `${text} Check Jobs, or retry with the same inputs without reloading. Reloading loses duplicate protection.`;
+}

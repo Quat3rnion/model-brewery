@@ -1,28 +1,30 @@
-import { api, errorText } from './api';
+import { api, submissionError } from './api';
 import { brewery } from './store.svelte';
 import type { JobSummary, NewJob } from './types';
-import type { RetrySubmission } from './retry-prefill.svelte';
+import { RetryKeys, type RetrySubmission } from './retry-keys';
 
 /** Tracks one form's job submission: busy flag, error text and the queued job. */
 export class Submitter {
   busy = $state(false);
   error = $state<string | null>(null);
   job = $state<JobSummary | null>(null);
+  #keys = new RetryKeys();
 
   async submit(job: NewJob, retry?: RetrySubmission): Promise<JobSummary | null> {
-    if (this.busy) return null;
+    if (this.busy || retry?.blocked) return null;
     this.busy = true;
     this.error = null;
     try {
       const body = stripEmpty(job);
-      const attempt = retry?.submission(job.kind, body);
-      const created = await api.submitJob(body, attempt?.key);
-      if (created?.id) attempt?.accept();
+      const attempt = this.#keys.take(body, retry?.history);
+      const created = await api.submitJob(body, attempt.key);
+      if (!created?.id) throw new Error('The controller did not return a job ID.');
+      attempt.accept();
       this.job = created;
       void brewery.refresh();
       return created;
     } catch (e) {
-      this.error = errorText(e);
+      this.error = submissionError(e);
       return null;
     } finally {
       this.busy = false;

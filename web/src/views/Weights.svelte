@@ -169,7 +169,7 @@
     const submitted = draft;
     const request = proposeJob(id, source.host, submitted);
     if (draftPin) request.options = { ...request.options, source_sha256: draftPin, ...(draftPacked ? { packed: true } : {}) };
-    const job = await proposeSub.submit(request);
+    const job = await proposeSub.submit(request, retry.action('weight_propose'));
     if (job && sourceId === id) {
       for (const edit of submitted) {
         const key = editKey(edit);
@@ -195,7 +195,7 @@
   ]);
   async function inspect() {
     if (!source || inspectBlockers.length || !inspectParsed.t.ok || !inspectParsed.i.ok) return;
-    await inspectSub.submit(inspectJob(source.id, source.host, inspectParsed.t.value, inspectParsed.i.value));
+    await inspectSub.submit(inspectJob(source.id, source.host, inspectParsed.t.value, inspectParsed.i.value), retry.action('weight_inspect'));
   }
   const lastInspect = $derived(newestFirst(jobsFor(jobs, sourceId, new Set(['weight_inspect'])))[0]);
   let inspectDetail = $state<JobDetail | null>(null);
@@ -247,7 +247,8 @@
   });
   async function tune() {
     if (!source || !tuneParsed.t.ok || !tuneParsed.c.ok || !tuneParsed.m.ok || tuneBlockers.length) return;
-    const job = await tuneSub.submit(tuneJob(source.id, source.host, calibrationId, heldOutId, tuneParsed.t.value, tuneParsed.c.value, tuneParsed.m.value));
+    const job = await tuneSub.submit(tuneJob(source.id, source.host, calibrationId, heldOutId, tuneParsed.t.value, tuneParsed.c.value, tuneParsed.m.value),
+      retry.action('weight_tune'));
     if (job) openReview(job.id);
   }
 
@@ -301,7 +302,7 @@
   async function applyNow() {
     if (!reviewed || !source || applyBlockers.length) return;
     // The controller requires the exact source of the proposal job.
-    await applySub.submit(applyJob(reviewed.input_ids[0], source.host, reviewed.id), retry.submission);
+    await applySub.submit(applyJob(reviewed.input_ids[0], source.host, reviewed.id), retry.action('weight_apply'));
   }
   let appliedDetail = $state<JobDetail | null>(null);
   $effect(() => {
@@ -335,11 +336,12 @@
     },
     restore: ({ job, proposal }) => {
       if (sourceId !== job.input_ids[0]) throw new Error('Source mismatch.');
-      return { patch: proposal ? { reviewId: proposal.id, confirmed: false } : {}, context: { job, proposal }, focus: 'w-source' };
+      return { actions: proposal ? ['weight_apply'] : [job.kind, `previous:${job.kind}`, `visual:${job.kind}`],
+        patch: proposal ? { reviewId: proposal.id, confirmed: false } : {}, context: { job, proposal }, focus: 'w-source' };
     },
     clear: () => { confirmed = false; },
   });
-  watchPrefill(retry);
+  watchPrefill(retry, () => !!brewery.state);
   const previous = $derived(retry.context && !retry.context.proposal ? retry.context.job : undefined);
   const previousBlockers = $derived.by(() => {
     if (!previous || !source) return ['Select an available source entry.'];
@@ -364,7 +366,7 @@
   async function queuePrevious() {
     if (!previous || !source || previousBlockers.length || retrySub.busy) return;
     const { kind, input_ids, options } = previous;
-    const queued = await retrySub.submit({ kind, host: source.host, input_ids, options }, retry.submission);
+    const queued = await retrySub.submit({ kind, host: source.host, input_ids, options }, retry.action(`previous:${kind}`));
     if (queued) location.hash = `#/jobs/${encodeURIComponent(queued.id)}`;
   }
 
@@ -432,6 +434,7 @@
   </section>
 
   {#if retry.failed}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
+  {#if retry.loadingReason}<p class="hint" role="status">{retry.loadingReason}</p>{/if}
   {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
   {#if previous}
     <section class="panel" aria-labelledby="w-previous-h">
@@ -593,7 +596,7 @@
           <FieldError id="w-tune-c-e" error={fieldError(visibleTune, 'coordinates')} />
         </div>
         {#if tuneSub.error}<p class="note bad" role="alert">{tuneSub.error}</p>{/if}
-        <Submit blockers={tuneBlockers} busy={tuneSub.busy} onclick={tune}>Tune selected weights</Submit>
+        <Submit blockers={tuneBlockers} busy={tuneSub.busy} disabled={retry.action('weight_tune').blocked} onclick={tune}>Tune selected weights</Submit>
       </div>
     {/if}
       </details>
@@ -633,7 +636,7 @@
               <p class="xs muted">No edits yet.{#if source.kind === 'gguf'} Add edits from the visual editor or text entry above.{/if}</p>
             {/if}
             {#if proposeSub.error}<p class="note bad" role="alert">{proposeSub.error}</p>{/if}
-            <Submit blockers={proposeBlockers} busy={proposeSub.busy} onclick={propose}>Create proposal</Submit>
+            <Submit blockers={proposeBlockers} busy={proposeSub.busy} disabled={retry.action('weight_propose').blocked} onclick={propose}>Create proposal</Submit>
           </section>
         {/if}
       {:else if source && access?.reason}
@@ -719,7 +722,7 @@
                     </label>
                   {/if}
                   {#if applySub.error}<p class="note bad" role="alert">{applySub.error}</p>{/if}
-                  <Submit blockers={applyBlockers} busy={applySub.busy} onclick={applyNow}>Apply as new {sourceFormat}</Submit>
+                  <Submit blockers={applyBlockers} busy={applySub.busy} disabled={retry.action('weight_apply').blocked} onclick={applyNow}>Apply as new {sourceFormat}</Submit>
                   <p class="xs muted">Apply registers a verified revision as a separate Library entry and keeps the original.</p>
                 {/if}
               </div>
@@ -743,7 +746,7 @@
         <label for="w-ins-i">Coordinate</label>
         <input id="w-ins-i" class="input mono coord" bind:value={inspectIndex} autocomplete="off" spellcheck="false" placeholder="0, 0" />
       </div>
-      <Submit variant="secondary" blockers={inspectBlockers} busy={inspectSub.busy} onclick={inspect}>Inspect</Submit>
+      <Submit variant="secondary" blockers={inspectBlockers} busy={inspectSub.busy} disabled={retry.action('weight_inspect').blocked} onclick={inspect}>Inspect</Submit>
     </div>
     {#if inspectSub.error}<p class="note bad" role="alert">{inspectSub.error}</p>{/if}
     <div aria-live="polite">

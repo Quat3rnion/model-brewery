@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { buildConversion, parseConversion, parseConversions, stageRows, isActiveConversion, ConversionSubmitter, STAGES } from './conversion';
+
+it('records a supplied retry key for the identical body after retry query removal', async () => {
+  const sent: string[] = [];
+  const s = new ConversionSubmitter(async (_body, key) => {
+    sent.push(key);
+    return { id: 'started', state: 'running' };
+  });
+  await s.submit({ input_ids: ['source'] }, 'retry-key');
+  await s.submit({ input_ids: ['source'] });
+  await s.submit({ input_ids: ['different'] });
+  expect(sent.slice(0, 2)).toEqual(['retry-key', 'retry-key']);
+  expect(sent[2]).not.toBe('retry-key');
+});
 import type { ConvertForm } from './convert';
 import type { Model } from './types';
 

@@ -36,8 +36,9 @@
   import Ids from '../components/calibration/Ids.svelte';
   import type { JobDetail, JobSummary } from '../lib/types';
   import { errorText } from '../lib/api';
-  import { loadRetryJob, omittedInputs, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
+  import { availableId, loadRetryJob, omittedInputs, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
   import RetryOffer from '../components/RetryOffer.svelte';
+  import RetryWarnings from '../components/RetryWarnings.svelte';
 
   const hosts = $derived(brewery.state?.hosts ?? []);
   const models = $derived(brewery.state?.models ?? []);
@@ -67,9 +68,6 @@
   const error = (field: string) => fieldError(visible, field);
   const setupLink = $derived(host && `#/settings/evaluation?host=${encodeURIComponent(host.id)}`);
   const run = new Submitter();
-  let acknowledged = $state('');
-  const unavailableSuites = $derived.by(() => omittedInputs(retry.context ?? [], picked));
-  const omissionKey = $derived(JSON.stringify(unavailableSuites));
   const retry = new RetryPrefill({
     slot: 'benchmarks', defaults: { hostId: '', target: '', picked: [] as string[] },
     read: () => ({ hostId, target, picked }),
@@ -77,16 +75,21 @@
     load: loadRetryJob(['benchmark']),
     restore: job => {
       const request = requestedOf(job);
-      const hostId = job.requested_host ?? job.host ?? '';
+      const hostId = availableId(job.requested_host ?? job.host, hosts);
       const choices = benchmarkChoices(hosts.find(h => h.id === hostId));
       const picked = request.benchmarks.filter(id => choices.suites.some(suite => suite.id === id));
       const target = choices.targets.find(t => t.id === request.benchmark_target)?.id ?? '';
-      return { patch: { hostId, target, picked }, context: request.benchmarks, focus: 'bm-host' };
+      return {
+        actions: ['benchmark'], patch: { hostId, target, picked }, focus: 'bm-host',
+        retains: draft => draft.picked.some(id => request.benchmarks.includes(id)),
+        omissions: draft => omittedInputs(request.benchmarks, draft.picked).map(id => ({ id,
+          text: `Suite ${id} ${benchmarkChoices(hosts.find(h => h.id === draft.hostId)).suites.some(s => s.id === id)
+            ? 'was not restored. Select it to include it.' : 'is not available on this host.'}` })),
+      };
     },
-    applied: () => { acknowledged = ''; },
-    clear: () => { acknowledged = ''; },
   });
   watchPrefill(retry, () => !!brewery.state);
+  const launch = $derived(retry.action('benchmark'));
 
   // ---- Scorecard selection ----
   const benchJobs = $derived(newestFirst(jobs.filter((j) => j.kind === 'benchmark')));
@@ -184,16 +187,11 @@
     <WorkflowGate workflow="benchmark">
     <div class="body stack" oninputcapture={retry.touchField} onchangecapture={retry.touchField} onclickcapture={retry.touchField} onkeydowncapture={retry.touchField}>
       {#if retry.failed}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
+      {#if retry.loadingReason}<p class="hint" role="status">{retry.loadingReason}</p>{/if}
       {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
-      {#if unavailableSuites.length && acknowledged !== omissionKey}
-        <div class="note warn" role="status">
-          <p>These suites from the previous request were not restored:</p>
-          <ul>{#each unavailableSuites as id (id)}
-            <li class="break">Suite {id} {offer.suites.some(s => s.id === id) ? 'was not restored. Select it to include it.' : 'is not available on this host.'}</li>
-          {/each}</ul>
-          <button type="button" class="btn" onclick={() => { acknowledged = omissionKey; document.getElementById('bm-host')?.focus(); }}>Acknowledge omitted suites</button>
-        </div>
-      {/if}
+      <RetryWarnings items={retry.omissions('benchmark')} label="Acknowledge omitted suites"
+        acknowledged={retry.acknowledged('benchmark')}
+        acknowledge={() => { retry.acknowledge('benchmark'); document.getElementById('bm-host')?.focus(); }} />
       <Blockers blockers={built.blockers.filter((b) => !b.field)} />
       <div class="grid-2">
         <HostSelect id="bm-host" bind:value={hostId} workflow="benchmark" kind="benchmark" label="Host" hint="The host runs the suites against the endpoint. No library input is used." error={error('host')} onblur={() => { touched.host = true; }} />
@@ -234,7 +232,7 @@
         <FieldError id="bm-suites-error" error={error('suites')} />
       </fieldset>
 
-      <div><button type="button" class="btn primary" disabled={retry.loading || !built.job || run.busy} aria-busy={run.busy} onclick={() => built.job && run.submit(built.job, retry.submission)}>{run.busy ? 'Submitting…' : 'Queue benchmark run'}</button></div>
+      <div><button type="button" class="btn primary" disabled={launch.blocked || !built.job || run.busy} aria-busy={run.busy} onclick={() => built.job && run.submit(built.job, launch)}>{run.busy ? 'Submitting…' : 'Queue benchmark run'}</button></div>
       <SubmitStatus s={run} />
     </div>
     </WorkflowGate>
