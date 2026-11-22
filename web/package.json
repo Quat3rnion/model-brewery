@@ -9,7 +9,8 @@
     "preview": "vite preview --port 5175",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
-    "test:flows": "playwright test"
+    "test:flows": "playwright test",
+    "test:browser": "for test in tests/*.browser.mjs; do echo \"$test\"; node \"$test\" || exit $?; done"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.14.0",

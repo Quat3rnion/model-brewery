@@ -36,18 +36,22 @@ try {
     }
   }
   await page.getByRole('heading', { name: 'Convert', exact: true }).waitFor();
+  const diagnostics = page.locator('summary').filter({ hasText: 'Individual steps (diagnostics)' });
+  const disclosure = diagnostics.locator('..').locator('summary').filter({ hasText: 'Hy4 metadata plan' });
+  await disclosure.waitFor({ state: 'hidden' });
   await capture('closed');
-  const disclosure = page.locator('summary').filter({ hasText: 'Hy4 metadata plan' });
-  await disclosure.focus();
+  await diagnostics.press('Enter');
   await disclosure.press('Enter');
-  const button = page.getByRole('button', { name: 'Queue Hy4 plan' });
+  const panel = disclosure.locator('..');
+  const source = panel.getByRole('combobox', { name: 'Hy4 source' });
+  assert.equal(await source.inputValue(), '');
+  const button = panel.getByRole('button', { name: 'Queue Hy4 plan' });
   assert(await button.isDisabled());
   for (const host of ['ordinary', 'planner']) {
-    await page.getByRole('combobox', { name: 'Hy4 source' }).click();
-    await page.getByRole('option', { name: new RegExp(`Checkpoint on ${host}`) }).click();
+    await source.click();
+    await panel.getByRole('option', { name: new RegExp(`Checkpoint on ${host}`) }).click();
     assert.equal(await button.isDisabled(), host === 'ordinary');
   }
-  const panel = page.locator('details').filter({ has: disclosure });
   for (const text of ['blk.1.ffn_down_exps.weight', 'Q8_0', '224,927,386,624', '/models/planner', 'b2498eba']) {
     assert((await panel.innerText()).includes(text), text);
   }

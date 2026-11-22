@@ -76,6 +76,8 @@ Keep wide data views inside local scroll areas. `web/src/components/weights/Heat
 
 From `web/`, run `npm ci`, `npx playwright install chromium`, and `npm run test:flows`. On Linux, use `npx playwright install --with-deps chromium` if the browser needs system packages. Use `npm run test:flows -- --project=390-dark` to run one project. The suite checks both themes at 1280 and 390 px.
 
+Run `npm run test:browser` from `web/` to run the standalone browser checks. CI runs these checks after the flow tests with the same Playwright Chromium.
+
 Import `test` and `expect` from `web/tests/flows/fixtures.mjs`. Each test gets a new local mock controller. The browser cannot reach the live controller. Call `controller.load('active-jobs')` to select a scenario, then `await controller.open(page, 'queue')` to open the Jobs view. The default is `live-shaped`, which uses only synthetic data. See `web/tests/flows/mock/scenarios.mjs` for the other scenarios.
 
 Use `controller.requests('POST', '/api/jobs')` to check the number of requests and their JSON bodies. Use `controller.respond('GET', '/api/state', { status: 503, json: { error: 'Unavailable' } })` to change one response. `load()` clears response overrides but keeps the request log. The mock does not run native tools or jobs.
