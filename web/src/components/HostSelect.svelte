@@ -3,7 +3,7 @@
   import { capability } from '../lib/format';
   import { hostOptions } from '../lib/pickers';
   import { hostWorkflowEligibility, type GgufEligibility } from '../lib/eligibility';
-  import type { Workflow } from '../lib/types';
+  import type { EligibilityEntry, Host, Workflow } from '../lib/types';
   import Combobox from './Combobox.svelte';
   import FieldError from './FieldError.svelte';
 
@@ -12,6 +12,7 @@
     kind,
     workflow,
     hideIneligible = false,
+    fallbackEligibility,
     gguf,
     label = 'Host',
     hint,
@@ -20,12 +21,13 @@
     id: givenId,
     error,
     onblur,
-  }: { value?: string; kind?: string; workflow?: Workflow; hideIneligible?: boolean; gguf?: GgufEligibility; label?: string; hint?: string; optional?: boolean; optionalLabel?: string; id?: string; error?: string; onblur?: () => void } = $props();
+  }: { value?: string; kind?: string; workflow?: Workflow; hideIneligible?: boolean; fallbackEligibility?: (host: Host) => EligibilityEntry; gguf?: GgufEligibility; label?: string; hint?: string; optional?: boolean; optionalLabel?: string; id?: string; error?: string; onblur?: () => void } = $props();
 
   const uid = $props.id();
   const id = $derived(givenId ?? `${uid}-host`);
   const hosts = $derived(brewery.state?.hosts ?? []);
-  const options = $derived(hostOptions(hosts, kind, workflow ? (h) => hostWorkflowEligibility(brewery.state?.eligibility, h.id, workflow, gguf) : undefined)
+  const options = $derived(hostOptions(hosts, kind, (h) =>
+    (workflow && hostWorkflowEligibility(brewery.state?.eligibility, h.id, workflow, gguf)) || fallbackEligibility?.(h))
     .filter((option) => !hideIneligible || !option.disabled));
   const selected = $derived(hosts.find((h) => h.id === value));
   const cap = $derived(!workflow && kind && selected ? capability(selected, kind) : null);

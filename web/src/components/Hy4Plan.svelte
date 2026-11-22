@@ -1,12 +1,13 @@
 <script lang="ts">
   import { brewery } from '../lib/store.svelte';
   import { newKey } from '../lib/conversion';
-  import { errorText } from '../lib/api';
+  import { api, errorText } from '../lib/api';
+  import type { NewJob } from '../lib/types';
   import JobLink from './JobLink.svelte';
   import ModelSelect from './ModelSelect.svelte';
   import Submit from './Submit.svelte';
 
-  let { sourceId = $bindable('') }: { sourceId?: string } = $props();
+  let sourceId = $state('');
   const source = $derived(brewery.state?.models.find(m => m.id === sourceId));
   const host = $derived(brewery.state?.hosts.find(h => h.id === source?.host));
   const problem = $derived(!source || source.kind !== 'hf' ? 'Select the registered HF directory for the pinned revision.'
@@ -20,15 +21,14 @@
   async function queue() {
     if (busy || problem || !source) return;
     const id = source.id;
-    const body = JSON.stringify({ kind: 'plan', host: source.host, input_ids: [id], options: { hy4_overrides: { [tensor]: 'Q8_0' } } });
-    if (lastBody !== body) { key = newKey(); lastBody = body; }
+    const body: NewJob = { kind: 'plan', host: source.host, input_ids: [id], options: { hy4_overrides: { [tensor]: 'Q8_0' } } };
+    const json = JSON.stringify(body);
+    if (lastBody !== json) { key = newKey(); lastBody = json; }
     busy = true;
     outcome = null;
     try {
-      const response = await fetch('/api/jobs', { method: 'POST', body,
-        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key } });
-      const job = await response.json();
-      if (!response.ok || typeof job?.id !== 'string' || !job.id) throw new Error(job?.error ?? `Cannot confirm plan submission (HTTP ${response.status}).`);
+      const job = await api.submitJob(body, key);
+      if (typeof job?.id !== 'string' || !job.id) throw new Error('The controller did not return a plan job ID.');
       outcome = { source: id, id: job.id };
       void brewery.refresh();
     } catch (e) {
@@ -46,7 +46,7 @@
     <ModelSelect bind:value={sourceId} kinds={['hf']} label="Hy4 source" hint="Choose the registered HF directory on its planner worker." />
     {#if source?.kind === 'hf'}<p class="xs muted">Source: <code>{source.path}</code> on <strong>{source.host}</strong>.</p>{/if}
     <p class="small">Fixed override: <code>{tensor}</code> from Q4_K to <strong>Q8_0</strong>. Other routed experts stay Q4_K.</p>
-    <p class="small">Expected file size: <strong>224,927,386,624 bytes</strong>, including the Engram tables. The planned resident region grows by 603,979,776 bytes. These are layout sizes, not measured memory use.</p>
+    <p class="small">Expected file size: <strong>224,927,386,624 bytes</strong>, including the <abbr title="Tables that store values for sequences of tokens">Engram</abbr> tables. The region that stays in memory grows by 603,979,776 bytes in the plan. These are layout sizes, not measured memory use.</p>
     <p class="xs muted">Reads metadata only. Does not read or verify weight payloads, write a GGUF file, or test runtime support or quality.</p>
     <Submit blockers={problem ? [problem] : []} {busy} onclick={queue}>Queue Hy4 plan</Submit>
     <div aria-live="polite">

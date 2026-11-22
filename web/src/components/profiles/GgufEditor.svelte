@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { unsavedChanges } from '../../lib/unsaved-changes.svelte';
   import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { api, errorText } from '../../lib/api';
@@ -161,8 +162,10 @@
   const nativeOverrides = $derived(Object.keys(overrides).some(n => nativeNames.has(n)));
   const startJson = $derived(start ? JSON.stringify([start.name, start.preset, start.overrides]) : JSON.stringify(['', catalog.presets[0]?.id ?? '', {}]));
   const dirty = $derived(JSON.stringify([name.trim(), preset, overrides]) !== startJson);
+  const guard = unsavedChanges(() => dirty);
 
   function edit(p: SavedGgufProfile) {
+    if (saving || !guard.confirm()) return;
     start = p;
     name = p.name;
     preset = p.preset;
@@ -201,9 +204,10 @@
     }
   }
   function useInConvert(p: SavedGgufProfile) {
-    if (!profileMatches(catalog,p)) return;
+    if (saving || !profileMatches(catalog,p) || !guard.confirm()) return;
+    reset();
     profileStore.pendingUse = `gguf:${p.revision}`;
-    location.hash = '#/convert';
+    location.hash = '#/convert?format=gguf';
   }
   const typeNote = (id: string) => (catalog.typeById.get(id)?.fork ? ' · ROCmFPX' : '') + (catalog.typeById.get(id)?.requiresImatrix ? ' (needs imatrix)' : '');
 </script>
@@ -228,7 +232,7 @@
               <td class="xs" data-label="Saved">{p.createdAt ? formatTime(p.createdAt) : '—'}</td>
               <td class="acts">
                 <button type="button" class="btn small" onclick={() => edit(p)} aria-label="Edit {p.name} as a new revision">Edit</button>
-                <button type="button" class="btn small primary" disabled={!profileMatches(catalog,p)} onclick={() => useInConvert(p)} aria-label="Use GGUF profile {p.name} in Convert">Use in Convert</button>
+                <button type="button" class="btn small primary" disabled={!profileMatches(catalog,p)} onclick={() => useInConvert(p)} aria-label="Use in Convert: {p.name} revision {shortRev(p.revision)}">Use in Convert</button>
                 {#if !profileMatches(catalog,p)}<span class="xs muted">Incompatible encoder revision</span>{/if}
               </td>
             </tr>
@@ -382,7 +386,6 @@
       <input id="{uid}-name" class="input" bind:value={name} maxlength="80" autocomplete="off" aria-describedby="{uid}-name-h" />
       <span class="hint" id="{uid}-name-h">Saving with the same name adds a new revision; the imatrix is chosen at conversion time.</span>
     </div>
-    <button type="button" class="btn primary" disabled={!built.body || saving || discovering || nativeOverrides || (!dirty && !!start)} onclick={save}>{saving ? 'Saving…' : 'Save GGUF revision'}</button>
   </div>
   {#if built.problems.length}<p class="why xs"><strong>Needed:</strong> {built.problems.join(' ')}</p>{/if}
   {#if nativeOverrides}<p class="why xs">Remove draft overrides for source names without a GGUF mapping to save this profile.</p>{/if}
@@ -390,9 +393,26 @@
     {#if saveErr}<p class="note bad" role="alert">{saveErr} Your changes are kept.</p>{/if}
     {#if saved}<div class="note info"><p>Saved <strong>{saved.name}</strong>, revision <span class="mono">{shortRev(saved.revision)}</span>.</p><button type="button" class="btn small primary" onclick={() => useInConvert(saved!)}>Use in Convert</button></div>{/if}
   </div>
+  <div class="save-bar">
+    {#if !name.trim()}<a href="#{uid}-name" onclick={(event) => { event.preventDefault(); document.getElementById(`${uid}-name`)?.focus(); }}>Enter a profile name</a>{/if}
+    <button type="button" class="btn primary" disabled={!built.body || saving || discovering || nativeOverrides || (!dirty && !!start)} onclick={save}>{saving ? 'Saving…' : 'Save revision'}</button>
+  </div>
 </div>
 
 <style>
+  .save-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--s-2);
+    padding: var(--s-2);
+    background: var(--surface-2);
+    border-radius: var(--r-md);
+  }
   .sum {
     display: flex;
     flex-wrap: wrap;

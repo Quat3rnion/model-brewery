@@ -64,6 +64,8 @@ Use semantic links, buttons, forms, labels, and fieldsets. Connect hints to cont
 - Call `const guard = unsavedChanges(() => dirty)` during setup. Use `if (!guard.confirm()) return` before a host switch or editor close. The guard also prompts before hash navigation or browser unload while the draft is dirty. Read `route.hash` for accepted deep links.
 - Use `focusAfterRemoval(() => { open = false; }, () => openButton)` when an action removes the focused control. Give the helper a function that finds the next control after the update. It does not move focus if the action leaves focus on another control.
 
+Convert uses the four-stage host decisions from `/api/state`. A complete managed HGN request also gets a debounced check at `POST /api/conversions/eligibility`. That check does not queue work. GGUF can run only on the host that holds the selected source. Convert and Profiles keep the selected format in the hash query.
+
 Pair status color with words and shapes. `web/src/components/Badge.svelte` gives each status a text label and a shape. Do not use color as the only state signal.
 
 At 760 px, the header stops being sticky and the section links wrap. Shared two- and three-column grids become one column. At 640 px, `stackable` tables use a block layout. Cells with `data-label` show their labels. Put wide tables in `.table-wrap`.

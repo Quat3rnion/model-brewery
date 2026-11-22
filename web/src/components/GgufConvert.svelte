@@ -4,14 +4,17 @@
   import { brewery } from '../lib/store.svelte';
   import { capability, hostName, modelLabel } from '../lib/format';
   import { profileStore } from '../lib/profiles.svelte';
+  import { conversionRunHref, STAGES, type ConversionBody } from '../lib/conversion';
+  import { hostWorkflowEligibility } from '../lib/eligibility';
+  import { type Blocker, blockerText } from '../lib/blockers';
+  import { validSha } from '../lib/ggufSource';
   import { conversions, ConversionStarter } from '../lib/conversions.svelte';
   import { buildGgufConversion, imatrixRequired, IMATRIX_KIND, forkSelected, profileMatches, FORK_NOTICE, type GgufCatalog } from '../lib/gguf';
   import { shortRev } from '../lib/profiles';
   import ModelSelect from './ModelSelect.svelte';
   import ComponentPicker from './ComponentPicker.svelte';
-  import HostSelect from './HostSelect.svelte';
+  import Blockers from './Blockers.svelte';
   import Submit from './Submit.svelte';
-  import type { ConversionBody } from '../lib/conversion';
 
   let { catalog, source=$bindable('') }: { catalog: GgufCatalog; source?:string } = $props();
   const hosts = $derived(brewery.state?.hosts ?? []);
@@ -20,7 +23,6 @@
   let choice = $state(''); // 'preset:<id>' | 'rev:<hex>'
   let imatrix = $state('');
   let assets = $state('');
-  let host = $state('');
   let threads = $state<number | null>(null);
 
   $effect(() => {
@@ -41,28 +43,34 @@
   const fork = $derived(forkSelected(catalog, rev?.preset ?? preset, rev?.overrides ?? {}));
   const needsImatrix = $derived(rev ? imatrixRequired(catalog, rev.preset, rev.overrides) : !!catalog.presets.find((p) => p.id === preset)?.requiresImatrix);
   const built = $derived(
-    buildGgufConversion(catalog, { source, sourceKind:src?.kind, assets, preset, revision: rev ? { revision: rev.revision, needsImatrix } : null, imatrix: needsImatrix ? imatrix : '', threads, host }),
+    buildGgufConversion(catalog, { source, sourceKind:src?.kind, assets, preset, revision: rev ? { revision: rev.revision, needsImatrix } : null, imatrix: needsImatrix ? imatrix : '', threads, host: src?.host ?? '' }),
   );
-  const target = $derived(hosts.find((h) => h.id === (host || src?.host)));
+  const target = $derived(hosts.find((h) => h.id === src?.host));
+  const hostBlockers = $derived.by((): Blocker[] => {
+    if (!src) return [];
+    const kind = src.kind;
+    const host = hostName(hosts, src.host);
+    if (!target) return [{ text: 'The controller did not report this host.', host }];
+    if (kind !== 'hf' && kind !== 'gguf' && kind !== 'safetensors') return [];
+    const decision = hostWorkflowEligibility(brewery.state?.eligibility, src.host, 'gguf_output', { kind, rocmfpx: fork });
+    if (decision) return decision.reasons.map((r) => ({ host, text: r.text, fixAnchor: r.fix_anchor }));
+    if (target.scheduling_paused) return [{ host, text: 'Resume job scheduling', fixAnchor: `#/settings/infrastructure?host=${encodeURIComponent(src.host)}&section=policy` }];
+    const required = ['gguf_output', ...STAGES, ...(fork ? ['gguf_rocmfpx_output'] : []), ...(kind === 'gguf' ? [] : [`gguf_${kind}_output`])];
+    return required.flatMap((key) => {
+      const cap = capability(target, key);
+      const reason = target.capability_reasons?.[key];
+      return cap.allowed ? [] : [{ host, text: reason?.text ?? cap.reason ?? 'GGUF output is not available.', fixAnchor: reason?.fix_anchor }];
+    });
+  });
   const blockers = $derived.by(() => {
     const out = [...built.problems];
     if (rev && !profileMatches(catalog,rev)) out.push('This profile does not match the current encoder catalog.');
-    if (fork && target?.capabilities?.gguf_rocmfpx_output!==true) out.push(target?.reasons?.gguf_rocmfpx_output ?? 'Choose a worker that reports ROCmFPX output support.');
     if (source && (!src || src.available===false || !['hf','gguf','safetensors'].includes(src.kind))) out.push('Choose an available HF checkpoint, standalone SafeTensors file or GGUF input.');
-    if (src && !target) out.push('The controller did not report a worker for this source.');
-    if (src && host && host!==src.host) out.push('Run on the host of the registered inputs.');
+    if (hostBlockers.length) out.push('Select a source on a host that can write GGUF.');
     if (standalone && assets && !assetChoices.some(m=>m.id===assets)) out.push('Choose available assets on the source host.');
     if (imatrix && needsImatrix && !sameHostMatrix.some(m=>m.id===imatrix)) out.push('Choose an available importance matrix on the source host.');
     if (choice.startsWith('rev:') && !rev) out.push('The chosen GGUF profile revision is no longer listed.');
-    if (target) {
-      const g = capability(target, 'gguf_output');
-      if (!g.allowed) out.push(g.reason ?? `${target.name ?? target.id} cannot write GGUF.`);
-      else if (standalone && !capability(target,'gguf_safetensors_output').allowed) out.push(target.reasons?.gguf_safetensors_output ?? `${target.name ?? target.id} does not report standalone SafeTensors to GGUF support.`);
-      else if (src?.kind === 'hf') {
-        const h = capability(target, 'gguf_hf_output');
-        if (!h.allowed) out.push(h.reason ?? `${target.name ?? target.id} cannot convert a Hugging Face checkpoint to GGUF.`);
-      }
-    }
+    if (conversions.status === 'unavailable') out.push('This controller does not provide managed conversions.');
     return out;
   });
   const starter = new ConversionStarter();
@@ -94,7 +102,13 @@
       </span>
     </div>
   </div>
-  {#if fork}<p class="note warn small">{FORK_NOTICE}</p>{/if}
+  {#if src && !validSha(src.sha256)}<p class="hint">Source checkpoint unverified.</p>{/if}
+  {#if fork}<p class="note warn small"><abbr title="GGUF encoder fork with ROCm support">ROCmFPX</abbr>: {FORK_NOTICE}</p>{/if}
+  <dl><dt>Run on</dt><dd>{src ? hostName(hosts, src.host) : 'Host of the source'}</dd></dl>
+  {#if hostBlockers.length}
+    <Blockers blockers={hostBlockers} />
+    <p class="hint">Register or copy the source to a host that can write GGUF. <a href="#/library">Open Library</a> or <a href="#/transfers">Open Transfers</a>.</p>
+  {/if}
   {#if standalone && src}
     <div class="field">
       <label for="gg-assets">Config and tokenizer assets (required)</label>
@@ -106,23 +120,27 @@
     </div>
     <p class="xs muted">The weights alone do not identify a complete model. The exporter checks the weights, config, tokenizer and architecture; worker support does not guarantee that this model can be exported.</p>
   {:else if src}<ComponentPicker source={src} idPrefix="gg-comp" gguf />{/if}
-  {#if src?.kind==='hf' || standalone}<p class="xs muted">The bounded GGUF exporter does not support the Flash-Next layout. For a Flash-Next HF checkpoint, choose HGN bundle output instead.</p>{/if}
+  {#if src?.kind==='hf' || standalone}<p class="xs muted">The GGUF exporter does not support the Flash-Next layout. For a Flash-Next HF checkpoint, choose Managed HGN instead.</p>{/if}
   <div class="grid-2">
     {#if needsImatrix}
       <ModelSelect bind:value={imatrix} kinds={[IMATRIX_KIND]} exclude={models.filter(m=>!sameHostMatrix.some(x=>x.id===m.id)).map(m=>m.id)} label="Importance matrix (imatrix)" hint="Register a matching importance matrix on the source host." id="gg-imatrix" />
     {/if}
-    <HostSelect bind:value={host} kind="gguf_output" label="Run on" optional optionalLabel="Host of the source" id="gg-host" />
     <div class="field">
       <label for="gg-threads">Threads <span class="muted">(optional)</span></label>
       <input id="gg-threads" class="input num" type="number" min="1" max="64" step="1" bind:value={threads} inputmode="numeric" />
+      <span class="hint">1 to 64.</span>
     </div>
   </div>
   <p class="xs muted">The output is a single .gguf file on the worker, registered in the Library when the workflow finishes. The workflow runs inspect, plan, convert and verify like an HGN conversion.</p>
   <Submit {blockers} busy={starter.busy} onclick={start}>Start GGUF conversion</Submit>
   <div aria-live="polite" class="xs">
     {#if starter.error}<p class="note bad" role="alert">{starter.error} Pressing Start again retries the same request.</p>
-    {:else if starter.last && starter.replayed}<p class="muted">This exact request already started conversion <span class="mono">{starter.last.id}</span>; nothing new was started.</p>
-    {:else if starter.last}<p class="muted">Started conversion <span class="mono">{starter.last.id}</span>. It is listed under Conversions.</p>{/if}
+    {:else if starter.last}<p class="muted">{starter.replayed ? 'This request already started conversion' : 'Started conversion'} <a href={conversionRunHref(starter.last.id, 'gguf')}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : ''}</p>{/if}
   </div>
-  {#if conversions.status === 'unavailable'}<p class="note warn">This controller has no conversion workflow.</p>{/if}
 </div>
+
+<style>
+  dl { margin: 0; }
+  dt { font-weight: 600; }
+  dd { margin: 0; }
+</style>

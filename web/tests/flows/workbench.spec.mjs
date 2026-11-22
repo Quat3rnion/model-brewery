@@ -260,7 +260,7 @@ test('Convert shows stage links and starts one managed conversion', async ({ pag
   const convert = page.getByRole('button', { name: 'Start conversion', exact: true });
   await expect(convert).toBeDisabled();
   await pick(page, 'Source checkpoint', /^Fixture checkpoint/);
-  await page.getByLabel('Output profile', { exact: true }).selectOption('v2');
+  await page.getByRole('region', { name: 'Convert a checkpoint' }).getByLabel('Profile', { exact: true }).selectOption('v2');
   await convert.click();
   await expect(page.getByText(/Started conversion conversion-mock-/)).toBeVisible();
   const requests = controller.requests('POST', '/api/conversions');
@@ -274,9 +274,9 @@ test('Profiles shows a saved HGN revision and carries it into Convert', async ({
   controller.load('saved-profiles');
   await controller.open(page, 'profiles');
   await expect(page.getByRole('rowheader', { name: 'Fixture HGN profile' })).toBeVisible();
-  await page.getByRole('button', { name: /Use Fixture HGN profile revision .* in Convert/ }).click();
+  await page.getByRole('button', { name: /Use in Convert: Fixture HGN profile revision/ }).click();
   await expect(page).toHaveURL(/#\/convert$/);
-  await expect(page.getByLabel('Output profile', { exact: true })).toHaveValue(`rev:${'a'.repeat(64)}`);
+  await expect(page.getByRole('region', { name: 'Convert a checkpoint' }).getByLabel('Profile', { exact: true })).toHaveValue(`rev:${'a'.repeat(64)}`);
 });
 
 test('Profiles keeps GGUF revisions separate from HGN revisions', async ({ page, controller }) => {
@@ -290,7 +290,7 @@ test('Profiles keeps GGUF revisions separate from HGN revisions', async ({ page,
 test('Convert reads recipe layers only on request and reuses the completed read', async ({ page, controller }) => {
   controller.load('weight-reads');
   await controller.open(page, 'convert');
-  await page.getByRole('checkbox', { name: 'Layer recipe' }).check();
+  await page.getByRole('radio', { name: 'Layer recipe' }).check();
   await expectNoNewJobs(page, controller);
   await page.locator('#recipe-source').click();
   await page.getByRole('option', { name: /^Fixture checkpoint/ }).click();
@@ -302,7 +302,7 @@ test('Convert reads recipe layers only on request and reuses the completed read'
   expect(jobsPosted(controller)).toEqual([inventoryRead('source-a')]);
 
   await page.reload();
-  await page.getByRole('checkbox', { name: 'Layer recipe' }).check();
+  await page.getByRole('radio', { name: 'Layer recipe' }).check();
   await page.locator('#recipe-source').click();
   await page.getByRole('option', { name: /^Fixture checkpoint/ }).click();
   await expect(page.getByLabel('Layer 0 type')).toBeVisible();
@@ -462,9 +462,6 @@ test('Settings readiness does not contradict live capabilities', async ({ page, 
 // Audit regressions for later tasks. Replace each placeholder with an assertion
 // of the corrected behavior; do not lock in the current broken behavior.
 for (const finding of [
-  'Convert requires every managed conversion stage, not just convert',
-  'GGUF conversion does not offer a destination it will later reject',
-  'Profiles warns before discarding unsaved editor changes',
   'Job detail clears a previous result when the id changes',
   'A missing job id stops polling after a 404',
   'Inspection results support inventory and tile modes',

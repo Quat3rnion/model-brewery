@@ -29,6 +29,11 @@ export interface ConversionBody {
 /** Form value prefix for a saved profile revision in the profile select. */
 export const REV_PREFIX = 'rev:';
 
+export function conversionRunHref(id: string, mode = 'hgn'): string {
+  const params = new URLSearchParams(mode === 'hgn' ? { run: id } : { format: mode, run: id });
+  return `#/convert?${params}`;
+}
+
 export interface Conversion {
   id: string;
   host: string | null;
@@ -52,11 +57,17 @@ export interface Conversion {
 /** The single POST body. Profile is required; host is explicit, 'auto', or omitted (source host). */
 export function buildConversion(f: ConvertForm, models: Model[]): { body: ConversionBody | null; problems: string[] } {
   const rev = f.profile.startsWith(REV_PREFIX) ? f.profile.slice(REV_PREFIX.length) : null;
+  const source = models.find((m) => m.id === f.source);
   // Reuse the converter step validation for inputs, extras and numeric options.
   const r = buildConvertJob('convert', rev !== null ? { ...f, profile: '' } : f, models);
   const problems = [...r.problems];
   if (!f.profile) problems.unshift('Choose the output profile.');
   if (rev !== null && !/^[0-9a-f]{64}$/.test(rev)) problems.unshift('The saved profile revision is not valid. Choose it again.');
+  if (source?.available === false) problems.push(source.reason ?? 'Select an available source checkpoint.');
+  if (rev !== null && ((source && source.kind !== 'hf') ||
+      [f.ht_backend, f.i4r_backend, f.q4cp_backend, f.decode_backend].some((backend) => backend && backend !== 'cpu'))) {
+    problems.push('Select an HF source and CPU backends to use a custom profile.');
+  }
   if (problems.length || !r.job) return { body: null, problems };
   const body: ConversionBody = { input_ids: r.job.input_ids, options: r.job.options };
   if (r.job.host) body.host = r.job.host;

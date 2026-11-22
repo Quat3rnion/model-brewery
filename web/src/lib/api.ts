@@ -63,7 +63,7 @@ export const api = {
   addPrompt: (prompt: NewPrompt) => request<Prompt>('POST', '/api/prompts', prompt),
   updatePrompt: (id: string, prompt: NewPrompt) => request<Prompt>('PUT', `/api/prompts/${encodeURIComponent(id)}`, prompt),
   deletePrompt: (id: string) => request<void>('DELETE', `/api/prompts/${encodeURIComponent(id)}`),
-  submitJob: (job: NewJob) => request<JobSummary>('POST', '/api/jobs', job),
+  submitJob: (job: NewJob, key?: string) => request<JobSummary>('POST', '/api/jobs', job, undefined, key ? { 'Idempotency-Key': key } : undefined),
   suggestPaths: (host: string, prefix: string, signal?: AbortSignal) => request<unknown>('POST', '/api/suggestions/paths', { host, prefix }, signal),
   // Durable conversion workflow (controller runs inspect → plan → convert → verify).
   conversionEligibility: (body: unknown, signal?: AbortSignal) => request<EligibilityEntry>('POST', '/api/conversions/eligibility', body, signal),
