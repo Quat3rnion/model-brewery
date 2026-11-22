@@ -1,5 +1,24 @@
 import { test, expect } from './fixtures.mjs';
 
+test('conversion eligibility checks the destination without starting work', async ({ request, controller }) => {
+  controller.load('gguf');
+  const origin = controller.origin;
+  const endpoint = `${origin}/api/conversions/eligibility`;
+  const body = { format: 'gguf', input_ids: ['gguf-a'], options: { preset: 'Q8_0' } };
+  const accepted = await request.post(endpoint, { data: { ...body, host: 'worker-a' } });
+  expect(accepted.ok()).toBe(true);
+  expect(await accepted.json()).toEqual({ eligible: true, reasons: [] });
+  const blocked = await request.post(endpoint, { data: { ...body, host: 'worker-b' } });
+  expect(blocked.ok()).toBe(true);
+  const result = await blocked.json();
+  expect(result.eligible).toBe(false);
+  expect(result.reasons[0].fix_anchor).toBe('#/settings/infrastructure?host=worker-b&section=policy');
+  const state = await (await request.get(`${origin}/api/state`)).json();
+  expect(state.eligibility.hosts['worker-b'].gguf_output_by_kind.gguf.reasons).toContainEqual(result.reasons[0]);
+  expect(state.jobs).toEqual([]);
+  expect(await (await request.get(`${origin}/api/conversions`)).json()).toEqual([]);
+});
+
 test('opens an empty Library', async ({ page, controller }) => {
   controller.load('empty');
   await controller.open(page, 'library');

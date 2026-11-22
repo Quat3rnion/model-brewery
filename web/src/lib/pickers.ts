@@ -2,15 +2,20 @@
 
 import { disambiguate, normalize, type ComboOption } from './combobox';
 import { basename, capability, hostName, kindLabel, modelLabel } from './format';
-import type { Host, Model } from './types';
+import type { EligibilityEntry, Host, Model } from './types';
 
-/** Hosts; with a job kind, capable hosts first and the controller reason as detail. */
-export function hostOptions(hosts: Host[], kind?: string): ComboOption[] {
+/** Show available hosts first and disable hosts rejected by workflow eligibility. */
+export function hostOptions(hosts: Host[], kind?: string, eligibility?: (host: Host) => EligibilityEntry | undefined): ComboOption[] {
   const rows = hosts.map((h, i) => {
-    const c = kind ? capability(h, kind) : { allowed: true, reason: null };
+    const entry = eligibility?.(h);
+    const c = entry
+      ? { allowed: entry.eligible, reason: entry.reasons.map((r) => r.text).join(' ') || 'This host cannot run this workflow.' }
+      : kind ? capability(h, kind) : { allowed: true, reason: null };
     const name = h.name ?? h.id;
     const detail = [name !== h.id ? h.id : '', c.allowed ? '' : `Unavailable: ${c.reason ?? ''}`].filter(Boolean).join(' · ');
-    return { o: { value: h.id, label: name, detail: detail || undefined, keywords: [h.id] } as ComboOption, ok: c.allowed, i };
+    const o: ComboOption = { value: h.id, label: name, detail: detail || undefined, keywords: [h.id] };
+    if (entry?.eligible === false) o.disabled = true;
+    return { o, ok: c.allowed, i };
   });
   rows.sort((a, b) => Number(b.ok) - Number(a.ok) || a.i - b.i);
   return disambiguate(rows.map((r) => r.o));

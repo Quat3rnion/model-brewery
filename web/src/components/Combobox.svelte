@@ -26,6 +26,7 @@
     loading = false,
     onpick,
     onfocus,
+    onblur: onleave,
     ontextinput,
   }: {
     value?: string;
@@ -51,6 +52,7 @@
     /** Called after a pick. Return true to keep the list open (directory completion). */
     onpick?: (o: ComboOption) => boolean | void;
     onfocus?: () => void;
+    onblur?: () => void;
     /** Free mode: called on every user edit with the new text. */
     ontextinput?: (text: string) => void;
   } = $props();
@@ -178,6 +180,7 @@
     const to = e.relatedTarget as Node | null;
     if (to && list?.contains(to)) return;
     commitTyped();
+    onleave?.();
   }
 </script>
 

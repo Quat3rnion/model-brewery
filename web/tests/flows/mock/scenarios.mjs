@@ -8,8 +8,58 @@ const kinds = [
   'baseline', 'benchmark', 'cache_cleanup', 'compare', 'convert', 'evaluate', 'exl3_layer',
   'generate', 'hf_download', 'inspect', 'plan', 'transfer', 'transfer_preview', 'verify',
   'weight_apply', 'weight_inspect', 'weight_propose', 'weight_tune', 'gguf_output',
+  'gguf_hf_output', 'gguf_safetensors_output', 'gguf_rocmfpx_output',
 ];
 const capabilities = (allowed) => Object.fromEntries(kinds.map((kind) => [kind, allowed.includes(kind)]));
+const stages = ['inspect', 'plan', 'convert', 'verify'];
+const simple = ['compare', 'generate', 'baseline', 'evaluate', 'benchmark', 'transfer', 'transfer_preview'];
+const conversions = ['managed_conversion', 'component_conversion', 'custom_profile_conversion',
+  'pool_conversion', 'pool_component_conversion', 'pool_custom_profile_conversion'];
+const sourceKinds = ['gguf', 'hf', 'safetensors'];
+const workflows = [...simple, ...conversions, 'gguf_output', 'register_manual'];
+const entry = (reasons) => ({ eligible: !reasons.length, reasons });
+
+function reason(host, text, evaluation = false) {
+  const hostParam = encodeURIComponent(host.id);
+  return {
+    text: `${text} Check Settings for ${host.name}.`,
+    fix_anchor: evaluation ? `#/settings/evaluation?host=${hostParam}` : `#/settings/infrastructure?host=${hostParam}&section=policy`,
+  };
+}
+
+function any(entries) {
+  if (entries.some((e) => e.eligible)) return entry([]);
+  const reasons = new Map(entries.flatMap((e) => e.reasons.map((r) => [`${r.text}\n${r.fix_anchor}`, r])));
+  return entry(reasons.size ? [...reasons.values()] : [{ text: 'Configure a host in Settings.', fix_anchor: '#/settings/infrastructure' }]);
+}
+
+function eligibility(hosts, allOff) {
+  const byHost = Object.fromEntries(hosts.map((host) => {
+    const needs = (...kinds) => kinds.filter((kind) => !host.capabilities[kind]).map((kind) => host.capability_reasons[kind]);
+    const ggufByKind = (extra) => Object.fromEntries(sourceKinds.map((kind) => [
+      kind, entry(needs('gguf_output', ...(kind === 'gguf' ? [] : [`gguf_${kind}_output`]), ...extra, ...stages)),
+    ]));
+    const gguf = ggufByKind([]);
+    return [host.id, {
+      ...Object.fromEntries(simple.map((kind) => [kind, entry(needs(kind))])),
+      ...Object.fromEntries(conversions.map((workflow) => {
+        const blockers = needs(...stages);
+        if (workflow.startsWith('pool_') && hosts.some((h) => h.quantization_pool) && !host.quantization_pool) {
+          blockers.push(reason(host, 'This host is not in the conversion pool.'));
+        }
+        return [workflow, entry(blockers)];
+      })),
+      gguf_output: any(Object.values(gguf)),
+      gguf_output_by_kind: gguf,
+      gguf_rocmfpx_by_kind: ggufByKind(['gguf_rocmfpx_output']),
+      register_manual: entry(allOff ? [reason(host, 'Manual registration is not available.')] : []),
+    }];
+  }));
+  return {
+    hosts: byHost,
+    global: Object.fromEntries(workflows.map((workflow) => [workflow, any(Object.values(byHost).map((host) => host[workflow]))])),
+  };
+}
 const target = { id: 'fixture-endpoint', label: 'Fixture endpoint' };
 const suite = { id: 'smoke', label: 'Endpoint smoke' };
 const workers = [
@@ -206,10 +256,45 @@ export function scenario(name, catalogSha) {
     case 'controller-down': data = { ...base, down: true }; break;
     default: throw new Error(`Unknown controller scenario: ${name}`);
   }
+  const hosts = data.hosts.map((host) => ({
+    ...host,
+    capability_reasons: Object.fromEntries(Object.entries(host.reasons).map(([kind, text]) => [
+      kind, reason(host, `${text}${name === 'capabilities-off' ? ` ${kind} is not configured.` : ''}`, ['evaluate', 'generate', 'baseline', 'benchmark'].includes(kind)),
+    ])),
+  }));
   return structuredClone({
     jobs: [], conversions: [], profiles: [], eventCursor: 10,
     settings: settings(data.hosts),
     capabilities: capabilities(kinds.filter((kind) => data.hosts.some((host) => host.capabilities[kind]))),
     ...data,
+    hosts,
+    eligibility: eligibility(hosts, name === 'capabilities-off'),
   });
+}
+
+// Model the destination checks needed by flow tests, not the full admission validator.
+export function conversionEligibility(data, body) {
+  const reject = (text) => entry([{ text, fix_anchor: '#/convert' }]);
+  if (!Array.isArray(body?.input_ids) || body.input_ids.length < 1 || body.input_ids.length > 5) {
+    return reject('Select a source and up to four auxiliary inputs.');
+  }
+  const inputs = body.input_ids.map((id) => data.models.find((model) => model.id === id));
+  if (inputs.some((input) => !input)) return reject('Unknown model ID.');
+  if (body.profile_revision && !data.profiles.some((profile) => profile.revision === body.profile_revision)) {
+    return reject('Unknown profile revision.');
+  }
+  const host = body.host ?? inputs[0].host;
+  const pooled = host === 'auto';
+  if (!pooled && !data.eligibility.hosts[host]) return reject('Unknown worker host.');
+  const hosts = pooled ? Object.values(data.eligibility.hosts) : [data.eligibility.hosts[host]];
+  const decisions = hosts.map((entry) => {
+    if (body.format === 'gguf') {
+      const byKind = body.options?.preset === 'Q8_0_ROCMFPX' ? entry.gguf_rocmfpx_by_kind : entry.gguf_output_by_kind;
+      return byKind[inputs[0].kind] ?? reject('Select a GGUF, HF or SafeTensors source.');
+    }
+    const workflow = body.profile_revision ? 'custom_profile_conversion' : inputs.length > 1 ? 'component_conversion' : 'managed_conversion';
+    return entry[pooled ? (workflow === 'managed_conversion' ? 'pool_conversion' : `pool_${workflow}`) : workflow];
+  });
+  const decision = any(decisions);
+  return entry(decision.reasons.slice(0, 1));
 }

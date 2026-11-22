@@ -3,6 +3,7 @@
   import { kindLabel } from '../lib/format';
   import { modelOptions } from '../lib/pickers';
   import Combobox from './Combobox.svelte';
+  import FieldError from './FieldError.svelte';
 
   let {
     value = $bindable(''),
@@ -13,7 +14,9 @@
     optional = false,
     optionalLabel = 'None',
     id: givenId,
-  }: { value?: string; kinds: ReadonlySet<string> | string[]; label: string; hint?: string; exclude?: string[]; optional?: boolean; optionalLabel?: string; id?: string } = $props();
+    error,
+    onblur,
+  }: { value?: string; kinds: ReadonlySet<string> | string[]; label: string; hint?: string; exclude?: string[]; optional?: boolean; optionalLabel?: string; id?: string; error?: string; onblur?: () => void } = $props();
 
   const uid = $props.id();
   const id = $derived(givenId ?? `${uid}-model`);
@@ -33,8 +36,11 @@
     disabled={options.length === 0 && !optional}
     placeholder={options.length ? (optional ? optionalLabel : 'Select or type a name, host or path') : 'No matching entries'}
     emptyText="No entry matches. Search by name, host, path or ID."
-    describedby="{id}-hint"
+    describedby={error ? `${id}-error` : hint || !options.length ? `${id}-hint` : undefined}
+    invalid={!!error}
+    {onblur}
   />
+  <FieldError id="{id}-error" {error} />
   {#if options.length === 0}
     <span class="hint" id="{id}-hint">No library entry of kind {kindNames}. Register one in Library.</span>
   {:else if hint}
