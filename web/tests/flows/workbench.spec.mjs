@@ -461,9 +461,3 @@ test('Settings readiness does not contradict live capabilities', async ({ page, 
 
 // Audit regressions for later tasks. Replace each placeholder with an assertion
 // of the corrected behavior; do not lock in the current broken behavior.
-for (const finding of [
-  'Settings warns before discarding unsaved evaluation or policy edits',
-  'Settings host selection also selects that infrastructure host',
-]) {
-  test.fixme(finding, async () => {});
-}

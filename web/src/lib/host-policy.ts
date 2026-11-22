@@ -1,12 +1,21 @@
 import { obj } from './reports';
 import { readDirectories, type Directories } from './model-directories';
+import type { Blocker } from './blockers';
 
 export const limits = {
   concurrency: 'Concurrent jobs',
   cpu_threads: 'CPU threads per job',
-  min_free_ram_bytes: 'Minimum free RAM (bytes)',
-  disk_reserve_bytes: 'Disk reserve (bytes)',
+  min_free_ram_bytes: 'Minimum free RAM',
+  disk_reserve_bytes: 'Disk reserve',
 };
+const gib = 1024 ** 3;
+export const resourceUnit = (key: string) => key.endsWith('_bytes') ? 'GiB' : '';
+export function resourceInput(key: string, value: number) {
+  const n = resourceUnit(key) ? value / gib : value;
+  // Keep tiny byte limits in plain decimal so the displayed value is valid input.
+  return n > 0 && n < 0.000001 ? n.toFixed(20).replace(/0+$/, '') : String(n);
+}
+export const resourceDisplay = (key: string, value: number) => `${resourceInput(key, value)}${resourceUnit(key) ? ' GiB' : ''}`;
 interface Credential { id:string; label:string }
 interface EditorSetup { status:string; model_directory:string|null; credentials:Credential[]; reason?:string; blocker?:string }
 function isCredential(value:unknown):value is Credential {
@@ -63,16 +72,27 @@ export function parseHostPolicies(value: unknown): HostPolicy[] | null {
   }
   return out;
 }
-export function resourceValues(h: HostPolicy, input: Record<string,string>): Record<string,number> | null {
-  if (!h.resourceEditable) return null;
-  const out: Record<string,number> = {};
-  for (const [key,text] of Object.entries(input)) {
-    if (!text.trim()) continue;
-    const range = h.resource_bounds[key], n = Number(text);
-    if (!range || !/^\d+$/.test(text) || !integer(n) || n < range.min || n > range.max) return null;
-    out[key] = n;
+export function validateResources(h: HostPolicy, input: Record<string,string>) {
+  const values: Record<string,number> = {};
+  const blockers: Blocker[] = [];
+  for (const [key, raw] of Object.entries(input)) {
+    const text = raw.trim();
+    if (!text) continue;
+    const range = h.resource_bounds[key];
+    const usesGiB = !!resourceUnit(key);
+    const number = usesGiB ? Math.round(Number(text) * gib) : Number(text);
+    const pattern = usesGiB ? /^(?:\d+(?:\.\d*)?|\.\d+)$/ : /^\d+$/;
+    if (!range || !pattern.test(text) || !integer(number) || number < range.min || number > range.max) {
+      const name = limits[key as keyof typeof limits] ?? key;
+      blockers.push({ field: key, text: range
+        ? `${name}: enter ${usesGiB ? 'a value' : 'a whole number'} from ${resourceDisplay(key, range.min)} to ${resourceDisplay(key, range.max)}, or leave it empty to inherit.`
+        : `${name}: the controller did not report a range.` });
+    } else values[key] = number;
   }
-  return out;
+  return { values: h.resourceEditable && !blockers.length ? values : null, blockers };
+}
+export function resourceValues(h: HostPolicy, input: Record<string,string>): Record<string,number> | null {
+  return validateResources(h, input).values;
 }
 export type PolicyAction =
   | {action:'setup_weight_editor'; worker:string; revision:number; model_directory:string; credential:string}
