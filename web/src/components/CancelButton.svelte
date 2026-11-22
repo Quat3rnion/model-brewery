@@ -1,13 +1,14 @@
 <script lang="ts">
   import { api, errorText } from '../lib/api';
   import { brewery } from '../lib/store.svelte';
+  import { isActive, isCancelling } from '../lib/format';
   import type { JobSummary } from '../lib/types';
 
   let { job, small = true }: { job: JobSummary; small?: boolean } = $props();
   let confirming = $state(false);
   let busy = $state(false);
   let error = $state<string | null>(null);
-  const can = $derived((job.state === 'queued' || job.state === 'running') && !job.cancel_requested);
+  const can = $derived(isActive(job.state) && !isCancelling(job));
 
   async function cancel() {
     busy = true;
@@ -34,8 +35,8 @@
     {/if}
     {#if error}<span class="xs err" role="alert">{error}</span>{/if}
   </span>
-{:else if job.cancel_requested && (job.state === 'queued' || job.state === 'running')}
-  <span class="xs muted">Cancel requested</span>
+{:else if isCancelling(job)}
+  <span class="xs muted">Waiting for the job to stop.</span>
 {/if}
 
 <style>

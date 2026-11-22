@@ -462,10 +462,6 @@ test('Settings readiness does not contradict live capabilities', async ({ page, 
 // Audit regressions for later tasks. Replace each placeholder with an assertion
 // of the corrected behavior; do not lock in the current broken behavior.
 for (const finding of [
-  'Job detail clears a previous result when the id changes',
-  'A missing job id stops polling after a 404',
-  'Inspection results support inventory and tile modes',
-  'Transfers keeps entry names readable at narrow widths',
   'Settings warns before discarding unsaved evaluation or policy edits',
   'Settings host selection also selects that infrastructure host',
 ]) {

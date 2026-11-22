@@ -18,7 +18,7 @@
 
 <div class="stack">
   {#if kind === 'weight_inspect'}
-    {#if inspected}
+    {#if inspected?.mode === 'value'}
       <dl class="kv small">
         <dt>Tensor</dt><dd class="mono break">{inspected.tensor}</dd>
         <dt>Coordinate</dt><dd class="mono num">{coord(inspected.index)}</dd>
@@ -27,8 +27,40 @@
         <dt>Stored value</dt><dd class="mono num">{exact(inspected.value)}</dd>
         {#if inspected.source_sha256}<dt>Source SHA-256</dt><dd class="mono" title={inspected.source_sha256}>{shortHash(inspected.source_sha256)}</dd>{/if}
       </dl>
-    {:else}
+    {:else if inspected?.mode === 'inventory'}
+      <p class="small muted">{inspected.tensors.length} of {inspected.total.toLocaleString()} tensors on this page. Use Weights to read another page or select a tensor.</p>
+      {#if inspected.tensors.length}
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard users must be able to scroll this table.) -->
+        <div class="table-wrap scroll" role="region" aria-label="Tensor inventory scroll area" tabindex="0">
+          <table class="data">
+            <caption class="sr-only">Tensor inventory</caption>
+            <thead><tr><th scope="col">Tensor</th><th scope="col">Shape</th><th scope="col">Stored type</th></tr></thead>
+            <tbody>
+              {#each inspected.tensors as tensor (tensor.order)}
+                <tr>
+                  <td class="mono xs break">{tensor.name}</td>
+                  <td class="mono xs num">{coord(tensor.shape)}</td>
+                  <td class="mono xs">{tensor.dtype}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+    {:else if inspected?.mode === 'tile'}
+      <dl class="kv small">
+        <dt>Tensor</dt><dd class="mono break">{inspected.tensor}</dd>
+        <dt>Origin</dt><dd class="mono num">{coord(inspected.origin)}</dd>
+        <dt>Tensor shape</dt><dd class="mono num">{coord(inspected.shape)}</dd>
+        <dt>Tile shape</dt><dd class="mono num">{coord(inspected.tile_shape)}</dd>
+        <dt>Stored type</dt><dd class="mono">{inspected.dtype}</dd>
+      </dl>
+      <p class="xs muted">The raw report lists the tile values in row order.</p>
+    {:else if job.state === 'succeeded'}
       <p class="note warn">The inspect result has an unknown shape.</p>
+    {/if}
+    {#if inspected && inspected.mode !== 'value' && job.input_ids[0]}
+      <p class="small"><a href="#/weights?source={encodeURIComponent(job.input_ids[0])}">Open source in Weights</a></p>
     {/if}
   {/if}
 

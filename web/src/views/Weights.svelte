@@ -201,7 +201,7 @@
       if (lastInspect?.id === id) inspectDetail = d;
     }, () => {});
   });
-  const inspected = $derived(inspectDetail ? readInspect(inspectDetail.result) : null);
+  const inspected = $derived(inspectDetail ? readInspect(inspectDetail.result, 'value') : null);
   function useInspected() {
     if (!inspected) return;
     const row = { key: nextKey(), tensor: inspected.tensor, index: inspected.index.join(', '), op: 'set' as Op, value: exact(inspected.value) };

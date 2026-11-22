@@ -5,9 +5,11 @@
   import { Submitter } from '../lib/submit.svelte';
   import { capability, formatBytes } from '../lib/format';
   import { fieldError, visibleBlockers, type Blocker } from '../lib/blockers';
-  import { hostWorkflowEligibility } from '../lib/eligibility';
+  import { globalJobEligibility, hostWorkflowEligibility } from '../lib/eligibility';
   import { unsavedChanges } from '../lib/unsaved-changes.svelte';
   import { focusAfterRemoval } from '../lib/focus';
+  import { hashParam, route } from '../lib/route.svelte';
+  import { readRetry } from '../lib/rerun';
   import WorkflowGate from '../components/WorkflowGate.svelte';
   import Blockers from '../components/Blockers.svelte';
   import FieldError from '../components/FieldError.svelte';
@@ -24,6 +26,7 @@
   const prompts = $derived(brewery.state?.prompts ?? []);
   const hosts = $derived(brewery.state?.hosts ?? []);
   const models = $derived(brewery.state?.models ?? []);
+  const setup = $derived(globalJobEligibility(brewery.state, 'compare'));
 
   let a = $state('');
   let b = $state('');
@@ -45,14 +48,53 @@
   const touched = $state<Record<string, boolean>>({});
   let attempted = $state(false);
   let lastSubmittedPrompt = $state('');
+  let retryMessage = $state('');
+  let retryLoading = $state(false);
   unsavedChanges(() => promptText !== '' && promptText !== lastSubmittedPrompt);
+
+  $effect(() => {
+    const hash = route.hash;
+    retryMessage = '';
+    if (!hashParam(hash, 'retry')) {
+      retryLoading = false;
+      return;
+    }
+    const controller = new AbortController();
+    retryLoading = true;
+    readRetry(hash, ['compare'], controller.signal).then((job) => {
+      if (!job || controller.signal.aborted) return;
+      const [first, second] = job.input_ids;
+      a = models.some((m) => m.id === first && m.kind === 'gguf') ? first : '';
+      b = models.some((m) => m.id === second && m.kind === 'gguf') ? second : '';
+      host = job.requested_host ?? job.host ?? '';
+      promptId = job.prompt_id ?? '';
+      promptText = job.prompt ?? '';
+      promptMode = promptId ? 'saved' : 'text';
+      // A restored prompt is not a new edit.
+      lastSubmittedPrompt = promptText;
+      const o = job.options;
+      n = typeof o?.n === 'number' ? o.n : 16;
+      threads = typeof o?.threads === 'number' ? o.threads : undefined;
+      think = o?.think === true;
+      raw = o?.raw === true;
+      gpuDevice = typeof o?.gpu_device === 'string' ? o.gpu_device : '';
+      gpuLayers = typeof o?.gpu_layers === 'number' ? o.gpu_layers : undefined;
+      useGpu = !!gpuDevice || gpuLayers !== undefined;
+      retryMessage = 'Review the previous job options before you queue a comparison.';
+    }).catch(() => {
+      if (!controller.signal.aborted) retryMessage = 'Could not open the previous job options. Enter the options again.';
+    }).finally(() => {
+      if (!controller.signal.aborted) retryLoading = false;
+    });
+    return () => controller.abort();
+  });
 
   const blockers = $derived.by((): Blocker[] => {
     const out: Blocker[] = [];
     if (!a) out.push({ field: 'model-a', text: 'Select model A.' });
     if (!b) out.push({ field: 'model-b', text: 'Select model B.' });
     else if (a === b) out.push({ field: 'model-b', text: 'Select a different model.' });
-    if (promptMode === 'saved' && !promptId) out.push({ field: 'saved', text: 'Select a saved prompt.' });
+    if (promptMode === 'saved' && !selectedPrompt) out.push({ field: 'saved', text: 'Select a saved prompt.' });
     if (promptMode === 'text' && !promptText.trim()) out.push({ field: 'text', text: 'Enter a prompt.' });
     if (n === undefined || !Number.isInteger(n) || n < 0 || n > 128) out.push({ field: 'n', text: 'Enter a whole number from 0 to 128.' });
     if (threads != null && (!Number.isInteger(threads) || threads < 1 || threads > 64)) out.push({ field: 'threads', text: 'Enter a whole number from 1 to 64.' });
@@ -102,7 +144,7 @@
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     attempted = true;
-    if (blockers.length || s.busy) return;
+    if (blockers.length || s.busy || retryLoading) return;
     const text = promptMode === 'text' ? promptText : undefined;
     const job = await s.submit({
       kind: 'compare',
@@ -133,8 +175,12 @@
 
   <section class="panel" aria-labelledby="cmp-h">
     <header><h2 id="cmp-h">New comparison</h2></header>
-    <WorkflowGate workflow="compare">
+    <WorkflowGate workflow="compare" decision={setup}>
     <form class="body stack" onsubmit={submit} novalidate>
+      {#if retryLoading || retryMessage}
+        <p class="small muted" role="status">{retryLoading ? 'Loading the previous job options.' : retryMessage}</p>
+      {/if}
+      <fieldset class="retry-fields" disabled={retryLoading}>
       <div class="grid-2">
         <ModelSelect bind:value={a} kinds={GGUF} label="Model A" exclude={b ? [b] : []} error={error('model-a')} onblur={touch('model-a')} />
         <ModelSelect bind:value={b} kinds={GGUF} label="Model B" exclude={a ? [a] : []} error={error('model-b')} onblur={touch('model-b')} />
@@ -202,10 +248,11 @@
       </Advanced>
 
       <div class="row">
-        <button type="submit" class="btn primary" disabled={s.busy} aria-busy={s.busy}>{s.busy ? 'Submitting…' : 'Queue comparison'}</button>
+        <button type="submit" class="btn primary" disabled={s.busy || retryLoading} aria-busy={s.busy}>{s.busy ? 'Submitting…' : 'Queue comparison'}</button>
       </div>
       <Blockers blockers={visible} />
       <SubmitStatus {s} />
+      </fieldset>
     </form>
     </WorkflowGate>
   </section>
@@ -243,6 +290,15 @@
 </div>
 
 <style>
+  .retry-fields {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-3);
+    margin: 0;
+    padding: 0;
+    border: 0;
+    min-width: 0;
+  }
   .rh {
     display: flex;
     flex-wrap: wrap;
