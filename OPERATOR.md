@@ -1638,6 +1638,11 @@ It does not accept arbitrary commands.
 
 Both sections use the same API request protections.
 Infrastructure has no second admin key.
+The HTTPS gateway does not ask for a login. Thus each client on an allowed
+LAN or tailnet network can use all Infrastructure actions. These include
+host policy, resource limits, catalog runtimes, editor directory grants,
+SSH host definitions and worker installation. This is an accepted risk.
+Allow only trusted client networks.
 The loopback listener has no login. For network access, use the HTTPS
 gateway and limit access to trusted client networks.
 
