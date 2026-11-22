@@ -208,8 +208,10 @@ class GatewayTest(unittest.TestCase):
             ("Origin", f"https://{self.host}"),
             ("Sec-Fetch-Site", "same-origin"),
             ("Content-Type", "application/json; charset=utf-8"),
+            ("Authorization", "Bearer client-supplied"),
             ("Proxy-Authorization", "Basic x"),
             ("Cookie", "credential=x"),
+            ("Cookie2", "credential=x"),
             ("Forwarded", "for=192.0.2.1"),
             ("X-Forwarded-For", "192.0.2.1"),
             ("X-Forwarded-Extra", "client-supplied"),
@@ -222,7 +224,7 @@ class GatewayTest(unittest.TestCase):
 
             self.assertEqual(headers["sec-fetch-site"], "same-origin")
             self.assertEqual(headers["content-type"], "application/json; charset=utf-8")
-            for name in ("authorization", "proxy-authorization", "cookie", "forwarded",
+            for name in ("authorization", "proxy-authorization", "cookie", "cookie2", "forwarded",
                          "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
                          "x-forwarded-extra", "x-real-ip"):
                 self.assertNotIn(name, headers)
