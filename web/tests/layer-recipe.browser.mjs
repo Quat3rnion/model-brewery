@@ -238,6 +238,8 @@ try {
   assert.deepEqual(await download(), recipe, 'only user edits resolve incompatible choices');
 
   await choose('Indexed weights');
+  await page.getByRole('button', { name: 'Read layers', exact: true }).click();
+  await page.getByRole('button', { name: 'Read next layers', exact: true }).click();
   await layer(9).selectOption('F16');
   assert.equal(await assetSelect.count(), 0, 'indexed sources provide their own assets');
   assert.ok(await runButton.isDisabled());

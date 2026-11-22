@@ -97,17 +97,22 @@ try {
   await page.goto(`${server.resolvedUrls.local[0]}#/profiles?format=gguf`);
   const source = page.getByRole('combobox', { name: 'Source model' });
   const output = (name) => page.getByRole('combobox', { name: `Output type for ${name}`, exact: true });
-  await output('blk.2.attn_q.weight').waitFor();
-  assert.deepEqual(reads, ['plan'], 'default model must not load other models’ receipts');
-  assert.deepEqual(submissions, [], 'an exact plan needs no job or profile write');
   async function choose(name) {
     await source.click();
     // Support the workbench's searchable model picker.
     await page.getByRole('option', { name: new RegExp(name) }).click();
   }
+  await source.waitFor();
+  assert.equal(await source.inputValue(), '', 'the editor does not select a source');
+  await choose('Planned HF');
+  await output('blk.2.attn_q.weight').waitFor();
+  assert.deepEqual(reads, ['plan'], 'the selected model must not load other models’ receipts');
+  assert.deepEqual(submissions, [], 'an exact plan needs no job or profile write');
   await Promise.all([page.waitForRequest((req) => req.url().endsWith('/api/jobs/other-plan')), choose('Slow HF')]);
   await choose('Unmapped HF');
   releaseSlow();
+  await page.getByRole('button', { name: 'Read tensor list', exact: true }).click();
+  await page.getByRole('button', { name: 'Read next tensors', exact: true }).click();
   await page.getByText(/129 .*source tensors/i).waitFor();
   const search = page.getByRole('searchbox', { name: 'Search tensors and overrides' });
   await search.fill('final_native_only');

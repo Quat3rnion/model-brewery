@@ -3,12 +3,13 @@
   import { api, errorText } from '../lib/api';
   import { STAGES, type ConversionBody } from '../lib/conversion';
   import { conversions, type ConversionStarter } from '../lib/conversions.svelte';
-  import { capability, modelLabel } from '../lib/format';
+  import { capability, hostName, isActive, modelLabel } from '../lib/format';
   import { inventoryBlocker, validSha } from '../lib/ggufSource';
   import { obj } from '../lib/reports';
   import { brewery } from '../lib/store.svelte';
   import type { JobDetail, JobSummary, Model } from '../lib/types';
   import { inventoryJob, readInventory, walkInventory } from '../lib/weightmap';
+  import JobState from './JobState.svelte';
   import Submit from './Submit.svelte';
   import { trellisProblem } from '../lib/trellis-layer';
 
@@ -29,8 +30,9 @@
   const jobs = $derived([
     ...currentJobs,
     ...(brewery.state?.jobs ?? []).filter(job => job.kind === 'weight_inspect' &&
-      job.host === source.host && job.input_ids[0] === source.id && job.state === 'succeeded' &&
-      job.has_result !== false && !currentJobs.some(current => current.id === job.id)),
+      job.host === source.host && job.input_ids[0] === source.id &&
+      (isActive(job.state) || (job.state === 'succeeded' && job.has_result !== false)) &&
+      !currentJobs.some(current => current.id === job.id)),
   ].filter(job => loaded.get(job.id) !== 'rejected'));
   const details = $derived(Object.fromEntries([...loaded].filter(([, detail]) => detail && detail !== 'rejected')) as Record<string, JobDetail>);
   const inventory = $derived(walkInventory(source, jobs, details, { format: source.kind, sha: expectedSha, matchHost: true }));
@@ -39,7 +41,10 @@
   const flash = $derived(source.kind === 'hf' &&
     (expectedSha === flashDigest || inventory.pages[0]?.source_sha256 === flashDigest));
 
-  $effect(() => {
+  const readPending = $derived(!!inventory.need && submitted.get(inventory.need.offset) === null);
+  const readJob = $derived(inventory.job ?? currentJobs.at(-1));
+
+  function readLayers() {
     const next = inventory.need;
     if (flash || blocked || error || !next || submitted.has(next.offset)) return;
     const { offset, sha } = next;
@@ -53,7 +58,7 @@
       submitted.set(offset, job);
       void brewery.refresh();
     }).catch(e => { error = errorText(e); });
-  });
+  }
 
   $effect(() => {
     const job = inventory.job;
@@ -133,7 +138,7 @@
     const out: string[] = [];
     if (setup) out.push(setup);
     if (conversions.status === 'unavailable') out.push('This controller has no managed conversion workflow.');
-    if (!recipe && !problem) out.push(!complete ? 'Wait for the source inventory.' : !layers.length
+    if (!recipe && !problem) out.push(!complete ? 'Read the source layers first.' : !layers.length
       ? 'Choose a source with recognized layer matrices.' : tooMany ? 'Use at most 256 layer overrides.' : 'Change the incompatible types.');
     if (problem) out.push('Resolve the source inventory problem above.');
     if (format === 'hgn' && recipe && !Object.values(recipe.layers).some(type => type === 'HT3' || type === 'HT4')) {
@@ -178,10 +183,24 @@
   {/if}
 {/snippet}
 
+{#if readJob && !flash}
+  <div class="row" role="status">
+    <a href="#/jobs/{encodeURIComponent(readJob.id)}">Layer read job</a>
+    <JobState job={readJob} />
+  </div>
+{/if}
 {#if problem}
   <p class="note bad" role="alert">{problem}</p>
+{:else if inventory.need}
+  <div class="row">
+    <button type="button" class="btn" onclick={readLayers} disabled={readPending}>
+      {inventory.pages.length ? 'Read next layers' : 'Read layers'}
+    </button>
+    <span class="hint">This queues a <code>weight_inspect</code> job on {hostName(brewery.state?.hosts ?? [], source.host)}.</span>
+  </div>
+  {#if readPending}<p class="hint" role="status">Submitting the layer read.</p>{/if}
 {:else if !complete}
-  <p class="muted small" role="status">Reading source SHA-256 and layers…</p>
+  <p class="muted small" role="status">Waiting for the source SHA-256 and layers.</p>
 {:else if !layers.length}
   <p class="note warn small">The source inventory does not list any recognized layer matrices.</p>
 {:else}

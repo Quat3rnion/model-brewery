@@ -59,30 +59,32 @@
     onproposal: (jobId: string) => void;
   } = $props();
 
-  const jobs = $derived(brewery.state?.jobs ?? []);
+  const stateJobs = $derived(brewery.state?.jobs ?? []);
+  let submitted = $state<JobSummary[]>([]);
+  const jobs = $derived([...stateJobs, ...submitted.filter(j => !stateJobs.some(row => row.id === j.id))]);
   const models = $derived(brewery.state?.models ?? []);
 
-  // Jobs the user chose to read again are ignored; requests sent from this page are not repeated.
+  // Ignore old reports only when the user asks the worker to read again.
   let ignored = $state<Set<string>>(new Set());
-  const requested = new Set<string>();
   const packedHost = $derived(!isSafeSource(source.kind) && brewery.state?.hosts.find(h => h.id === source.host)?.capabilities?.weight_packed === true);
   const usable = $derived(jobs.filter((j) => !ignored.has(j.id)));
+  const sourceHost = $derived(hostName(brewery.state?.hosts ?? [], source.host));
   const reads = new Submitter();
+  let readKey = $state('');
 
   function want(job: JobSummary | null): void {
     if (job?.state === 'succeeded' && !brewery.details[job.id]) void brewery.loadJob(job.id).catch(() => {});
   }
-  function request(options: Record<string, unknown>, build: () => ReturnType<typeof inventoryJob>) {
-    const k = JSON.stringify(options);
-    if (requested.has(k) || reads.busy) return;
-    requested.add(k);
-    void reads.submit(build());
+  async function read(job: ReturnType<typeof inventoryJob>) {
+    if (reads.busy) return;
+    readKey = JSON.stringify(job.options);
+    const created = await reads.submit(job);
+    if (created) submitted = [created, ...submitted];
   }
-  function readAgain(match: (o: Record<string, unknown>) => boolean) {
+  function ignoreReads(match: (job: JobSummary) => boolean) {
     const next = new Set(ignored);
-    for (const j of jobs) if (j.kind === 'weight_inspect' && j.input_ids[0] === source.id && match((j.options ?? {}) as Record<string, unknown>) && !isActive(j.state)) next.add(j.id);
+    for (const j of jobs) if (j.kind === 'weight_inspect' && j.input_ids[0] === source.id && !isActive(j.state) && match(j)) next.add(j.id);
     ignored = next;
-    requested.clear();
   }
 
   // ---- Inventory, page by page. ----
@@ -90,15 +92,20 @@
   const sha = $derived(inv.pages[0]?.source_sha256 ?? null);
   const total = $derived(inv.pages[0]?.total ?? 0);
   const tensors = $derived(inv.pages.flatMap((p) => p.tensors.map(t => isPacked(t.dtype) && (!packedHost || (source.kind === 'hgn') !== (t.dtype === 'Q8G64')) ? {...t, reason: t.reason ?? 'Packed editing is not enabled for this source and worker.'} : t)));
+  const inventoryRequest = $derived(inv.need ? inventoryJob(source.id, source.host, inv.need.offset, inv.need.sha, packedHost) : null);
+  const inventoryError = $derived(inv.error ?? (inventoryRequest && readKey === JSON.stringify(inventoryRequest.options) ? reads.error : null));
+  const lastInventoryRead = $derived(submitted.find(j => j.options?.mode === 'inventory' && !ignored.has(j.id)));
+  const inventoryJobFound = $derived(inv.job ?? jobs.find(j => j.id === lastInventoryRead?.id));
   $effect(() => {
-    if (!canVisual) return;
-    want(inv.job ?? null);
-    const need = inv.need;
-    if (need) {
-      const options = inventoryJob(source.id, source.host, need.offset, need.sha, packedHost).options!;
-      request(options, () => inventoryJob(source.id, source.host, need.offset, need.sha, packedHost));
-    }
+    if (canVisual) want(inv.job ?? null);
   });
+  function readInventoryPage() {
+    if (!canVisual || reads.busy || (inv.job && !inv.error)) return;
+    if (!inventoryRequest) {
+      ignoreReads(j => j.options?.mode === 'inventory');
+      void read(inventoryJob(source.id, source.host, 0, undefined, packedHost));
+    } else void read(inventoryRequest);
+  }
 
   // ---- Current tensor and tile. ----
   let tensorName = $state<string | null>(null);
@@ -137,7 +144,8 @@
   });
 
   const req = $derived(p ? tileRequest(p, { lead, tr, tc }) : null);
-  const tileOptions = $derived(tensor && req && sha ? tileJob(source.id, source.host, sha, tensor.name, req, !float).options! : null);
+  const tileRead = $derived(tensor && req && sha ? tileJob(source.id, source.host, sha, tensor.name, req, !float) : null);
+  const tileOptions = $derived(tileRead?.options);
   const tileJobFound = $derived(tileOptions ? findRead(usable, source.id, tileOptions) : null);
   const tile = $derived.by((): Tile | string | null => {
     if (!tensor || !req || !sha || !tileJobFound) return null;
@@ -147,12 +155,18 @@
     return d ? readTile(d.result, { tensor: tensor.name, origin: req.origin, shape: req.shape, sha, dtype: tensor.dtype, full: tensor.shape }) : null;
   });
   const tileOk = $derived(typeof tile === 'object' ? tile : null);
+  const tileError = $derived(typeof tile === 'string' ? tile : tileOptions && readKey === JSON.stringify(tileOptions) ? reads.error : null);
   const otherTileActive = $derived(jobs.some((j) => j.kind === 'weight_inspect' && j.input_ids[0] === source.id && (j.options as Record<string, unknown> | undefined)?.mode === 'tile' && isActive(j.state)));
   $effect(() => {
-    if (!canVisual || !tensor || !tileOptions || !sha || !req) return;
-    want(tileJobFound);
-    if (!tileJobFound && !otherTileActive) request(tileOptions, () => tileJob(source.id, source.host, sha, tensor.name, req, !float));
+    if (canVisual) want(tileJobFound);
   });
+  function readCurrentTile() {
+    const request = tileRead;
+    const options = request?.options;
+    if (!canVisual || !request || !options || reads.busy || otherTileActive || (tileJobFound && !tileError)) return;
+    if (tileJobFound) ignoreReads(j => !!findRead([j], source.id, options));
+    void read(request);
+  }
 
   // Stored values seen in loaded tiles, for edits across tiles.
   const levels = new SvelteMap<string, Neighbors>();
@@ -353,22 +367,32 @@
         <h3 class="h" id="vw-map-h">1. Tensor</h3>
         <div class="row xs muted">
           {#if sha}<span>Source <span class="mono" title={sha}>{shortHash(sha)}</span> · {tensors.length} of {total} tensors</span>{/if}
-          {#if inv.job}<JobState job={inv.job} />{/if}
-          <button type="button" class="btn ghost small" onclick={() => readAgain((o) => o.mode === 'inventory')} disabled={!!inv.job && isActive(inv.job.state)}>Read again</button>
         </div>
       </div>
+      {#if inventoryJobFound}
+        <div class="row" role="status">
+          <a href="#/jobs/{encodeURIComponent(inventoryJobFound.id)}">Tensor list read job</a>
+          <JobState job={inventoryJobFound} />
+        </div>
+      {/if}
+      {#if !inv.job || inv.error}
+        <div class="row">
+          <button type="button" class="btn small" onclick={readInventoryPage} disabled={reads.busy}>
+            {!inventoryRequest ? 'Read tensor list again' : inv.pages.length ? 'Read next tensors' : 'Read tensor list'}
+          </button>
+          <span class="hint">This queues a <code>weight_inspect</code> job on {sourceHost}.</span>
+        </div>
+      {/if}
       {#if source.sha256 && sha && source.sha256 !== sha}
         <p class="note warn small">The Library hash ({shortHash(source.sha256)}) differs from the file the worker read ({shortHash(sha)}). Edits use the file the worker read.</p>
       {/if}
-      {#if inv.error}
-        <p class="note bad" role="alert">{inv.error}</p>
-      {:else if reads.error && inv.need}
-        <p class="note bad" role="alert">{reads.error}</p>
-      {/if}
+      {#if inventoryError}<p class="note bad" role="alert">{inventoryError}</p>{/if}
       {#if tensors.length}
         <TensorMap {tensors} selected={tensorName} onopen={openTensor} />
-      {:else if !inv.error}
-        <p class="muted small" aria-live="polite">Reading the tensor list from {hostName(brewery.state?.hosts ?? [], source.host)}… The worker checks the registered file and returns its tensor inventory.</p>
+      {:else if inv.job && !inv.error}
+        <p class="muted small" role="status">Waiting for the tensor list.</p>
+      {:else if !inventoryRequest && !inventoryError}
+        <p class="muted small">No tensors were found.</p>
       {/if}
     </section>
 
@@ -426,17 +450,21 @@
           {/if}
         </div>
 
-        {#if typeof tile === 'string'}
-          <div class="note bad" role="alert">
-            {tile}
-            <button type="button" class="btn small" onclick={() => readAgain((o) => o.mode === 'tile' && o.tensor === tensor.name)}>Read again</button>
+        {#if tileJobFound}
+          <div class="row" role="status">
+            <a href="#/jobs/{encodeURIComponent(tileJobFound.id)}">Tile read job</a>
+            <JobState job={tileJobFound} />
           </div>
-        {:else if !tileOk}
-          <div class="loading" aria-live="polite">
-            {#if tileJobFound}<JobState job={tileJobFound} />{/if}
-            <span class="small muted">{otherTileActive && !tileJobFound ? 'Waiting for the previous tile read…' : 'Reading this tile from the worker…'} One job reads up to {p.rank === 1 ? '1,024' : '32 × 32'} stored values.</span>
+        {/if}
+        {#if tileError}<p class="note bad" role="alert">{tileError}</p>{/if}
+        {#if !tileJobFound || tileError}
+          <div class="row">
+            <button type="button" class="btn small" onclick={readCurrentTile} disabled={reads.busy || otherTileActive}>{tileError ? 'Read tile again' : 'Read tile'}</button>
+            <span class="hint">This queues a <code>weight_inspect</code> job on {sourceHost}.</span>
           </div>
-        {:else}
+          {#if otherTileActive}<p class="hint" role="status">Wait for the previous tile read to finish.</p>{/if}
+        {/if}
+        {#if tileOk}
           <div class="tile">
             <HeatGrid
               tile={tileOk}
@@ -666,15 +694,6 @@
   .ot.cur {
     outline: 2px solid var(--text);
     outline-offset: 1px;
-  }
-  .loading {
-    display: flex;
-    align-items: center;
-    gap: var(--s-2);
-    min-height: 120px;
-    padding: var(--s-4);
-    border: 1px dashed var(--line);
-    border-radius: var(--r-tile);
   }
   .tile {
     display: flex;

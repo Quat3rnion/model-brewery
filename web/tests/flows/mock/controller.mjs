@@ -1,7 +1,7 @@
 import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { catalog, ggufCatalog, conversion, detail, job, scenario } from './scenarios.mjs';
+import { catalog, ggufCatalog, conversion, detail, job, scenario, weightRead } from './scenarios.mjs';
 
 const hgnCatalog = JSON.parse(readFileSync(catalog, 'utf8'));
 const gguf = JSON.parse(readFileSync(ggufCatalog, 'utf8'));
@@ -56,7 +56,11 @@ export async function startController(assets) {
         return json(prompt, 201);
       }
       case 'POST /api/jobs': {
-        const entry = detail(job(id('job'), body.kind, body));
+        const jobId = id('job');
+        const model = data.models.find((m) => m.id === body.input_ids[0]);
+        const entry = data.finishWeightReads && body.kind === 'weight_inspect' && model
+          ? weightRead(jobId, body, model)
+          : detail(job(jobId, body.kind, body));
         data.jobs.push(entry);
         return json(summary(entry), 201);
       }
