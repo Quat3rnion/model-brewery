@@ -26,6 +26,9 @@ jobs:
       - run: npm run test:flows
         env:
           TMPDIR: ${{ runner.temp }}
+      - run: npm run test:browser
+        env:
+          TMPDIR: ${{ runner.temp }}
       - uses: actions/upload-artifact@v7
         if: failure()
         with:

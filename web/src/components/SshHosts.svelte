@@ -159,7 +159,7 @@
       {:else if !hosts.length}<p class="small muted">No SSH hosts defined.</p>{/if}
       {#each hosts as h (h.id)}
         <article class="stack">
-          <h4 class="break">{h.name}{#if h.name !== h.id} <span class="small muted">({h.id})</span>{/if}</h4>
+          <h4 class="break">{h.name}{#if h.name !== h.id}{' '}<span class="small muted">({h.id})</span>{/if}</h4>
           <div class="small break"><strong>{h.status}</strong> · {h.user}@{h.host} · port {h.port} · revision {h.revision}</div>
           <div class="xs mono break">{h.fingerprint}</div>
           {#if !editing}

@@ -16,7 +16,8 @@ try {
   page.on('pageerror', e=>errors.push(e.message));
   page.setDefaultTimeout(4000);
   const host = {id:'frame',name:'Frame',revision:4,paused:false,draining:false,installed_jobs:['plan'],
-    allowed_jobs:['plan'],disabled_jobs:[],weight_editor:{available:true,enabled:false,capabilities:{}}};
+    allowed_jobs:['plan'],disabled_jobs:[],model_directories:{available:true,configured:[],granted:[]},
+    weight_editor:{available:true,enabled:false,capabilities:{}}};
   const state = {workers:[],hosts:[host]};
   await page.route('**/api/**', async route=>{
     const path = new URL(route.request().url()).pathname;
@@ -47,6 +48,14 @@ try {
     assert.deepEqual(actions.shift(),{action:'set_weight_editor',worker:'frame',revision,enabled});
   }
   assert.deepEqual(actions,[]);
+  host.weight_editor={available:false,enabled:false,capabilities:{}};
+  await page.reload();
+  await panel.getByText('The controller did not report how to set up weight editing on this host.').waitFor();
+  assert.equal(await panel.getByRole('textbox').count(),0);
+  assert.equal(await panel.getByRole('button',{name:'Set up and enable editor'}).count(),0);
+  await page.getByRole('region',{name:'Model source directories'}).getByLabel('Add a directory').waitFor();
+  assert.equal(await page.getByLabel('Add a directory').count(),1);
+
   const credentials=[{id:'fallback',label:'Fallback account'},{id:'operator-ssh',label:'Verified SSH login · Frame'}];
   host.weight_editor={available:false,enabled:false,capabilities:{},setup:{status:'needs_setup',model_directory:null,credentials,reason:null}};
   await page.reload();
@@ -58,7 +67,7 @@ try {
   }
   await panel.getByLabel('SSH login for editor setup').selectOption({label:'Verified SSH login · Frame'});
   await panel.getByText('needs setup',{exact:true}).waitFor();
-  const directory=panel.getByLabel('Remote model directory');
+  const directory=panel.getByLabel('Editor model directory');
   await directory.fill('/models/HF');
   await panel.getByText(/install.*verify.*before enabling/i).waitFor();
   assert.deepEqual(actions,[]);
@@ -70,8 +79,8 @@ try {
   host.weight_editor.setup={status:'needs_setup',model_directory:null,credentials:[],reason};
   await page.reload();
   await panel.getByText(reason,{exact:true}).waitFor();
-  await directory.fill('/models/HF');
-  assert.ok(await panel.getByRole('button',{name:'Set up and enable editor'}).isDisabled());
+  assert.equal(await directory.count(),0);
+  assert.equal(await panel.getByRole('button',{name:'Set up and enable editor'}).count(),0);
   await panel.getByText(/Add SSH host.*Edit definition.*Test connection/).waitFor();
   await panel.getByText(/address and SSH port.*different host ID/i).waitFor();
   await panel.getByRole('button',{name:'Go to SSH hosts'}).press('Enter');
@@ -97,7 +106,8 @@ try {
   host.weight_editor.setup={status:'needs_setup',model_directory:'/models/HF',credentials,reason:runtimeReason,blocker:'runtime'};
   await page.reload();
   await panel.getByText(runtimeReason,{exact:true}).waitFor();
-  assert.ok(await panel.getByRole('button',{name:'Set up and enable editor'}).isDisabled());
+  assert.equal(await directory.count(),0);
+  assert.equal(await panel.getByRole('button',{name:'Set up and enable editor'}).count(),0);
   assert.equal(await panel.getByRole('button',{name:'Go to SSH hosts'}).count(),0);
   host.weight_editor={available:true,enabled:false,capabilities:{},setup:{status:'verified',model_directory:'/models/HF',credentials,reason:null}};
   await page.reload();
