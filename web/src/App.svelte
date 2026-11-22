@@ -48,7 +48,7 @@
   ];
 
   $effect(() => {
-    const label = VIEWS.find((v) => v.id === route.view)?.label ?? (route.view === 'profiles' ? 'Profiles' : route.view === 'weights' ? 'Weight edits' : 'Job');
+    const label = VIEWS.find((v) => v.id === route.view)?.label ?? (route.view === 'profiles' ? 'Profiles' : route.view === 'weights' ? 'Weight edits' : route.view === 'not-found' ? 'Not found' : 'Job');
     document.title = `${running ? '▶ ' : ''}${label} · Model Brewery`;
   });
 </script>
@@ -131,6 +131,11 @@
     {:else if route.view === 'settings'}<Settings />
     {:else if route.view === 'profiles'}<Profiles />
     {:else if route.view === 'weights'}<Weights />
+    {:else}
+      <div class="stack">
+        <h1 tabindex="-1">Not found</h1>
+        <p>This page does not exist. <a href="#/library">Open Library</a>.</p>
+      </div>
     {/if}
   {/if}
 </main>

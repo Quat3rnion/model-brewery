@@ -161,8 +161,8 @@
     <header>
       <h2 id="wf-h">Convert a checkpoint</h2>
       <div class="fmt" role="radiogroup" aria-label="Output format">
-        <label class:on={outFormat === 'hgn'}><input type="radio" bind:group={outFormat} value="hgn" /> {useLayerRecipe ? 'HGN archive' : 'HGN bundle'}</label>
-        <label class:on={outFormat === 'gguf'}><input type="radio" bind:group={outFormat} value="gguf" /> GGUF file</label>
+        <label class:on={outFormat === 'hgn'}><input type="radio" name="convert-format" bind:group={outFormat} value="hgn" /> {useLayerRecipe ? 'HGN archive' : 'HGN bundle'}</label>
+        <label class:on={outFormat === 'gguf'}><input type="radio" name="convert-format" bind:group={outFormat} value="gguf" /> GGUF file</label>
       </div>
     </header>
     <div class="body">

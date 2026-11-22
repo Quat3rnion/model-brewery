@@ -66,6 +66,25 @@ test('a missing job deep link shows an error without a result', async ({ page, c
   await expect(page.getByRole('region', { name: 'Result' })).toHaveCount(0);
 });
 
+test('a singular job link opens the job and an unknown route shows Not found', async ({ page, controller }) => {
+  controller.load('results');
+  await controller.open(page, 'job/transfer-result');
+  await expect(page.getByRole('region', { name: 'Result' })).toContainText('Missing bytes fit in free space');
+  await page.evaluate(() => { location.hash = '#/missing-section'; });
+  await expect(page.getByRole('heading', { name: 'Not found', exact: true })).toBeFocused();
+  await page.getByRole('main').getByRole('link', { name: 'Open Library' }).click();
+  await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
+});
+
+test('Library follows entry links without leaving the Library view', async ({ page, controller }) => {
+  await controller.open(page, 'library?entry=gguf-a');
+  const table = page.getByRole('table', { name: /Library entries/ });
+  await expect(table.getByText('Fixture GGUF', { exact: true })).toBeVisible();
+  await page.evaluate(() => { location.hash = '#/library?entry=gguf-b'; });
+  await expect(table.getByText('Fixture GGUF copy', { exact: true })).toBeVisible();
+  await expect(table.getByText('Fixture GGUF', { exact: true })).toHaveCount(0);
+});
+
 test('Transfers filters source entries and queues only a preview', async ({ page, controller }) => {
   await controller.open(page, 'transfers');
   await pick(page, 'Destination host', /^Worker B/);
@@ -80,14 +99,116 @@ test('Transfers filters source entries and queues only a preview', async ({ page
 
 test('Compare accepts a typed prompt and requires both models', async ({ page, controller }) => {
   await controller.open(page, 'compare');
-  await page.getByRole('radio', { name: 'Type a prompt' }).check();
+  const typed = page.getByRole('radio', { name: 'Type a prompt' });
+  await expect(typed).toHaveAttribute('name', 'compare-prompt');
+  await typed.check();
   await page.getByRole('textbox', { name: 'Prompt text' }).fill('Compare these responses.');
   await pick(page, 'Model A', /^Fixture GGUF\b(?! copy)/);
   const queue = page.getByRole('button', { name: 'Queue comparison' });
-  await expect(queue).toBeDisabled();
+  const modelB = page.getByRole('combobox', { name: 'Model B' });
+  const fixes = page.getByRole('list', { name: 'Changes needed' });
+  await expect(fixes).toHaveCount(0);
+  await expect(modelB).not.toHaveAttribute('aria-invalid', 'true');
+  await queue.click();
+  await expect(fixes.getByRole('listitem')).toHaveText(['Select model B.']);
+  await expect(modelB).toHaveAttribute('aria-invalid', 'true');
+  await expect(modelB).toHaveAccessibleDescription('Select model B.');
   expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
   await pick(page, 'Model B', /^Fixture GGUF copy/);
-  await expect(queue).toBeEnabled();
+  await expect(modelB).not.toHaveAttribute('aria-invalid', 'true');
+  await expect(fixes).toHaveCount(0);
+  await queue.click();
+  await expect.poll(() => controller.requests('POST', '/api/jobs').map(({ body }) => body.input_ids)).toEqual([['gguf-a', 'gguf-b']]);
+});
+
+test('Compare explains missing capability before selection', async ({ page, controller }) => {
+  controller.load('capabilities-off');
+  await controller.open(page, 'compare');
+  await expect(page.getByRole('heading', { name: 'Compare', level: 1 })).toBeVisible();
+  const notice = page.getByRole('region', { name: 'Setup required' });
+  await expect(notice).toContainText('No host can run this workflow.');
+  await expect(notice.getByRole('link', { name: /Worker B/ })).toHaveAttribute('href', '#/settings/infrastructure?host=worker-b&section=policy');
+  await expect(page.getByRole('combobox', { name: 'Model A' })).toHaveCount(0);
+  expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
+});
+
+test('Compare marks an ineligible host and links the fix for an ineligible default host', async ({ page, controller }) => {
+  await controller.open(page, 'compare');
+  const host = page.getByRole('combobox', { name: 'Run on' });
+  await host.click();
+  const unavailable = page.getByRole('option', { name: /Worker B.*compare is not configured/ });
+  await expect(unavailable).toHaveAttribute('aria-disabled', 'true');
+  await host.press('Escape');
+  await pick(page, 'Model A', /^Fixture GGUF copy/);
+  await host.focus();
+  await host.press('Tab');
+  await expect(host).toHaveAttribute('aria-invalid', 'true');
+  const fixes = page.getByRole('list', { name: 'Changes needed' });
+  await expect(fixes.getByRole('link', { name: /Worker B.*compare is not configured/ })).toHaveAttribute('href', '#/settings/infrastructure?host=worker-b&section=policy');
+  await pick(page, 'Run on', /^Worker A/);
+  await expect(host).not.toHaveAttribute('aria-invalid', 'true');
+});
+
+test('Compare keeps a typed draft if navigation is cancelled', async ({ page, controller }) => {
+  await controller.open(page, 'compare');
+  await page.getByRole('radio', { name: 'Type a prompt' }).check();
+  const prompt = page.getByRole('textbox', { name: 'Prompt text' });
+  await prompt.fill('Draft prompt.');
+  const library = page.getByRole('navigation', { name: 'Sections' }).getByRole('link', { name: 'Library' });
+  const refused = page.waitForEvent('dialog');
+  const firstClick = library.click();
+  const stay = await refused;
+  expect(stay.type()).toBe('confirm');
+  expect(stay.message()).toBe('Discard unsaved changes?');
+  await stay.dismiss();
+  await firstClick;
+  await expect(page).toHaveURL(/#\/compare$/);
+  await expect(prompt).toHaveValue('Draft prompt.');
+  const accepted = page.waitForEvent('dialog');
+  const secondClick = library.click();
+  await (await accepted).accept();
+  await secondClick;
+  await expect(page.getByRole('heading', { name: 'Library', level: 1 })).toBeFocused();
+});
+
+test('Compare can return to the original history entry after declining Back', async ({ page, controller }) => {
+  await controller.open(page);
+  await page.getByRole('link', { name: 'Compare', exact: true }).click();
+  await page.getByRole('radio', { name: 'Type a prompt' }).check();
+  const prompt = page.getByRole('textbox', { name: 'Prompt text' });
+  await prompt.fill('Draft prompt.');
+  const refused = page.waitForEvent('dialog');
+  await page.evaluate(() => { history.back(); });
+  await (await refused).dismiss();
+  await expect(page).toHaveURL(/#\/compare$/);
+  await expect(prompt).toHaveValue('Draft prompt.');
+  const accepted = page.waitForEvent('dialog');
+  await page.evaluate(() => { history.back(); });
+  await (await accepted).accept();
+  await expect(page.getByRole('heading', { name: 'Library', level: 1 })).toBeFocused();
+});
+
+test('Compare warns before the browser unloads a typed draft', async ({ page, controller }) => {
+  await controller.open(page, 'compare');
+  await page.getByRole('radio', { name: 'Type a prompt' }).check();
+  const prompt = page.getByRole('textbox', { name: 'Prompt text' });
+  await prompt.fill('Draft prompt.');
+  const confirmed = page.waitForEvent('dialog');
+  await page.evaluate(() => { setTimeout(() => { location.search = '?test-unload'; }, 0); });
+  const dialog = await confirmed;
+  expect(dialog.type()).toBe('beforeunload');
+  await dialog.dismiss();
+  await expect(prompt).toHaveValue('Draft prompt.');
+  await expect(page).toHaveURL(/\/#\/compare$/);
+});
+
+test('Compare returns focus to the file input when a report closes', async ({ page, controller }) => {
+  await controller.open(page, 'compare');
+  const files = page.getByLabel('Report files (JSON)');
+  await files.setInputFiles({ name: 'bad.json', mimeType: 'application/json', buffer: Buffer.from('{bad') });
+  await page.getByRole('button', { name: 'Close bad.json' }).press('Enter');
+  await expect(page.getByRole('button', { name: 'Close bad.json' })).toHaveCount(0);
+  await expect(files).toBeFocused();
 });
 
 test('Evaluate and Benchmarks explain when no worker can run those jobs', async ({ page, controller }) => {
@@ -208,7 +329,6 @@ for (const finding of [
   'Inspection results support inventory and tile modes',
   'Job detail does not mark a verification that was not performed as Failed',
   'Transfers keeps entry names readable at narrow widths',
-  'Compare explains missing capability before selection',
   'Evaluate explains disabled generation and baseline before selection',
   'Calibration keeps reports during navigation',
   'Settings warns before discarding unsaved evaluation or policy edits',
