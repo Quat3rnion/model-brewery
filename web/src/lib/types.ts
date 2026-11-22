@@ -51,10 +51,11 @@ export interface Model {
   host: string;
   path: string;
   kind: string;
-  /** Size and SHA-256 from an accepted output receipt, not a live measurement. */
+  /** Size from an accepted output receipt or a worker file check. */
   bytes?: number;
+  /** SHA-256 from an accepted output receipt, not a live hash. */
   sha256?: string;
-  /** Null or absent means the controller has not checked the path on the worker. */
+  /** Null or absent means the controller has no current answer. */
   available?: boolean | null;
   reason?: string;
   /** Job that produced this entry, when the controller registered an output. */

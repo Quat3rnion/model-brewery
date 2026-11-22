@@ -9,6 +9,25 @@ import time
 from pathlib import Path
 
 root = Path(__file__).parent
+if sys.argv[1] == "stat":
+    if not (root / "model-stat-fixture").exists():
+        sys.exit(1)
+    action, host = sys.argv[1:]
+    assert host in ("alpha", "beta")
+    path = json.load(sys.stdin)["path"]
+    with (root / "model-stat-calls").open("a") as calls:
+        print(path, file=calls)
+    if path.endswith("/slow.gguf"):
+        time.sleep(20)
+    if path.endswith("/unknown.gguf"):
+        print(json.dumps({"error":"beta: unknown variant `stat`, expected one of `status` or `start`"}))
+        sys.exit(2)
+    print(json.dumps({
+        "/models/current.gguf": {"state":"file","bytes":7},
+        "/models/missing.gguf": {"state":"missing"},
+    }.get(path, {"state":"outside_roots"})))
+    sys.exit(0)
+
 if sys.argv[1] == "suggest-paths":
     action, host = sys.argv[1:]
     payload = json.load(sys.stdin)

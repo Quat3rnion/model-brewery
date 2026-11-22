@@ -207,6 +207,7 @@ fn hf_download_registers_only_verified_artifacts_and_recovers_without_relaunch()
         format!("/worker/jobs/{whole}/work/download")
     );
     assert_eq!(launches(&app), 1);
+    let records = app.model_records();
 
     app.stop();
     // Simulate a database written by a controller that saved the verified
@@ -219,7 +220,7 @@ fn hf_download_registers_only_verified_artifacts_and_recovers_without_relaunch()
     .unwrap();
     drop(db);
     app.launch();
-    assert_eq!(library(&app), saved);
+    assert_eq!(app.model_records(), records);
     let (status, body) = app.request(
         "POST",
         "/api/jobs",
@@ -228,7 +229,7 @@ fn hf_download_registers_only_verified_artifacts_and_recovers_without_relaunch()
     );
     assert_eq!(status, 200);
     assert_eq!(id(&serde_json::from_str(&body).unwrap()), whole);
-    assert_eq!(library(&app), saved);
+    assert_eq!(app.model_records(), records);
     for (filename, kind) in [
         ("quant/model.gguf", "gguf"),
         ("model.safetensors", "safetensors"),

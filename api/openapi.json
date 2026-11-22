@@ -864,8 +864,8 @@
           "id": {"$ref": "#/components/schemas/Id"}, "name": {"$ref": "#/components/schemas/Name"}, "host": {"$ref": "#/components/schemas/HostId"},
           "path": {"$ref": "#/components/schemas/AbsoluteWorkerPath"}, "kind": {"$ref": "#/components/schemas/ModelKind"},
           "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$", "description": "SHA-256 from an accepted output receipt. This is not a live hash."},
-          "bytes": {"type": "integer", "minimum": 1, "description": "Size in bytes from the same receipt."},
-          "available": {"type": ["boolean", "null"], "description": "Availability on the owning worker. Null means the controller has not checked the path."},
+          "bytes": {"type": "integer", "minimum": 0, "description": "Size in bytes from the same receipt, or from the worker's file check if no receipt is available."},
+          "available": {"type": ["boolean", "null"], "description": "Cached path availability on the owning worker. False means the worker is disabled or not configured, or the path is missing or outside its allowed model roots. Null means the controller has no current answer. Availability does not verify the current file hash."},
           "reason": {"type": "string", "description": "Why availability is unknown or false."},
           "job_id": {"$ref": "#/components/schemas/Id", "description": "Job that produced the registered output."}
         }

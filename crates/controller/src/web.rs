@@ -242,15 +242,18 @@ async fn state(State(app): State<Shared>) -> Result<Json<Value>> {
     // in the same SQLite transaction. Read the cursor while still holding it.
     let store = app.store.lock().map_err(ApiError::storage)?;
     let hosts = app.effective_hosts().map_err(ApiError::storage)?;
+    let mut models = store.models().map_err(ApiError::storage)?;
+    let jobs = store.jobs().map_err(ApiError::storage)?;
+    app.model_availability.refresh(&hosts, &jobs, &mut models);
     let capabilities: BTreeMap<_, _> = KINDS
         .iter()
         .map(|&kind| (kind, hosts.iter().any(|host| host.capabilities[kind])))
         .collect();
     Ok(Json(json!({
         "hosts": hosts,
-        "models": store.models().map_err(ApiError::storage)?,
+        "models": models,
         "prompts": store.prompts().map_err(ApiError::storage)?,
-        "jobs": store.jobs().map_err(ApiError::storage)?,
+        "jobs": jobs,
         "capabilities": capabilities,
         "event_cursor": store.feed_cursor().map_err(ApiError::storage)?,
     })))

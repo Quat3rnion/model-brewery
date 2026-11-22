@@ -177,6 +177,17 @@ impl Fixture {
         .into()
     }
 
+    fn model_records(&self) -> Value {
+        let mut state = self.json("GET", "/api/state", None, 200);
+        let mut models = state["models"].take();
+        for model in models.as_array_mut().unwrap() {
+            let model = model.as_object_mut().unwrap();
+            model.remove("available");
+            model.remove("reason");
+        }
+        models
+    }
+
     fn enqueue(&self, body: Value) -> String {
         id(&self.json("POST", "/api/jobs", Some(body), 201)).into()
     }
@@ -667,7 +678,10 @@ fn same_origin_library_survives_restart() {
     app.launch();
     let state = app.json("GET", "/api/state", None, 200);
     assert_eq!(state["hosts"][1]["reasons"]["plan"], "not installed");
-    assert_eq!(state["models"][0], model);
+    let mut model = model;
+    model.as_object_mut().unwrap().remove("available");
+    model.as_object_mut().unwrap().remove("reason");
+    assert_eq!(app.model_records(), json!([model]));
     assert_eq!(state["prompts"][0], created);
     app.json(
         "DELETE",
@@ -709,12 +723,83 @@ fn legacy_model_records_keep_their_identity_and_report_unknown_availability() {
         assert_eq!(model["host"], host);
         assert_eq!(model["path"], path);
         assert_eq!(model["kind"], kind);
-        assert_eq!(model.get("available"), Some(&Value::Null));
-        assert!(model["reason"].as_str().is_some_and(|s| !s.is_empty()));
+        let expected = if host == "gone" {
+            json!(false)
+        } else {
+            Value::Null
+        };
+        assert_eq!(model.get("available"), Some(&expected));
+        if host == "gone" {
+            assert_eq!(
+                model["reason"],
+                "The owning worker is not configured or is disabled."
+            );
+        } else {
+            assert!(model["reason"].as_str().is_some_and(|s| !s.is_empty()));
+        }
         for missing in ["sha256", "bytes", "job_id"] {
             assert!(model.get(missing).is_none());
         }
     }
+}
+
+#[test]
+fn library_checks_models_asynchronously_and_caches_worker_replies() {
+    let mut app = Fixture::new();
+    app.touch("model-stat-fixture");
+    app.launch();
+    let paths = [
+        ("alpha", "/models/slow.gguf"),
+        ("alpha", "/models/current.gguf"),
+        ("beta", "/models/missing.gguf"),
+        ("beta", "/outside/outside.gguf"),
+        ("beta", "/models/unknown.gguf"),
+    ];
+    for (host, path) in paths {
+        app.register(host, "gguf", path);
+    }
+    let start = Instant::now();
+    let first = app.json("GET", "/api/state", None, 200);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "snapshot waited for worker"
+    );
+    assert!(first["models"][0]["available"].is_null());
+    let state = wait_for(|| {
+        let state = app.json("GET", "/api/state", None, 200);
+        (state["models"][0]["reason"] == "The controller could not check this path on the worker."
+            && state["models"][4]["reason"] == "Worker does not report file state. Update the worker."
+            && state["models"][1]["available"] == true
+            && state["models"][2]["available"] == false
+            && state["models"][3]["available"] == false)
+            .then_some(state)
+    });
+    let models = state["models"].as_array().unwrap();
+    assert!(models[0]["available"].is_null());
+    assert_eq!(models[1]["bytes"], 7);
+    assert!(models[1].get("sha256").is_none());
+    assert_eq!(
+        models[2]["reason"],
+        "The model path does not exist on the worker."
+    );
+    assert_eq!(
+        models[3]["reason"],
+        "The worker does not allow access to this path."
+    );
+    assert!(models[4]["available"].is_null());
+    for _ in 0..3 {
+        app.json("GET", "/api/state", None, 200);
+    }
+    let calls = fs::read_to_string(app.path("model-stat-calls")).unwrap();
+    for (_, path) in paths {
+        assert_eq!(
+            calls.lines().filter(|line| *line == path).count(),
+            1,
+            "{calls}"
+        );
+    }
+    assert_eq!(state["event_cursor"], first["event_cursor"]);
+    assert_eq!(state["jobs"], json!([]));
 }
 
 #[test]
