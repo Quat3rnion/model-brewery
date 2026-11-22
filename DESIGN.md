@@ -61,3 +61,13 @@ Pair status color with words and shapes. `web/src/components/Badge.svelte` gives
 At 760 px, the header stops being sticky and the section links wrap. Shared two- and three-column grids become one column. At 640 px, `stackable` tables use a block layout. Cells with `data-label` show their labels. Put wide tables in `.table-wrap`.
 
 Keep wide data views inside local scroll areas. `web/src/components/weights/HeatGrid.svelte` uses a scroll wrapper and keyboard grid semantics. Use `.break` for long paths, hashes, and IDs so they do not widen the page.
+
+## Workbench flow tests
+
+From `web/`, run `npm ci`, `npx playwright install chromium`, and `npm run test:flows`. On Linux, use `npx playwright install --with-deps chromium` if the browser needs system packages. Use `npm run test:flows -- --project=390-dark` to run one project. The suite checks both themes at 1280 and 390 px.
+
+Import `test` and `expect` from `web/tests/flows/fixtures.mjs`. Each test gets a new local mock controller. The browser cannot reach the live controller. Call `controller.load('active-jobs')` to select a scenario, then `await controller.open(page, 'queue')` to open the Jobs view. The default is `live-shaped`, which uses only synthetic data. See `web/tests/flows/mock/scenarios.mjs` for the other scenarios.
+
+Use `controller.requests('POST', '/api/jobs')` to check the number of requests and their JSON bodies. Use `controller.respond('GET', '/api/state', { status: 503, json: { error: 'Unavailable' } })` to change one response. `load()` clears response overrides but keeps the request log. The mock does not run native tools or jobs.
+
+The accessibility tests report WCAG A and AA violations for each view. The [known-violations allowlist](web/tests/flows/known-violations.mjs) lists the existing failures by view, rule, project, and element. Remove the entry for a fixed violation. A new failing element or rule fails the test.
