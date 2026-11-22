@@ -69,7 +69,7 @@ export function roleOf(name: string): Role {
 }
 
 export function layerOf(name: string): number | null {
-  const m = /(?:^|\.)(?:blk|layers|h)\.(\d+)\./.exec(name);
+  const m = /(?:^|\.)(?:blk|layers|h|visual\.blocks)\.(\d+)\./.exec(name);
   return m ? Number(m[1]) : null;
 }
 

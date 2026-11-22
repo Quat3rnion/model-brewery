@@ -13,7 +13,8 @@
   import { Submitter } from '../../lib/submit.svelte';
   import { theme } from '../../lib/theme.svelte';
   import { isSafeSource, hostName, isActive, shortHash } from '../../lib/format';
-  import { MAX_COORDINATES, MAX_EDITS, coord, exact, percent, relChange, signed, proposeJob, tuneJob, parseValue, parseMaxUpdate } from '../../lib/weights';
+  import { MAX_COORDINATES, MAX_EDITS, coord, exact, percent, relChange, signed, tuneJob, parseValue, parseMaxUpdate } from '../../lib/weights';
+  import { editKey, type DraftEdit } from '../../lib/weight-draft';
   import {
     isDtype, isPacked, type Neighbors,
     findRead,
@@ -38,25 +39,23 @@
   let {
     source,
     canVisual,
-    canPropose,
     canTune,
     calibrationId,
     heldOutId,
-    proposeReason,
     tuneReason,
     mode = $bindable('manual'),
     onproposal,
+    pending,
   }: {
     source: Model;
     canVisual: boolean;
-    canPropose: boolean;
     canTune: boolean;
     calibrationId: string;
     heldOutId: string;
-    proposeReason: string | null;
     tuneReason: string | null;
     mode?: 'manual' | 'auto';
     onproposal: (jobId: string) => void;
+    pending: SvelteMap<string, DraftEdit>;
   } = $props();
 
   const stateJobs = $derived(brewery.state?.jobs ?? []);
@@ -200,22 +199,17 @@
   const range = (start: number, size: number, n: number) => `${start * size}–${Math.min(n, (start + 1) * size) - 1}`;
 
   // ---- Pending manual edits (all tensors), keyed tensor|index. ----
-  interface Pending {
-    tensor: string;
-    index: number[];
-    dtype: string;
-    before: number;
-    after: number;
-  }
-  const pending = new SvelteMap<string, Pending>();
   let lastSha: string | null = null;
   $effect(() => {
     if (sha && lastSha !== sha) {
-      if (lastSha) { pending.clear(); known.clear(); levels.clear(); selected = new Set(); focusKey = null; }
+      if (lastSha) {
+        for (const [key, edit] of pending) if (edit.observed) pending.delete(key);
+        known.clear(); levels.clear(); selected = new Set(); focusKey = null;
+      }
       lastSha = sha;
     }
   });
-  const pendingHere = $derived(new Map([...pending.values()].filter((e) => e.tensor === tensorName).map((e) => [keyOf(e.index), e.after])));
+  const pendingHere = $derived(new Map([...pending.values()].filter((e) => e.tensor === tensorName && e.observed).map((e) => [keyOf(e.index), e.value])));
   let notice = $state<string | null>(null);
 
   function selectedCells(): { key: string; index: number[]; before: number }[] {
@@ -228,21 +222,24 @@
     return out;
   }
   function setAfter(index: number[], before: number, after: number | null): boolean {
-    if (!tensor || after === null) return false;
-    const id = `${tensor.name}|${keyOf(index)}`;
+    if (!tensor || !sha || after === null) return false;
+    const id = editKey({ tensor: tensor.name, index });
+    const current = pending.get(id);
+    if (current && !current.observed) return false;
     if (after === before) pending.delete(id);
-    else if (!pending.has(id) && pending.size >= MAX_EDITS) return false;
-    else pending.set(id, { tensor: tensor.name, index, dtype: tensor.dtype, before, after });
+    else if (!current && pending.size >= MAX_EDITS) return false;
+    else pending.set(id, { tensor: tensor.name, index, op: 'set', value: after, observed: { before, sha, packed: isPacked(tensor.dtype) } });
     return true;
   }
   function apply(fn: (before: number, current: number) => number | null) {
     if (mode !== 'manual' || !tensor) return;
     let refused = 0;
     for (const c of selectedCells()) {
-      const cur = pending.get(`${tensor.name}|${c.key}`)?.after ?? c.before;
+      const current = pending.get(`${tensor.name}|${c.key}`);
+      const cur = current?.observed ? current.value : c.before;
       if (!setAfter(c.index, c.before, fn(c.before, cur))) refused++;
     }
-    notice = refused ? `${refused} ${refused === 1 ? 'cell was' : 'cells were'} not changed: the result is outside the finite ${tensor.dtype} range or the ${MAX_EDITS}-edit limit is reached.` : null;
+    notice = refused ? `${refused} ${refused === 1 ? 'cell was' : 'cells were'} not changed. Check the ${tensor.dtype} range, the edit limit, and whether the draft already has a text edit for that cell.` : null;
   }
   function selectTile() {
     const t = tileOk;
@@ -262,7 +259,7 @@
       const value = levels.get(`${tensor.name}|${c.key}`)?.[direction];
       if (value == null || !setAfter(c.index, c.before, value)) skipped++;
     }
-    notice = skipped ? `${skipped} selected cells had no available ${direction} level or exceeded the edit limit.` : null;
+    notice = skipped ? `${skipped} selected cells did not change. Check the ${direction} level, the edit limit, and existing text edits.` : null;
   }
   function nudge(n: number) {
     const dtype = float;
@@ -273,7 +270,7 @@
 
   const sel = $derived(selectedCells());
   const focusBefore = $derived(tensor && focusKey ? known.get(`${tensor.name}|${focusKey}`) : undefined);
-  const focusAfter = $derived(tensor && focusKey ? pending.get(`${tensor.name}|${focusKey}`)?.after : undefined);
+  const focusAfter = $derived(focusKey ? pendingHere.get(focusKey) : undefined);
 
   // Slider: shift from the stored value, applied to every selected cell.
   const ranges = $derived(niceRanges(tileOk?.absMax ?? 0));
@@ -293,25 +290,6 @@
   const exactParsed = $derived(parseValue(exactText));
 
   // ---- Submit. ----
-  const proposeSub = new Submitter();
-  const edits = $derived([...pending.values()]);
-  const proposeBlockers = $derived([
-    ...(canPropose ? [] : [proposeReason ?? 'Manual proposals are not enabled on this worker.']),
-    ...(sha ? [] : ['Read the tensor list first.']),
-    ...(edits.some(e => isPacked(e.dtype)) && !packedHost ? ['Packed editing is not enabled on this host.'] : []),
-    ...(edits.length ? [] : ['Change at least one cell.']),
-  ]);
-  async function propose() {
-    if (!sha || !edits.length) return;
-    const job = proposeJob(source.id, source.host, edits.map((e) => ({ tensor: e.tensor, index: e.index, op: 'set', value: e.after })));
-    job.options = { ...job.options, source_sha256: sha, ...(edits.some(e => isPacked(e.dtype)) ? {packed:true} : {}) };
-    const created = await proposeSub.submit(job);
-    if (created) {
-      pending.clear();
-      onproposal(created.id);
-    }
-  }
-
   const MAX_STEPS = 60;
   let maxIdx = $state(30);
   const maxFromSlider = (i: number) => Number((10 ** (-6 + (i / MAX_STEPS) * 6)).toPrecision(2));
@@ -577,39 +555,7 @@
       </section>
     {/if}
 
-    <!-- 4. Proposal -->
-    {#if mode === 'manual'}
-      <section class="step" aria-labelledby="vw-pend-h">
-        <div class="row between">
-          <h3 class="h" id="vw-pend-h">{tensor ? '4' : '2'}. Proposal <span class="muted num">({edits.length} of {MAX_EDITS} edits)</span></h3>
-          {#if edits.length}<button type="button" class="btn ghost small" onclick={() => pending.clear()}>Discard all</button>{/if}
-        </div>
-        {#if edits.length}
-          <div class="table-wrap pend">
-            <table class="data stackable">
-              <thead><tr><th scope="col">Tensor</th><th scope="col">Coordinate</th><th scope="col">Stored</th><th scope="col">New</th><th scope="col">Change</th><th scope="col"><span class="sr-only">Remove</span></th></tr></thead>
-              <tbody>
-                {#each edits as e (`${e.tensor}|${keyOf(e.index)}`)}
-                  <tr>
-                    <td class="mono xs break" data-label="Tensor">{e.tensor}</td>
-                    <td class="mono num nowrap" data-label="Coordinate">{coord(e.index)}</td>
-                    <td class="mono num" data-label="Stored">{exact(e.before)}</td>
-                    <td class="mono num" data-label="New">{exact(e.after)}</td>
-                    <td class="mono num nowrap" data-label="Change">{signed(Number((e.after - e.before).toPrecision(4)))} <span class="muted">({percent(relChange(e.before, e.after))})</span></td>
-                    <td><button type="button" class="btn ghost small" aria-label="Remove edit {coord(e.index)}" onclick={() => pending.delete(`${e.tensor}|${keyOf(e.index)}`)}>Remove</button></td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-          <p class="xs muted">These targets are representable in the source encoding. The worker checks them again and shows the result for review. Nothing is written before you apply.</p>
-        {:else}
-          <p class="xs muted">No changes yet. Changed cells collect here, across tensors.</p>
-        {/if}
-        {#if proposeSub.error}<p class="note bad" role="alert">{proposeSub.error}</p>{/if}
-        <Submit blockers={proposeBlockers} busy={proposeSub.busy} onclick={propose}>Create proposal</Submit>
-      </section>
-    {:else if tensor}
+    {#if mode === 'auto' && tensor}
       <section class="step">
         {#if tuneSub.error}<p class="note bad" role="alert">{tuneSub.error}</p>{/if}
         <Submit blockers={tuneBlockers} busy={tuneSub.busy} onclick={tune}>Tune {selected.size || ''} selected {selected.size === 1 ? 'weight' : 'weights'}</Submit>
@@ -778,12 +724,6 @@
   }
   .ferr {
     color: var(--bad);
-  }
-  .pend {
-    max-height: 280px;
-    overflow: auto;
-    border: 1px solid var(--line-soft);
-    border-radius: var(--r-tile);
   }
   @media (max-width: 640px) {
     .ctl {

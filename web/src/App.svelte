@@ -73,9 +73,9 @@
   <div class="controls">
     <div class="conn c-{brewery.connection}" role="status" aria-live="polite">
       <span class="cdot" aria-hidden="true"></span>
-      {#if brewery.connection === 'live'}<span>Connected</span>
-      {:else if brewery.connection === 'retrying'}<span title={brewery.lastError ?? ''}>Reconnecting…</span>
-      {:else}<span>Connecting…</span>{/if}
+      {#if brewery.connection === 'live'}<span aria-label="Controller connected">Connected</span>
+      {:else if brewery.lastError}<span aria-label="Controller disconnected. Retrying.">Retrying</span>
+      {:else}<span aria-label="Connecting to controller">Connecting</span>{/if}
     </div>
     <fieldset class="seg theme">
       <legend class="sr-only">Theme</legend>
@@ -108,16 +108,18 @@
     <div class="boot">
       {#if brewery.lastError}
         <h1 tabindex="-1">Controller not reachable</h1>
-        <p class="muted">{brewery.lastError} The page retries on its own. Start the controller (default <code>127.0.0.1:4141</code>) and keep this tab open.</p>
+        <p class="muted">Start the controller (default <code>127.0.0.1:4141</code>). This page connects again automatically.</p>
+        <p class="muted small break">{brewery.lastError}</p>
       {:else}
         <h1 tabindex="-1">Loading workbench…</h1>
       {/if}
     </div>
   {:else}
     {#if brewery.connection === 'retrying'}
-      <p class="note warn stale" role="alert">
-        Lost contact with the controller ({brewery.lastError}). Showing the last known state from {brewery.lastUpdated?.toLocaleTimeString()}. Jobs keep running on the controller.
-      </p>
+      <div class="note warn stale" role="alert">
+        <p>The controller disconnected. This page shows the state from {brewery.lastUpdated?.toLocaleTimeString()} and tries to connect again. Jobs continue on the controller.</p>
+        {#if brewery.lastError}<p class="small break">{brewery.lastError}</p>{/if}
+      </div>
     {/if}
     {#if route.view === 'library'}<Library />
     {:else if route.view === 'queue'}<Queue />
@@ -335,6 +337,9 @@
   }
   .stale {
     margin-bottom: var(--s-4);
+  }
+  .stale p + p {
+    margin-top: var(--s-1);
   }
   @media (max-width: 760px) {
     /* On phones the header scrolls away, as in Halogen Dashboard: a sticky

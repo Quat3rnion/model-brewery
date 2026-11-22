@@ -78,6 +78,13 @@ const inv = (tensors: unknown[], extra: Record<string, unknown> = {}) => ({
 });
 
 describe('inventory', () => {
+  it('groups HF vision block tensors by layer, not as global tensors', () => {
+    const p = readInventory(inv([
+      { name: 'model.visual.blocks.7.attn.qkv.weight', shape: [4, 4], dtype: 'F32' },
+      { name: 'model.visual.patch_embed.proj.weight', shape: [4, 4], dtype: 'F32' },
+    ], { source_format: 'hf' }), 'hf');
+    expect(p?.tensors.map((t) => t.layer)).toEqual([7, null]);
+  });
   it('keeps the Flash-Next vision patch kernel in the HF inventory without opening it for edits', () => {
     const row = {name:'model.visual.patch_embed.proj.weight', shape:[1152,3,2,16,16], elements:1769472, dtype:'BF16', editable:false, reason:'SafeTensors shape is read-only'};
     const page = (patch:Record<string,unknown> = {}) => readInventory(inv([{...row,...patch}], {source_format:'hf'}), 'hf');

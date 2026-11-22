@@ -8,7 +8,7 @@ This guide records the current Model Brewery web interface. It is not a redesign
 
 Keep nested routes under their parent section. Profiles uses Convert in the header. Weight edits uses Library. Job details use Jobs. Infrastructure settings stay under Settings. `App.svelte` marks the parent link with `aria-current="page"`.
 
-Show the connection state with text, not only a dot. The header reports Connecting, Connected, or Reconnecting. Keep running-job progress and cancellation available in the shared shell.
+Show the connection state with text, not only a dot. The header reports Connecting, Connected, or Retrying. Keep running-job progress and cancellation available in the shared shell. On small screens, let the operator hide the job details without hiding the counts.
 
 ## Visual tokens
 
@@ -34,9 +34,9 @@ Use `--line-strong` for control borders and `--focus` for focus indicators. In d
 
 Use `web/src/components/Submit.svelte` for gated job actions. It disables the button while busy or blocked. It shows the blocking reasons beside the action.
 
-Keep a review step before destructive actions. `web/src/components/CancelButton.svelte` asks the operator to confirm cancellation. `web/src/views/Library.svelte` confirms removal of an entry and states that the source files stay on the host.
+Keep a review step before destructive actions. `web/src/components/CancelButton.svelte` asks the operator to confirm cancellation. `web/src/views/Library.svelte` confirms removal of an entry and states that the source files stay on the host. Entries on Backend downloads cannot be registered again by hand.
 
-Show unsaved changes and their available actions. `web/src/views/Settings.svelte` provides Save and Discard changes. `web/src/views/Profiles.svelte` saves a new immutable revision. `web/src/views/Weights.svelte` shows proposed values and requires confirmation before applying a separate revision.
+Show unsaved changes and their available actions. `web/src/views/Settings.svelte` provides Save and Discard changes. `web/src/views/Profiles.svelte` saves a new immutable revision. `web/src/views/Weights.svelte` puts visual and typed GGUF edits in one manual proposal. It shows the proposed values and requires confirmation before it applies a separate revision.
 
 Keep optional settings in disclosures. `web/src/components/Advanced.svelte` and the Convert view use `details.disclosure` for advanced or diagnostic controls.
 
@@ -59,7 +59,7 @@ Use semantic links, buttons, forms, labels, and fieldsets. Connect hints to cont
 ### Shared workflow controls
 
 - Wrap the form in `<WorkflowGate workflow="compare">…</WorkflowGate>`. Keep the page heading and job history outside the gate. The gate uses `eligibility.global[workflow]` unless you pass an `EligibilityEntry` as `decision`. An ineligible decision replaces the form with the controller reasons and their fix links. A missing decision leaves the form visible.
-- Use `<HostSelect workflow="compare" kind="compare" bind:value={host} />`. `kind` is the capability to check when eligibility is absent. Pass `gguf={{ kind: 'hf', rocmfpx: true }}` with `workflow="gguf_output"` to check a specific GGUF source and encoder. Ineligible hosts remain visible with their reasons, but cannot be selected. When the form can use a default host or keep a previous choice, check its current decision with `hostWorkflowEligibility(snapshot, hostId, workflow, gguf?)`.
+- Use `<HostSelect workflow="compare" kind="compare" bind:value={host} />`. `kind` is the capability to check when eligibility is absent. Pass `gguf={{ kind: 'hf', rocmfpx: true }}` with `workflow="gguf_output"` to check a specific GGUF source and encoder. Ineligible hosts remain visible with their reasons, but cannot be selected. Manual registration uses `hideIneligible` to omit those hosts. When the form can use a default host or keep a previous choice, check its current decision with `hostWorkflowEligibility(snapshot, hostId, workflow, gguf?)`.
 - For each problem, make a `Blocker` with `text` and optional `field`, `host` and `fixAnchor`. Keep the complete list for validation. Set `touched[field] = true` when the operator leaves a field and set `attempted = true` on submit. Pass `visibleBlockers(all, touched, attempted)` to `<Blockers blockers={visible} />`. Use `fieldError(visible, field)` for the first inline error. `ModelSelect` and `HostSelect` accept `error` and `onblur`; for native controls, set `aria-invalid` and point `aria-describedby` to the `id` of `<FieldError {id} {error} />` when an error is visible.
 - Call `const guard = unsavedChanges(() => dirty)` during setup. Use `if (!guard.confirm()) return` before a host switch or editor close. The guard also prompts before hash navigation or browser unload while the draft is dirty. Read `route.hash` for accepted deep links.
 - Use `focusAfterRemoval(() => { open = false; }, () => openButton)` when an action removes the focused control. Give the helper a function that finds the next control after the update. It does not move focus if the action leaves focus on another control.

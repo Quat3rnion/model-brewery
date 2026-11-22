@@ -103,7 +103,7 @@
     const v = o.value === NONE ? '' : o.value;
     value = v;
     typed = false;
-    text = free ? v : o.value === NONE ? '' : o.label;
+    text = free ? value : value === v ? (o.value === NONE ? '' : o.label) : shownText;
     const keep = onpick?.(o) === true;
     if (keep) {
       if (free) ontextinput?.(v);

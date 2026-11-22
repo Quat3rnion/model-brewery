@@ -47,7 +47,7 @@
         <label for="hf-scope">Download scope</label>
         <select id="hf-scope" class="input" bind:value={scope}>
           <option value="file">One model file</option>
-          <option value="repo">Whole Hugging Face repository</option>
+          <option value="repo">Whole repository</option>
         </select>
       </div>
       {#if scope === 'file'}
@@ -58,7 +58,7 @@
         </div>
       {/if}
     </div>
-    <p class="hint">Track progress or cancel in Jobs. The Library entry appears after the download is verified.</p>
+    <p class="hint">Track progress or cancel in Jobs. Backend downloads verifies the download before it adds the source to Library.</p>
     <Submit {blockers} busy={submitter.busy} onclick={start}>Start download</Submit>
     {#if submitter.error}<p class="note bad" role="alert">{submitter.error}</p>{/if}
   </div>
