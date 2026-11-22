@@ -94,7 +94,7 @@
     if (conversions.status === 'unavailable') out.push('This controller does not provide managed conversions.');
     return out;
   });
-  const starter = new ConversionStarter();
+  const starter = new ConversionStarter('convert.gguf');
   async function start() {
     if (loading || retry.blocked || !built.body || starter.busy || blockers.length) return;
     await starter.start(built.body as unknown as ConversionBody, retry);
@@ -159,7 +159,7 @@
   <Submit {blockers} busy={starter.busy} disabled={loading || retry.blocked} onclick={start}>Start GGUF conversion</Submit>
   <div aria-live="polite" class="xs">
     {#if starter.error}<p class="note bad" role="alert">{starter.error} Pressing Start again retries the same request.</p>
-    {:else if starter.last}<p class="muted">{starter.replayed ? 'This request already started conversion' : 'Started conversion'} <a href={conversionRunHref(starter.last.id, 'gguf')}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : ''}</p>{/if}
+    {:else if starter.last}<p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a href={conversionRunHref(starter.last.id, 'gguf')}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : ''}</p>{/if}
   </div>
 </div>
 

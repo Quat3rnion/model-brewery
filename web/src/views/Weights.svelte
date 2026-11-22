@@ -153,7 +153,7 @@
     touched = {};
     document.getElementById('w-draft-h')?.focus();
   }
-  const proposeSub = new Submitter();
+  const proposeSub = new Submitter('weights.propose');
   const draftPin = $derived(draft.find((edit) => edit.observed)?.observed?.sha);
   const draftPacked = $derived(draft.some((edit) => edit.observed?.packed));
   const proposeBlockers = $derived([
@@ -190,7 +190,7 @@
   let inspectTensor = $state('');
   let inspectIndex = $state('');
   const inspectParsed = $derived({ t: parseTensor(inspectTensor), i: parseIndex(inspectIndex) });
-  const inspectSub = new Submitter();
+  const inspectSub = new Submitter('weights.inspect');
   const inspectBlockers = $derived([
     ...gate('weight_inspect'),
     ...(inspectParsed.t.ok ? [] : [inspectParsed.t.error]),
@@ -231,7 +231,7 @@
   let tuneTouched = $state<Record<string, boolean>>({});
   const tuneParsed = $derived({ t: parseTensor(tuneTensor), c: parseCoordinates(tuneCoords), m: parseMaxUpdate(tuneMax) });
   const coordCount = $derived(tuneCoords.split('\n').filter((l) => l.trim()).length);
-  const tuneSub = new Submitter();
+  const tuneSub = new Submitter('weights.tune');
   const tuneFields = $derived<Blocker[]>([
     ...(tuneParsed.t.ok ? [] : [{ field: 'tensor', text: tuneParsed.t.error }]),
     ...(tuneParsed.c.ok ? [] : [{ field: 'coordinates', text: tuneParsed.c.error }]),
@@ -292,7 +292,7 @@
     void reviewId;
     confirmed = false;
   });
-  const applySub = new Submitter();
+  const applySub = new Submitter('weights.apply');
   const applyBlockers = $derived.by(() => {
     const out = [...gate('weight_apply')];
     if (!reviewed) return [...out, 'Select a proposal.'];
@@ -321,7 +321,7 @@
   const applied = $derived(appliedDetail ? readApplied(appliedDetail.result) : null);
   const appliedModel = $derived(applied?.library_model_id ? models.find((m) => m.id === applied.library_model_id) : undefined);
 
-  const retrySub = new Submitter();
+  const retrySub = new Submitter(job => `weights.previous.${job.kind}`);
   const loadWeightsRetry = loadRetryJob(WEIGHT_KINDS);
   type WeightRetry = { job: JobDetail; proposal?: JobDetail };
   const defaults = { reviewId: null as string | null, confirmed: false };
@@ -439,7 +439,7 @@
   </section>
 
   {#if retry.failed}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
-  {#if retry.loadingReason}<p class="hint" role="status">{retry.loadingReason}</p>{/if}
+  {#if retry.loadingReason}<p id="w-retry-loading" class="hint" role="status">{retry.loadingReason}</p>{/if}
   {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
   {#if previous}
     <section class="panel" aria-labelledby="w-previous-h">
@@ -509,6 +509,7 @@
           {pending}
           onproposal={openReview}
           tuneRetry={retry.action('visual:weight_tune')}
+          retryLoading={retry.loading}
         />
         {/key}
         {/if}
@@ -601,7 +602,7 @@
           <span class="hint" id="w-tune-c-hint">One <span class="mono">row, column</span> pair per line. Start at 0. <span class="num">{coordCount}</span> of {MAX_COORDINATES}.</span>
           <FieldError id="w-tune-c-e" error={fieldError(visibleTune, 'coordinates')} />
         </div>
-        <SubmitStatus s={tuneSub} replayOnly />
+        <SubmitStatus s={tuneSub} />
         <Submit blockers={tuneBlockers} busy={tuneSub.busy} disabled={retry.action('weight_tune').blocked} onclick={tune}>Tune selected weights</Submit>
       </div>
     {/if}
@@ -641,7 +642,7 @@
             {:else}
               <p class="xs muted">No edits yet.{#if source.kind === 'gguf'} Add edits from the visual editor or text entry above.{/if}</p>
             {/if}
-            <SubmitStatus s={proposeSub} replayOnly />
+            <SubmitStatus s={proposeSub} />
             <Submit blockers={proposeBlockers} busy={proposeSub.busy} disabled={retry.action('weight_propose').blocked} onclick={propose}>Create proposal</Submit>
           </section>
         {/if}
@@ -727,7 +728,7 @@
                       <span>I reviewed all {proposal.edits.length} proposed {proposal.edits.length === 1 ? 'value' : 'values'} for source <span class="mono">{shortHash(proposal.source_sha256)}</span>.{#if tuneRegress}{' '}I accept that the held-out error increased.{/if}</span>
                     </label>
                   {/if}
-                  <SubmitStatus s={applySub} replayOnly />
+                  <SubmitStatus s={applySub} />
                   <Submit blockers={applyBlockers} busy={applySub.busy} disabled={retry.action('weight_apply').blocked} onclick={applyNow}>Apply as new {sourceFormat}</Submit>
                   <p class="xs muted">Apply registers a verified revision as a separate Library entry and keeps the original.</p>
                 {/if}
@@ -754,7 +755,7 @@
       </div>
       <Submit variant="secondary" blockers={inspectBlockers} busy={inspectSub.busy} disabled={retry.action('weight_inspect').blocked} onclick={inspect}>Inspect</Submit>
     </div>
-    <SubmitStatus s={inspectSub} replayOnly />
+    <SubmitStatus s={inspectSub} />
     <div aria-live="polite">
       {#if lastInspect}
         <div class="ins">

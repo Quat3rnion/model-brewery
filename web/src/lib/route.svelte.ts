@@ -145,3 +145,9 @@ class Route {
 }
 
 export const route = new Route();
+
+export function captureSubmissionVisit(): () => boolean {
+  const { hash } = route;
+  const visit = route.capture();
+  return () => visit.current() && hash === route.hash;
+}

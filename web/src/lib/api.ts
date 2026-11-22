@@ -16,7 +16,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, extra?: Record<string, string>): Promise<T> {
+async function requestWithStatus<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, extra?: Record<string, string>): Promise<{ data: T; status: number }> {
   let response: Response;
   const headers: Record<string, string> = { Accept: 'application/json' };
   // The controller requires JSON content type on POST as CSRF protection.
@@ -34,7 +34,6 @@ async function request<T>(method: string, path: string, body?: unknown, signal?:
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause;
     throw new ApiError('The controller is not reachable.', 0);
   }
-  if (response.status === 204) return undefined as T;
   const text = await response.text();
   let data: unknown = undefined;
   if (text) {
@@ -52,7 +51,11 @@ async function request<T>(method: string, path: string, body?: unknown, signal?:
         : `Request failed with HTTP ${response.status}.`;
     throw new ApiError(message, response.status);
   }
-  return data as T;
+  return { data: data as T, status: response.status };
+}
+
+async function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, extra?: Record<string, string>): Promise<T> {
+  return (await requestWithStatus<T>(method, path, body, signal, extra)).data;
 }
 
 export const api = {
@@ -65,10 +68,11 @@ export const api = {
   updatePrompt: (id: string, prompt: NewPrompt) => request<Prompt>('PUT', `/api/prompts/${encodeURIComponent(id)}`, prompt),
   deletePrompt: (id: string) => request<void>('DELETE', `/api/prompts/${encodeURIComponent(id)}`),
   submitJob: (job: NewJob, key?: string) => request<JobSummary>('POST', '/api/jobs', job, undefined, key ? { 'Idempotency-Key': key } : undefined),
+  queueJob: (job: NewJob, key: string) => request<JobSummary | Pick<JobSummary, 'id'>>('POST', '/api/jobs', job, undefined, { 'Idempotency-Key': key }),
   suggestPaths: (host: string, prefix: string, signal?: AbortSignal) => request<unknown>('POST', '/api/suggestions/paths', { host, prefix }, signal),
   // Durable conversion workflow (controller runs inspect → plan → convert → verify).
   conversionEligibility: (body: unknown, signal?: AbortSignal) => request<EligibilityEntry>('POST', '/api/conversions/eligibility', body, signal),
-  startConversion: (body: unknown, key: string) => request<unknown>('POST', '/api/conversions', body, undefined, { 'Idempotency-Key': key }),
+  startConversion: (body: unknown, key: string) => requestWithStatus<unknown>('POST', '/api/conversions', body, undefined, { 'Idempotency-Key': key }),
   conversions: (signal?: AbortSignal) => request<unknown>('GET', '/api/conversions', undefined, signal),
   conversion: (id: string, signal?: AbortSignal) => request<unknown>('GET', `/api/conversions/${encodeURIComponent(id)}`, undefined, signal),
   cancelConversion: (id: string) => request<unknown>('POST', `/api/conversions/${encodeURIComponent(id)}/cancel`, {}),
@@ -91,8 +95,14 @@ export function errorText(error: unknown): string {
 }
 
 /** A network or server error does not tell us if the controller accepted the POST. */
-export function submissionError(error: unknown): string {
+export function rejectedSubmission(error: unknown): boolean {
+  return error instanceof ApiError && error.status >= 400 && error.status < 500;
+}
+
+export function submissionError(error: unknown, retry = false): string {
   const text = errorText(error);
-  if (error instanceof ApiError && error.status >= 400 && error.status < 500) return text;
-  return `${text} Check Jobs, or retry with the same inputs without reloading. Reloading loses duplicate protection.`;
+  if (rejectedSubmission(error)) return text;
+  return retry
+    ? `${text} Check Jobs, or open the same retry and submit with the same inputs.`
+    : `${text} Check Jobs, or retry with the same inputs without reloading. Reloading loses duplicate protection.`;
 }

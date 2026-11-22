@@ -10,8 +10,8 @@
 import { buildConvertJob, type ConvertForm } from './convert';
 import { obj } from './reports';
 import type { Model } from './types';
-import { submissionError } from './api';
-import { RetryKeys, type RetrySubmission } from './retry-keys';
+import { rejectedSubmission, submissionError } from './api';
+import { PlainAttempt, retryKey, type RetrySubmission } from './retry-keys';
 
 export const STAGES = ['inspect', 'plan', 'convert', 'verify'] as const;
 export type Stage = (typeof STAGES)[number];
@@ -149,7 +149,7 @@ export function stageRows(c: Conversion, jobStates: Record<string, string | unde
   });
 }
 
-export type PostConversion = (body: ConversionBody, key: string) => Promise<unknown>;
+export type PostConversion = (body: ConversionBody, key: string) => Promise<{ data: unknown; status: number }>;
 
 /**
  * One submission at a time. A retry of the same body reuses the key, so a
@@ -159,33 +159,32 @@ export class ConversionSubmitter {
   busy = false;
   error: string | null = null;
   replayed = false;
-  #keys = new RetryKeys<Conversion>(undefined, true);
-  #inflight: Promise<Conversion | null> | null = null;
+  #plain = new PlainAttempt();
 
-  constructor(private post: PostConversion) {}
+  constructor(private launcher: string, private post: PostConversion) {}
 
-  submit(body: ConversionBody, retry?: RetrySubmission): Promise<Conversion | null> {
-    if (this.#inflight) return this.#inflight.then(() => null);
-    if (retry?.blocked) return Promise.resolve(null);
-    const attempt = this.#keys.take('conversion', body, retry?.history);
+  async submit(body: ConversionBody, retry?: RetrySubmission, current = () => true): Promise<Conversion | null> {
+    if (this.busy || retry?.blocked) return null;
     this.error = null;
-    this.replayed = !!attempt.result;
-    if (attempt.result) return Promise.resolve(attempt.result);
     this.busy = true;
-    this.#inflight = (async () => {
-      try {
-        const c = parseConversion(await this.post(body, attempt.key));
-        if (!c) throw new Error('The controller answered without a conversion record.');
-        attempt.accept(c);
-        return c;
-      } catch (e) {
-        this.error = submissionError(e);
-        return null;
-      } finally {
-        this.busy = false;
-        this.#inflight = null;
-      }
-    })();
-    return this.#inflight;
+    const failedId = retry?.failedId;
+    let plain: ReturnType<PlainAttempt['take']> | undefined;
+    try {
+      const snapshot: ConversionBody = JSON.parse(JSON.stringify(body));
+      if (!failedId) plain = this.#plain.take(this.launcher, snapshot, current);
+      const key = plain?.key ?? await retryKey(failedId!, this.launcher, snapshot);
+      const { data, status } = await this.post(snapshot, key);
+      const c = parseConversion(data);
+      if (!c?.id) throw new Error('The controller answered without a conversion record.');
+      plain?.complete();
+      this.replayed = status === 200;
+      return c;
+    } catch (e) {
+      if (rejectedSubmission(e)) plain?.complete();
+      this.error = submissionError(e, !!failedId);
+      return null;
+    } finally {
+      this.busy = false;
+    }
   }
 }

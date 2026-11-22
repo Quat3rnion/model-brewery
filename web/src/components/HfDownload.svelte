@@ -9,7 +9,7 @@
   import { hostName } from '../lib/format';
   import Submit from './Submit.svelte';
 
-  const submitter = new Submitter();
+  const submitter = new Submitter('library.hf-download');
   let host = $state('backend-hf');
   const hosts = $derived(brewery.state?.hosts ?? []);
   const target = $derived(hosts.find((h) => h.id === host));
@@ -62,9 +62,9 @@
       host: host === 'backend-hf' ? undefined : host,
       options: { repo_id: repo.trim(), revision: revision.trim(), filename: scope === 'file' ? filename.trim() : undefined },
     }, retry.action('hf_download'));
-    if (job && visit.canPresent()) {
+    if (job && visit.current()) {
       savedDraft = submitted;
-      if (!submitter.replayed) location.hash = `#/jobs/${encodeURIComponent(job.id)}`;
+      if (!submitter.replayed && visit.canPresent()) location.hash = `#/jobs/${encodeURIComponent(job.id)}`;
     }
   }
 </script>
@@ -103,7 +103,7 @@
     {#if host !== 'backend-hf'}<p class="hint">Download on {hostName(hosts, host)}.</p>{/if}
     <p class="hint">Track progress or cancel in Jobs. The download service verifies the files before it adds the entry to Library.</p>
     <Submit {blockers} busy={submitter.busy} disabled={retry.loading} onclick={start}>Start download</Submit>
-    <SubmitStatus s={submitter} replayOnly />
+    <SubmitStatus s={submitter} />
   </div>
 </details>
 

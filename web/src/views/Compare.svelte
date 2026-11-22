@@ -153,7 +153,7 @@
     [think ? 'thinking mode' : '', raw ? 'raw prompt' : '', useGpu ? `GPU${gpuDevice ? ` ${gpuDevice}` : ''}${gpuLayers ? `, ${gpuLayers} layers` : ''}` : '', threads ? `${threads} threads` : ''].filter(Boolean),
   );
 
-  const s = new Submitter();
+  const s = new Submitter('compare.run');
   async function submit() {
     attempted = true;
     if (blockers.length || s.busy || launch.blocked) return;

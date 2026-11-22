@@ -116,7 +116,7 @@ test('visual tuning retains an unconfirmed retry key across Back and replays acc
     if (!accepted.has(key)) accepted.set(key, job(`tune-${accepted.size + 1}`, req.body.kind, req.body));
     return tunes().length === 1
       ? { status: 502, json: { error: 'Reply lost.' } }
-      : { json: accepted.get(key) };
+      : { json: { id: accepted.get(key).id } };
   });
   const setup = async () => {
     await page.getByRole('radio', { name: 'Automatic' }).check();
@@ -157,7 +157,9 @@ test('visual tuning retains an unconfirmed retry key across Back and replays acc
   await awayAndBack();
   await (await setup()).click();
   await expect(page.getByText(/already queued/i)).toBeVisible();
-  expect(tunes()).toHaveLength(2);
+  expect(tunes()).toHaveLength(3);
+  expect(tunes()[2].headers['idempotency-key']).toBe(tunes()[0].headers['idempotency-key']);
+  expect(accepted.size).toBe(1);
 });
 
 test('edited partial transfer still requires acknowledgment on the plain route', async ({ page, controller: c }) => {
@@ -279,11 +281,11 @@ for (const [kind, action, old] of [
   expect(second.headers['idempotency-key']).toBe(first.headers['idempotency-key']);
 });
 
-test('ambiguous retry reply says to check Jobs or retry without reloading', async ({ page, controller: c }) => {
+test('ambiguous retry reply says to check Jobs or reopen the same retry', async ({ page, controller: c }) => {
   c.respond('POST', '/api/jobs', { status: 502, json: { error: 'Reply lost.' } });
   await openRetry(page, c, 'generate', 'Evaluate', { input_ids: ['bundle-a'], prompt_text: 'Retry this.' });
   await button(page, 'Queue generation').click();
-  await expect(page.getByRole('alert').filter({ hasText: 'Reply lost.' })).toContainText(/check Jobs.+without reloading/i);
+  await expect(page.getByRole('alert').filter({ hasText: 'Reply lost.' })).toContainText(/check Jobs.+open the same retry/i);
 });
 
 for (const [kind, view, action, fields] of [

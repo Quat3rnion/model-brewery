@@ -13,7 +13,7 @@
 
 <script lang="ts">
   import { SvelteMap } from 'svelte/reactivity';
-  import { api, errorText } from '../lib/api';
+  import { errorText } from '../lib/api';
   import { conversionRunHref, STAGES, type ConversionBody } from '../lib/conversion';
   import type { Blocker } from '../lib/blockers';
   import { conversions, type ConversionStarter } from '../lib/conversions.svelte';
@@ -27,6 +27,8 @@
   import JobState from './JobState.svelte';
   import Blockers from './Blockers.svelte';
   import Submit from './Submit.svelte';
+  import SubmitStatus from './SubmitStatus.svelte';
+  import { Submitter } from '../lib/submit.svelte';
   import { trellisProblem } from '../lib/trellis-layer';
   import type { RetrySubmission } from '../lib/retry-prefill.svelte';
 
@@ -37,6 +39,7 @@
 
   const submitted = new SvelteMap<number, JobSummary | null>();
   const loaded = new SvelteMap<string, JobDetail | 'rejected' | null>();
+  const reads = new Submitter('convert.recipe.inventory');
   let error = $state('');
   const host = $derived(brewery.state?.hosts.find(h => h.id === source.host));
   const blocked = $derived(inventoryBlocker(source, host));
@@ -64,20 +67,25 @@
   const readPending = $derived(!!inventory.need && submitted.get(inventory.need.offset) === null);
   const readJob = $derived(inventory.job ?? currentJobs.at(-1));
 
-  function readLayers() {
+  async function readLayers() {
     const next = inventory.need;
-    if (flash || blocked || error || !next || submitted.has(next.offset)) return;
+    if (loading || flash || blocked || error || !next || submitted.has(next.offset)) return;
     const { offset, sha } = next;
     const request = inventoryJob(source.id, source.host, offset, sha);
     submitted.set(offset, null);
-    void api.submitJob(request).then(job => {
+    const accepted = await reads.submit(request);
+    if (!accepted) {
+      submitted.delete(offset);
+      return;
+    }
+    try {
+      const job = 'state' in accepted ? accepted : await brewery.loadJob(accepted.id);
       if (job.kind !== request.kind || job.host !== request.host || job.input_ids?.length !== 1 || job.input_ids[0] !== request.input_ids[0]) {
         error = 'The inventory job does not match the selected source.';
         return;
       }
       submitted.set(offset, job);
-      void brewery.refresh();
-    }).catch(e => { error = errorText(e); });
+    } catch (e) { error = errorText(e); }
   }
 
   $effect(() => {
@@ -221,11 +229,12 @@
     <JobState job={readJob} />
   </div>
 {/if}
+{#if reads.error || reads.replayed}<SubmitStatus s={reads} />{/if}
 {#if problem}
   <p class="note bad" role="alert">{problem}</p>
 {:else if inventory.need}
   <div class="row">
-    <button type="button" class="btn" onclick={readLayers} disabled={readPending}>
+    <button type="button" class="btn" onclick={readLayers} disabled={loading || readPending} aria-describedby={loading ? 'cv-retry-loading' : undefined}>
       {inventory.pages.length ? 'Read next layers' : 'Read layers'}
     </button>
     <span class="hint">This queues a <code>weight_inspect</code> job on {hostName(brewery.state?.hosts ?? [], source.host)}.</span>
@@ -284,7 +293,7 @@
 <div aria-live="polite" class="xs">
   {#if currentSubmission && starter.error}
     <p class="note bad" role="alert">{starter.error} Run the same recipe again to retry the same request.</p>
-  {:else if currentSubmission && !starter.busy && starter.last}
-    <p class="muted">{starter.replayed ? 'This request already started conversion' : 'Started conversion'} <a href={conversionRunHref(starter.last.id, 'recipe')}>{starter.last.id}</a>. {#if starter.replayed}No second conversion was started.{/if}</p>
+  {:else if !starter.busy && starter.last}
+    <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a href={conversionRunHref(starter.last.id, 'recipe')}>{starter.last.id}</a>. {#if starter.replayed}No second conversion was started.{/if}</p>
   {/if}
 </div>

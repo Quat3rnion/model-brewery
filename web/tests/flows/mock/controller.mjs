@@ -8,17 +8,36 @@ const gguf = JSON.parse(readFileSync(ggufCatalog, 'utf8'));
 const json = (body, status = 200) => ({ status, json: body });
 const error = (status, message) => json({ error: message }, status);
 const summary = ({ result, events, prompt_text, ...rest }) => rest;
+const canonical = body => JSON.stringify(body, (_, value) =>
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value);
 
 // Only model the response and state transitions that browser tests need.
 // Tests can set a response for additional endpoints without changing defaults.
 export async function startController(assets) {
   const log = [];
   const responses = new Map();
+  const submissions = new Map();
   let data = scenario('live-shaped', hgnCatalog.catalog_sha256);
   let seq = 0;
   const id = (prefix) => `${prefix}-mock-${++seq}`;
   const key = (method, path) => `${method} ${path}`;
-  const api = async (method, path, body) => {
+  function submit(path, body, headers, create) {
+    const header = headers['idempotency-key'];
+    if (header === undefined) return json(create(), 201);
+    if (!header.length || header.length > 128 || /[^A-Za-z0-9._-]/.test(header)) return error(400, 'invalid Idempotency-Key');
+    const scope = key(path, header);
+    const fingerprint = canonical(body);
+    const prior = submissions.get(scope);
+    if (prior) {
+      if (prior.fingerprint !== fingerprint) return error(409, 'Idempotency-Key already used for a different request');
+      return json(path === '/api/jobs' ? { id: prior.record.id } : prior.record);
+    }
+    const record = create();
+    submissions.set(scope, { fingerprint, record });
+    return json(record, 201);
+  }
+  const api = async (method, path, body, headers) => {
     switch (key(method, path)) {
       case 'GET /api/state':
         return json({ hosts: data.hosts, models: data.models, prompts: data.prompts,
@@ -55,7 +74,7 @@ export async function startController(assets) {
         data.prompts.push(prompt);
         return json(prompt, 201);
       }
-      case 'POST /api/jobs': {
+      case 'POST /api/jobs': return submit(path, body, headers, () => {
         const jobId = id('job');
         const model = data.models.find((m) => m.id === body.input_ids[0]);
         const { prompt, ...request } = body;
@@ -65,17 +84,17 @@ export async function startController(assets) {
             ...request, prompt_text: body.prompt_id ? data.prompts.find((p) => p.id === body.prompt_id)?.text ?? null : prompt ?? null,
           }));
         data.jobs.push(entry);
-        return json(summary(entry), 201);
-      }
+        return summary(entry);
+      });
       case 'POST /api/conversions/eligibility': return json(conversionEligibility(data, body));
-      case 'POST /api/conversions': {
+      case 'POST /api/conversions': return submit(path, body, headers, () => {
         const entry = conversion(id('conversion'), body);
         const child = detail(job(id('job'), 'inspect', { host: entry.host, input_ids: entry.input_ids }));
         entry.job_ids.inspect = child.id;
         data.conversions.push(entry);
         data.jobs.push(child);
-        return json(entry, 201);
-      }
+        return entry;
+      });
       case 'POST /api/profiles': {
         const profile = { ...body, revision: (++seq).toString(16).padStart(64, '0'), created_at: Date.now() };
         data.profiles.push(profile);
@@ -132,7 +151,7 @@ export async function startController(assets) {
           ? (typeof override === 'function' ? await override(request) : override)
           : data.down ? { down: true }
           : data.status ? error(data.status, `Fixture HTTP ${data.status}`)
-          : await api(method, path, body);
+          : await api(method, path, body, request.headers);
         if (answer.down) req.socket.destroy();
         else if (answer.status === 204) res.writeHead(204).end();
         else res.writeHead(answer.status ?? 200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
@@ -151,6 +170,7 @@ export async function startController(assets) {
     load(name) {
       data = scenario(name, hgnCatalog.catalog_sha256);
       responses.clear();
+      submissions.clear();
     },
     respond: (method, path, response) => responses.set(key(method, path), response),
     requests: (method, path) => structuredClone(log.filter((r) => (!method || r.method === method) && (!path || r.path === path))),

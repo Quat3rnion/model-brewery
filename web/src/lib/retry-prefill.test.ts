@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { availableId, historicalPrompt, RetryKeys, RetryPrefill, omittedInputs } from './retry-prefill.svelte';
+import { availableId, historicalPrompt, RetryPrefill, omittedInputs } from './retry-prefill.svelte';
 import { RouteActivity } from './route.svelte';
 
 let slot = 0;
@@ -35,6 +35,7 @@ describe('retry prefill', () => {
     await vi.waitFor(() => expect(t.retry.offered).toBe(true));
     expect(t.draft().fields.name).toBe('');
     expect(t.focus).not.toHaveBeenCalled();
+    expect(t.retry.action('queue').failedId).toBe('job');
     t.retry.usePrevious();
     t.retry.usePrevious();
     expect(t.draft().fields.name).toBe('old input');
@@ -58,7 +59,7 @@ describe('retry prefill', () => {
     expect(t.draft().fields.seed).toBe(91);
     t.retry.usePrevious();
     expect(t.draft().fields).toEqual({ name: 'old input', seed: 23 });
-    expect(t.restore).toHaveBeenCalledTimes(2);
+    expect(t.restore).toHaveBeenCalledTimes(3);
   });
 
   it('caches the historical request, not the Library-dependent patch', async () => {
@@ -88,6 +89,31 @@ describe('retry prefill', () => {
     await Promise.resolve();
     expect(t.draft().fields.name).toBe('');
     expect(t.retry.offered).toBe(false);
+  });
+
+  it('focuses the heading when the restored control cannot take focus', async () => {
+    const t = setup();
+    const body = {};
+    const control = { focus: vi.fn() };
+    const heading = { focus: vi.fn() };
+    vi.stubGlobal('document', {
+      body, activeElement: body,
+      getElementById: () => control,
+      querySelector: (selector: string) => selector === 'main h1' ? heading : null,
+    });
+    try {
+      const retry = new RetryPrefill({ ...t.form, focus: undefined });
+      retry.enter('entry', 'job');
+      retry.setReady(true);
+      retry.touch();
+      t.resolve('previous');
+      await vi.waitFor(() => expect(retry.offered).toBe(true));
+      retry.usePrevious();
+      await vi.waitFor(() => expect(control.focus).toHaveBeenCalledOnce());
+      expect(heading.focus).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('compares original inputs with the restored selection, not the current offer', () => {
@@ -136,9 +162,11 @@ describe('retry prefill', () => {
     draft.picked.push('another');
     expect(retry.action('transfer').blocked).toBe(true);
     expect(retry.action('cleanup').blocked).toBe(false);
-    expect(retry.action('cleanup').history).toBeUndefined();
+    expect(retry.action('cleanup').failedId).toBeUndefined();
+    expect(retry.action('preview').failedId).toBe('job');
     retry.enter('plain', null);
     expect(retry.action('preview').blocked).toBe(true);
+    expect(retry.action('preview').failedId).toBeUndefined();
     retry.acknowledge('transfer');
     expect(retry.action('preview').blocked).toBe(false);
     expect(retry.omissions('preview').map(item => item.id)).toEqual(['deleted']);
@@ -147,39 +175,19 @@ describe('retry prefill', () => {
     draft.picked = ['another'];
     expect(retry.omissions('transfer')).toEqual([]);
   });
-});
-
-it('binds a retry key to its launcher, job kind and exact wire body', () => {
-  let sequence = 0;
-  const keys = new RetryKeys(() => String(++sequence));
-  const body = { input_ids: ['A'], host: 'worker' };
-  const retry = { slot: 'keys', id: 'failed-job', entry: 'one', action: 'editor' };
-  expect(keys.take('plan', body, retry).key).toBe('1');
-  expect(keys.take('plan', { host: 'worker', input_ids: ['A'] }, retry).key).toBe('1');
-  expect(keys.take('plan', body, { ...retry, action: 'previous' }).key).toBe('2');
-  expect(keys.take('inspect', body, retry).key).toBe('3');
-  expect(keys.take('plan', { ...body, input_ids: ['B'] }, retry).key).toBe('4');
-  const independent = keys.take('verify', body);
-  independent.accept({ id: 'independent-job' });
-  expect(keys.take('verify', body).key).not.toBe(independent.key);
-});
-
-it('replays an accepted retry on Back but retires its key for a fresh entry', () => {
-  let sequence = 0;
-  const launch = () => new RetryKeys<{ id: string }>(() => String(++sequence));
-  const keys = launch();
-  const body = { input_ids: ['A'] };
-  const retry = (entry: string) => ({ slot: 'retire', id: 'failed-job', entry, action: 'run' });
-  const initial = keys.take('plan', body, retry('one'));
-  expect(launch().take('plan', body, retry('two')).key).toBe(initial.key);
-  const withoutQuery = keys.take('plan', body);
-  expect(withoutQuery.key).toBe(initial.key);
-  withoutQuery.accept({ id: 'accepted-job' });
-  expect(launch().take('plan', body, retry('one')).result?.id).toBe('accepted-job');
-  expect(launch().take('plan', body, retry('two')).result?.id).toBe('accepted-job');
-  const fresh = launch().take('plan', body, retry('three'));
-  expect(fresh.key).not.toBe(initial.key);
-  expect(fresh.result).toBeUndefined();
+  it('keeps the matching retry launcher bound when the operator replaces every restored field', async () => {
+    const t = setup();
+    t.retry.enter('entry', 'job');
+    t.retry.setReady(true);
+    t.resolve('restored');
+    await vi.waitFor(() => expect(t.retry.action('queue').failedId).toBe('job'));
+    t.draft().fields.name = 'new';
+    t.draft().fields.seed = 91;
+    expect(t.retry.action('queue').failedId).toBe('job');
+    t.form.write({ fields: { name: 'new', seed: 91 }, host: 'new-host', limit: 8 });
+    expect(t.retry.action('queue').failedId).toBe('job');
+    expect(t.retry.action('unrelated').failedId).toBeUndefined();
+  });
 });
 
 it('permits stored results but suppresses presentation after interaction or a round trip', () => {

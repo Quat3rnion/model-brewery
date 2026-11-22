@@ -77,14 +77,14 @@
   const copyBlockers = $derived(blockers());
   const previewHostBlockers = $derived(hostBlockers('transfer_preview'));
   const transferHostBlockers = $derived(hostBlockers('transfer'));
-  const preview = new Submitter();
-  const transfer = new Submitter();
+  const preview = new Submitter('transfers.preview');
+  const transfer = new Submitter('transfers.transfer');
 
   // Cleanup
   let cleanHost = $state('');
   let digest = $state('');
   let confirmClean = $state(false);
-  const cleaner = new Submitter();
+  const cleaner = new Submitter('transfers.cleanup');
   const digestProblem = $derived(digest.trim() && !/^[0-9a-f]{64}$/.test(digest.trim()) ? 'Use a 64-character lowercase SHA-256 hex digest.' : null);
   const cleanBlockers = $derived.by(() => {
     const out: Blocker[] = [];
@@ -110,7 +110,7 @@
       const dest = destinationOptions.some(item => item.value === job.host) ? job.host ?? '' : '';
       const selected = job.input_ids.filter(id => models.some(model => model.id === id && model.host !== dest && model.available !== false));
       return {
-        actions: ['transfer_preview', 'transfer'], patch: { dest, selected }, context: true, focus: 'tx-host',
+        actions: ['transfer_preview', 'transfer'], retryActions: [job.kind], patch: { dest, selected }, context: true, focus: 'tx-host',
         retains: draft => draft.selected.some(id => job.input_ids.includes(id)),
         omissions: draft => omittedInputs(job.input_ids, draft.selected).map(id => {
           const model = models.find(m => m.id === id);
