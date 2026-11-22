@@ -192,7 +192,7 @@ const KIND_TITLES: Record<string, string> = {
   compare: 'Prompt comparison',
   inspect: 'Converter inspect',
   plan: 'Converter plan',
-  convert: 'Conversion',
+  convert: 'Convert step',
   verify: 'Bundle verify',
   generate: 'Generation',
   evaluate: 'GSM8K evaluation',

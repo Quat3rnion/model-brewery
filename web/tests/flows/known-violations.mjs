@@ -20,13 +20,7 @@ export const knownViolations = {
   benchmarks: runningJobStatus,
   calibration: runningJobStatus,
   settings: runningJobStatus,
-  profiles: {
-    ...runningJobStatus,
-    'label-content-name-mismatch': {
-      projects: ['1280-light', '1280-dark', '390-light', '390-dark'],
-      nodes: ['button[aria-label^="Use Fixture HGN profile revision "]'],
-    },
-  },
+  profiles: runningJobStatus,
   weights: runningJobStatus,
   job: {
     ...runningJobStatus,

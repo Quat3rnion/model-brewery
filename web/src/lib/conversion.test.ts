@@ -119,6 +119,15 @@ describe('saved profile revision', () => {
   it('rejects a malformed revision value', () => {
     expect(buildConversion(form({ profile: 'rev:xyz' }), models).problems.join()).toMatch(/revision/);
   });
+  it('requires HF and CPU backends for a custom profile', () => {
+    const forced = buildConversion(form({ profile: `rev:${rev}`, q4cp_backend: 'hip' }), models);
+    const gguf = buildConversion(form({ profile: `rev:${rev}` }), [{ ...models[0], kind: 'gguf' }]);
+    expect(forced).toEqual({ body: null, problems: ['Select an HF source and CPU backends to use a custom profile.'] });
+    expect(gguf).toEqual(forced);
+  });
+  it('does not build a request for an unavailable registered checkpoint', () => {
+    expect(buildConversion(form(), [{ ...models[0], available: false }]).body).toBeNull();
+  });
   it('workflow echoes profile identity', () => {
     const c = parseConversion(wf({ profile_revision: rev, profile_name: 'Fast attn', options: {} }))!;
     expect(c.profileRevision).toBe(rev);
