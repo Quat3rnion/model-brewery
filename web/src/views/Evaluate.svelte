@@ -3,15 +3,20 @@
   import { Submitter } from '../lib/submit.svelte';
   import { BUNDLE_KINDS, capability, hostName, isTerminal, modelLabel } from '../lib/format';
   import { benchmarkLine, generationLine, latestJobFor, lineTone, verificationLine, type ReportLine } from '../lib/reports';
+  import { fieldError, visibleBlockers, type Blocker } from '../lib/blockers';
+  import { hostWorkflowEligibility } from '../lib/eligibility';
+  import { unsavedChanges } from '../lib/unsaved-changes.svelte';
   import HostSelect from '../components/HostSelect.svelte';
   import Combobox from '../components/Combobox.svelte';
   import { idOptions, promptOptions } from '../lib/pickers';
   import ModelSelect from '../components/ModelSelect.svelte';
-  import Submit from '../components/Submit.svelte';
+  import WorkflowGate from '../components/WorkflowGate.svelte';
+  import Blockers from '../components/Blockers.svelte';
+  import FieldError from '../components/FieldError.svelte';
   import SubmitStatus from '../components/SubmitStatus.svelte';
   import RecentJobs from '../components/RecentJobs.svelte';
   import Badge from '../components/Badge.svelte';
-  import type { Host, JobSummary } from '../lib/types';
+  import type { Host, JobSummary, Workflow } from '../lib/types';
 
   const hosts = $derived(brewery.state?.hosts ?? []);
   const models = $derived(brewery.state?.models ?? []);
@@ -26,11 +31,22 @@
   function hostOf(id: string, override: string) {
     return hosts.find((h) => h.id === (override || models.find((m) => m.id === id)?.host));
   }
-  function capBlock(kind: string, h: Host | undefined, out: string[]) {
-    if (!h) return;
-    const c = capability(h, kind);
-    if (!c.allowed && c.reason) out.push(c.reason);
+  function hostBlockers(workflow: Workflow, host: Host | undefined): Blocker[] {
+    if (!host) return [];
+    const entry = hostWorkflowEligibility(brewery.state?.eligibility, host.id, workflow);
+    const legacy = entry ? undefined : capability(host, workflow);
+    if (entry?.eligible !== false && legacy?.allowed !== false) return [];
+    const capabilityReason = host.capability_reasons?.[workflow];
+    const reasons = entry?.reasons ?? (capabilityReason ? [capabilityReason] : []);
+    return reasons.length
+      ? reasons.map((r) => ({ text: r.text, fixAnchor: r.fix_anchor }))
+      : [{ host: host.name, text: legacy?.reason ?? 'This host cannot run this workflow.', fixAnchor: evaluationSettings(host) }];
   }
+  const evaluationSettings = (host: Host) => `#/settings/evaluation?host=${encodeURIComponent(host.id)}`;
+  const touched = $state<Record<string, boolean>>({});
+  const touch = (field: string) => () => { touched[field] = true; };
+  const refInputs = ['gsm8k-predictions', 'gsm8k-baseline'];
+  const refResults = [...refInputs, 'gsm8k-evaluation'];
 
   // ---- Report status per bundle (three separate lines) ----
   // Load terminal detail records for the latest verify/generate/evaluate job of each bundle.
@@ -50,7 +66,7 @@
     return [
       { name: 'File verification', line: verificationLine(...pick('verify')) },
       { name: 'Generation', line: generationLine(...pick('generate')) },
-      { name: 'Benchmark quality', line: benchmarkLine(...pick('evaluate')) },
+      { name: 'GSM8K score', line: benchmarkLine(...pick('evaluate')) },
     ];
   }
 
@@ -60,15 +76,20 @@
   let gMode = $state<'saved' | 'text'>('saved');
   let gPromptId = $state('');
   let gText = $state('');
+  let submittedText = $state('');
+  unsavedChanges(() => gText !== '' && gText !== submittedText);
   const gen = new Submitter();
-  const gBlockers = $derived.by(() => {
-    const out: string[] = [];
-    if (!gBundle) out.push('Select a bundle.');
-    if (gMode === 'saved' && !gPromptId) out.push('Select a saved prompt.');
-    if (gMode === 'text' && !gText) out.push('Enter a prompt.');
-    capBlock('generate', hostOf(gBundle, gHost), out);
-    return out;
-  });
+  const gHostBlockers = $derived(hostBlockers('generate', hostOf(gBundle, gHost)));
+  const gFields = $derived<Blocker[]>([
+    ...(!gBundle ? [{ field: 'g-bundle', text: 'Select a bundle.' }] : []),
+    ...(gMode === 'saved' && !prompts.some((p) => p.id === gPromptId) ? [{ field: 'g-prompt', text: 'Select a saved prompt.' }] : []),
+    ...(gMode === 'text' && !gText.trim() ? [{ field: 'g-text', text: 'Enter a prompt.' }] : []),
+  ]);
+  async function generate() {
+    const text = gMode === 'text' ? gText : undefined;
+    const job = await gen.submit({ kind: 'generate', host: gHost || undefined, input_ids: [gBundle], prompt_id: gMode === 'saved' ? gPromptId : undefined, prompt: text });
+    if (job && text !== undefined) submittedText = text;
+  }
 
   // ---- Evaluate ----
   let eBundle = $state('');
@@ -76,34 +97,32 @@
   let eBaseMode = $state<'none' | 'file' | 'source'>('none');
   let eBaseFile = $state('');
   let eSource = $state('');
-  const eSources = $derived(sources(hostOf(eBundle, eHost)));
+  const eWorker = $derived(hostOf(eBundle, eHost));
+  const eSources = $derived(sources(eWorker));
   const ev = new Submitter();
-  const eBlockers = $derived.by(() => {
-    const out: string[] = [];
-    if (!eBundle) out.push('Select a bundle.');
-    if (eBaseMode === 'file' && !eBaseFile) out.push('Select reference results.');
-    if (eBaseMode === 'source' && !eSources.some(s=>s.id===eSource)) out.push('Select a configured comparison endpoint.');
-    capBlock('evaluate', hostOf(eBundle, eHost), out);
-    return out;
-  });
+  const eHostBlockers = $derived(hostBlockers('evaluate', eWorker));
+  const eFields = $derived<Blocker[]>([
+    ...(!eBundle ? [{ field: 'e-bundle', text: 'Select a bundle.' }] : []),
+    ...(eBaseMode === 'file' && !eBaseFile ? [{ field: 'e-file', text: 'Select reference results.' }] : []),
+    ...(eBaseMode === 'source' && !eSources.some((s) => s.id === eSource) ? [{ field: 'e-src', text: 'Select a reference endpoint.' }] : []),
+  ]);
 
-  // ---- Baseline ----
+  // ---- Reference ----
   let bMode = $state<'file' | 'source'>('file');
   let bFile = $state('');
   let bHost = $state('');
   let bSource = $state('');
-  const bSources = $derived(sources(hosts.find((h) => h.id === bHost)));
+  const bWorker = $derived(hostOf(bMode === 'file' ? bFile : '', bHost));
+  const bSources = $derived(sources(bWorker));
   const base = new Submitter();
-  const bBlockers = $derived.by(() => {
-    const out: string[] = [];
-    if (bMode === 'file' && !bFile) out.push('Select a predictions or baseline file.');
-    if (bMode === 'source') {
-      if (!bHost) out.push('Select a host.');
-      if (!bSource) out.push('Select a baseline source.');
-    }
-    capBlock('baseline', bMode === 'source' ? hosts.find((h) => h.id === bHost) : hostOf(bFile, bHost), out);
-    return out;
-  });
+  const bHostBlockers = $derived(hostBlockers('baseline', bWorker));
+  const bFields = $derived<Blocker[]>([
+    ...(bMode === 'file' && !bFile ? [{ field: 'b-file', text: 'Select reference results or predictions.' }] : []),
+    ...(bMode === 'source' && !bHost ? [{ field: 'b-host', text: 'Select a host.' }] : []),
+    ...(bMode === 'source' && !bSources.some((s) => s.id === bSource) ? [{ field: 'b-src', text: 'Select a reference endpoint.' }] : []),
+  ]);
+  const visible = $derived(visibleBlockers([...gFields, ...eFields, ...bFields], touched));
+  const error = (field: string) => fieldError(visible, field);
 </script>
 
 <div class="stack">
@@ -114,24 +133,20 @@
     </p>
   </div>
 
-  {#if hosts.length && !hosts.some((h) => capability(h, 'evaluate').allowed)}
-    <p class="note info">No worker can run GSM8K evaluation yet. <a href="#/settings">Check evaluation settings</a>.</p>
-  {/if}
-
   <section class="panel" aria-labelledby="st-h">
     <header><h2 id="st-h">Bundle status</h2></header>
     {#if bundles.length === 0}
-      <p class="empty">No bundles in the library. Convert a checkpoint, or register a bundle directory.</p>
+      <p class="empty">No bundles in the <a href="#/library">Library</a>. Convert a checkpoint, or register a bundle directory.</p>
     {:else}
       <div class="table-wrap">
         <table class="data status stackable">
-          <caption class="sr-only">Latest file verification, generation and benchmark result for each bundle</caption>
+          <caption class="sr-only">Latest file verification, generation and GSM8K score for each bundle</caption>
           <thead>
             <tr>
               <th scope="col">Bundle</th>
               <th scope="col">File verification</th>
               <th scope="col">Generation</th>
-              <th scope="col">Benchmark quality</th>
+              <th scope="col">GSM8K score</th>
             </tr>
           </thead>
           <tbody>
@@ -156,105 +171,132 @@
     {/if}
   </section>
 
-  <h2 class="group-h">Benchmark quality</h2>
-  {#snippet prepareReference()}
-    <details class="disclosure">
-      <summary>Prepare a reusable comparison result</summary>
+  <h2 class="group-h">GSM8K score</h2>
+  <section class="panel" aria-labelledby="ev-h">
+    <header><h3 id="ev-h" class="ph">GSM8K evaluation</h3></header>
+    <WorkflowGate workflow="evaluate">
       <div class="body stack">
-        <p class="small muted">Import predictions from a reference model, or score a configured endpoint on the same questions.</p>
-        <div class="seg" role="radiogroup" aria-label="Baseline input">
-          <label><input type="radio" bind:group={bMode} value="file" /> Import predictions file</label>
-          <label><input type="radio" bind:group={bMode} value="source" /> Configured source</label>
-        </div>
-        <div class="grid-2">
-          {#if bMode === 'file'}
-            <ModelSelect bind:value={bFile} kinds={['gsm8k-predictions', 'gsm8k-baseline']} label="Predictions or baseline file" />
-            <HostSelect bind:value={bHost} kind="baseline" label="Run on" optional optionalLabel="Host of the file" />
-          {:else}
-            <HostSelect bind:value={bHost} kind="baseline" label="Host" />
-            <div class="field">
-              <Combobox bind:value={bSource} id="b-src" label="Baseline source" options={idOptions(bSources)} disabled={!bHost || bSources.length === 0} placeholder={bHost && bSources.length === 0 ? 'None configured on this host' : bHost ? 'Select or type a source' : 'Select a host first'} emptyText="No source matches." />
-              <span class="hint">Comparison endpoints are configured in <a href="#/settings">Settings</a>.</span>
-            </div>
-          {/if}
-        </div>
-        <Submit
-          blockers={bBlockers}
-          busy={base.busy}
-          onclick={() =>
-            base.submit(
-              bMode === 'file'
-                ? { kind: 'baseline', host: bHost || undefined, input_ids: [bFile] }
-                : { kind: 'baseline', host: bHost, input_ids: [], options: { baseline_source: bSource } },
-            )}>Queue comparison result</Submit
-        >
-        <SubmitStatus s={base} />
-      </div>
-    </details>
-  {/snippet}
-    <section class="panel" aria-labelledby="ev-h">
-      <header><h3 id="ev-h" class="ph">GSM8K evaluation</h3></header>
-      <div class="body stack">
-        <ModelSelect bind:value={eBundle} kinds={BUNDLE_KINDS} label="Bundle" />
-        <HostSelect bind:value={eHost} kind="evaluate" label="Run on" optional optionalLabel="Host of the bundle" />
+        <Blockers blockers={eHostBlockers} />
+        <ModelSelect bind:value={eBundle} kinds={BUNDLE_KINDS} label="Bundle" error={error('e-bundle')} onblur={touch('e-bundle')} />
+        <HostSelect bind:value={eHost} workflow="evaluate" kind="evaluate" label="Run on" optional optionalLabel="Host of the bundle" />
         <fieldset class="plain">
           <legend class="small muted">Scoring mode</legend>
           <div class="seg">
-            <label><input type="radio" bind:group={eBaseMode} value="none" /> Standalone score</label>
-            <label><input type="radio" bind:group={eBaseMode} value="file" /> Compare with a file</label>
-            <label><input type="radio" bind:group={eBaseMode} value="source" /> Compare with an endpoint</label>
+            <label><input type="radio" name="evaluation-mode" bind:group={eBaseMode} value="none" /> Standalone score</label>
+            <label><input type="radio" name="evaluation-mode" bind:group={eBaseMode} value="file" /> Use a reference file</label>
+            <label><input type="radio" name="evaluation-mode" bind:group={eBaseMode} value="source" /> Use a reference endpoint</label>
           </div>
           {#if eBaseMode === 'file'}
-            <ModelSelect bind:value={eBaseFile} kinds={['gsm8k-baseline','gsm8k-evaluation','gsm8k-predictions']} label="Reference results" hint="Select results or predictions for the same GSM8K protocol. The reference can use a different model or precision." />
-            {@render prepareReference()}
+            <ModelSelect bind:value={eBaseFile} kinds={refResults} label="Reference results" hint="Select results or predictions for the same GSM8K protocol. The reference can use a different model or precision." error={error('e-file')} onblur={touch('e-file')} />
+            {#if !models.some((model) => refResults.includes(model.kind))}
+              <p class="hint">Register a reference file in <a href="#/library">Library</a>, or prepare reference results below.</p>
+            {/if}
           {:else if eBaseMode === 'source'}
             <div class="field">
               {#if eSources.length}
-                <Combobox bind:value={eSource} id="e-src" label="Comparison endpoint" options={idOptions(eSources)} placeholder="Select an endpoint" emptyText="No endpoint matches." />
-              {:else if !hostOf(eBundle,eHost)}<p class="xs muted">Select the bundle or worker to see its comparison endpoints.</p>
-              {:else}<p class="xs muted">No comparison endpoint on this worker. <a href="#/settings">Check Settings</a> or compare with a file instead.</p>{/if}
+                <Combobox bind:value={eSource} id="e-src" label="Reference endpoint" options={idOptions(eSources)} placeholder="Select an endpoint" emptyText="No endpoint matches." invalid={!!error('e-src')} describedby={error('e-src') ? 'e-src-error' : undefined} onblur={touch('e-src')} />
+                <FieldError id="e-src-error" error={error('e-src')} />
+              {:else if eWorker}
+                <p class="small muted">No reference endpoint on this host. <a href={evaluationSettings(eWorker)}>Set up an endpoint for {eWorker.name}</a>, or use a reference file.</p>
+              {:else}
+                <p class="small muted">Select a bundle or host to see its reference endpoints.</p>
+              {/if}
             </div>
           {/if}
         </fieldset>
-        <Submit
-          blockers={eBlockers}
-          busy={ev.busy}
-          onclick={() =>
-            ev.submit({
-              kind: 'evaluate',
-              host: eHost || undefined,
-              input_ids: eBaseMode === 'file' ? [eBundle, eBaseFile] : [eBundle],
-              options: eBaseMode === 'source' ? { baseline_source: eSource } : undefined,
-            })}>Queue full GSM8K evaluation</Submit
-        >
-        <SubmitStatus s={ev} />
+        {@render queue('Queue full GSM8K evaluation', eFields, eHostBlockers, ev, () =>
+          ev.submit({
+            kind: 'evaluate',
+            host: eHost || undefined,
+            input_ids: eBaseMode === 'file' ? [eBundle, eBaseFile] : [eBundle],
+            options: eBaseMode === 'source' ? { baseline_source: eSource } : undefined,
+          }))}
       </div>
-    </section>
+    </WorkflowGate>
+  </section>
+
+  <section class="panel" aria-labelledby="ref-h">
+    <header><h3 id="ref-h" class="ph">Prepare reference results</h3></header>
+    <WorkflowGate workflow="baseline">
+      <div class="body stack">
+        <Blockers blockers={bHostBlockers} />
+        <p class="small muted">Import predictions from a reference model, or score a configured endpoint on the same questions.</p>
+        <fieldset class="plain">
+          <legend class="small muted">Reference input</legend>
+          <div class="seg">
+            <label><input type="radio" name="reference-input" bind:group={bMode} value="file" /> Import a file</label>
+            <label><input type="radio" name="reference-input" bind:group={bMode} value="source" /> Use a reference endpoint</label>
+          </div>
+        </fieldset>
+        <div class="grid-2">
+          {#if bMode === 'file'}
+            <div class="stack">
+              <ModelSelect bind:value={bFile} kinds={refInputs} label="Reference results or predictions" error={error('b-file')} onblur={touch('b-file')} />
+              {#if !models.some((model) => refInputs.includes(model.kind))}
+                <p class="hint">Register a reference file in <a href="#/library">Library</a>.</p>
+              {/if}
+            </div>
+            <HostSelect bind:value={bHost} workflow="baseline" kind="baseline" label="Run on" optional optionalLabel="Host of the file" />
+          {:else}
+            <HostSelect bind:value={bHost} workflow="baseline" kind="baseline" label="Host" error={error('b-host')} onblur={touch('b-host')} />
+            <div class="field">
+              <Combobox bind:value={bSource} id="b-src" label="Reference endpoint" options={idOptions(bSources)} disabled={!bSources.length} placeholder={!bWorker ? 'Select a host first' : bSources.length ? 'Select an endpoint' : 'No endpoint on this host'} emptyText="No endpoint matches." invalid={!!error('b-src')} describedby={error('b-src') ? 'b-src-error' : undefined} onblur={touch('b-src')} />
+              <FieldError id="b-src-error" error={error('b-src')} />
+              {#if bWorker && !bSources.length}<span class="hint"><a href={evaluationSettings(bWorker)}>Set up a reference endpoint for {bWorker.name}</a>.</span>{/if}
+            </div>
+          {/if}
+        </div>
+        {@render queue('Queue reference results', bFields, bHostBlockers, base, () => base.submit(
+          bMode === 'file'
+            ? { kind: 'baseline', host: bHost || undefined, input_ids: [bFile] }
+            : { kind: 'baseline', host: bHost, input_ids: [], options: { baseline_source: bSource } },
+        ))}
+      </div>
+    </WorkflowGate>
+  </section>
 
   <h2 class="group-h">Generation check</h2>
   <section class="panel" aria-labelledby="gen-h">
     <header><h3 id="gen-h" class="ph">Generate</h3></header>
-    <div class="body stack">
-      <ModelSelect bind:value={gBundle} kinds={BUNDLE_KINDS} label="Bundle" />
-      <HostSelect bind:value={gHost} kind="generate" label="Run on" optional optionalLabel="Host of the bundle" hint="Needs a worker with an approved Halogen runtime. The run records which files it opens." />
-      <div class="seg" role="radiogroup" aria-label="Prompt source">
-        <label><input type="radio" bind:group={gMode} value="saved" /> Saved prompt</label>
-        <label><input type="radio" bind:group={gMode} value="text" /> Type a prompt</label>
+    <WorkflowGate workflow="generate">
+      <div class="body stack">
+        <Blockers blockers={gHostBlockers} />
+        <ModelSelect bind:value={gBundle} kinds={BUNDLE_KINDS} label="Bundle" error={error('g-bundle')} onblur={touch('g-bundle')} />
+        <HostSelect bind:value={gHost} workflow="generate" kind="generate" label="Run on" optional optionalLabel="Host of the bundle" hint="Needs a worker with an approved Halogen runtime. The run records which files it opens." />
+        <fieldset class="plain">
+          <legend class="small muted">Prompt source</legend>
+          <div class="seg">
+            <label><input type="radio" name="generation-prompt" bind:group={gMode} value="saved" /> Saved prompt</label>
+            <label><input type="radio" name="generation-prompt" bind:group={gMode} value="text" /> Type a prompt</label>
+          </div>
+          {#if gMode === 'saved'}
+            <div class="field">
+              <Combobox bind:value={gPromptId} id="g-prompt" label="Saved prompt" labelHidden options={promptOptions(prompts)} disabled={!prompts.length} placeholder={prompts.length ? 'Select or type a prompt name' : 'No saved prompts'} emptyText="No saved prompt matches." invalid={!!error('g-prompt')} describedby={error('g-prompt') ? 'g-prompt-error' : undefined} onblur={touch('g-prompt')} />
+              <FieldError id="g-prompt-error" error={error('g-prompt')} />
+              {#if !prompts.length}<span class="hint">Save a prompt in <a href="#/library">Library</a>, or type a prompt for this run.</span>{/if}
+            </div>
+          {:else}
+            <div class="field">
+              <label for="g-text">Prompt text</label>
+              <textarea id="g-text" class="input" rows="3" bind:value={gText} aria-invalid={!!error('g-text')} aria-describedby={error('g-text') ? 'g-text-error' : undefined} onblur={touch('g-text')}></textarea>
+              <FieldError id="g-text-error" error={error('g-text')} />
+            </div>
+          {/if}
+        </fieldset>
+        {@render queue('Queue generation', gFields, gHostBlockers, gen, generate)}
       </div>
-      {#if gMode === 'saved'}
-        <div class="field">
-          <Combobox bind:value={gPromptId} id="g-prompt" label="Saved prompt" labelHidden options={promptOptions(prompts)} disabled={!prompts.length} placeholder={prompts.length ? 'Select or type a prompt name' : 'No saved prompts'} emptyText="No saved prompt matches." />
-        </div>
-      {:else}
-        <div class="field"><label for="g-text" class="sr-only">Prompt text</label><textarea id="g-text" class="input" rows="3" bind:value={gText}></textarea></div>
-      {/if}
-      <Submit blockers={gBlockers} busy={gen.busy} onclick={() => gen.submit({ kind: 'generate', host: gHost || undefined, input_ids: [gBundle], prompt_id: gMode === 'saved' ? gPromptId : undefined, prompt: gMode === 'text' ? gText : undefined })}>Queue generation</Submit>
-      <SubmitStatus s={gen} />
-    </div>
+    </WorkflowGate>
   </section>
 
-  <RecentJobs kinds={['generate', 'evaluate', 'baseline']} title="Recent generation and evaluation jobs" limit={8} />
+  <RecentJobs kinds={['generate', 'evaluate', 'baseline']} title="Recent generation, evaluation and reference jobs" limit={8} />
 </div>
+
+{#snippet queue(label: string, fields: Blocker[], hosts: Blocker[], s: Submitter, submit: () => Promise<unknown>)}
+  <div>
+    <button type="button" class="btn primary" disabled={s.busy || fields.length > 0 || hosts.length > 0} aria-busy={s.busy} onclick={submit}>{s.busy ? 'Submitting…' : label}</button>
+  </div>
+  <SubmitStatus {s} />
+{/snippet}
 
 <style>
   .group-h {

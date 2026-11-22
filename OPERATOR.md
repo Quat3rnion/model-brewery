@@ -2202,7 +2202,10 @@ removed, use `qualification/fixtures/halogen-0.18.22-timing.jsonl`.
 Open the **Calibration** tab of the web page (`#/calibration`). Use
 **Report files (JSON)** to select one or more files from your disk. Each file
 can be at most 16 MiB. The browser reads the files. It does not upload them
-to the controller and does not load a model.
+to the controller and does not load a model. Open reports stay in memory when
+you go to another workbench page in the same browser tab. Reloading or closing
+the tab clears them. When no reports are open, the page shows the commands
+that make each report.
 
 The page accepts these schemas:
 

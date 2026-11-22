@@ -5,8 +5,9 @@
 // their names match.
 
 import { capability, isTerminal } from './format';
+import type { Blocker } from './blockers';
 import { referenceInfo, benchmarkLine, isFullSplit, obj, readScore } from './reports';
-import type { Host, JobDetail, JobSummary, NewJob } from './types';
+import type { EligibilityEntry, Host, JobDetail, JobSummary, NewJob } from './types';
 
 export const BENCHMARK_SCHEMA = 'brewery-benchmark-report-v1';
 export const SCORECARD_SCHEMA = 'brewery-workbench-scorecard-v1';
@@ -69,23 +70,43 @@ export function choiceLabel(list: Choice[], id: string): string {
 }
 
 /** One 'benchmark' job: no inputs, options { benchmark_target, benchmarks }. */
-export function buildBenchmarkJob(host: Host | undefined, target: string, suites: string[]): { job: NewJob | null; problems: string[] } {
-  const problems: string[] = [];
+export function buildBenchmarkJob(host: Host | undefined, target: string, suites: string[], decision?: EligibilityEntry): { job: NewJob | null; blockers: Blocker[] } {
+  const blockers: Blocker[] = [];
   const picked = [...new Set(suites)];
-  if (!host) problems.push('Select a host.');
+  if (!host) blockers.push({ field: 'host', text: 'Select a host.' });
   else {
-    const c = capability(host, 'benchmark');
-    if (!c.allowed && c.reason) problems.push(c.reason);
+    const legacy = decision ? undefined : capability(host, 'benchmark');
+    if (decision?.eligible === false || legacy?.allowed === false) {
+      const reason = host.capability_reasons?.benchmark;
+      const reasons = decision?.reasons ?? (reason ? [reason] : []);
+      if (reasons.length) blockers.push(...reasons.map((r) => ({ text: r.text, fixAnchor: r.fix_anchor })));
+      else blockers.push({ host: host.name ?? host.id, text: legacy?.reason ?? 'This host cannot run benchmarks.', fixAnchor: `#/settings/evaluation?host=${encodeURIComponent(host.id)}` });
+    }
     const { targets, suites: offered } = benchmarkChoices(host);
-    if (!target) problems.push(targets.length ? 'Select an endpoint target.' : 'This host advertises no endpoint target.');
-    else if (!targets.some((t) => t.id === target)) problems.push('The selected endpoint target is not advertised by this host.');
+    if (!target) blockers.push({ field: 'target', text: targets.length ? 'Select an endpoint target.' : 'This host advertises no endpoint target.' });
+    else if (!targets.some((t) => t.id === target)) blockers.push({ field: 'target', text: 'The selected endpoint target is not advertised by this host.' });
     const unknown = picked.filter((id) => !offered.some((s) => s.id === id));
-    if (unknown.length) problems.push(`Suites not advertised by this host: ${unknown.join(', ')}.`);
+    if (unknown.length) blockers.push({ field: 'suites', text: `Suites not advertised by this host: ${unknown.join(', ')}.` });
   }
-  if (picked.length === 0) problems.push('Select at least one benchmark suite.');
-  if (picked.length > MAX_SUITES) problems.push(`Select at most ${MAX_SUITES} benchmark suites.`);
-  if (problems.length || !host) return { job: null, problems };
-  return { job: { kind: 'benchmark', host: host.id, input_ids: [], options: { benchmark_target: target, benchmarks: picked } }, problems };
+  if (picked.length === 0) blockers.push({ field: 'suites', text: 'Select at least one benchmark suite.' });
+  if (picked.length > MAX_SUITES) blockers.push({ field: 'suites', text: `Select at most ${MAX_SUITES} benchmark suites.` });
+  if (blockers.length || !host) return { job: null, blockers };
+  return { job: { kind: 'benchmark', host: host.id, input_ids: [], options: { benchmark_target: target, benchmarks: picked } }, blockers };
+}
+
+/** Preserve report values as text beside their field paths, not as a JSON blob. */
+export function provenanceRows(value: unknown): [string, string][] {
+  function rows(v: unknown, path: string, depth: number): [string, string][] {
+    const fields = Array.isArray(v) ? Object.entries(v) : Object.entries(obj(v) ?? {});
+    if (fields.length) {
+      if (depth >= 8) return [[path, 'See exported JSON for nested fields.']];
+      return fields.flatMap(([key, item]) => rows(item, path ? `${path}.${key}` : key, depth + 1));
+    }
+    return typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'
+      ? [[path || 'Value', String(v)]]
+      : [];
+  }
+  return rows(value, '', 0);
 }
 
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback);
