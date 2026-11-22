@@ -1128,12 +1128,17 @@ operator control; the API does not expose an arbitrary command runner.
 All JSON POST requests need `Content-Type: application/json`.
 
 `GET /api/state` reports model availability from the owning worker. These
-checks run in the background and are cached for 30 seconds. A missing path,
-a path outside the worker's allowed model roots, or a disabled or removed
-worker reports `available: false`. A check that is pending, fails, or is not
-supported reports `available: null`. Update older dispatchers and workers to
-get file state. The check does not hash or read model data. A reported
-`sha256` comes from a verified output receipt, not from the file check.
+checks run in the background. Registrations for the same worker, executor,
+and path share one result for 30 seconds. A missing or disallowed path, or a
+disabled or removed worker, reports `available: false`. If the ordinary
+worker cannot check access on a separate weight editor, the controller
+reports `available: null`. Pending, failed, and unsupported checks also
+report `null`. Update older dispatchers and workers to get file state.
+The check does not hash or read model data. A reported `sha256` comes from
+a verified output receipt, not from the file check.
+
+`GET /api/jobs/{id}` returns `prompt_text`, the text sent to the worker at
+submission. Later edits to a saved prompt do not change this text.
 
 ```sh
 curl -s http://127.0.0.1:4141/api/state

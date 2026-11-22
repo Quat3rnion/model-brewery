@@ -1,27 +1,23 @@
 use crate::{Config, cache};
 use anyhow::{Result, ensure};
-use brewery_worker::{LIMIT, PathState, SUGGEST_PREFIX_BYTES, decode_limited, is_digest, token};
+use brewery_worker::{
+    LIMIT, PathState, SUGGEST_PREFIX_BYTES, absolute, decode_limited, is_digest, token,
+};
 use serde::Deserialize;
-use std::{io::ErrorKind, os::unix::fs::MetadataExt, path::Path};
+use std::{fs::File, io::ErrorKind, os::unix::fs::MetadataExt, path::Path};
 
 pub fn get(path: &str) -> Result<PathState> {
     if path.len() > SUGGEST_PREFIX_BYTES
         || !path.starts_with('/')
         || path.chars().any(char::is_control)
-        || path.split('/').any(|part| matches!(part, "." | ".."))
+        || absolute(Path::new(path)).is_err()
     {
         return Ok(PathState::OutsideRoots);
     }
     let path = Path::new(path);
     let (cfg, _) = Config::load()?;
-    let in_sources = cfg.source_roots.iter().any(|root| {
-        root.is_absolute()
-            && root != Path::new("/")
-            && !root.starts_with(&cfg.root)
-            && !cfg.root.starts_with(root)
-            && path.starts_with(root)
-    });
-    if !in_sources
+    if cfg.configured_source_root(path).is_none()
+        && !(cfg.cache_source_root(path).is_some() && private_root(&cfg.root)?.is_some())
         && !cfg
             .hy4_plan
             .as_ref()
@@ -77,16 +73,9 @@ fn published(root: &Path, path: &Path) -> Result<bool> {
     if token(id).is_err() || !parts.next().is_some_and(|part| part == "work") {
         return Ok(false);
     }
-    let fd = match cache::no_symlink_open(root, libc::O_DIRECTORY | libc::O_PATH) {
-        Ok(fd) => fd,
-        Err(error) if missing(&error) => return Ok(false),
-        Err(error) => return Err(error),
+    let Some(fd) = private_root(root)? else {
+        return Ok(false);
     };
-    let metadata = fd.metadata()?;
-    ensure!(
-        metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0,
-        "worker root must be private and owned by the worker"
-    );
     let relative_record = Path::new("jobs").join(id).join("state.json");
     let record = match cache::no_symlink_open_at(&fd, &relative_record, libc::O_PATH) {
         Ok(fd) => cache::readable_regular(fd)?,
@@ -120,6 +109,20 @@ fn published(root: &Path, path: &Path) -> Result<bool> {
             .and_then(|result| result.artifact)
             .and_then(|artifact| artifact.path)
             .is_some_and(|published| Path::new(&published) == path))
+}
+
+fn private_root(root: &Path) -> Result<Option<File>> {
+    let fd = match cache::no_symlink_open(root, libc::O_DIRECTORY | libc::O_PATH) {
+        Ok(fd) => fd,
+        Err(error) if missing(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = fd.metadata()?;
+    ensure!(
+        metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0,
+        "worker root must be private and owned by the worker"
+    );
+    Ok(Some(fd))
 }
 
 fn missing(error: &anyhow::Error) -> bool {

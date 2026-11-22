@@ -8,14 +8,16 @@ use crate::{
 use brewery_worker::{PathState, StatRequest};
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::{process::Command, sync::Semaphore};
+use tokio::{process::Command, sync::Semaphore, time::timeout};
 
 const CACHE_TTL: Duration = Duration::from_secs(30);
 const IN_FLIGHT: usize = 4;
+const WORKER_START_INTERVAL: Duration = Duration::from_millis(250);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct ModelAvailability {
     dispatch: PathBuf,
@@ -23,11 +25,35 @@ pub struct ModelAvailability {
     ssh: Arc<infra_hosts::Registry>,
     local_edit: Arc<local_edit::Lanes>,
     remote_edit: Arc<remote_edit::Installer>,
-    cache: Mutex<HashMap<String, Entry>>,
+    cache: Mutex<Cache>,
     permits: Arc<Semaphore>,
+    config_permits: Arc<Semaphore>,
+}
+
+#[derive(Default)]
+struct Cache {
+    paths: HashMap<Probe, Entry>,
+    workers: HashMap<String, WorkerProbe>,
+}
+
+struct WorkerProbe {
+    started: Instant,
+    in_flight: bool,
+    config_gate: Arc<Semaphore>,
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct Probe {
+    executor: Executor,
+    // Static lanes are fixed for this controller instance; managed SSH
+    // workers have an installation binding. Remote editor IDs are generations.
+    generation: Option<String>,
+    host: String,
+    path: PathBuf,
 }
 
 enum Entry {
+    Waiting(Instant),
     Pending,
     Checked(Instant, Check),
 }
@@ -37,6 +63,7 @@ enum Check {
     State(PathState),
     Unsupported,
     Unknown,
+    EditorUnverified,
 }
 
 impl Check {
@@ -66,6 +93,12 @@ impl Check {
                 None,
                 Some("The controller could not check this path on the worker."),
             ),
+            Self::EditorUnverified => (
+                None,
+                Some(
+                    "The standard worker could not find or access this path. Editor access is not checked.",
+                ),
+            ),
         };
         model.available = available;
         model.reason = reason.map(str::to_owned);
@@ -74,15 +107,22 @@ impl Check {
 
 // Dispatch uses a separate config for these executors. A successful model
 // publication may not be visible in the owning host's default worker state.
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 enum Executor {
-    Default,
+    Default { editor: Option<Editor> },
     Backend { editor: bool },
     LocalEdit,
     RemoteEdit(uuid::Uuid),
 }
 
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum Editor {
+    Local,
+    Remote(uuid::Uuid),
+}
+
 impl Executor {
-    fn for_model(model: &Model, producer: Option<&Job>) -> Self {
+    fn for_model(host: &Host, model: &Model, producer: Option<&Job>) -> Self {
         if model.host == backend_hf::ID {
             return Self::Backend {
                 editor: model.kind == "weight-calibration"
@@ -97,7 +137,18 @@ impl Executor {
                 return Self::RemoteEdit(editor);
             }
         }
-        Self::Default
+        let weight_input = matches!(
+            model.kind.as_str(),
+            "gguf" | "hf" | "safetensors" | "hgn" | "weight-calibration"
+        );
+        let editor = if !weight_input {
+            None
+        } else if host.local_edit {
+            Some(Editor::Local)
+        } else {
+            host.remote_editor.map(Editor::Remote)
+        };
+        Self::Default { editor }
     }
 }
 
@@ -115,68 +166,128 @@ impl ModelAvailability {
             ssh: dispatcher.ssh_hosts.clone(),
             local_edit: dispatcher.local_edit.clone(),
             remote_edit: dispatcher.remote_edit.clone(),
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(Cache::default()),
             permits: Arc::new(Semaphore::new(IN_FLIGHT)),
+            config_permits: Arc::new(Semaphore::new(IN_FLIGHT)),
         }
     }
 
     pub fn refresh(self: &Arc<Self>, hosts: &[Host], jobs: &[Job], models: &mut [Model]) {
-        let worker_ids: HashSet<_> = hosts.iter().map(|host| host.id.as_str()).collect();
+        let hosts: HashMap<_, _> = hosts.iter().map(|host| (host.id.as_str(), host)).collect();
+        let jobs: HashMap<_, _> = jobs.iter().map(|job| (job.id.as_str(), job)).collect();
+        let now = Instant::now();
         let mut cache = self.cache.lock().expect("model state cache");
-        let registered: HashSet<_> = models
-            .iter()
-            .filter(|model| worker_ids.contains(model.host.as_str()))
-            .map(|model| model.id.as_str())
-            .collect();
-        cache.retain(|id, entry| {
-            matches!(entry, Entry::Pending) || registered.contains(id.as_str())
-        });
-        let mut due = Vec::new();
+        let mut registered = HashSet::new();
+        let mut due = HashMap::<_, (Instant, Probe)>::new();
         for model in models {
-            if !worker_ids.contains(model.host.as_str()) {
+            let Some(host) = hosts.get(model.host.as_str()) else {
                 model.available = Some(false);
                 model.reason = Some("The owning worker is not configured or is disabled.".into());
                 continue;
-            }
-            let last_check = match cache.get(&model.id) {
-                Some(Entry::Pending) => continue,
-                Some(Entry::Checked(at, check)) if at.elapsed() < CACHE_TTL => {
+            };
+            let producer = model.job_id.as_deref().and_then(|id| jobs.get(id).copied());
+            let probe = Probe {
+                executor: Executor::for_model(host, model, producer),
+                generation: host.provision_binding.clone(),
+                host: model.host.clone(),
+                // Normalize lexically; path lookup and symlink checks belong to the worker.
+                path: Path::new(&model.path).components().collect(),
+            };
+            registered.insert(probe.clone());
+            let due_at = match *cache
+                .paths
+                .entry(probe.clone())
+                .or_insert(Entry::Waiting(now))
+            {
+                Entry::Pending => continue,
+                Entry::Checked(at, check) if now.saturating_duration_since(at) < CACHE_TTL => {
                     check.apply(model);
                     continue;
                 }
-                Some(Entry::Checked(at, _)) => Some(*at),
-                None => None,
+                Entry::Checked(at, _) => at + CACHE_TTL,
+                Entry::Waiting(at) => at,
             };
-            due.push((last_check, model));
+            if cache.workers.get(&host.id).is_some_and(|worker| {
+                worker.in_flight
+                    || now.saturating_duration_since(worker.started) < WORKER_START_INTERVAL
+            }) {
+                continue;
+            }
+            let next = due
+                .entry(host.id.as_str())
+                .or_insert_with(|| (due_at, probe.clone()));
+            if due_at < next.0 {
+                *next = (due_at, probe);
+            }
         }
-        // New and least recently checked records go first, so a large
-        // library or several slow paths cannot starve the last records.
-        due.sort_by_key(|(last_check, _)| *last_check);
-        let jobs: HashMap<_, _> = jobs.iter().map(|job| (job.id.as_str(), job)).collect();
-        for (_, model) in due {
+        cache
+            .paths
+            .retain(|probe, entry| matches!(entry, Entry::Pending) || registered.contains(probe));
+        cache.workers.retain(|host, worker| {
+            worker.in_flight
+                || worker.config_gate.available_permits() == 0
+                || hosts.contains_key(host.as_str())
+        });
+        // Give each worker one slot at a time, rotating by least recent start.
+        // Within a worker, a path already due stays ahead of later registrations.
+        let mut due: Vec<_> = due.into_iter().collect();
+        due.sort_by_key(|(host, _)| (cache.workers.get(*host).map(|worker| worker.started), *host));
+        for (_, (_, probe)) in due {
             let Ok(permit) = self.permits.clone().try_acquire_owned() else {
                 break;
             };
-            let producer = model.job_id.as_deref().and_then(|id| jobs.get(id).copied());
-            let executor = Executor::for_model(model, producer);
-            let (id, host, path) = (model.id.clone(), model.host.clone(), model.path.clone());
-            cache.insert(id.clone(), Entry::Pending);
+            let worker = cache
+                .workers
+                .entry(probe.host.clone())
+                .or_insert_with(|| WorkerProbe {
+                    started: now,
+                    in_flight: true,
+                    config_gate: Arc::new(Semaphore::new(1)),
+                });
+            worker.started = now;
+            worker.in_flight = true;
+            let config_gate = worker.config_gate.clone();
+            cache.paths.insert(probe.clone(), Entry::Pending);
             let this = self.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                let check = this.check(executor, &host, path).await;
-                this.cache
-                    .lock()
-                    .expect("model state cache")
-                    .insert(id, Entry::Checked(Instant::now(), check));
+                let check = timeout(PROBE_TIMEOUT, this.check(&probe, config_gate))
+                    .await
+                    .unwrap_or(Check::Unknown);
+                let mut cache = this.cache.lock().expect("model state cache");
+                cache
+                    .workers
+                    .get_mut(&probe.host)
+                    .expect("pending worker probe")
+                    .in_flight = false;
+                cache
+                    .paths
+                    .insert(probe, Entry::Checked(Instant::now(), check));
             });
         }
     }
 
-    fn command(&self, executor: Executor, host: &str) -> Option<Command> {
+    async fn command(&self, probe: &Probe, config_gate: Arc<Semaphore>) -> Option<Command> {
+        let host = &probe.host;
         let mut command = Command::new(&self.dispatch);
-        let config = match executor {
-            Executor::Default => self.ssh.config_for(&[host]).ok()?,
+        let config = match probe.executor {
+            Executor::Default { .. } if probe.generation.is_some() => {
+                // A timeout cannot cancel a running filesystem syscall. Keep
+                // both permits in the blocking task. One worker with a stuck
+                // config check must not use all slots on subsequent probes.
+                let worker_permit = config_gate.try_acquire_owned().ok()?;
+                let permit = self.config_permits.clone().try_acquire_owned().ok()?;
+                let ssh = self.ssh.clone();
+                let host = host.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _permits = (permit, worker_permit);
+                    ssh.config_for(&[&host])
+                })
+                .await
+                .ok()?
+                .ok()?
+            }
+            Executor::Default { .. } => None,
             Executor::Backend { editor } => {
                 let (dispatch, primary, edit) = self.backend.as_ref()?;
                 command = Command::new(dispatch);
@@ -197,21 +308,31 @@ impl ModelAvailability {
         Some(command)
     }
 
-    async fn check(&self, executor: Executor, host: &str, path: String) -> Check {
-        let Some(mut command) = self.command(executor, host) else {
+    async fn check(&self, probe: &Probe, config_gate: Arc<Semaphore>) -> Check {
+        let Some(mut command) = self.command(probe, config_gate).await else {
             return Check::Unknown;
         };
-        let Ok(body) = serde_json::to_vec(&StatRequest { path }) else {
+        let Ok(body) = serde_json::to_vec(&StatRequest {
+            path: probe.path.to_string_lossy().into_owned(),
+        }) else {
             return Check::Unknown;
         };
-        command.args(["stat", host]);
+        command.args(["stat", &probe.host]);
         let Ok((output, status)) = read_only_dispatch(command, body).await else {
             return Check::Unknown;
         };
         if status.success() {
-            return serde_json::from_slice(&output)
-                .map(Check::State)
-                .unwrap_or(Check::Unknown);
+            return match serde_json::from_slice(&output) {
+                Ok(PathState::Missing | PathState::OutsideRoots)
+                    if matches!(probe.executor, Executor::Default { editor: Some(_) }) =>
+                {
+                    // Read-only Stat on the ordinary lane cannot attest
+                    // approval on a remote editor or under a per-job local grant.
+                    Check::EditorUnverified
+                }
+                Ok(state) => Check::State(state),
+                Err(_) => Check::Unknown,
+            };
         }
         #[derive(serde::Deserialize)]
         struct ErrorReply {

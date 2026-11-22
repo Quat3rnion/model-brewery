@@ -87,6 +87,33 @@ fn standalone_gguf(job: &Job) -> bool {
 }
 
 impl Config {
+    fn configured_source_root(&self, path: &Path) -> Option<&Path> {
+        self.source_roots
+            .iter()
+            .filter(|root| {
+                root.is_absolute()
+                    && !root.starts_with(&self.root)
+                    && !self.root.starts_with(root)
+                    && path.starts_with(root)
+            })
+            .max_by_key(|root| root.components().count())
+            .map(PathBuf::as_path)
+    }
+
+    fn cache_dir(&self) -> PathBuf {
+        self.root.join("cache")
+    }
+
+    fn cache_source_root(&self, path: &Path) -> Option<PathBuf> {
+        let cache = self.cache_dir();
+        let mut parts = path.strip_prefix(&cache).ok()?.components();
+        let digest = parts.next()?.as_os_str().to_str()?;
+        (self.backend_weight_download_root.is_none()
+            && is_digest(digest)
+            && parts.next()?.as_os_str() == "data")
+            .then(|| cache.join(digest).join("data"))
+    }
+
     fn load() -> Result<(Self, PathBuf)> {
         let path = env::var_os("BREWERY_WORKER_CONFIG")
             .map(PathBuf::from)
@@ -347,7 +374,7 @@ impl Worker {
         }
         let jobs = cfg.root.join("jobs");
         let cache = Cache {
-            complete: cfg.root.join("cache"),
+            complete: cfg.cache_dir(),
             partial: cfg.root.join("partial"),
             reserve: cfg.disk_reserve_bytes,
         };
@@ -413,42 +440,34 @@ impl Worker {
             self.cfg.backend_weight_download_root.is_none(),
             "backend editing requires an exact verified publication"
         );
-        if let Ok(p) = cache::authorized(p, &self.cfg.source_roots) {
-            let root = self
-                .cfg
-                .source_roots
-                .iter()
-                .filter(|r| p.starts_with(r))
-                .max_by_key(|r| r.components().count())
-                .unwrap();
-            return Ok((p, root.clone()));
+        if let Some(root) = self.cfg.configured_source_root(p) {
+            cache::no_symlink_open(p, libc::O_PATH)?;
+            return Ok((p.to_path_buf(), root.to_path_buf()));
         }
-        // Only published cache data or output of succeeded jobs is a source.
-        for (base, is_job) in [(&self.cache.complete, false), (&self.jobs, true)] {
-            if let Ok(rel) = p.strip_prefix(base) {
-                let id = rel
-                    .components()
-                    .next()
-                    .and_then(|p| p.as_os_str().to_str())
-                    .context("invalid source")?;
-                let root = if is_job {
-                    let r = self.require(id)?;
-                    ensure!(
-                        r.reply.state == "succeeded" && r.action == "start",
-                        "job output is not published"
-                    );
-                    let work = base.join(id).join("work");
-                    if r.job.is_some_and(|job| job.kind == "hf_download") {
-                        work.join("download")
-                    } else {
-                        work
-                    }
-                } else {
-                    ensure!(is_digest(id), "invalid cache source");
-                    base.join(id).join("data")
-                };
-                return Ok((cache::authorized(p, std::slice::from_ref(&root))?, root));
-            }
+        if let Some(root) = self.cfg.cache_source_root(p) {
+            cache::no_symlink_open(p, libc::O_PATH)?;
+            return Ok((p.to_path_buf(), root));
+        }
+        // Stat only reports the exact artifact published by a prior job.
+        // A job can also consume other files inside a successful job's work directory.
+        if let Ok(rel) = p.strip_prefix(&self.jobs) {
+            let id = rel
+                .components()
+                .next()
+                .and_then(|p| p.as_os_str().to_str())
+                .context("invalid source")?;
+            let r = self.require(id)?;
+            ensure!(
+                r.reply.state == "succeeded" && r.action == "start",
+                "job output is not published"
+            );
+            let work = self.jobs.join(id).join("work");
+            let root = if r.job.is_some_and(|job| job.kind == "hf_download") {
+                work.join("download")
+            } else {
+                work
+            };
+            return Ok((cache::authorized(p, std::slice::from_ref(&root))?, root));
         }
         bail!("input outside allowed source roots")
     }

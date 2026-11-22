@@ -706,8 +706,14 @@ impl Store {
         read_list(&self.conn, "SELECT body FROM jobs ORDER BY seq", [])
     }
     pub fn detail(&self, id: &str) -> Result<Option<Value>> {
-        let Some(mut data): Option<Value> =
-            read_one(&self.conn, "SELECT body FROM jobs WHERE id = ?", id)?
+        let Some(mut data): Option<Value> = read_one(
+            &self.conn,
+            "SELECT json_set(body, '$.prompt_text',
+                             CASE WHEN json_type(envelope, '$.prompt') = 'text'
+                                  THEN json_extract(envelope, '$.prompt') END)
+             FROM jobs WHERE id = ?",
+            id,
+        )?
         else {
             return Ok(None);
         };

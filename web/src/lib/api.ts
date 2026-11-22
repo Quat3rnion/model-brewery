@@ -57,6 +57,7 @@ async function request<T>(method: string, path: string, body?: unknown, signal?:
 
 export const api = {
   state: (signal?: AbortSignal) => request<BrewState>('GET', '/api/state', undefined, signal),
+  // Only job detail includes the submission-time prompt_text.
   job: (id: string, signal?: AbortSignal) => request<JobDetail>('GET', `/api/jobs/${encodeURIComponent(id)}`, undefined, signal),
   addModel: (model: NewModel) => request<Model>('POST', '/api/models', model),
   removeModel: (id: string) => request<void>('DELETE', `/api/models/${encodeURIComponent(id)}`),

@@ -806,6 +806,88 @@ fn library_checks_models_asynchronously_and_caches_worker_replies() {
 }
 
 #[test]
+fn library_coalesces_paths_and_checks_other_workers_during_a_backlog() {
+    let mut app = Fixture::new();
+    app.touch("model-stat-fixture");
+    app.launch();
+    for _ in 0..8 {
+        app.register("alpha", "gguf", "/models/slow.gguf");
+        app.register("alpha", "gguf", "/models//slow.gguf");
+    }
+    for suffix in 0..8 {
+        app.register("alpha", "gguf", &format!("/models/{suffix}/slow.gguf"));
+    }
+    let beta = [
+        app.register("beta", "gguf", "/models/current.gguf"),
+        app.register("beta", "gguf", "/models//current.gguf"),
+        app.register("beta", "gguf", "/models/./current.gguf"),
+    ];
+    let start = Instant::now();
+    loop {
+        let state = app.json("GET", "/api/state", None, 200);
+        let models = state["models"].as_array().unwrap();
+        if beta.iter().all(|id| {
+            models
+                .iter()
+                .any(|model| model["id"] == id.as_str() && model["available"] == true)
+        }) {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "alpha backlog blocked beta"
+        );
+        sleep(Duration::from_millis(20));
+    }
+    let calls = fs::read_to_string(app.path("model-stat-calls")).unwrap();
+    assert_eq!(calls.lines().count(), 2, "{calls}");
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| *line == "/models/slow.gguf")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn job_detail_returns_submitted_prompt_after_edit_and_restart() {
+    let mut app = Fixture::new();
+    app.launch();
+    let a = app.register("alpha", "gguf", "/models/a.gguf");
+    let b = app.register("alpha", "gguf", "/models/b.gguf");
+    let saved = app.json(
+        "POST",
+        "/api/prompts",
+        Some(json!({"name":"Saved","text":"Original\n"})),
+        201,
+    );
+    app.touch("hold");
+    let from_saved =
+        app.enqueue(json!({"kind":"compare","input_ids":[a,b],"prompt_id":id(&saved)}));
+    let typed = app.enqueue(json!({"kind":"compare","input_ids":[a,b],"prompt":"Typed prompt\n"}));
+    let no_prompt = app.enqueue(json!({"kind":"cache_cleanup","host":"alpha"}));
+    app.json(
+        "PUT",
+        &format!("/api/prompts/{}", id(&saved)),
+        Some(json!({"name":"Saved","text":"Edited"})),
+        200,
+    );
+    app.stop();
+    app.launch();
+    let detail = app.detail(&from_saved);
+    assert_eq!(detail["prompt_text"], "Original\n");
+    assert_eq!(detail["prompt_id"], id(&saved));
+    let detail = app.detail(&typed);
+    assert_eq!(detail["prompt_text"], "Typed prompt\n");
+    assert!(detail["prompt_id"].is_null());
+    assert_eq!(
+        app.detail(&no_prompt).get("prompt_text"),
+        Some(&Value::Null)
+    );
+}
+
+#[test]
 fn saved_prompt_put_replaces_fields_without_changing_id() {
     let mut app = Fixture::new();
     app.launch();
