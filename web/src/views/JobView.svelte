@@ -3,7 +3,8 @@
   import JobProgress from '../components/JobProgress.svelte';
   import { detailLines, readDetail, summarizeHistory } from '../lib/progress';
   import { brewery } from '../lib/store.svelte';
-  import { ApiError, errorText } from '../lib/api';
+  import { api, ApiError, errorText } from '../lib/api';
+  import { canRetryManagedHgn, managedRetryHref, parseConversions, STAGES } from '../lib/conversion';
   import { formatTime, hostName, isActive, isCancelling, isTerminal, kindLabel, kindTitle, modelLabel, progressText, stateLabel } from '../lib/format';
   import JobState from '../components/JobState.svelte';
   import CancelButton from '../components/CancelButton.svelte';
@@ -62,6 +63,20 @@
   const history = $derived(summarizeHistory(detail?.events ?? []));
   const job = $derived(detail && summary ? { ...detail, ...summary, result: detail.result, events: detail.events } : (detail ?? summary));
   const retry = $derived(job ? rerunAction(job) : null);
+  const findManagedRetry = $derived(job && STAGES.some((stage) => stage === job.kind) &&
+    (retry || job.state === 'succeeded') && job.format !== 'gguf' && !job.options?.hy4_overrides && !job.options?.layer_recipe ? job.id : null);
+  let managedRetry = $state<{ jobId: string; runId: string } | null>(null);
+  $effect(() => {
+    const jobId = findManagedRetry;
+    managedRetry = null;
+    if (!jobId) return;
+    const request = new AbortController();
+    void api.conversions(request.signal).then((result) => {
+      const parent = parseConversions(result).find((run) => canRetryManagedHgn(run) && Object.values(run.jobIds).includes(jobId));
+      if (!request.signal.aborted && parent) managedRetry = { jobId, runId: parent.id };
+    }).catch(() => {}); // Standalone step recovery does not need the conversion API.
+    return () => request.abort();
+  });
   const hint = $derived(retry ? rerunHint(job?.error) : null);
   const prompt = $derived(job?.prompt_id ? prompts.find((p) => p.id === job.prompt_id) : null);
   const downloadId = $derived(job?.kind === 'hf_download' && job.state === 'succeeded' ? obj(job.result)?.library_model_id : null);
@@ -110,9 +125,10 @@
     {#if job.state === 'cancelled'}
       <p class="note warn">This job was cancelled. Partial outputs are excluded.</p>
     {/if}
-    {#if retry}
+    {#if retry || managedRetry?.jobId === id}
       <div class="row">
-        <a class="btn" href={retry.href}>{retry.label}</a>
+        {#if retry}<a class="btn" href={retry.href}>{retry.label}</a>{/if}
+        {#if managedRetry?.jobId === id}<a class="btn" href={managedRetryHref(managedRetry.runId)}>Run again</a>{/if}
         {#if hint}<p class="small muted">{hint}</p>{/if}
       </div>
     {/if}

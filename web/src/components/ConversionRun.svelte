@@ -9,7 +9,7 @@
   import { conversions } from '../lib/conversions.svelte';
   import { focusAfterRemoval } from '../lib/focus';
   import { formatTime, hostName, modelLabel } from '../lib/format';
-  import { parseConversion, stageRows, STAGE_LABEL, type Conversion, type StageStatus } from '../lib/conversion';
+  import { canRetryManagedHgn, managedRetryHref, parseConversion, stageRows, STAGE_LABEL, type Conversion, type StageStatus } from '../lib/conversion';
   import type { Tone } from '../lib/format';
 
   let { c }: { c: Conversion } = $props();
@@ -93,6 +93,8 @@
           <button type="button" class="btn danger small" bind:this={cancelButton}
             onclick={() => focusAfterRemoval(() => { confirming = true; }, () => keepButton)} aria-label="Cancel conversion {c.id}">Cancel</button>
         {/if}
+      {:else if canRetryManagedHgn(c)}
+        <a class="btn" href={managedRetryHref(c.id)}>Run again</a>
       {/if}
     </div>
   </header>

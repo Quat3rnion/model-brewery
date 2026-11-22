@@ -159,6 +159,33 @@ test('Managed eligibility rechecks the same request when an input host resumes',
   expect(controller.requests('POST', '/api/conversions')).toHaveLength(0);
 });
 
+test('Managed preflight survives progress-only cursor changes', async ({ page, controller }) => {
+  await page.clock.install();
+  const data = convertState();
+  let cursor = 0;
+  controller.respond('GET', '/api/state', () => ({ json: { ...data, event_cursor: ++cursor } }));
+  const check = '/api/conversions/eligibility';
+  let finish;
+  const pending = new Promise((resolve) => { finish = resolve; });
+  controller.respond('POST', check, async () => {
+    await pending;
+    return { json: { eligible: true, reasons: [] } };
+  });
+  await controller.open(page, 'convert');
+  await pick(page, '#wf-source', /^Fixture checkpoint/);
+  await page.locator('#wf-profile').selectOption('v2');
+  await page.clock.runFor(400);
+  await expect.poll(() => controller.requests('POST', check).length).toBe(1);
+  const stateUpdate = page.waitForResponse((r) => r.url().endsWith('/api/state'));
+  await page.clock.runFor(1500);
+  await stateUpdate;
+  await page.clock.runFor(400);
+  finish();
+  await expect(page.getByRole('button', { name: 'Start conversion', exact: true })).toBeEnabled();
+  expect(controller.requests('POST', check)).toHaveLength(1);
+  expect(controller.requests('POST', '/api/conversions')).toHaveLength(0);
+});
+
 test('Hy4 is inside diagnostics and does not use the managed source', async ({ page, controller }) => {
   await controller.open(page, 'convert');
   await pick(page, '#wf-source', /^Fixture checkpoint/);

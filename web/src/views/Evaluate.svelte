@@ -18,7 +18,7 @@
   import SubmitStatus from '../components/SubmitStatus.svelte';
   import RecentJobs from '../components/RecentJobs.svelte';
   import Badge from '../components/Badge.svelte';
-  import type { Host, JobSummary, Workflow } from '../lib/types';
+  import type { Host, JobDetail, JobSummary, Workflow } from '../lib/types';
 
   const hosts = $derived(brewery.state?.hosts ?? []);
   const models = $derived(brewery.state?.models ?? []);
@@ -79,22 +79,28 @@
   let gPromptId = $state('');
   let gText = $state('');
   let submittedText = $state('');
+  let gMaxTokens = $state<number>();
+  let gEdited = false;
+  let pendingGeneration = $state<JobDetail | null>(null);
+  const markGenerationEdited = () => { gEdited = true; };
   unsavedChanges(() => gText !== '' && gText !== submittedText);
   const gen = new Submitter();
   const gHostBlockers = $derived(hostBlockers('generate', hostOf(gBundle, gHost)));
   const gFields = $derived<Blocker[]>([
-    ...(!gBundle ? [{ field: 'g-bundle', text: 'Select a bundle.' }] : []),
+    ...(!bundles.some((b) => b.id === gBundle && b.available !== false) ? [{ field: 'g-bundle', text: 'Select an available bundle.' }] : []),
     ...(gMode === 'saved' && !prompts.some((p) => p.id === gPromptId) ? [{ field: 'g-prompt', text: 'Select a saved prompt.' }] : []),
     ...(gMode === 'text' && !gText.trim() ? [{ field: 'g-text', text: 'Enter a prompt.' }] : []),
   ]);
   async function generate() {
     const text = gMode === 'text' ? gText : undefined;
-    const job = await gen.submit({ kind: 'generate', host: gHost || undefined, input_ids: [gBundle], prompt_id: gMode === 'saved' ? gPromptId : undefined, prompt: text });
+    const job = await gen.submit({ kind: 'generate', host: gHost || undefined, input_ids: [gBundle], prompt_id: gMode === 'saved' ? gPromptId : undefined, prompt: text,
+      options: gMaxTokens === undefined ? undefined : { max_tokens: gMaxTokens } });
     if (job && text !== undefined) submittedText = text;
   }
 
   // ---- Evaluate ----
   let eBundle = $state('');
+  let previousBundle = $state('');
   let eHost = $state('');
   let eBaseMode = $state<'none' | 'file' | 'source'>('none');
   let eBaseFile = $state('');
@@ -103,9 +109,13 @@
   const eSources = $derived(sources(eWorker));
   const ev = new Submitter();
   const eHostBlockers = $derived(hostBlockers('evaluate', eWorker));
+  const usableBundle = $derived(bundles.some((b) => b.id === eBundle && b.available !== false));
+  const missingPreviousBundle = $derived(previousBundle && eBundle === previousBundle && !usableBundle
+    ? `Previous bundle ${previousBundle} is not available. Select another bundle.` : '');
   const eFields = $derived<Blocker[]>([
-    ...(!eBundle ? [{ field: 'e-bundle', text: 'Select a bundle.' }] : []),
-    ...(eBaseMode === 'file' && !eBaseFile ? [{ field: 'e-file', text: 'Select reference results.' }] : []),
+    ...(!usableBundle ? [{ field: 'e-bundle', text: missingPreviousBundle || 'Select an available bundle.' }] : []),
+    ...(eBaseMode === 'file' && !models.some((m) => m.id === eBaseFile && refResults.includes(m.kind) && m.available !== false) ?
+      [{ field: 'e-file', text: eBaseFile ? `Reference file ${eBaseFile} is not available. Select another file.` : 'Select reference results.' }] : []),
     ...(eBaseMode === 'source' && !eSources.some((s) => s.id === eSource) ? [{ field: 'e-src', text: 'Select a reference endpoint.' }] : []),
   ]);
 
@@ -126,20 +136,29 @@
   const visible = $derived(visibleBlockers([...gFields, ...eFields, ...bFields], touched));
   const error = (field: string) => fieldError(visible, field);
   let retryError = $state(false);
+  function applyGeneration(job: JobDetail) {
+    gBundle = job.input_ids[0] ?? '';
+    gHost = job.requested_host ?? job.host ?? '';
+    gText = job.prompt_text ?? '';
+    submittedText = gText;
+    gPromptId = job.prompt_id ?? '';
+    gMode = job.prompt_text != null || !gPromptId ? 'text' : 'saved';
+    gMaxTokens = typeof job.options?.max_tokens === 'number' ? job.options.max_tokens : undefined;
+    pendingGeneration = null;
+    gEdited = false;
+  }
   $effect(() => {
     retryError = false;
+    pendingGeneration = null;
     return watchRetry(route.hash, ['evaluate', 'baseline', 'generate'], (job) => {
       const [first = '', second = ''] = job.input_ids;
       const host = job.requested_host ?? job.host ?? '';
       const endpoint = typeof job.options?.baseline_source === 'string' ? job.options.baseline_source : '';
       if (job.kind === 'generate') {
-        gBundle = first;
-        gHost = host;
-        gText = job.prompt_text ?? '';
-        submittedText = gText;
-        gPromptId = job.prompt_id ?? '';
-        gMode = job.prompt_text != null || !gPromptId ? 'text' : 'saved';
+        if (gEdited) pendingGeneration = job;
+        else applyGeneration(job);
       } else if (job.kind === 'evaluate') {
+        previousBundle = first;
         eBundle = first;
         eHost = host;
         eBaseFile = second;
@@ -208,7 +227,8 @@
     <WorkflowGate workflow="evaluate">
       <div class="body stack">
         <Blockers blockers={eHostBlockers} />
-        <ModelSelect bind:value={eBundle} kinds={BUNDLE_KINDS} label="Bundle" error={error('e-bundle')} onblur={touch('e-bundle')} />
+        {#if missingPreviousBundle}<p class="note warn break" role="status">{missingPreviousBundle}</p>{/if}
+        <ModelSelect bind:value={() => usableBundle ? eBundle : '', (value) => { eBundle = value; }} kinds={BUNDLE_KINDS} label="Bundle" error={error('e-bundle')} onblur={touch('e-bundle')} />
         <HostSelect bind:value={eHost} workflow="evaluate" kind="evaluate" label="Run on" optional optionalLabel="Host of the bundle" />
         <fieldset class="plain">
           <legend class="small muted">Scoring mode</legend>
@@ -219,6 +239,9 @@
           </div>
           {#if eBaseMode === 'file'}
             <ModelSelect bind:value={eBaseFile} kinds={refResults} label="Reference results" hint="Select results or predictions for the same GSM8K protocol. The reference can use a different model or precision." error={error('e-file')} onblur={touch('e-file')} />
+            {#if eBaseFile && eFields.some((item) => item.field === 'e-file')}
+              <p class="note warn break" role="status">{fieldError(eFields, 'e-file')}</p>
+            {/if}
             {#if !models.some((model) => refResults.includes(model.kind))}
               <p class="hint">Register a reference file in <a href="#/library">Library</a>, or prepare reference results below.</p>
             {/if}
@@ -292,28 +315,35 @@
     <WorkflowGate workflow="generate">
       <div class="body stack">
         <Blockers blockers={gHostBlockers} />
-        <ModelSelect bind:value={gBundle} kinds={BUNDLE_KINDS} label="Bundle" error={error('g-bundle')} onblur={touch('g-bundle')} />
-        <HostSelect bind:value={gHost} workflow="generate" kind="generate" label="Run on" optional optionalLabel="Host of the bundle" hint="Needs a worker with an approved Halogen runtime. The run records which files it opens." />
+        {#if pendingGeneration}
+          <div class="row">
+            <p class="small" role="status">Previous inputs are ready. Use them to replace this draft.</p>
+            <button type="button" class="btn" onclick={() => { if (pendingGeneration) applyGeneration(pendingGeneration); }}>Use previous inputs</button>
+          </div>
+        {/if}
+        <ModelSelect bind:value={() => gBundle, (value) => { markGenerationEdited(); gBundle = value; }} kinds={BUNDLE_KINDS} label="Bundle" error={error('g-bundle')} onblur={touch('g-bundle')} />
+        <HostSelect bind:value={() => gHost, (value) => { markGenerationEdited(); gHost = value; }} workflow="generate" kind="generate" label="Run on" optional optionalLabel="Host of the bundle" hint="Needs a worker with an approved Halogen runtime. The run records which files it opens." />
         <fieldset class="plain">
           <legend class="small muted">Prompt source</legend>
           <div class="seg">
-            <label><input type="radio" name="generation-prompt" bind:group={gMode} value="saved" /> Saved prompt</label>
-            <label><input type="radio" name="generation-prompt" bind:group={gMode} value="text" /> Type a prompt</label>
+            <label><input type="radio" name="generation-prompt" bind:group={gMode} value="saved" onchange={markGenerationEdited} /> Saved prompt</label>
+            <label><input type="radio" name="generation-prompt" bind:group={gMode} value="text" onchange={markGenerationEdited} /> Type a prompt</label>
           </div>
           {#if gMode === 'saved'}
             <div class="field">
-              <Combobox bind:value={gPromptId} id="g-prompt" label="Saved prompt" labelHidden options={promptOptions(prompts)} disabled={!prompts.length} placeholder={prompts.length ? 'Select or type a prompt name' : 'No saved prompts'} emptyText="No saved prompt matches." invalid={!!error('g-prompt')} describedby={error('g-prompt') ? 'g-prompt-error' : undefined} onblur={touch('g-prompt')} />
+              <Combobox bind:value={() => gPromptId, (value) => { markGenerationEdited(); gPromptId = value; }} id="g-prompt" label="Saved prompt" labelHidden options={promptOptions(prompts)} disabled={!prompts.length} placeholder={prompts.length ? 'Select or type a prompt name' : 'No saved prompts'} emptyText="No saved prompt matches." invalid={!!error('g-prompt')} describedby={error('g-prompt') ? 'g-prompt-error' : undefined} onblur={touch('g-prompt')} />
               <FieldError id="g-prompt-error" error={error('g-prompt')} />
               {#if !prompts.length}<span class="hint">Save a prompt in <a href="#/library">Library</a>, or type a prompt for this run.</span>{/if}
             </div>
           {:else}
             <div class="field">
               <label for="g-text">Prompt text</label>
-              <textarea id="g-text" class="input" rows="3" bind:value={gText} aria-invalid={!!error('g-text')} aria-describedby={error('g-text') ? 'g-text-error' : undefined} onblur={touch('g-text')}></textarea>
+              <textarea id="g-text" class="input" rows="3" bind:value={gText} aria-invalid={!!error('g-text')} aria-describedby={error('g-text') ? 'g-text-error' : undefined} oninput={markGenerationEdited} onblur={touch('g-text')}></textarea>
               <FieldError id="g-text-error" error={error('g-text')} />
             </div>
           {/if}
         </fieldset>
+        {#if gMaxTokens !== undefined}<p class="hint">Maximum output tokens from previous request: {gMaxTokens}.</p>{/if}
         {@render queue('Queue generation', gFields, gHostBlockers, gen, generate)}
       </div>
     </WorkflowGate>

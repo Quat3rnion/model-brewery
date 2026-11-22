@@ -19,7 +19,7 @@
   import LayerRecipe from '../components/LayerRecipe.svelte';
   import Hy4Plan from '../components/Hy4Plan.svelte';
   import { conversions, ConversionStarter } from '../lib/conversions.svelte';
-  import { buildConversion, conversionRunHref, isActiveConversion, parseConversions, STAGES, type Conversion } from '../lib/conversion';
+  import { buildConversion, canRetryManagedHgn, conversionRunHref, isActiveConversion, parseConversion, parseConversions, STAGES, type Conversion } from '../lib/conversion';
   import { api, errorText } from '../lib/api';
   import { fieldError, visibleBlockers, type Blocker } from '../lib/blockers';
   import { hostWorkflowEligibility } from '../lib/eligibility';
@@ -107,10 +107,34 @@
   let diagnosticsOpen = $state(false);
   let retryRequest = $state<{ job: JobDetail; parent?: Conversion } | null>(null);
   let retryError = $state(false);
+  let retryRunLoading = $state(false);
   $effect(() => {
+    const hash = route.hash;
     retryRequest = null;
     retryError = false;
-    return watchRetry(route.hash, STAGES, async (job, signal) => {
+    const runId = hashParam(hash, 'retry_run');
+    retryRunLoading = !!runId;
+    if (runId) {
+      const request = new AbortController();
+      void api.conversion(runId, request.signal).then((result) => {
+        if (request.signal.aborted) return;
+        const run = parseConversion(result);
+        if (!run || run.id !== runId || !canRetryManagedHgn(run)) throw new Error('Cannot reopen this conversion.');
+        restoreManaged(run.inputIds, run.options, run.profileRevision, run.requestedHost ?? run.host ?? '', run.decodeBackend);
+        // This is a new attempt, not a repeat of the last POST after a lost reply.
+        starter = new ConversionStarter();
+        diagnosticsOpen = false;
+        void tick().then(() => {
+          if (!request.signal.aborted) document.getElementById('wf-h')?.focus();
+        });
+      }).catch(() => {
+        if (!request.signal.aborted) retryError = true;
+      }).finally(() => {
+        if (!request.signal.aborted) retryRunLoading = false;
+      });
+      return () => request.abort();
+    }
+    return watchRetry(hash, STAGES, async (job, signal) => {
       // GGUF stage records store the preset, not the full conversion request.
       const parent = (job.format === 'gguf' && !job.options?.layer_recipe) || job.profile_revision
         ? parseConversions(await api.conversions(signal)).find((run) => Object.values(run.jobIds).includes(job.id))
@@ -130,6 +154,33 @@
   const recipeRetry = $derived(retryJob && priorOptions.layer_recipe ? {
     id: retryJob.id, inputIds: priorInputs, recipe: priorOptions.layer_recipe,
   } : null);
+  function restoredForm(inputIds: string[], opts: Record<string, unknown>, profile: string | null, target: string): ConvertForm {
+    const draft = emptyForm();
+    draft.source = inputIds[0] ?? '';
+    draft.host = target === 'auto' ? '' : target;
+    draft.anyHost = target === 'auto';
+    draft.profile = profile ? `${REV_PREFIX}${profile}` : typeof opts.profile === 'string' ? opts.profile : '';
+    for (const key of ['ht_backend', 'i4r_backend', 'q4cp_backend', 'decode_backend'] as const) {
+      const value = opts[key];
+      if (typeof value === 'string') draft[key] = value;
+    }
+    for (const key of ['threads', 'seed', 'ht_beam'] as const) {
+      const value = opts[key];
+      if (typeof value === 'number') draft[key] = value;
+    }
+    for (const { kind } of COMPONENT_ROLES) {
+      const index = opts[kind];
+      if (typeof index === 'number') draft.extras[kind] = inputIds[index] ?? '';
+    }
+    return draft;
+  }
+  function restoreManaged(inputIds: string[], opts: Record<string, unknown>, profile: string | null, target: string, decode: string | null) {
+    const draft = restoredForm(inputIds, opts, profile, target);
+    if (decode) draft.decode_backend = decode;
+    form = draft;
+    wfAny = draft.anyHost;
+    wfHost = draft.host;
+  }
   $effect(() => {
     const job = retryJob;
     if (!job) return;
@@ -147,33 +198,12 @@
     }
     // For a saved custom profile, use the managed form: a single HGN step
     // accepts built-ins only. Wait for the parent to recover the full request.
-    const inputIds = priorProfile ? priorInputs : job.input_ids;
-    const opts = priorProfile ? priorOptions : job.options ?? {};
-    const draft = emptyForm();
-    draft.source = inputIds[0] ?? '';
-    draft.bundle = !priorProfile && job.kind === 'verify' ? inputIds[1] ?? '' : '';
     const target = job.requested_host ?? job.host ?? '';
-    draft.host = target === 'auto' ? '' : target;
-    draft.anyHost = target === 'auto';
-    draft.profile = priorProfile ? `${REV_PREFIX}${priorProfile}` : typeof opts.profile === 'string' ? opts.profile : '';
-    for (const key of ['ht_backend', 'i4r_backend', 'q4cp_backend', 'decode_backend'] as const) {
-      const value = opts[key];
-      if (typeof value === 'string') draft[key] = value;
-    }
-    for (const key of ['threads', 'seed', 'ht_beam'] as const) {
-      const value = opts[key];
-      if (typeof value === 'number') draft[key] = value;
-    }
-    for (const { kind } of COMPONENT_ROLES) {
-      const index = opts[kind];
-      if (typeof index === 'number') draft.extras[kind] = inputIds[index] ?? '';
-    }
     if (priorProfile) {
-      form = draft;
-      if (priorConversion?.decodeBackend) form.decode_backend = priorConversion.decodeBackend;
-      wfAny = (priorConversion?.requestedHost ?? target) === 'auto';
-      wfHost = wfAny ? '' : priorConversion?.host ?? draft.host;
+      restoreManaged(priorInputs, priorOptions, priorProfile, priorConversion?.requestedHost ?? priorConversion?.host ?? target, priorConversion?.decodeBackend ?? null);
     } else {
+      const draft = restoredForm(job.input_ids, job.options ?? {}, null, target);
+      if (job.kind === 'verify') draft.bundle = job.input_ids[1] ?? '';
       const stage = STAGES.find((stage) => stage === job.kind);
       if (stage) step = stage;
       diagnosticsOpen = true;
@@ -280,9 +310,9 @@
     if (hostChecks.length && hostChecks.every((reasons) => reasons.length)) out.push(...hostChecks.flat());
     return out;
   });
-  const checkBody = $derived(mode === 'hgn' && conversions.status !== 'unavailable' && !localBlockers.length && wfBuilt.body ? JSON.stringify(wfBuilt.body) : null);
+  const checkBody = $derived(mode === 'hgn' && !retryRunLoading && conversions.status !== 'unavailable' && !localBlockers.length && wfBuilt.body ? JSON.stringify(wfBuilt.body) : null);
   // Compare by value: polling an unchanged snapshot must not repeat the check.
-  const checkState = $derived(checkBody ? JSON.stringify([hosts, snapshot, brewery.state?.event_cursor,
+  const checkState = $derived(checkBody ? JSON.stringify([hosts, snapshot,
     models.filter((model) => wfBuilt.body?.input_ids.includes(model.id))]) : '');
   let checked = $state<{ key: string; decision?: EligibilityEntry; error?: string }>();
   const checkKey = $derived(checkBody && JSON.stringify([checkBody, checkState]));
@@ -314,12 +344,14 @@
   const touched = $state<Record<string, boolean>>({});
   let attempted = $state(false);
   const visible = $derived(visibleBlockers(wfBlockers, touched, attempted || !!checkBody || (!!wfSource && !!form.profile)));
-  const starter = new ConversionStarter();
+  let starter = $state(new ConversionStarter());
   async function startConversion() {
     // One POST per click. The body is built only here, never from an effect.
     attempted = true;
     if (!wfBuilt.body || starter.busy || !checkKey || checked?.key !== checkKey || !checked.decision?.eligible) return;
-    await starter.start(wfBuilt.body);
+    const hash = route.hash;
+    const run = await starter.start(wfBuilt.body);
+    if (run && route.hash === hash && hashParam(hash, 'retry_run')) route.replaceQuery('#/convert');
   }
   $effect(() => conversions.watch());
   const runs = $derived(conversions.list);
@@ -366,12 +398,13 @@
   <div class="head">
     <h1 tabindex="-1">Convert</h1>
     {#if retryError}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
+    {#if retryRunLoading}<p class="hint" role="status">Loading the previous conversion.</p>{/if}
     <p class="muted small">Convert a source checkpoint to an HGN bundle or a GGUF file.</p>
   </div>
 
   <section class="panel" aria-labelledby="wf-h">
     <header>
-      <h2 id="wf-h">Convert a checkpoint</h2>
+      <h2 id="wf-h" tabindex="-1">Convert a checkpoint</h2>
       <div class="fmt" role="radiogroup" aria-label="Conversion mode">
         {#each MODES as item (item.id)}
           <label class:on={mode === item.id}>

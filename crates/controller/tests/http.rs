@@ -806,6 +806,28 @@ fn library_checks_models_asynchronously_and_caches_worker_replies() {
 }
 
 #[test]
+fn library_preserves_directory_suffix_when_checking_safetensors_paths() {
+    let mut app = Fixture::new();
+    app.touch("model-stat-fixture");
+    app.launch();
+    app.register("beta", "safetensors", "/models/current.safetensors");
+    app.register("beta", "safetensors", "/models/current.safetensors/.");
+    let state = wait_for(|| {
+        let state = app.json("GET", "/api/state", None, 200);
+        state["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|model| model["available"].is_boolean())
+            .then_some(state)
+    });
+    assert_eq!(state["models"][0]["available"], true);
+    assert_eq!(state["models"][1]["available"], false);
+    let calls = fs::read_to_string(app.path("model-stat-calls")).unwrap();
+    assert!(calls.lines().any(|path| path == "/models/current.safetensors/."));
+}
+
+#[test]
 fn library_coalesces_paths_and_checks_other_workers_during_a_backlog() {
     let mut app = Fixture::new();
     app.touch("model-stat-fixture");

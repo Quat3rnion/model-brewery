@@ -165,6 +165,28 @@ fn stat_reports_model_paths_without_following_symlinks_or_reading_private_state(
 }
 
 #[test]
+fn stat_requires_a_directory_for_paths_with_directory_suffixes() {
+    let t = Rig::new();
+    let model = t.src.join("model.safetensors");
+    fs::write(&model, b"weights").unwrap();
+    for (path, state) in [
+        (
+            model.display().to_string(),
+            json!({"state":"file","bytes":7}),
+        ),
+        (format!("{}/.", model.display()), json!({"state":"missing"})),
+        (format!("{}/", model.display()), json!({"state":"missing"})),
+        (
+            format!("{}/.", t.src.display()),
+            json!({"state":"directory"}),
+        ),
+    ] {
+        let reply = t.rpc_raw(&json!({"op":"stat","path":path}));
+        assert_eq!(reply["ok"], state, "{path}");
+    }
+}
+
+#[test]
 fn pinned_hf_resolution_passes_expected_manifest_without_reading_model_payloads() {
     let t = Rig::new();
     let (_, _) = pinned_fixture(&t);

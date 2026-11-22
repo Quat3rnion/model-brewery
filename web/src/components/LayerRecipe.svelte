@@ -134,7 +134,7 @@
   const standalone = $derived(source.kind === 'safetensors');
   const assets = $derived((brewery.state?.models ?? []).filter(m => m.kind === 'assets' && m.host === source.host && m.available !== false));
   let assetId = $state('');
-  const priorRecipe = $derived(obj(retry?.recipe));
+  const priorRecipe = $derived(retry?.inputIds[0] === source.id ? obj(retry.recipe) : null);
   let restored = '';
   $effect(() => {
     if (!retry || !priorRecipe || retry.id === restored || retry.inputIds[0] !== source.id) return;

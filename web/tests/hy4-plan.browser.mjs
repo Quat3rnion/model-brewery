@@ -20,7 +20,7 @@ try {
   await page.route('**/api/**', route => {
     const req = route.request(), path = new URL(req.url()).pathname;
     if (req.method() === 'GET') return route.fulfill({ json: path === '/api/state' ? {
-      hosts: [{ id: 'ordinary', capabilities: { plan: true } }, { id: 'planner', capabilities: { hy4_plan: true } }],
+      hosts: [{ id: 'ordinary', capabilities: { plan: true } }, { id: 'planner', capabilities: { plan: true, hy4_plan: true } }],
       models, jobs: [], prompts: [],
     } : [] });
     writes.push({ path, key: req.headers()['idempotency-key'], body: req.postDataJSON() });

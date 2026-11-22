@@ -77,9 +77,13 @@
     const base = structuredClone($state.snapshot(host));
     edits[key(host.id)] = { base, draft: structuredClone(base), touched: {}, attempted: false };
   }
+  let readinessRequest = 0;
   async function load() {
+    const request = ++readinessRequest;
     try {
-      saved = parseSettings(await api.settings());
+      const next = parseSettings(await api.settings());
+      if (request !== readinessRequest) return;
+      saved = next;
       status = 'ok';
       loadError = null;
       for (const host of saved) {
@@ -88,10 +92,11 @@
       }
       if (!selectedId) selectedId = saved.find((h) => h.managed)?.id ?? saved[0]?.id ?? '';
     } catch (e) {
+      if (request !== readinessRequest) return;
       status = e instanceof ApiError && (e.status === 404 || e.status === 405) ? 'unavailable' : 'error';
       loadError = errorText(e);
     } finally {
-      loaded = true;
+      if (request === readinessRequest) loaded = true;
     }
   }
   $effect(() => { void load(); });
