@@ -170,7 +170,7 @@
     </div>
     {#if useLayerRecipe}
       <div class="body stack">
-        <ModelSelect bind:value={form.source} kinds={['hf', 'safetensors']} label="Source checkpoint" hint="Select the SafeTensors file or indexed HF directory to read its layers and SHA-256." id="recipe-source" />
+        <ModelSelect bind:value={form.source} kinds={['hf', 'safetensors']} label="Source checkpoint" hint="Choose a SafeTensors file or an indexed HF directory for the recipe." id="recipe-source" />
         {#if recipeSource}
           {#key recipeKey}
             <LayerRecipe source={recipeSource} format={outFormat} starter={recipeStarter} />

@@ -5,6 +5,18 @@ async function pick(page, field, option) {
   await page.getByRole('option', { name: option }).click();
 }
 
+const jobsPosted = (controller) => controller.requests('POST', '/api/jobs').map(({ body }) => body);
+const inventoryRead = (id, offset = 0) => ({
+  kind: 'weight_inspect', host: 'worker-a', input_ids: [id],
+  options: { mode: 'inventory', offset, limit: 128, ...(offset ? { source_sha256: 'a'.repeat(64) } : {}) },
+});
+
+async function expectNoNewJobs(page, controller, count = 0) {
+  // Let reactive work and the next controller refresh finish before checking for a POST.
+  await page.waitForResponse((res) => new URL(res.url()).pathname === '/api/state' && res.ok());
+  expect(jobsPosted(controller)).toHaveLength(count);
+}
+
 test('keyboard navigation focuses the section heading and the skip target', async ({ page, controller }) => {
   await controller.open(page);
   const nav = page.getByRole('navigation', { name: 'Sections' });
@@ -143,6 +155,93 @@ test('Profiles keeps GGUF revisions separate from HGN revisions', async ({ page,
   await expect(page.getByRole('rowheader', { name: 'Fixture HGN profile' })).toHaveCount(0);
 });
 
+test('Convert reads recipe layers only on request and reuses the completed read', async ({ page, controller }) => {
+  controller.load('weight-reads');
+  await controller.open(page, 'convert');
+  await page.getByRole('checkbox', { name: 'Layer recipe' }).check();
+  await expectNoNewJobs(page, controller);
+  await page.locator('#recipe-source').click();
+  await page.getByRole('option', { name: /^Fixture checkpoint/ }).click();
+  await expectNoNewJobs(page, controller);
+  await expect(page.getByText('This queues a weight_inspect job on Worker A.')).toBeVisible();
+  await page.getByRole('button', { name: 'Read layers', exact: true }).click();
+  await expect(page.getByRole('link', { name: 'Layer read job' })).toHaveAttribute('href', '#/jobs/job-mock-1');
+  await expect(page.getByLabel('Layer 0 type')).toBeVisible();
+  expect(jobsPosted(controller)).toEqual([inventoryRead('source-a')]);
+
+  await page.reload();
+  await page.getByRole('checkbox', { name: 'Layer recipe' }).check();
+  await page.locator('#recipe-source').click();
+  await page.getByRole('option', { name: /^Fixture checkpoint/ }).click();
+  await expect(page.getByLabel('Layer 0 type')).toBeVisible();
+  await expectNoNewJobs(page, controller, 1);
+});
+
+test('Profiles opens the GGUF editor with no source selected and no job', async ({ page, controller }) => {
+  controller.load('weight-reads');
+  await controller.open(page, 'profiles?format=gguf');
+  const source = page.getByRole('combobox', { name: 'Source model' });
+  await expect(source).toBeEnabled();
+  await expectNoNewJobs(page, controller);
+  await expect(source).toHaveValue('');
+});
+
+test('Profiles reads GGUF editor tensors only on request', async ({ page, controller }) => {
+  controller.load('weight-reads');
+  await controller.open(page, 'profiles?format=gguf');
+  // This source has no saved tensor names, so it needs a new read.
+  await pick(page, 'Source model', /^Fixture checkpoint/);
+  await expectNoNewJobs(page, controller);
+  await expect(page.getByText('This queues a weight_inspect job on Worker A.')).toBeVisible();
+  await page.getByRole('button', { name: 'Read tensor list', exact: true }).click();
+  await expect(page.getByRole('link', { name: 'Tensor list read job' })).toHaveAttribute('href', '#/jobs/job-mock-1');
+  await expect(page.getByRole('rowheader', { name: 'model.layers.0.mlp.down_proj.weight' })).toBeVisible();
+  expect(jobsPosted(controller)).toEqual([inventoryRead('source-a')]);
+});
+
+test('Weights does not submit inspection jobs until explicitly requested', async ({ page, controller }) => {
+  controller.load('weight-reads');
+  await controller.open(page, 'weights');
+  await pick(page, 'Source model', /^Fixture GGUF\b(?! copy)/);
+  await expectNoNewJobs(page, controller);
+  await page.reload(); // The URL now includes the selected source.
+  await expect(page.getByRole('heading', { name: '1. Tensor' })).toBeVisible();
+  await expectNoNewJobs(page, controller);
+
+  await expect(page.getByText('This queues a weight_inspect job on Worker A.')).toBeVisible();
+  await page.getByRole('button', { name: 'Read tensor list', exact: true }).click();
+  await expect(page.getByRole('link', { name: 'Tensor list read job' })).toHaveAttribute('href', '#/jobs/job-mock-1');
+  const next = page.getByRole('button', { name: 'Read next tensors', exact: true });
+  await expect(next).toBeEnabled();
+  await expectNoNewJobs(page, controller, 1);
+  expect(jobsPosted(controller)).toEqual([inventoryRead('gguf-a')]);
+  await next.click();
+  await expect(page.getByText(/129 of 129 tensors/)).toBeVisible();
+  expect(jobsPosted(controller)).toEqual([inventoryRead('gguf-a'), inventoryRead('gguf-a', 128)]);
+
+  const tensor = 'blk.0.ffn_down.weight';
+  await page.getByRole('option', { name: new RegExp(`^${tensor},`) }).click();
+  const values = page.getByRole('region', { name: /2\. Values/ });
+  const columns = values.getByLabel('Columns');
+  await columns.selectOption('1');
+  await expectNoNewJobs(page, controller, 2);
+  await expect(values.getByText('This queues a weight_inspect job on Worker A.')).toBeVisible();
+  await values.getByRole('button', { name: 'Read tile', exact: true }).click();
+  await expect(values.getByRole('link', { name: 'Tile read job' })).toHaveAttribute('href', '#/jobs/job-mock-3');
+  const grid = values.getByRole('grid', { name: /Stored values of blk\.0\.ffn_down\.weight/ });
+  await expect(grid).toBeVisible();
+  expect(jobsPosted(controller)).toEqual([inventoryRead('gguf-a'), inventoryRead('gguf-a', 128), {
+    kind: 'weight_inspect', host: 'worker-a', input_ids: ['gguf-a'],
+    options: { mode: 'tile', tensor, origin: [0, 32], shape: [2, 1], source_sha256: 'a'.repeat(64) },
+  }]);
+
+  await columns.selectOption('0');
+  await expect(values.getByRole('button', { name: 'Read tile', exact: true })).toBeEnabled();
+  await columns.selectOption('1');
+  await expect(grid).toBeVisible();
+  await expectNoNewJobs(page, controller, 3);
+});
+
 test('Evaluate presents synthetic scores without treating them as release proof', async ({ page, controller }) => {
   controller.load('results');
   await controller.open(page, 'evaluate');
@@ -199,7 +298,6 @@ test('Settings saves an evaluation edit without starting a job', async ({ page, 
 // of the corrected behavior; do not lock in the current broken behavior.
 for (const finding of [
   'Library identity stays Not yet hashed because its report fields are absent',
-  'Weights does not submit inspection jobs until explicitly requested',
   'Convert requires every managed conversion stage, not just convert',
   'GGUF conversion does not offer a destination it will later reject',
   'Profiles warns before discarding unsaved editor changes',
