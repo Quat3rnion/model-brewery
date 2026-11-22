@@ -361,6 +361,13 @@ pub struct Reason {
 }
 
 impl Reason {
+    pub fn link(text: &str, fix_anchor: &str) -> Self {
+        Self {
+            text: text.into(),
+            fix_anchor: fix_anchor.into(),
+        }
+    }
+
     pub fn settings(host: &Host, section: &str, action: &str) -> Self {
         let (page, label) = match section {
             "evaluation" => ("evaluation", "Evaluation"),
@@ -389,10 +396,21 @@ impl Host {
         }
         let action = match detail.map(String::as_str) {
             Some(
-                "Disabled by infrastructure job policy"
+                "Disabled by the controller configuration"
+                | "Disabled by infrastructure job policy"
                 | "Disabled by infrastructure administration",
-            ) => {
-                format!("Enable {kind} in the worker policy")
+            ) => format!("Enable {kind} jobs in the worker policy"),
+            _ if kind == "benchmark" && self.benchmark_targets.is_empty() => {
+                "Configure a benchmark target and enable benchmark jobs".into()
+            }
+            _ if kind == "benchmark" && self.benchmarks.is_empty() => {
+                "Configure a benchmark suite and enable benchmark jobs".into()
+            }
+            _ if matches!(kind, "generate" | "evaluate") => {
+                "Configure the Halogen runtime and enable evaluation jobs".into()
+            }
+            _ if kind == "baseline" => {
+                "Configure the baseline runtime and enable baseline jobs".into()
             }
             _ => format!("Check the {kind} runtime and worker policy"),
         };
@@ -752,30 +770,231 @@ impl Host {
         Ok(())
     }
 
-    pub fn supports_conversion(&self, options: &Map<String, Value>) -> bool {
-        self.capabilities["convert"]
-            && self
-                .quantization_backends
-                .iter()
-                .all(|(encoder, backends)| {
-                    match options.get(&format!("{encoder}_backend")) {
-                        Some(value) => backends
-                            .iter()
-                            .any(|backend| value.as_str() == Some(backend.as_str())),
-                        None => true, // Operator configures compatible worker defaults.
-                    }
+    fn conversion_backend_blocker(&self, options: &Map<String, Value>) -> Option<Reason> {
+        self.quantization_backends
+            .iter()
+            .find_map(|(encoder, backends)| {
+                // If the request omits the backend, the worker supplies its default.
+                let backend = options.get(&format!("{encoder}_backend"))?.as_str();
+                (!backends
+                    .iter()
+                    .any(|allowed| Some(allowed.as_str()) == backend))
+                .then(|| {
+                    let backend = backend.unwrap_or("requested");
+                    Reason::settings(
+                        self,
+                        "policy",
+                        &format!(
+                            "Allow the {backend} backend for {encoder}, or select another backend"
+                        ),
+                    )
                 })
+            })
+    }
+}
+
+pub fn input_blocker(job: &Job, envelope: &Envelope, hosts: &[Host]) -> Option<Reason> {
+    hosts.iter().find_map(|host| {
+        let source = envelope.inputs.iter().any(|input| input.host == host.id);
+        if source && host.scheduling_paused {
+            return Some(Reason::settings(
+                host,
+                "policy",
+                "Resume job scheduling for the input worker",
+            ));
+        }
+        if envelope.options.contains_key(brewery_worker::hy4::OPTION) {
+            return None;
+        }
+        let hy4_encode = host.capabilities.get(brewery_worker::hy4::ENCODE) == Some(&true);
+        let hy4_plan = host.capabilities.get(brewery_worker::hy4::CAPABILITY) == Some(&true);
+        let remote_edit = crate::weights::is_kind(&job.kind)
+            && host.id == job.host
+            && job.remote_editor.is_some()
+            && host.remote_editor == job.remote_editor;
+        if (hy4_encode && (source || host.id == job.host)) || (source && hy4_plan && !remote_edit) {
+            return Some(Reason::settings(
+                host,
+                "policy",
+                "Use a worker that is not dedicated to Hy4",
+            ));
+        }
+        None
+    })
+}
+
+pub fn conversion_candidate_blocker(
+    host: &Host,
+    job: &Job,
+    envelope: &Envelope,
+    hosts: &[Host],
+) -> Option<Reason> {
+    let inputs = &envelope.inputs;
+    let source = inputs.first();
+    if job.host == "auto" {
+        if hosts.iter().any(|host| host.quantization_pool) {
+            if !host.quantization_pool {
+                return Some(Reason::settings(
+                    host,
+                    "policy",
+                    "Add this worker to the conversion pool",
+                ));
+            }
+        } else if source.is_none_or(|source| source.host != host.id) {
+            return Some(Reason::link(
+                "Select the source worker or configure a conversion pool in Settings.",
+                "#/settings/infrastructure",
+            ));
+        }
+        if host.capabilities.get(brewery_worker::hy4::ENCODE) == Some(&true) {
+            return Some(Reason::settings(
+                host,
+                "policy",
+                "Use a worker that is not dedicated to Hy4",
+            ));
+        }
+    }
+    if host.scheduling_paused {
+        return Some(Reason::settings(host, "policy", "Resume job scheduling"));
+    }
+    if !host.capabilities["convert"] {
+        return Some(host.capability_reason("convert"));
+    }
+    host.conversion_backend_blocker(&job.options)
+        .or_else(|| conversion_input_blocker(host, job, envelope))
+}
+
+fn conversion_input_blocker(host: &Host, job: &Job, envelope: &Envelope) -> Option<Reason> {
+    let inputs = &envelope.inputs;
+    let source = inputs.first();
+    let local = || inputs.iter().all(|input| input.host == host.id);
+    let capability = |kind: &str| (!host.capabilities[kind]).then(|| host.capability_reason(kind));
+    let local_inputs = || {
+        (!local())
+            .then(|| Reason::link("Select the worker that holds the input files.", "#/library"))
+    };
+    if envelope
+        .options
+        .get("output_format")
+        .and_then(Value::as_str)
+        == Some(brewery_worker::hgn_recipe::FORMAT)
+    {
+        return capability(brewery_worker::hgn_recipe::CAPABILITY).or_else(local_inputs);
+    }
+    if !job.format.is_hgn() {
+        return capability("gguf_output")
+            .or_else(|| {
+                envelope
+                    .options
+                    .contains_key("layer_recipe")
+                    .then(|| capability(crate::gguf::LAYER_RECIPE_CAPABILITY).or_else(local_inputs))
+                    .flatten()
+            })
+            .or_else(|| match envelope.options.get("encoder_family") {
+                None => None,
+                Some(family) if family == "rocmfpx" => capability(crate::gguf::ROCMFPX_CAPABILITY),
+                Some(_) => Some(Reason::link(
+                    "Select a supported GGUF encoder.",
+                    "#/convert",
+                )),
+            })
+            .or_else(|| match source.map(|source| source.kind.as_str()) {
+                Some("hf") => capability("gguf_hf_output"),
+                Some("safetensors") => {
+                    capability(crate::gguf::STANDALONE_CAPABILITY).or_else(local_inputs)
+                }
+                Some("gguf") => None,
+                _ => Some(Reason::link(
+                    "Select a GGUF, HF or standalone SafeTensors source.",
+                    "#/library",
+                )),
+            });
+    }
+    let needs_components = source.is_some_and(|source| source.kind == "hf")
+        && match job.kind.as_str() {
+            "inspect" | "plan" | "convert" => inputs.len() > 1,
+            "verify" => inputs.len() > 2,
+            _ => false,
+        };
+    if needs_components && let Some(reason) = capability("convert_components") {
+        return Some(reason);
+    }
+    if job.profile_revision.is_some()
+        && let Some(reason) = capability("custom_profiles")
+    {
+        return Some(reason);
+    }
+    (host.component_cpu_only
+        && matches!(job.kind.as_str(), "inspect" | "plan" | "convert" | "verify")
+        && [
+            "ht_backend",
+            "i4r_backend",
+            "q4cp_backend",
+            "decode_backend",
+        ]
+        .iter()
+        .any(|key| job.options.get(*key).is_some_and(|v| v != "cpu")))
+    .then(|| cpu_conversion_reason(host))
+}
+
+pub fn cpu_conversion_reason(host: &Host) -> Reason {
+    Reason::link(
+        &format!(
+            "Select CPU backends or select another worker. {} uses CPU backends only.",
+            host.name
+        ),
+        "#/convert",
+    )
+}
+
+pub const SIMPLE_WORKFLOWS: &[&str] = &[
+    "compare",
+    "generate",
+    "baseline",
+    "evaluate",
+    "benchmark",
+    "transfer",
+    "transfer_preview",
+];
+
+pub fn standard_job_host_blocker(host: &Host, kind: &str) -> Option<Reason> {
+    if !host.capabilities[kind] {
+        Some(host.capability_reason(kind))
+    } else if host.scheduling_paused {
+        Some(Reason::settings(host, "policy", "Resume job scheduling"))
+    } else if host.capabilities.get(brewery_worker::hy4::CAPABILITY) == Some(&true)
+        || host.capabilities.get(brewery_worker::hy4::ENCODE) == Some(&true)
+    {
+        Some(Reason::settings(
+            host,
+            "policy",
+            "Use a worker that is not dedicated to Hy4",
+        ))
+    } else {
+        None
+    }
+}
+
+pub fn manual_registration_blocker(host: &str, kind: &str) -> Option<Reason> {
+    if kind == brewery_worker::hgn_recipe::ARCHIVE {
+        Some(Reason::link(
+            "Run a verified recipe to register a native HGN archive.",
+            "#/convert",
+        ))
+    } else if host == crate::backend_hf::ID {
+        Some(Reason::link(
+            "Select another worker in Library. Only verified jobs can register files on Backend downloads.",
+            "#/library",
+        ))
+    } else {
+        None
     }
 }
 
 // Prefer the source host if eligible, avoiding a transfer. Selection of an
 // *idle* host occurs in the scheduler, not during POST.
 pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<&'a Host> {
-    if envelope.inputs.iter().any(|input| {
-        hosts
-            .iter()
-            .any(|host| host.id == input.host && host.scheduling_paused)
-    }) {
+    if input_blocker(job, envelope, hosts).is_some() {
         return Vec::new();
     }
     let inputs = &envelope.inputs;
@@ -799,75 +1018,17 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
             })
             .collect();
     }
-    if hosts.iter().any(|host| {
-        host.capabilities.get(brewery_worker::hy4::ENCODE) == Some(&true)
-            && (host.id == job.host || inputs.iter().any(|input| input.host == host.id))
-    }) {
-        return Vec::new();
-    }
-    if inputs.iter().any(|input| {
-        hosts.iter().any(|host| {
-            host.id == input.host
-                && host.capabilities.get(brewery_worker::hy4::CAPABILITY) == Some(&true)
-                && !(crate::weights::is_kind(&job.kind)
-                    && host.id == job.host
-                    && job.remote_editor.is_some()
-                    && host.remote_editor == job.remote_editor)
-        })
-    }) {
-        return Vec::new();
-    }
-    let needs_components = inputs.first().is_some_and(|source| source.kind == "hf")
-        && match job.kind.as_str() {
-            "inspect" | "plan" | "convert" => inputs.len() > 1,
-            "verify" => inputs.len() > 2,
-            _ => false,
-        };
-    let components_allowed = |host: &Host| {
-        if envelope
-            .options
-            .get("output_format")
-            .and_then(Value::as_str)
-            == Some(brewery_worker::hgn_recipe::FORMAT)
-        {
-            return host.capabilities[brewery_worker::hgn_recipe::CAPABILITY]
-                && inputs.iter().all(|input| input.host == host.id);
-        }
-        if !job.format.is_hgn() {
-            return host.capabilities["gguf_output"]
-                && (!envelope.options.contains_key("layer_recipe")
-                    || (host.capabilities[crate::gguf::LAYER_RECIPE_CAPABILITY]
-                        && inputs.iter().all(|input| input.host == host.id)))
-                && match envelope.options.get("encoder_family") {
-                    None => true,
-                    Some(family) => {
-                        family == "rocmfpx" && host.capabilities[crate::gguf::ROCMFPX_CAPABILITY]
-                    }
-                }
-                && match inputs.first().map(|source| source.kind.as_str()) {
-                    Some("hf") => host.capabilities["gguf_hf_output"],
-                    Some("safetensors") => {
-                        host.capabilities[crate::gguf::STANDALONE_CAPABILITY]
-                            && inputs.iter().all(|input| input.host == host.id)
-                    }
-                    Some("gguf") => true,
-                    _ => false,
-                };
-        }
-        (!needs_components || host.capabilities["convert_components"])
-            && (job.profile_revision.is_none() || host.capabilities["custom_profiles"])
-            && (!matches!(job.kind.as_str(), "inspect" | "plan" | "convert" | "verify")
-                || !host.component_cpu_only
-                || [
-                    "ht_backend",
-                    "i4r_backend",
-                    "q4cp_backend",
-                    "decode_backend",
-                ]
-                .iter()
-                .all(|key| job.options.get(*key).is_none_or(|v| v == "cpu")))
-    };
     if job.kind != "convert" {
+        if SIMPLE_WORKFLOWS.contains(&job.kind.as_str()) {
+            return hosts
+                .iter()
+                .filter(|host| {
+                    host.id == job.host
+                        && standard_job_host_blocker(host, &job.kind).is_none()
+                        && (job.kind != "benchmark" || host.check_benchmark(&job.options).is_ok())
+                })
+                .collect();
+        }
         let needs_hgn = crate::weights::is_kind(&job.kind)
             && inputs.first().is_some_and(|source| source.kind == "hgn");
         let needs_safetensors = crate::weights::is_kind(&job.kind)
@@ -897,38 +1058,21 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
                                 || envelope.options.get("backend").is_some_and(|b| b == "cpu"))))
                     && (!crate::weights::needs_visual(&job.kind, &job.options)
                         || host.capabilities["weight_visual"])
-                    && components_allowed(host)
-                    && (job.kind != "benchmark" || host.check_benchmark(&job.options).is_ok())
-            })
-            .collect();
-    }
-    if job.host != "auto" {
-        return hosts
-            .iter()
-            .filter(|host| {
-                host.id == job.host
-                    && !host.scheduling_paused
-                    && host.supports_conversion(&job.options)
-                    && components_allowed(host)
+                    && conversion_input_blocker(host, job, envelope).is_none()
             })
             .collect();
     }
     let source = inputs.first().map(|model| model.host.as_str());
-    let pool = hosts.iter().any(|host| host.quantization_pool);
     let mut eligible: Vec<_> = hosts
         .iter()
         .filter(|host| {
-            (if pool {
-                host.quantization_pool
-            } else {
-                Some(host.id.as_str()) == source
-            }) && !host.scheduling_paused
-                && host.capabilities.get(brewery_worker::hy4::ENCODE) != Some(&true)
-                && host.supports_conversion(&job.options)
-                && components_allowed(host)
+            (job.host == "auto" || job.host == host.id)
+                && conversion_candidate_blocker(host, job, envelope, hosts).is_none()
         })
         .collect();
-    eligible.sort_by_key(|host| Some(host.id.as_str()) != source);
+    if job.host == "auto" {
+        eligible.sort_by_key(|host| Some(host.id.as_str()) != source);
+    }
     eligible
 }
 

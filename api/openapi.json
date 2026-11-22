@@ -38,13 +38,13 @@
       "get": {
         "operationId": "getState",
         "summary": "Read the workbench snapshot and change cursor",
-        "description": "Use hosts and their capabilities, configured baseline source IDs, benchmark targets and suites to construct requests. The jobs list contains summaries, not result objects. Pass event_cursor to streamEvents to follow changes after this snapshot.",
+        "description": "Use eligibility to check if a workflow has a configured worker. Use the host's baseline source IDs, benchmark targets and suites to build the request. The jobs list contains summaries, not results. Pass event_cursor to streamEvents to follow changes after this snapshot.",
         "responses": {
           "200": {
             "description": "Current workbench state, including the cursor at the snapshot.",
             "content": {"application/json": {
               "schema": {"$ref": "#/components/schemas/WorkbenchState"},
-              "example": {"hosts": [], "models": [], "prompts": [], "jobs": [], "event_cursor": 0, "capabilities": {
+              "example": {"hosts": [], "models": [], "prompts": [], "jobs": [], "event_cursor": 0, "eligibility": {"global": {}, "hosts": {}}, "capabilities": {
                 "compare": false, "inspect": false, "plan": false, "convert": false, "verify": false, "generate": false,
                 "evaluate": false, "baseline": false, "benchmark": false, "transfer": false, "transfer_preview": false, "cache_cleanup": false
               }}
@@ -645,6 +645,26 @@
         }
       }
     },
+    "/api/conversions/eligibility": {
+      "post": {
+        "operationId": "checkConversionEligibility",
+        "summary": "Check admission for a specific conversion request without starting it",
+        "description": "Checks the selected source, auxiliary inputs, host or pool, profile and options. Sends no work to a worker and does not write to the controller store. A positive result does not reserve a worker or qualify a release.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/NewConversion"}}}
+        },
+        "responses": {
+          "200": {"description": "Admission decision and setup blockers, if any.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EligibilityEntry"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
     "/api/conversions": {
       "post": {
         "operationId": "createConversion",
@@ -881,7 +901,31 @@
       },
       "FixReason": {
         "type": "object", "additionalProperties": false, "required": ["text", "fix_anchor"],
-        "properties": {"text": {"type": "string"}, "fix_anchor": {"type": "string", "description": "Workbench fragment for the setting that can resolve this blocker."}}
+        "properties": {"text": {"type": "string"}, "fix_anchor": {"type": "string", "description": "Workbench fragment for the setting or form that can resolve this blocker."}}
+      },
+      "EligibilityEntry": {
+        "type": "object", "additionalProperties": false, "required": ["eligible", "reasons"],
+        "properties": {"eligible": {"type": "boolean"}, "reasons": {"type": "array", "items": {"$ref": "#/components/schemas/FixReason"}}}
+      },
+      "WorkflowEligibility": {
+        "type": "object", "additionalProperties": false, "required": ["global", "hosts"],
+        "description": "Computed from host settings and policy. Does not check live worker status, current inventory or release qualification. Use checkConversionEligibility for the selected inputs, profile and backend options.",
+        "properties": {
+          "global": {"type": "object", "description": "Workflow names. A workflow is eligible if any host supports it.", "additionalProperties": {"$ref": "#/components/schemas/EligibilityEntry"}},
+          "hosts": {"type": "object", "description": "Keyed by worker ID. GGUF input kinds are checked on the source worker. Pool entries use a source on that worker; check the full request to test other input locations.", "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "gguf_output_by_kind": {"$ref": "#/components/schemas/GgufSourceEligibility"},
+              "gguf_rocmfpx_by_kind": {"$ref": "#/components/schemas/GgufSourceEligibility"}
+            },
+            "additionalProperties": {"$ref": "#/components/schemas/EligibilityEntry"}
+          }}
+        }
+      },
+      "GgufSourceEligibility": {
+        "type": "object", "required": ["gguf", "hf", "safetensors"],
+        "propertyNames": {"enum": ["gguf", "hf", "safetensors"]},
+        "additionalProperties": {"$ref": "#/components/schemas/EligibilityEntry"}
       },
       "Host": {
         "type": "object", "additionalProperties": false,
@@ -906,13 +950,14 @@
         }
       },
       "WorkbenchState": {
-        "type": "object", "required": ["hosts", "models", "prompts", "jobs", "capabilities", "event_cursor"], "additionalProperties": false,
+        "type": "object", "required": ["hosts", "models", "prompts", "jobs", "capabilities", "eligibility", "event_cursor"], "additionalProperties": false,
         "properties": {
           "hosts": {"type": "array", "items": {"$ref": "#/components/schemas/Host"}},
           "models": {"type": "array", "items": {"$ref": "#/components/schemas/Model"}},
           "prompts": {"type": "array", "items": {"$ref": "#/components/schemas/Prompt"}},
           "jobs": {"type": "array", "items": {"$ref": "#/components/schemas/Job"}},
           "capabilities": {"$ref": "#/components/schemas/CapabilityMap", "description": "A capability is true when at least one configured worker supports it."},
+          "eligibility": {"$ref": "#/components/schemas/WorkflowEligibility"},
           "event_cursor": {"$ref": "#/components/schemas/EventCursor"}
         }
       },

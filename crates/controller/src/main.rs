@@ -4,6 +4,7 @@ mod backend_hf;
 mod conversion;
 mod dispatch;
 mod domain;
+mod eligibility;
 mod feed;
 mod gguf;
 mod hf_download;
@@ -59,14 +60,10 @@ impl App {
 
     fn effective_hosts(&self) -> Result<Vec<Host>, Error> {
         let hosts = self.settings.effective(&self.defined_hosts()?);
-        let mut hosts = match &self.admin {
+        match &self.admin {
             Some(admin) => admin.effective_hosts(&hosts, self),
             None => Ok(hosts),
-        }?;
-        for host in &mut hosts {
-            host.refresh_capability_reasons();
         }
-        Ok(hosts)
     }
 }
 

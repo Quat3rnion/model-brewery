@@ -1,4 +1,4 @@
-import type { BrewState, FixReason, JobDetail, JobSummary, Model, NewJob, NewModel, NewPrompt, Prompt } from './types';
+import type { BrewState, EligibilityEntry, FixReason, JobDetail, JobSummary, Model, NewJob, NewModel, NewPrompt, Prompt } from './types';
 
 export interface HostReadiness {
   id: string;
@@ -64,6 +64,7 @@ export const api = {
   submitJob: (job: NewJob) => request<JobSummary>('POST', '/api/jobs', job),
   suggestPaths: (host: string, prefix: string, signal?: AbortSignal) => request<unknown>('POST', '/api/suggestions/paths', { host, prefix }, signal),
   // Durable conversion workflow (controller runs inspect → plan → convert → verify).
+  conversionEligibility: (body: unknown, signal?: AbortSignal) => request<EligibilityEntry>('POST', '/api/conversions/eligibility', body, signal),
   startConversion: (body: unknown, key: string) => request<unknown>('POST', '/api/conversions', body, undefined, { 'Idempotency-Key': key }),
   conversions: (signal?: AbortSignal) => request<unknown>('GET', '/api/conversions', undefined, signal),
   conversion: (id: string, signal?: AbortSignal) => request<unknown>('GET', `/api/conversions/${encodeURIComponent(id)}`, undefined, signal),

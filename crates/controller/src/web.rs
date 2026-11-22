@@ -1,8 +1,11 @@
 use crate::{
     App,
-    conversion::{Conversion, NewConversion},
-    domain::{KINDS, NewJob, NewModel, NewPrompt, candidates},
-    feed, hf_tokens,
+    conversion::{Conversion, NewConversion, StartError},
+    domain::{
+        Envelope, Job, KINDS, NewJob, NewModel, NewPrompt, Reason, SIMPLE_WORKFLOWS, candidates,
+        input_blocker, manual_registration_blocker, standard_job_host_blocker,
+    },
+    eligibility, feed, hf_tokens,
     idempotency::{self, Replay, Submission},
     store::Store,
     suggestions::{self, SuggestError, Suggestions},
@@ -34,6 +37,7 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
             }),
         )
         .route("/state", get(state))
+        .route("/conversions/eligibility", post(conversion_eligibility))
         .route("/settings", get(get_settings))
         .route(
             "/settings/{host}",
@@ -240,7 +244,10 @@ async fn state(State(app): State<Shared>) -> Result<Json<Value>> {
     // Every controller mutation takes this mutex, and its feed entry commits
     // in the same SQLite transaction. Read the cursor while still holding it.
     let store = app.store.lock().map_err(ApiError::storage)?;
-    let hosts = app.effective_hosts().map_err(ApiError::storage)?;
+    let mut hosts = app.effective_hosts().map_err(ApiError::storage)?;
+    for host in &mut hosts {
+        host.refresh_capability_reasons();
+    }
     let capabilities: BTreeMap<_, _> = KINDS
         .iter()
         .map(|&kind| (kind, hosts.iter().any(|host| host.capabilities[kind])))
@@ -251,6 +258,7 @@ async fn state(State(app): State<Shared>) -> Result<Json<Value>> {
         "prompts": store.prompts().map_err(ApiError::storage)?,
         "jobs": store.jobs().map_err(ApiError::storage)?,
         "capabilities": capabilities,
+        "eligibility": eligibility::snapshot(&hosts),
         "event_cursor": store.feed_cursor().map_err(ApiError::storage)?,
     })))
 }
@@ -499,15 +507,8 @@ async fn add_model(
         return Ok(response);
     }
     let model = request.validate().map_err(ApiError::bad)?;
-    if model.kind == brewery_worker::hgn_recipe::ARCHIVE {
-        return Err(ApiError::bad(
-            "native HGN archives are registered only by verified recipes",
-        ));
-    }
-    if model.host == crate::backend_hf::ID {
-        return Err(ApiError::bad(
-            "backend files are registered only by verified jobs",
-        ));
+    if let Some(reason) = manual_registration_blocker(&model.host, &model.kind) {
+        return Err(ApiError::bad(reason.text));
     }
     if !app
         .effective_hosts()
@@ -665,10 +666,12 @@ async fn add_job(
             .find(|effective| effective.id == host)
             .ok_or_else(|| ApiError(StatusCode::CONFLICT, "worker unavailable".into()))?;
         if !entry.capabilities[&request.kind] {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                entry.reasons[&request.kind].clone(),
-            ));
+            let message = if SIMPLE_WORKFLOWS.contains(&request.kind.as_str()) {
+                entry.capability_reason(&request.kind).text
+            } else {
+                entry.reasons[&request.kind].clone()
+            };
+            return Err(ApiError(StatusCode::CONFLICT, message));
         }
         if request.kind == "benchmark" {
             entry
@@ -730,9 +733,21 @@ async fn add_job(
         envelope.options = checks.as_object().expect("apply checks").clone();
     }
     if candidates(&job, &envelope, &hosts).is_empty() {
+        let reason = if SIMPLE_WORKFLOWS.contains(&job.kind.as_str()) {
+            hosts
+                .iter()
+                .find(|host| host.id == job.host)
+                .and_then(|host| standard_job_host_blocker(host, &job.kind))
+                .or_else(|| input_blocker(&job, &envelope, &hosts))
+        } else {
+            None
+        };
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "no eligible worker for the requested job options".into(),
+            reason.map_or_else(
+                || "no eligible worker for the requested job options".into(),
+                |reason| reason.text,
+            ),
         ));
     }
     if job.local_edit {
@@ -864,9 +879,6 @@ async fn add_conversion(
     payload: std::result::Result<Json<NewConversion>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Conversion>)> {
     let (request, submission) = read_submission(&headers, "conversions", payload)?;
-    if request.options.contains_key(brewery_worker::hy4::OPTION) {
-        return Err(ApiError::bad("Hy4 jobs require a single-stage /api/jobs request"));
-    }
     let mut store = app.store.lock().map_err(ApiError::storage)?;
     if let Some(submission) = &submission {
         match store.replay(submission).map_err(ApiError::storage)? {
@@ -886,18 +898,54 @@ async fn add_conversion(
             }
         }
     }
+    let active = store
+        .by_state(crate::domain::State::Running)
+        .map_err(ApiError::storage)?;
+    let (row, job, envelope) = admit_conversion(&app, &store, request, &active)?
+        .map_err(|reason| ApiError(StatusCode::CONFLICT, reason.text))?;
+    store
+        .create_conversion(&row, &job, &envelope, submission.as_ref())
+        .map_err(ApiError::storage)?;
+    Ok((StatusCode::CREATED, Json(row)))
+}
+
+async fn conversion_eligibility(
+    State(app): State<Shared>,
+    payload: std::result::Result<Json<NewConversion>, JsonRejection>,
+) -> Result<Json<Value>> {
+    let request = read(payload)?;
+    let store = app.store.lock().map_err(ApiError::storage)?;
+    let decision = match admit_conversion(&app, &store, request, &[]) {
+        Ok(Ok(_)) => eligibility::Entry::new(vec![]),
+        Ok(Err(reason)) => eligibility::Entry::new(vec![reason]),
+        Err(error) if error.0.is_client_error() => {
+            eligibility::Entry::new(vec![Reason::link(&error.1, "#/convert")])
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(Json(json!(decision)))
+}
+
+fn admit_conversion(
+    app: &App,
+    store: &Store,
+    request: NewConversion,
+    active: &[Job],
+) -> Result<std::result::Result<(Conversion, Job, Envelope), Reason>> {
+    if request.options.contains_key(brewery_worker::hy4::OPTION) {
+        return Err(ApiError::bad(
+            "Hy4 jobs require a single-stage /api/jobs request",
+        ));
+    }
     if !(1..=5).contains(&request.input_ids.len()) {
         return Err(ApiError::bad(
             "conversion requires one source and up to four auxiliary inputs",
         ));
     }
+    let hosts = app.effective_hosts().map_err(ApiError::storage)?;
     if let Some(host) = request.host.as_deref()
         && host != "auto"
-        && !app
-            .effective_hosts()
-            .map_err(ApiError::storage)?
-            .iter()
-            .any(|entry| entry.id == host)
+        && !hosts.iter().any(|entry| entry.id == host)
     {
         return Err(ApiError::bad("unknown worker host"));
     }
@@ -909,20 +957,12 @@ async fn add_conversion(
                 .model(id)
                 .map_err(ApiError::storage)?
                 .ok_or_else(|| ApiError::bad("unknown model ID"))?;
-            if !app
-                .effective_hosts()
-                .map_err(ApiError::storage)?
-                .iter()
-                .any(|host| host.id == model.host)
-            {
+            if !hosts.iter().any(|host| host.id == model.host) {
                 return Err(ApiError::bad("input model's host is no longer configured"));
             }
             Ok(model)
         })
         .collect::<Result<Vec<_>>>()?;
-    let active = store
-        .by_state(crate::domain::State::Running)
-        .map_err(ApiError::storage)?;
     let profile = request
         .profile_revision
         .as_deref()
@@ -936,21 +976,11 @@ async fn add_conversion(
                 .ok_or_else(|| ApiError::not_found("profile revision"))
         })
         .transpose()?;
-    let hosts = app.effective_hosts().map_err(ApiError::storage)?;
-    let (row, job, envelope) =
-        Conversion::start(request, inputs, &hosts, &active, profile.as_ref())
-            .map_err(ApiError::bad)?
-            .ok_or_else(|| {
-                ApiError(
-                    StatusCode::CONFLICT,
-                    "no eligible worker supports all conversion stages and requested options"
-                        .into(),
-                )
-            })?;
-    store
-        .create_conversion(&row, &job, &envelope, submission.as_ref())
-        .map_err(ApiError::storage)?;
-    Ok((StatusCode::CREATED, Json(row)))
+    match Conversion::start(request, inputs, &hosts, active, profile.as_ref()) {
+        Ok(admitted) => Ok(Ok(admitted)),
+        Err(StartError::Invalid(message)) => Err(ApiError::bad(message)),
+        Err(StartError::Blocked(reason)) => Ok(Err(reason)),
+    }
 }
 
 async fn list_conversions(State(app): State<Shared>) -> Result<Json<Vec<Conversion>>> {
