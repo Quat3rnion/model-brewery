@@ -280,7 +280,7 @@
   </label>
   {#if !assets.length}<p class="hint"><a href="#/library">Register the matching assets in Library</a> on {host?.name ?? source.host}.</p>{/if}
 {/if}
-<Submit blockers={runBlockers} busy={starter.busy} disabled={loading} onclick={run}>Run layer recipe</Submit>
+<Submit blockers={runBlockers} busy={starter.busy} disabled={loading || retry?.blocked} onclick={run}>Run layer recipe</Submit>
 <div aria-live="polite" class="xs">
   {#if currentSubmission && starter.error}
     <p class="note bad" role="alert">{starter.error} Run the same recipe again to retry the same request.</p>

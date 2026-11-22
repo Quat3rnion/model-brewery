@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { RetryKeys, RetryPrefill, omittedInputs } from './retry-prefill.svelte';
+import { availableId, historicalPrompt, RetryKeys, RetryPrefill, omittedInputs } from './retry-prefill.svelte';
 
 let slot = 0;
 function setup() {
@@ -9,7 +9,7 @@ function setup() {
   const load = vi.fn(() => new Promise<string>(done => { resolve = done; }));
   const focus = vi.fn();
   const clear = vi.fn();
-  const restore = vi.fn((name: string) => ({ patch: { host: 'worker', limit: 7, fields: { name, seed: 23 } }, focus: 'first' }));
+  const restore = vi.fn((name: string) => ({ actions: ['queue'], patch: { host: 'worker', limit: 7, fields: { name, seed: 23 } }, focus: 'first' }));
   const form = {
     slot: `test-${++slot}`,
     defaults,
@@ -41,7 +41,7 @@ describe('retry prefill', () => {
     await vi.waitFor(() => expect(t.focus).toHaveBeenCalledExactlyOnceWith('first'));
   });
 
-  it('drops retry fields but retains individually edited nested values; history reuses the same restore', async () => {
+  it('drops untouched fields, retains edits and revalidates when applying from history', async () => {
     const t = setup();
     t.retry.enter('entry', 'job');
     t.retry.setReady(true);
@@ -57,10 +57,10 @@ describe('retry prefill', () => {
     expect(t.draft().fields.seed).toBe(91);
     t.retry.usePrevious();
     expect(t.draft().fields).toEqual({ name: 'old input', seed: 23 });
-    expect(t.restore).toHaveBeenCalledOnce();
+    expect(t.restore).toHaveBeenCalledTimes(2);
   });
 
-  it('rehydrates once-restored history without a GET even after a view remount', async () => {
+  it('caches the historical request, not the Library-dependent patch', async () => {
     const t = setup();
     t.retry.enter('entry', 'job');
     t.retry.setReady(true);
@@ -68,12 +68,14 @@ describe('retry prefill', () => {
     await vi.waitFor(() => expect(t.draft().fields.name).toBe('known'));
     t.retry.dispose();
     const next = setup();
+    next.restore.mockImplementation(name => ({ actions: ['queue'], patch: { host: '', limit: 7, fields: { name, seed: 23 } }, focus: 'first' }));
     const remount = new RetryPrefill({ ...next.form, slot: t.form.slot });
     remount.enter('entry', 'job');
     remount.setReady(true);
     expect(next.draft().fields.name).toBe('known');
+    expect(next.draft().host).toBe('');
     expect(next.load).not.toHaveBeenCalled();
-    expect(next.restore).not.toHaveBeenCalled();
+    expect(next.restore).toHaveBeenCalledOnce();
   });
 
   it('ignores a response from a departed route even when the transport ignores abort', async () => {
@@ -91,21 +93,79 @@ describe('retry prefill', () => {
     expect(omittedInputs(['A', 'B', 'B'], ['A'])).toEqual(['B']);
     expect(omittedInputs(['A', 'B'], ['A', 'B'])).toEqual([]);
   });
+
+  it('restores only a currently available ID and falls back to the historical prompt text', () => {
+    const id = 'library-id';
+    const request = { prompt_id: id, prompt_text: 'Historical prompt.' };
+    expect(availableId(id, [{ id, available: false }])).toBe('');
+    expect(availableId(id, [{ id }])).toBe(id);
+    expect(historicalPrompt(request, [{ id, text: 'New Library text.' }])).toEqual({ id: '', text: 'Historical prompt.', mode: 'text' });
+    expect(historicalPrompt(request, [{ id, text: 'Historical prompt.' }])).toEqual({ id, text: 'Historical prompt.', mode: 'saved' });
+  });
+
+  it('blocks actions with a visible reason until both the request and inventory arrive', async () => {
+    const t = setup();
+    t.retry.enter('entry', 'job');
+    t.resolve('old input');
+    await Promise.resolve();
+    expect(t.retry.loadingReason).toMatch(/Loading the previous/);
+    expect(t.retry.action('queue').blocked).toBe(true);
+    t.retry.setReady(true);
+    expect(t.retry.loadingReason).toBe('');
+    expect(t.retry.action('queue').blocked).toBe(false);
+  });
+
+  it('keeps the omission gate on an edited selection after returning to the plain route', async () => {
+    let draft = { picked: [] as string[] };
+    const retry = new RetryPrefill({
+      slot: 'omission-test', defaults: { picked: [] as string[] },
+      read: () => draft,
+      write: value => { draft = value; },
+      load: async () => ['original', 'deleted'],
+      restore: prior => ({
+        actions: ['transfer', 'preview'],
+        patch: { picked: ['original'] },
+        retains: value => value.picked.includes('original'),
+        omissions: value => omittedInputs(prior, value.picked).map(id => ({ id, text: id })),
+      }),
+    });
+    retry.enter('original', 'job');
+    retry.setReady(true);
+    await vi.waitFor(() => expect(draft.picked).toEqual(['original']));
+    draft.picked.push('another');
+    expect(retry.action('transfer').blocked).toBe(true);
+    expect(retry.action('cleanup').blocked).toBe(false);
+    expect(retry.action('cleanup').history).toBeUndefined();
+    retry.enter('plain', null);
+    expect(retry.action('preview').blocked).toBe(true);
+    retry.acknowledge('transfer');
+    expect(retry.action('preview').blocked).toBe(false);
+    expect(retry.omissions('preview').map(item => item.id)).toEqual(['deleted']);
+    draft.picked = ['original'];
+    expect(retry.action('preview').blocked).toBe(false);
+    draft.picked = ['another'];
+    expect(retry.omissions('transfer')).toEqual([]);
+  });
 });
 
-it('reuses unresolved keys across refetch and history; only body changes or a new accepted run rotate keys', () => {
+it('isolates launcher keys and reuses only the matching body after a lost reply or route exit', () => {
   let sequence = 0;
   const keys = new RetryKeys(() => String(++sequence));
+  const unrelated = new RetryKeys(() => String(++sequence));
   const body = { input_ids: ['A'] };
-  const first = keys.entry('convert', 'failed-job', 'one');
-  expect(first.submission('run', body).key).toBe('1');
-  expect(keys.entry('convert', 'failed-job', 'one').submission('run', body).key).toBe('1');
-  const replay = keys.entry('convert', 'failed-job', 'two');
-  const accepted = replay.submission('run', body);
+  const retry = (entry: string) => ({ slot: 'convert', id: 'failed-job', entry, action: 'run' });
+  expect(keys.take(body, retry('one')).key).toBe('1');
+  expect(keys.take(body, retry('one')).key).toBe('1');
+  const accepted = keys.take(body, retry('two'));
   expect(accepted.key).toBe('1');
-  expect(replay.submission('run', { input_ids: ['B'] }).key).toBe('2');
-  expect(replay.submission('preview', body).key).toBe('3');
   accepted.accept();
-  expect(keys.entry('convert', 'failed-job', 'one').submission('run', body).key).toBe('1');
-  expect(keys.entry('convert', 'failed-job', 'three').submission('run', body).key).toBe('4');
+  expect(keys.take(body).key).toBe('1'); // retry_run removed from the route.
+  expect(keys.take({ input_ids: ['B'] }).key).toBe('2');
+  expect(keys.take(body, retry('one')).key).toBe('1');
+  expect(keys.take(body, retry('three')).key).toBe('3');
+  const clean = unrelated.take(body);
+  expect(clean.key).toBe('4');
+  expect(unrelated.take(body).key).toBe('4');
+  clean.accept();
+  expect(unrelated.take(body).key).toBe('5'); // an independent confirmed cleanup
 });

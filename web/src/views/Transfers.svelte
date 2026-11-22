@@ -8,7 +8,7 @@
   import WorkflowGate from '../components/WorkflowGate.svelte';
   import { hostOptions, visibleChecklist } from '../lib/pickers';
   import { globalJobEligibility, hostWorkflowEligibility } from '../lib/eligibility';
-  import { loadRetryJob, omittedInputs, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
+  import { availableId, loadRetryJob, omittedInputs, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
   import RetryOffer from '../components/RetryOffer.svelte';
   import type { Blocker } from '../lib/blockers';
   import type { Host } from '../lib/types';
@@ -34,17 +34,8 @@
 
   let dest = $state('');
   let selected = $state<string[]>([]);
-  let acknowledgeOmissions = $state(false);
   const destHost = $derived(hosts.find((h) => h.id === dest));
-  const candidates = $derived(models.filter((m) => m.host !== dest));
-  const omitted = $derived.by(() => omittedInputs(retry.context ?? [], selected).map((id) => {
-    const model = models.find((m) => m.id === id);
-    return { id, reason: !model ? 'Not in Library.'
-      : model.host === dest ? 'Already on the destination host.' : 'Not selected.' };
-  }));
-  // A new set of omissions requires a new acknowledgment.
-  const omittedKey = $derived(JSON.stringify(omitted.map(({ id }) => id)));
-  $effect(() => { void omittedKey; acknowledgeOmissions = false; });
+  const candidates = $derived(models.filter((m) => m.host !== dest && m.available !== false));
   let txFilter = $state('');
   const listed = $derived(
     visibleChecklist(
@@ -67,7 +58,7 @@
     const out: Blocker[] = [];
     if (!destHost) out.push({ text: 'Select a destination host.' });
     if (selected.length === 0) out.push({ text: 'Select at least one entry to copy.' });
-    if (omitted.length && !acknowledgeOmissions) out.push({ text: 'Confirm the omitted entries before you continue.' });
+    if (omitted.length && !retry.acknowledged('transfer')) out.push({ text: 'Confirm the omitted entries before you continue.' });
     return out;
   }
 
@@ -114,16 +105,27 @@
     restore: job => {
       if (job.kind === 'cache_cleanup') {
         const sha = job.options?.bundle_sha256;
-        return { patch: { cleanHost: job.host ?? '', digest: typeof sha === 'string' ? sha : '' }, context: [], focus: 'cl-host' };
+        return { actions: ['cache_cleanup'], patch: { cleanHost: availableId(job.host, hosts), digest: typeof sha === 'string' ? sha : '' }, context: true, focus: 'cl-host' };
       }
       const dest = destinationOptions.some(item => item.value === job.host) ? job.host ?? '' : '';
-      const selected = job.input_ids.filter(id => models.some(model => model.id === id && model.host !== dest));
-      return { patch: { dest, selected }, context: job.input_ids, focus: 'tx-host' };
+      const selected = job.input_ids.filter(id => models.some(model => model.id === id && model.host !== dest && model.available !== false));
+      return {
+        actions: ['transfer_preview', 'transfer'], patch: { dest, selected }, context: true, focus: 'tx-host',
+        retains: draft => draft.selected.some(id => job.input_ids.includes(id)),
+        omissions: draft => omittedInputs(job.input_ids, draft.selected).map(id => {
+          const model = models.find(m => m.id === id);
+          return { id, text: `${id}: ${!model ? 'Not in Library.' : model.available === false ? 'Unavailable.'
+            : model.host === draft.dest ? 'Already on the destination host.' : 'Not selected.'}` };
+        }),
+      };
     },
-    applied: () => { confirmClean = false; acknowledgeOmissions = false; },
+    applied: () => { confirmClean = false; },
     clear: () => { confirmClean = false; },
   });
   watchPrefill(retry, () => !!brewery.state);
+  const omitted = $derived(retry.omissions('transfer'));
+  const copyRetry = $derived(retry.action('transfer'));
+  const previewRetry = $derived(retry.action('transfer_preview'));
 
   async function runCleanup() {
     const job = await cleaner.submit({
@@ -131,7 +133,7 @@
       host: cleanHost,
       input_ids: [],
       options: digest.trim() ? { bundle_sha256: digest.trim() } : undefined,
-    }, retry.submission);
+    }, retry.action('cache_cleanup'));
     if (job) confirmClean = false;
   }
 </script>
@@ -187,17 +189,17 @@
       {#if omitted.length}
         <div class="note warn">
           <p>These entries from the previous request will not be copied:</p>
-          <ul>{#each omitted as { id, reason } (id)}<li class="break">{id}: {reason}</li>{/each}</ul>
-          <label class="inline"><input type="checkbox" bind:checked={acknowledgeOmissions} /> Continue without these entries</label>
+          <ul>{#each omitted as { id, text } (id)}<li class="break">{text}</li>{/each}</ul>
+          <label class="inline"><input type="checkbox" checked={retry.acknowledged('transfer')} onchange={e => retry.acknowledge('transfer', e.currentTarget.checked)} /> Continue without these entries</label>
         </div>
       {/if}
       <div class="row actions">
         <button type="button" class="btn" aria-describedby={copyBlockers.length || previewHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={preview.busy}
-          disabled={retry.loading || preview.busy || copyBlockers.length > 0 || previewHostBlockers.length > 0}
-          onclick={() => preview.submit({ kind: 'transfer_preview', host: dest, input_ids: selected }, retry.submission)}>{preview.busy ? 'Submitting…' : 'Preview'}</button>
+          disabled={previewRetry.blocked || preview.busy || copyBlockers.length > 0 || previewHostBlockers.length > 0}
+          onclick={() => preview.submit({ kind: 'transfer_preview', host: dest, input_ids: selected }, previewRetry)}>{preview.busy ? 'Submitting…' : 'Preview'}</button>
         <button type="button" class="btn primary" aria-describedby={copyBlockers.length || transferHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={transfer.busy}
-          disabled={retry.loading || transfer.busy || copyBlockers.length > 0 || transferHostBlockers.length > 0}
-          onclick={() => transfer.submit({ kind: 'transfer', host: dest, input_ids: selected }, retry.submission)}>{transfer.busy ? 'Submitting…' : 'Transfer'}</button>
+          disabled={copyRetry.blocked || transfer.busy || copyBlockers.length > 0 || transferHostBlockers.length > 0}
+          onclick={() => transfer.submit({ kind: 'transfer', host: dest, input_ids: selected }, copyRetry)}>{transfer.busy ? 'Submitting…' : 'Transfer'}</button>
       </div>
       {#if copyBlockers.length || previewHostBlockers.length || transferHostBlockers.length}
         <Blockers id="copy-blockers" blockers={[...copyBlockers, ...previewHostBlockers, ...transferHostBlockers]} />

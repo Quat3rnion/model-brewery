@@ -8,8 +8,9 @@
   import { globalJobEligibility, hostWorkflowEligibility } from '../lib/eligibility';
   import { unsavedChanges } from '../lib/unsaved-changes.svelte';
   import { focusAfterRemoval } from '../lib/focus';
-  import { loadRetryJob, omittedInputs, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
+  import { availableId, historicalPrompt, loadRetryJob, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
   import RetryOffer from '../components/RetryOffer.svelte';
+  import RetryWarnings from '../components/RetryWarnings.svelte';
   import WorkflowGate from '../components/WorkflowGate.svelte';
   import Blockers from '../components/Blockers.svelte';
   import FieldError from '../components/FieldError.svelte';
@@ -54,35 +55,57 @@
   const defaults = { a: '', b: '', host: '', promptId: '', promptText: '', promptMode: 'saved' as typeof promptMode,
     n: 16 as number | undefined, threads: undefined as number | undefined, think: false, raw: false, useGpu: false,
     gpuDevice: '', gpuLayers: undefined as number | undefined };
-  const retry = new RetryPrefill<typeof defaults, JobDetail, { a: string; b: string; omitted: string[] }>({
+  const retry = new RetryPrefill<typeof defaults, JobDetail, { prompt: string; snapshot: string | null | undefined }>({
     slot: 'compare', defaults,
     read: () => ({ a, b, host, promptId, promptText, promptMode, n, threads, think, raw, useGpu, gpuDevice, gpuLayers }),
     write: value => { ({ a, b, host, promptId, promptText, promptMode, n, threads, think, raw, useGpu, gpuDevice, gpuLayers } = value); },
     load: loadRetryJob(['compare']),
     restore: job => {
       const [first, second] = job.input_ids;
-      const available = (id: string) => models.some(m => m.id === id && m.kind === 'gguf' && m.available !== false) ? id : '';
+      const available = (id: string) => availableId(id, models.filter(m => m.kind === 'gguf'));
       const a = available(first), b = available(second);
-      const promptId = job.prompt_id ?? '';
-      const promptText = job.prompt_text ?? '';
+      const prompt = historicalPrompt(job, prompts);
+      const priorHost = job.requested_host ?? job.host;
+      const host = availableId(priorHost, hosts);
       const o = job.options;
       const gpuDevice = typeof o?.gpu_device === 'string' ? o.gpu_device : '';
       const gpuLayers = typeof o?.gpu_layers === 'number' ? o.gpu_layers : undefined;
-      return { patch: { a, b, host: job.requested_host ?? job.host ?? '', promptId, promptText,
-        promptMode: promptId && (job.prompt_text == null || prompts.some(prompt => prompt.id === promptId && prompt.text === promptText)) ? 'saved' : 'text',
+      return { actions: ['compare'], patch: { a, b, host, promptId: prompt.id, promptText: prompt.text, promptMode: prompt.mode,
         n: typeof o?.n === 'number' ? o.n : 16, threads: typeof o?.threads === 'number' ? o.threads : undefined,
         think: o?.think === true, raw: o?.raw === true, gpuDevice, gpuLayers, useGpu: !!gpuDevice || gpuLayers !== undefined },
-        context: { a, b, omitted: omittedInputs(job.input_ids, [a, b]) }, focus: 'cmp-a' };
+        context: { prompt: prompt.id, snapshot: job.prompt_text }, focus: 'cmp-a',
+        omissions: draft => [
+          ...([[first, draft.a, 'A'], [second, draft.b, 'B']] as const).flatMap(([id, value, side]) =>
+            id && !available(value) ? [{ id: `${side}:${id}`, text: `Previous model ${side} ${id} was not restored. Select another model.`, required: true }] : []),
+          ...(priorHost && !host && !availableId(draft.host, hosts)
+            ? [{ id: priorHost, text: `Previous host ${priorHost} is not available. Select another host.`, required: true }] : []),
+          ...(job.prompt_id && job.prompt_text == null && !draft.promptText.trim() && !availableId(draft.promptId, prompts)
+            ? [{ id: job.prompt_id, text: `Previous prompt ${job.prompt_id} is not available. Select or enter a prompt.`, required: true }] : []),
+        ],
+      };
     },
     applied: patch => { lastSubmittedPrompt = patch.promptText ?? ''; },
-    clear: () => { lastSubmittedPrompt = ''; },
+    clear: () => {
+      if (promptText && promptText !== lastSubmittedPrompt) promptMode = 'text';
+      lastSubmittedPrompt = '';
+    },
   });
   watchPrefill(retry, () => !!brewery.state);
+  $effect(() => {
+    const prior = retry.context;
+    if (prior?.prompt && promptId === prior.prompt && promptMode === 'saved' &&
+        prior.snapshot != null && prior.snapshot !== selectedPrompt?.text) {
+      promptMode = 'text';
+      promptId = '';
+    }
+  });
+  const launch = $derived(retry.action('compare'));
 
   const blockers = $derived.by((): Blocker[] => {
     const out: Blocker[] = [];
-    if (!a) out.push({ field: 'model-a', text: 'Select model A.' });
-    if (!b) out.push({ field: 'model-b', text: 'Select model B.' });
+    const available = models.filter(m => m.kind === 'gguf');
+    if (!availableId(a, available)) out.push({ field: 'model-a', text: 'Select model A.' });
+    if (!availableId(b, available)) out.push({ field: 'model-b', text: 'Select model B.' });
     else if (a === b) out.push({ field: 'model-b', text: 'Select a different model.' });
     if (promptMode === 'saved' && !selectedPrompt) out.push({ field: 'saved', text: 'Select a saved prompt.' });
     if (promptMode === 'text' && !promptText.trim()) out.push({ field: 'text', text: 'Enter a prompt.' });
@@ -133,7 +156,7 @@
   const s = new Submitter();
   async function submit() {
     attempted = true;
-    if (blockers.length || s.busy || retry.loading) return;
+    if (blockers.length || s.busy || launch.blocked) return;
     const text = promptMode === 'text' ? promptText : undefined;
     const job = await s.submit({
       kind: 'compare',
@@ -149,7 +172,7 @@
         gpu_device: useGpu ? gpuDevice || undefined : undefined,
         gpu_layers: useGpu ? (gpuLayers ?? undefined) : undefined,
       },
-    }, retry.submission);
+    }, launch);
     if (job) {
       retry.markClean();
       if (text !== undefined) lastSubmittedPrompt = text;
@@ -174,9 +197,7 @@
           ? 'Could not open the previous job options. Enter the options again.' : 'Review the previous job options before you queue a comparison.'}</p>
       {/if}
       {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
-      {#if retry.context?.omitted.length && a === retry.context.a && b === retry.context.b}
-        <p class="note warn" role="status">Previous models not restored: {retry.context.omitted.join(', ')}.</p>
-      {/if}
+      <RetryWarnings items={retry.omissions('compare')} />
       <fieldset class="retry-fields" disabled={retry.loading}>
       <div class="grid-2">
         <ModelSelect id="cmp-a" bind:value={a} kinds={GGUF} label="Model A" exclude={b ? [b] : []} error={error('model-a')} onblur={touch('model-a')} />
@@ -245,7 +266,7 @@
       </Advanced>
 
       <div class="row">
-        <button type="button" class="btn primary" onclick={submit} disabled={s.busy || retry.loading} aria-busy={s.busy}>{s.busy ? 'Submitting…' : 'Queue comparison'}</button>
+        <button type="button" class="btn primary" onclick={submit} disabled={s.busy || launch.blocked} aria-busy={s.busy}>{s.busy ? 'Submitting…' : 'Queue comparison'}</button>
       </div>
       <Blockers blockers={visible} />
       <SubmitStatus {s} />

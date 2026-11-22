@@ -10,6 +10,8 @@
 import { buildConvertJob, type ConvertForm } from './convert';
 import { obj } from './reports';
 import type { Model } from './types';
+import { submissionError } from './api';
+import { RetryKeys, type RetrySubmission } from './retry-keys';
 
 export const STAGES = ['inspect', 'plan', 'convert', 'verify'] as const;
 export type Stage = (typeof STAGES)[number];
@@ -72,7 +74,6 @@ export function buildConversion(f: ConvertForm, models: Model[]): { body: Conver
   const problems = [...r.problems];
   if (!f.profile) problems.unshift('Choose the output profile.');
   if (rev !== null && !/^[0-9a-f]{64}$/.test(rev)) problems.unshift('The saved profile revision is not valid. Choose it again.');
-  if (source?.available === false) problems.push(source.reason ?? 'Select an available source checkpoint.');
   if (rev !== null && ((source && source.kind !== 'hf') ||
       [f.ht_backend, f.i4r_backend, f.q4cp_backend, f.decode_backend].some((backend) => backend && backend !== 'cpu'))) {
     problems.push('Select an HF source and CPU backends to use a custom profile.');
@@ -148,13 +149,6 @@ export function stageRows(c: Conversion, jobStates: Record<string, string | unde
   });
 }
 
-/** Fresh random idempotency key (ASCII, within the controller's [A-Za-z0-9._-]{1,128}). */
-export function newKey(): string {
-  const b = new Uint8Array(16);
-  crypto.getRandomValues(b);
-  return `conv-${[...b].map((x) => x.toString(16).padStart(2, '0')).join('')}`;
-}
-
 export type PostConversion = (body: ConversionBody, key: string) => Promise<unknown>;
 
 /**
@@ -164,30 +158,25 @@ export type PostConversion = (body: ConversionBody, key: string) => Promise<unkn
 export class ConversionSubmitter {
   busy = false;
   error: string | null = null;
-  #key: string | null = null;
-  #bodyJson: string | null = null;
+  #keys = new RetryKeys(undefined, true);
   #inflight: Promise<Conversion | null> | null = null;
 
   constructor(private post: PostConversion) {}
 
-  submit(body: ConversionBody, retryKey?: string): Promise<Conversion | null> {
+  submit(body: ConversionBody, retry?: RetrySubmission | string): Promise<Conversion | null> {
     if (this.#inflight) return this.#inflight.then(() => null);
-    const json = JSON.stringify(body);
-    if (!retryKey && (json !== this.#bodyJson || !this.#key)) {
-      this.#bodyJson = json;
-      this.#key = newKey();
-    }
-    const key = retryKey ?? this.#key!;
+    if (typeof retry !== 'string' && retry?.blocked) return Promise.resolve(null);
+    const attempt = typeof retry === 'string' ? this.#keys.take(body, undefined, retry) : this.#keys.take(body, retry?.history);
     this.busy = true;
     this.error = null;
     this.#inflight = (async () => {
       try {
-        const c = parseConversion(await this.post(body, key));
+        const c = parseConversion(await this.post(body, attempt.key));
         if (!c) throw new Error('The controller answered without a conversion record.');
-        // Success: the next different request gets a new key; the same body replays this one.
+        attempt.accept();
         return c;
       } catch (e) {
-        this.error = e instanceof Error ? e.message : String(e);
+        this.error = submissionError(e);
         return null;
       } finally {
         this.busy = false;

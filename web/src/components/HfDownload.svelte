@@ -31,7 +31,7 @@
       const revision = typeof options?.revision === 'string' ? options.revision : '';
       const filename = typeof options?.filename === 'string' ? options.filename : '';
       const scope = filename ? 'file' : 'repo';
-      return { patch: { host: requested_host || host || defaults.host, repo, revision, filename, scope }, focus: 'hf-repo' };
+      return { actions: ['hf_download'], patch: { host: requested_host || host || defaults.host, repo, revision, filename, scope }, focus: 'hf-repo' };
     },
     applied: () => { savedDraft = draft(); },
     clear: () => { savedDraft = JSON.stringify({ repo: '', revision: '', scope: 'file', filename: '' }); },
@@ -54,13 +54,14 @@
   });
   async function start() {
     if (submitter.busy || retry.loading || blockers.length) return;
+    const { entry, hash } = route;
     const submitted = draft();
     const job = await submitter.submit({
       kind: 'hf_download', input_ids: [],
       host: host === 'backend-hf' ? undefined : host,
       options: { repo_id: repo.trim(), revision: revision.trim(), filename: scope === 'file' ? filename.trim() : undefined },
-    }, retry.submission);
-    if (job) {
+    }, retry.action('hf_download'));
+    if (job && route.entry === entry && route.hash === hash) {
       savedDraft = submitted;
       location.hash = `#/jobs/${encodeURIComponent(job.id)}`;
     }
