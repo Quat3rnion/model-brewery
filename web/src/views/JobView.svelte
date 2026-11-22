@@ -4,7 +4,8 @@
   import { detailLines, readDetail, summarizeHistory } from '../lib/progress';
   import { brewery } from '../lib/store.svelte';
   import { api, ApiError, errorText } from '../lib/api';
-  import { canRetryManagedHgn, managedRetryHref, parseConversions, STAGES } from '../lib/conversion';
+  import { canRetryManagedHgn, managedRetryHref, STAGES } from '../lib/conversion';
+  import { conversions } from '../lib/conversions.svelte';
   import { formatTime, hostName, isActive, isCancelling, isTerminal, kindLabel, kindTitle, modelLabel, progressText, stateLabel } from '../lib/format';
   import JobState from '../components/JobState.svelte';
   import CancelButton from '../components/CancelButton.svelte';
@@ -63,19 +64,22 @@
   const history = $derived(summarizeHistory(detail?.events ?? []));
   const job = $derived(detail && summary ? { ...detail, ...summary, result: detail.result, events: detail.events } : (detail ?? summary));
   const retry = $derived(job ? rerunAction(job) : null);
-  const findManagedRetry = $derived(job && STAGES.some((stage) => stage === job.kind) &&
-    (retry || job.state === 'succeeded') && job.format !== 'gguf' && !job.options?.hy4_overrides && !job.options?.layer_recipe ? job.id : null);
-  let managedRetry = $state<{ jobId: string; runId: string } | null>(null);
+  const findManagedRetry = $derived(job && STAGES.some(stage => stage === job.kind) &&
+    job.format !== 'gguf' && !job.options?.hy4_overrides && !job.options?.layer_recipe ? job.id : null);
+  const parent = $derived(findManagedRetry ? conversions.list.find(run => Object.values(run.jobIds).includes(findManagedRetry)) : undefined);
+  const managedRetry = $derived(parent && canRetryManagedHgn(parent) ? parent.id : null);
+  $effect(() => { if (findManagedRetry) return conversions.watch(); });
+  // The scheduler may advance the parent after the last child event. Watch
+  // the state cursor as well as polling active conversions until they settle.
+  let lastProbe: { jobId: string; cursor: number | undefined; state: string | undefined } | undefined;
   $effect(() => {
     const jobId = findManagedRetry;
-    managedRetry = null;
+    const cursor = brewery.state?.event_cursor;
+    const state = job?.state;
     if (!jobId) return;
-    const request = new AbortController();
-    void api.conversions(request.signal).then((result) => {
-      const parent = parseConversions(result).find((run) => canRetryManagedHgn(run) && Object.values(run.jobIds).includes(jobId));
-      if (!request.signal.aborted && parent) managedRetry = { jobId, runId: parent.id };
-    }).catch(() => {}); // Standalone step recovery does not need the conversion API.
-    return () => request.abort();
+    const changed = lastProbe?.jobId === jobId && (lastProbe.cursor !== cursor || lastProbe.state !== state);
+    lastProbe = { jobId, cursor, state };
+    if (changed && untrack(() => !parent || parent.state === 'running')) void conversions.refresh();
   });
   const hint = $derived(retry ? rerunHint(job?.error) : null);
   const prompt = $derived(job?.prompt_id ? prompts.find((p) => p.id === job.prompt_id) : null);
@@ -125,10 +129,10 @@
     {#if job.state === 'cancelled'}
       <p class="note warn">This job was cancelled. Partial outputs are excluded.</p>
     {/if}
-    {#if retry || managedRetry?.jobId === id}
+    {#if retry || managedRetry}
       <div class="row">
         {#if retry}<a class="btn" href={retry.href}>{retry.label}</a>{/if}
-        {#if managedRetry?.jobId === id}<a class="btn" href={managedRetryHref(managedRetry.runId)}>Run again</a>{/if}
+        {#if managedRetry}<a class="btn" href={managedRetryHref(managedRetry)}>Run again</a>{/if}
         {#if hint}<p class="small muted">{hint}</p>{/if}
       </div>
     {/if}

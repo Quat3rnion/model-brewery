@@ -1,5 +1,4 @@
 import { api } from './api';
-import { hashParam } from './route.svelte';
 import type { JobSummary } from './types';
 
 function canRetry(job: JobSummary): boolean {
@@ -64,24 +63,10 @@ export function rerunAction(job: JobSummary): { label: string; href: string } | 
 }
 
 /** Fetch the request rather than putting prompts or options in a URL. Never submit work. */
-export async function readRetry(hash: string, kinds: readonly string[], signal: AbortSignal) {
-  const id = hashParam(hash, 'retry');
-  if (!id) return null;
+export async function readRetry(id: string, kinds: readonly string[], signal: AbortSignal) {
   const job = await api.job(id, signal);
   if (job.id !== id || !kinds.includes(job.kind) || !canRetry(job)) throw new Error('This job cannot fill this form.');
   return job;
-}
-
-/** Call from a route effect. Ignore a response if the operator left the form. */
-export function watchRetry(hash: string, kinds: readonly string[], apply: (job: Awaited<ReturnType<typeof api.job>>, signal: AbortSignal) => void | Promise<void>, failed: () => void) {
-  if (!hashParam(hash, 'retry')) return;
-  const controller = new AbortController();
-  void readRetry(hash, kinds, controller.signal).then((job) => {
-    if (job && !controller.signal.aborted) return apply(job, controller.signal);
-  }).catch(() => {
-    if (!controller.signal.aborted) failed();
-  });
-  return () => controller.abort();
 }
 
 export function rerunHint(error: string | null | undefined): string | null {

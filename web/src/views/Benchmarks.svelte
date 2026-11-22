@@ -36,8 +36,8 @@
   import Ids from '../components/calibration/Ids.svelte';
   import type { JobDetail, JobSummary } from '../lib/types';
   import { errorText } from '../lib/api';
-  import { route } from '../lib/route.svelte';
-  import { watchRetry } from '../lib/rerun';
+  import { loadRetryJob, omittedInputs, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
+  import RetryOffer from '../components/RetryOffer.svelte';
 
   const hosts = $derived(brewery.state?.hosts ?? []);
   const models = $derived(brewery.state?.models ?? []);
@@ -52,7 +52,10 @@
   // Drop selections that the newly selected host does not advertise.
   $effect(() => {
     const ids = new Set(offer.suites.map((s) => s.id));
-    if (picked.some((p) => !ids.has(p))) picked = picked.filter((p) => ids.has(p));
+    if (picked.some((p) => !ids.has(p))) {
+      retry.prune('picked', values => values.filter(id => ids.has(id)));
+      picked = picked.filter(id => ids.has(id));
+    }
     if (target && !offer.targets.some((t) => t.id === target)) target = '';
   });
   let suiteFilter = $state('');
@@ -64,20 +67,26 @@
   const error = (field: string) => fieldError(visible, field);
   const setupLink = $derived(host && `#/settings/evaluation?host=${encodeURIComponent(host.id)}`);
   const run = new Submitter();
-  let retryError = $state(false);
-  let previousSuites = $state<string[]>([]);
-  const unavailableSuites = $derived(previousSuites.filter((id) => !offer.suites.some((suite) => suite.id === id)));
-  $effect(() => {
-    retryError = false;
-    previousSuites = [];
-    return watchRetry(route.hash, ['benchmark'], (job) => {
+  let acknowledged = $state('');
+  const unavailableSuites = $derived.by(() => omittedInputs(retry.context ?? [], picked));
+  const omissionKey = $derived(JSON.stringify(unavailableSuites));
+  const retry = new RetryPrefill({
+    slot: 'benchmarks', defaults: { hostId: '', target: '', picked: [] as string[] },
+    read: () => ({ hostId, target, picked }),
+    write: value => { ({ hostId, target, picked } = value); },
+    load: loadRetryJob(['benchmark']),
+    restore: job => {
       const request = requestedOf(job);
-      hostId = job.requested_host ?? job.host ?? '';
-      target = request.benchmark_target ?? '';
-      previousSuites = request.benchmarks;
-      picked = request.benchmarks;
-    }, () => { retryError = true; });
+      const hostId = job.requested_host ?? job.host ?? '';
+      const choices = benchmarkChoices(hosts.find(h => h.id === hostId));
+      const picked = request.benchmarks.filter(id => choices.suites.some(suite => suite.id === id));
+      const target = choices.targets.find(t => t.id === request.benchmark_target)?.id ?? '';
+      return { patch: { hostId, target, picked }, context: request.benchmarks, focus: 'bm-host' };
+    },
+    applied: () => { acknowledged = ''; },
+    clear: () => { acknowledged = ''; },
   });
+  watchPrefill(retry, () => !!brewery.state);
 
   // ---- Scorecard selection ----
   const benchJobs = $derived(newestFirst(jobs.filter((j) => j.kind === 'benchmark')));
@@ -173,17 +182,21 @@
   <section class="panel" aria-labelledby="bl-h">
     <header><h2 id="bl-h">Run benchmarks</h2></header>
     <WorkflowGate workflow="benchmark">
-    <div class="body stack">
-      {#if retryError}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
-      {#if unavailableSuites.length}
+    <div class="body stack" oninputcapture={retry.touchField} onchangecapture={retry.touchField} onclickcapture={retry.touchField} onkeydowncapture={retry.touchField}>
+      {#if retry.failed}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
+      {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
+      {#if unavailableSuites.length && acknowledged !== omissionKey}
         <div class="note warn" role="status">
           <p>These suites from the previous request were not restored:</p>
-          <ul>{#each unavailableSuites as id (id)}<li class="break">Suite {id} is not available on this host.</li>{/each}</ul>
+          <ul>{#each unavailableSuites as id (id)}
+            <li class="break">Suite {id} {offer.suites.some(s => s.id === id) ? 'was not restored. Select it to include it.' : 'is not available on this host.'}</li>
+          {/each}</ul>
+          <button type="button" class="btn" onclick={() => { acknowledged = omissionKey; document.getElementById('bm-host')?.focus(); }}>Acknowledge omitted suites</button>
         </div>
       {/if}
       <Blockers blockers={built.blockers.filter((b) => !b.field)} />
       <div class="grid-2">
-        <HostSelect bind:value={hostId} workflow="benchmark" kind="benchmark" label="Host" hint="The host runs the suites against the endpoint. No library input is used." error={error('host')} onblur={() => { touched.host = true; }} />
+        <HostSelect id="bm-host" bind:value={hostId} workflow="benchmark" kind="benchmark" label="Host" hint="The host runs the suites against the endpoint. No library input is used." error={error('host')} onblur={() => { touched.host = true; }} />
         <div class="field">
           <Combobox bind:value={target} id="bm-target" label="Endpoint target" options={idOptions(offer.targets)} disabled={!host || offer.targets.length === 0} invalid={!!error('target')} describedby="bm-target-hint{error('target') ? ' bm-target-error' : ''}" placeholder={!host ? 'Select a host first' : offer.targets.length ? 'Select or type a target' : 'None advertised'} emptyText="No target matches." onblur={() => { touched.target = true; }} />
           <FieldError id="bm-target-error" error={error('target')} />
@@ -221,7 +234,7 @@
         <FieldError id="bm-suites-error" error={error('suites')} />
       </fieldset>
 
-      <div><button type="button" class="btn primary" disabled={!built.job || run.busy} aria-busy={run.busy} onclick={() => built.job && run.submit(built.job)}>{run.busy ? 'Submitting…' : 'Queue benchmark run'}</button></div>
+      <div><button type="button" class="btn primary" disabled={retry.loading || !built.job || run.busy} aria-busy={run.busy} onclick={() => built.job && run.submit(built.job, retry.submission)}>{run.busy ? 'Submitting…' : 'Queue benchmark run'}</button></div>
       <SubmitStatus s={run} />
     </div>
     </WorkflowGate>

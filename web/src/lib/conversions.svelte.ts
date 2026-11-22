@@ -4,6 +4,7 @@
 
 import { api, errorText } from './api';
 import { ConversionSubmitter, isActiveConversion, parseConversions, type Conversion, type ConversionBody } from './conversion';
+import type { RetrySubmission } from './retry-prefill.svelte';
 
 const ACTIVE_MS = 2_000;
 const IDLE_MS = 10_000;
@@ -16,6 +17,7 @@ class Conversions {
   error = $state<string | null>(null);
   #timer: ReturnType<typeof setTimeout> | null = null;
   #users = 0;
+  #inflight: Promise<void> | null = null;
 
   /** Start polling while a view is mounted; returns the stop function. */
   watch(): () => void {
@@ -30,7 +32,12 @@ class Conversions {
     };
   }
 
-  async refresh() {
+  refresh(): Promise<void> {
+    this.#inflight ??= this.#load().finally(() => { this.#inflight = null; });
+    return this.#inflight;
+  }
+
+  async #load() {
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = null;
     try {
@@ -67,14 +74,16 @@ export class ConversionStarter {
   replayed = $state(false);
   #inner = new ConversionSubmitter((body, key) => api.startConversion(body, key));
 
-  async start(body: ConversionBody): Promise<Conversion | null> {
+  async start(body: ConversionBody, retry?: RetrySubmission): Promise<Conversion | null> {
     if (this.busy) return null;
     this.busy = true;
     this.error = null;
-    const c = await this.#inner.submit(body);
+    const attempt = retry?.submission('conversion', body);
+    const c = await this.#inner.submit(body, attempt?.key);
     this.busy = false;
     this.error = this.#inner.error;
     if (c) {
+      attempt?.accept();
       this.replayed = this.last?.id === c.id;
       this.last = c;
       conversions.upsert(c);

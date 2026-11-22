@@ -28,6 +28,7 @@ export interface ConversionBody {
 
 /** Form value prefix for a saved profile revision in the profile select. */
 export const REV_PREFIX = 'rev:';
+export const DEFAULT_PROFILE = 'converter-default';
 
 export function conversionRunHref(id: string, mode = 'hgn'): string {
   const params = new URLSearchParams(mode === 'hgn' ? { run: id } : { format: mode, run: id });
@@ -62,12 +63,12 @@ export interface Conversion {
   format: string | null;
 }
 
-/** The single POST body. Profile is required; host is explicit, 'auto', or omitted (source host). */
+/** The form requires a profile choice, which may delegate to the converter. */
 export function buildConversion(f: ConvertForm, models: Model[]): { body: ConversionBody | null; problems: string[] } {
   const rev = f.profile.startsWith(REV_PREFIX) ? f.profile.slice(REV_PREFIX.length) : null;
   const source = models.find((m) => m.id === f.source);
   // Reuse the converter step validation for inputs, extras and numeric options.
-  const r = buildConvertJob('convert', rev !== null ? { ...f, profile: '' } : f, models);
+  const r = buildConvertJob('convert', rev !== null || f.profile === DEFAULT_PROFILE ? { ...f, profile: '' } : f, models);
   const problems = [...r.problems];
   if (!f.profile) problems.unshift('Choose the output profile.');
   if (rev !== null && !/^[0-9a-f]{64}$/.test(rev)) problems.unshift('The saved profile revision is not valid. Choose it again.');
@@ -169,14 +170,14 @@ export class ConversionSubmitter {
 
   constructor(private post: PostConversion) {}
 
-  submit(body: ConversionBody): Promise<Conversion | null> {
+  submit(body: ConversionBody, retryKey?: string): Promise<Conversion | null> {
     if (this.#inflight) return this.#inflight.then(() => null);
     const json = JSON.stringify(body);
-    if (json !== this.#bodyJson || !this.#key) {
+    if (!retryKey && (json !== this.#bodyJson || !this.#key)) {
       this.#bodyJson = json;
       this.#key = newKey();
     }
-    const key = this.#key;
+    const key = retryKey ?? this.#key!;
     this.busy = true;
     this.error = null;
     this.#inflight = (async () => {

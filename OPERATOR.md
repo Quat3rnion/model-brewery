@@ -433,6 +433,14 @@ enter an absolute path. The worker checks it when a job uses it.
 6. Read the result. `GET /api/jobs/{id}` returns the full result and the
    controller event log.
 
+**Run again** and the links that reopen a failed job in its form do not queue
+work. Review the inputs and any omissions before you submit. If you edited
+the form while the previous request loaded, select **Use previous inputs**
+to replace the draft. A plain form does not keep unchanged retry inputs.
+If the submission response is lost, submit the same inputs from the retry
+route in the same tab without reloading the page. The workbench reuses the
+request key.
+
 ### Convert a model
 
 The default way to convert is one action. On the Convert page, choose the

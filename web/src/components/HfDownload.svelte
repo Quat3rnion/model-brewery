@@ -2,7 +2,8 @@
   import { brewery } from '../lib/store.svelte';
   import { Submitter } from '../lib/submit.svelte';
   import { hashParam, route } from '../lib/route.svelte';
-  import { watchRetry } from '../lib/rerun';
+  import { loadRetryJob, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
+  import RetryOffer from './RetryOffer.svelte';
   import { unsavedChanges } from '../lib/unsaved-changes.svelte';
   import { hostName } from '../lib/format';
   import Submit from './Submit.svelte';
@@ -16,23 +17,28 @@
   let scope = $state('file');
   let filename = $state('');
   let open = $state(false);
-  let retryError = $state(false);
-  const draft = () => JSON.stringify([repo, revision, scope, filename]);
-  let savedDraft = $state(JSON.stringify(['', '', 'file', '']));
+  const defaults = { host: 'backend-hf', repo: '', revision: '', scope: 'file', filename: '' };
+  const draft = () => JSON.stringify({ repo, revision, scope, filename });
+  let savedDraft = $state(draft());
   unsavedChanges(() => draft() !== savedDraft);
+  const retry = new RetryPrefill({
+    slot: 'download', defaults,
+    read: () => ({ host, repo, revision, scope, filename }),
+    write: value => { ({ host, repo, revision, scope, filename } = value); },
+    load: loadRetryJob(['hf_download']),
+    restore: ({ options, requested_host, host }) => {
+      const repo = typeof options?.repo_id === 'string' ? options.repo_id : '';
+      const revision = typeof options?.revision === 'string' ? options.revision : '';
+      const filename = typeof options?.filename === 'string' ? options.filename : '';
+      const scope = filename ? 'file' : 'repo';
+      return { patch: { host: requested_host || host || defaults.host, repo, revision, filename, scope }, focus: 'hf-repo' };
+    },
+    applied: () => { savedDraft = draft(); },
+    clear: () => { savedDraft = JSON.stringify({ repo: '', revision: '', scope: 'file', filename: '' }); },
+  });
+  watchPrefill(retry);
   $effect(() => {
-    const hash = route.hash;
-    retryError = false;
-    if (hashParam(hash, 'retry')) open = true;
-    return watchRetry(hash, ['hf_download'], (job) => {
-      const { options } = job;
-      host = job.requested_host || job.host || 'backend-hf';
-      repo = typeof options?.repo_id === 'string' ? options.repo_id : '';
-      revision = typeof options?.revision === 'string' ? options.revision : '';
-      filename = typeof options?.filename === 'string' ? options.filename : '';
-      scope = filename ? 'file' : 'repo';
-      savedDraft = draft();
-    }, () => { retryError = true; });
+    if (hashParam(route.hash, 'retry')) open = true;
   });
   const safePart = (s: string) => /^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(s) && !s.includes('..');
   const blockers = $derived.by(() => {
@@ -47,13 +53,13 @@
     return errors;
   });
   async function start() {
-    if (submitter.busy || blockers.length) return;
+    if (submitter.busy || retry.loading || blockers.length) return;
     const submitted = draft();
     const job = await submitter.submit({
       kind: 'hf_download', input_ids: [],
       host: host === 'backend-hf' ? undefined : host,
       options: { repo_id: repo.trim(), revision: revision.trim(), filename: scope === 'file' ? filename.trim() : undefined },
-    });
+    }, retry.submission);
     if (job) {
       savedDraft = submitted;
       location.hash = `#/jobs/${encodeURIComponent(job.id)}`;
@@ -63,8 +69,10 @@
 
 <details class="disclosure" bind:open>
   <summary><strong>Download from Hugging Face</strong></summary>
-  <div class="stack fields">
-    {#if retryError}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
+  <div class="stack fields" oninputcapture={retry.touchField} onchangecapture={retry.touchField}>
+    {#if retry.loading}<p class="hint" role="status">Loading the previous download.</p>{/if}
+    {#if retry.failed}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
+    {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
     <div class="grid-2">
       <div class="field">
         <label for="hf-repo">Repository ID</label>
@@ -92,7 +100,7 @@
     </div>
     {#if host !== 'backend-hf'}<p class="hint">Download on {hostName(hosts, host)}.</p>{/if}
     <p class="hint">Track progress or cancel in Jobs. The download service verifies the files before it adds the entry to Library.</p>
-    <Submit {blockers} busy={submitter.busy} onclick={start}>Start download</Submit>
+    <Submit {blockers} busy={submitter.busy} disabled={retry.loading} onclick={start}>Start download</Submit>
     {#if submitter.error}<p class="note bad" role="alert">{submitter.error}</p>{/if}
   </div>
 </details>
