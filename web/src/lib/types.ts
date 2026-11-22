@@ -27,11 +27,17 @@ export type JobKind =
   | 'benchmark'
   | (string & {});
 
+export interface FixReason {
+  text: string;
+  fix_anchor: string;
+}
+
 export interface Host {
   id: string;
   name?: string;
   capabilities?: Record<string, boolean>;
   reasons?: Record<string, string>;
+  capability_reasons?: Record<string, FixReason>;
   /** Operator-configured GSM8K baseline sources (IDs only, never URLs). */
   baseline_sources?: { id: string; label?: string }[];
   /** Member of the conversion pool used by host 'auto'. */

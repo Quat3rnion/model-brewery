@@ -59,10 +59,14 @@ impl App {
 
     fn effective_hosts(&self) -> Result<Vec<Host>, Error> {
         let hosts = self.settings.effective(&self.defined_hosts()?);
-        match &self.admin {
+        let mut hosts = match &self.admin {
             Some(admin) => admin.effective_hosts(&hosts, self),
             None => Ok(hosts),
+        }?;
+        for host in &mut hosts {
+            host.refresh_capability_reasons();
         }
+        Ok(hosts)
     }
 }
 

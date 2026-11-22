@@ -1,4 +1,11 @@
-import type { BrewState, JobDetail, JobSummary, Model, NewJob, NewModel, NewPrompt, Prompt } from './types';
+import type { BrewState, FixReason, JobDetail, JobSummary, Model, NewJob, NewModel, NewPrompt, Prompt } from './types';
+
+export interface HostReadiness {
+  id: string;
+  ready: boolean;
+  readiness: Record<'benchmark' | 'baseline' | 'evaluate' | 'generate', { ready: boolean; reason?: FixReason }>;
+  evaluation: { status: 'managed' | 'profile_only'; reason?: string; reason_detail?: FixReason };
+}
 
 export class ApiError extends Error {
   constructor(
@@ -61,8 +68,8 @@ export const api = {
   conversions: (signal?: AbortSignal) => request<unknown>('GET', '/api/conversions', undefined, signal),
   conversion: (id: string, signal?: AbortSignal) => request<unknown>('GET', `/api/conversions/${encodeURIComponent(id)}`, undefined, signal),
   cancelConversion: (id: string) => request<unknown>('POST', `/api/conversions/${encodeURIComponent(id)}/cancel`, {}),
-  settings: (signal?: AbortSignal) => request<unknown>('GET', '/api/settings', undefined, signal),
-  saveSettings: (host: string, body: unknown) => request<unknown>('PUT', `/api/settings/${encodeURIComponent(host)}`, body),
+  settings: (signal?: AbortSignal) => request<{ hosts: HostReadiness[] }>('GET', '/api/settings', undefined, signal),
+  saveSettings: (host: string, body: unknown) => request<HostReadiness>('PUT', `/api/settings/${encodeURIComponent(host)}`, body),
   adminState: () => request<unknown>('GET', '/api/admin/state'),
   planDirectory: (body: import('./model-directories').DirectoryChange) => request<unknown>('POST', '/api/admin/model-directories/plan', body),
   confirmDirectory: (body: {worker:string; revision:number; confirmation:string}) => request<unknown>('POST', '/api/admin/model-directories/confirm', body),

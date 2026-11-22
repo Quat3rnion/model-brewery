@@ -879,6 +879,10 @@
         "type": "object", "required": ["id", "label"], "additionalProperties": false,
         "properties": {"id": {"$ref": "#/components/schemas/ConfiguredToken"}, "label": {"anyOf": [{"$ref": "#/components/schemas/Name"}, {"type": "null"}]}}
       },
+      "FixReason": {
+        "type": "object", "additionalProperties": false, "required": ["text", "fix_anchor"],
+        "properties": {"text": {"type": "string"}, "fix_anchor": {"type": "string", "description": "Workbench fragment for the setting that can resolve this blocker."}}
+      },
       "Host": {
         "type": "object", "additionalProperties": false,
         "required": ["id", "name", "capabilities", "reasons", "baseline_sources", "benchmark_targets", "benchmarks", "quantization_pool", "quantization_backends"],
@@ -887,6 +891,7 @@
           "capabilities": {"$ref": "#/components/schemas/HostCapabilityMap"},
           "component_cpu_only": {"type": "boolean", "description": "If true, this worker accepts only the cpu backend for inspect, plan, convert and verify, including the decode_backend of a conversion workflow. Default false."},
           "reasons": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Configured capability diagnostics, keyed by capability name."},
+          "capability_reasons": {"type": "object", "additionalProperties": {"$ref": "#/components/schemas/FixReason"}, "description": "Setup blockers for disabled capabilities, keyed by capability name."},
           "baseline_sources": {"type": "array", "items": {"$ref": "#/components/schemas/BaselineSource"}},
           "benchmark_targets": {"type": "array", "items": {"$ref": "#/components/schemas/BenchmarkChoice"}},
           "benchmarks": {"type": "array", "items": {"$ref": "#/components/schemas/BenchmarkChoice"}},
@@ -1148,7 +1153,7 @@
       },
       "HostSettings": {
         "type": "object",
-        "required": ["id", "name", "management", "evaluation", "managed", "ready", "approved_ports", "evaluation_allowed", "baseline_allowed", "approved_suites", "revision", "benchmark_targets", "enabled_suites", "baseline_endpoints", "evaluation_enabled"],
+        "required": ["id", "name", "management", "evaluation", "managed", "ready", "readiness", "approved_ports", "evaluation_allowed", "baseline_allowed", "approved_suites", "revision", "benchmark_targets", "enabled_suites", "baseline_endpoints", "evaluation_enabled"],
         "properties": {
           "id": {"$ref": "#/components/schemas/HostId"}, "name": {"type": "string"},
           "management": {
@@ -1162,12 +1167,20 @@
           },
           "evaluation": {
             "type": "object", "required": ["status"],
-            "properties": {"status": {"enum": ["managed", "profile_only", "unavailable"]}, "reason": {"type": "string"}}
+            "properties": {"status": {"enum": ["managed", "profile_only", "unavailable"]}, "reason": {"type": "string"}, "reason_detail": {"$ref": "#/components/schemas/FixReason"}}
           },
           "profile_binding": {"type": "string", "description": "Opaque binding for the selected controller-stored profile."},
           "saved_profile": {"$ref": "#/components/schemas/NewSettings", "description": "Previously saved controller profile available for review. Not automatically applied to a worker."},
           "managed": {"type": "boolean", "description": "Compatibility field. Use evaluation.status to distinguish saved profiles from active worker settings."},
-          "ready": {"type": "boolean", "description": "True if evaluation policy, suite catalog and saved evaluation settings are valid. Not a check of any endpoint."},
+          "ready": {"type": "boolean", "description": "True if at least one managed job is configured and enabled. Not a check of any endpoint."},
+          "readiness": {
+            "type": "object", "required": ["benchmark", "baseline", "evaluate", "generate"],
+            "propertyNames": {"enum": ["benchmark", "baseline", "evaluate", "generate"]},
+            "additionalProperties": {
+              "type": "object", "additionalProperties": false, "required": ["ready"],
+              "properties": {"ready": {"type": "boolean"}, "reason": {"$ref": "#/components/schemas/FixReason"}}
+            }
+          },
           "reason": {"type": "string", "description": "Evaluation configuration status, not a host-wide restriction."},
           "approved_ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "description": "Loopback ports that the operator approved for this worker."},
           "evaluation_allowed": {"type": "boolean", "description": "True only if worker policy, GPU load permission and the pinned image allow generate and evaluate. Set by the operator, not by this API."},
