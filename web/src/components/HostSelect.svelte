@@ -11,6 +11,7 @@
     value = $bindable(''),
     kind,
     workflow,
+    hideIneligible = false,
     gguf,
     label = 'Host',
     hint,
@@ -19,12 +20,13 @@
     id: givenId,
     error,
     onblur,
-  }: { value?: string; kind?: string; workflow?: Workflow; gguf?: GgufEligibility; label?: string; hint?: string; optional?: boolean; optionalLabel?: string; id?: string; error?: string; onblur?: () => void } = $props();
+  }: { value?: string; kind?: string; workflow?: Workflow; hideIneligible?: boolean; gguf?: GgufEligibility; label?: string; hint?: string; optional?: boolean; optionalLabel?: string; id?: string; error?: string; onblur?: () => void } = $props();
 
   const uid = $props.id();
   const id = $derived(givenId ?? `${uid}-host`);
   const hosts = $derived(brewery.state?.hosts ?? []);
-  const options = $derived(hostOptions(hosts, kind, workflow ? (h) => hostWorkflowEligibility(brewery.state?.eligibility, h.id, workflow, gguf) : undefined));
+  const options = $derived(hostOptions(hosts, kind, workflow ? (h) => hostWorkflowEligibility(brewery.state?.eligibility, h.id, workflow, gguf) : undefined)
+    .filter((option) => !hideIneligible || !option.disabled));
   const selected = $derived(hosts.find((h) => h.id === value));
   const cap = $derived(!workflow && kind && selected ? capability(selected, kind) : null);
 </script>

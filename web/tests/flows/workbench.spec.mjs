@@ -462,7 +462,6 @@ test('Settings readiness does not contradict live capabilities', async ({ page, 
 // Audit regressions for later tasks. Replace each placeholder with an assertion
 // of the corrected behavior; do not lock in the current broken behavior.
 for (const finding of [
-  'Library identity stays Not yet hashed because its report fields are absent',
   'Convert requires every managed conversion stage, not just convert',
   'GGUF conversion does not offer a destination it will later reject',
   'Profiles warns before discarding unsaved editor changes',

@@ -55,7 +55,8 @@ test('keeps the last Library during an outage and recovers', async ({ page, cont
   await expect(page.getByText('Fixture checkpoint', { exact: true })).toBeVisible();
   controller.load('controller-down');
   await page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect(page.getByRole('alert')).toContainText('Lost contact with the controller (The controller is not reachable.)');
+  await expect(page.getByRole('alert')).toContainText('The controller disconnected.');
+  await expect(page.getByRole('alert')).toContainText('The controller is not reachable.');
   await expect(page.getByText('Fixture checkpoint', { exact: true })).toBeVisible();
   controller.load('empty');
   await page.evaluate(() => window.dispatchEvent(new Event('online')));

@@ -9,9 +9,16 @@
 
   let { jobs, queued }: { jobs: JobSummary[]; queued: number } = $props();
   const hosts = $derived(brewery.state?.hosts ?? []);
+  let expanded = $state(true);
+  const detailsId = $props.id();
 </script>
 
 <section class="active" aria-label="Running jobs">
+  <div class="mobile-controls row">
+    <span class="num small">{jobs.length} running, {queued} queued</span>
+    <button type="button" class="btn small" aria-controls={detailsId} aria-expanded={expanded} onclick={() => { expanded = !expanded; }}>Job details</button>
+  </div>
+  <div id={detailsId} class="job-lines" class:collapsed={!expanded}>
   {#each jobs as job (job.id)}
     <div class="line">
       <div class="what">
@@ -28,6 +35,7 @@
       {queued} job{queued === 1 ? '' : 's'} queued{jobs.length ? '' : '; none running'}. <a href="#/queue">Open jobs</a>
     </p>
   {/if}
+  </div>
 </section>
 
 <style>
@@ -38,6 +46,15 @@
     padding: var(--s-2) var(--s-5);
     background: var(--surface-2);
     border-bottom: 1px solid var(--line-soft);
+  }
+  .job-lines {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-2);
+  }
+  .mobile-controls {
+    display: none;
+    justify-content: space-between;
   }
   /* Fixed columns so the progress of every running job starts at the same place. */
   .line {
@@ -69,6 +86,12 @@
   @media (max-width: 760px) {
     .active {
       padding: var(--s-2) var(--s-3);
+    }
+    .mobile-controls {
+      display: flex;
+    }
+    .job-lines.collapsed {
+      display: none;
     }
     .line {
       grid-template-columns: minmax(0, 1fr) auto;
