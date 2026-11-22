@@ -455,6 +455,9 @@
     <div class="body stack">
       {#if source && (access?.allowed || canVisual)}
         {#if !canChange}<p class="note warn small">Read-only: {sentence((mode === 'manual' ? caps.weight_propose.reason : caps.weight_tune.reason) ?? 'Select an available editing mode.')}</p>{/if}
+        {#if source.kind === 'gguf' && !canVisual && caps.weight_inspect.allowed && !(showText && mode === 'manual')}
+          {@render valueLookup(false)}
+        {/if}
         {#if mode === 'auto' && canChange}
           {#key source.id}
             <h3>Calibration and held-out data</h3>
@@ -503,37 +506,7 @@
       <div class="stack pad">
         <p class="xs muted">Coordinates are zero-based in row-major order, one number per tensor dimension, for example <span class="mono">3, 17</span>. <b>Set</b> writes the value. <b>Delta</b> adds it to the stored value. The worker rounds each result to the stored type and refuses edits that do not change the stored value.</p>
 
-        <fieldset class="sub">
-          <legend>Look up a stored value (optional)</legend>
-          <div class="lookup">
-            <div class="field grow">
-              <label for="w-ins-t">Tensor</label>
-              <input id="w-ins-t" class="input mono" bind:value={inspectTensor} autocomplete="off" spellcheck="false" placeholder="blk.0.attn_q.weight" />
-            </div>
-            <div class="field">
-              <label for="w-ins-i">Coordinate</label>
-              <input id="w-ins-i" class="input mono coord" bind:value={inspectIndex} autocomplete="off" spellcheck="false" placeholder="0, 0" />
-            </div>
-             <Submit variant="secondary" blockers={inspectBlockers} busy={inspectSub.busy} onclick={inspect}>Inspect</Submit>
-          </div>
-          {#if inspectSub.error}<p class="note bad" role="alert">{inspectSub.error}</p>{/if}
-          <div aria-live="polite">
-            {#if lastInspect}
-              <div class="ins">
-                <div class="row">
-                  <JobState job={lastInspect} />
-                  <a class="xs" href="#/jobs/{encodeURIComponent(lastInspect.id)}">Latest inspect</a>
-                  {#if lastInspect.created_at}<span class="xs muted">{formatTime(lastInspect.created_at)}</span>{/if}
-                </div>
-                {#if lastInspect.error}<p class="xs err break">{lastInspect.error}</p>{/if}
-                {#if inspectDetail}
-                  <WeightReport job={inspectDetail} />
-                  {#if inspected}<button type="button" class="btn small" onclick={useInspected} disabled={rows.length >= MAX_EDITS}>Add as edit row</button>{/if}
-                {/if}
-              </div>
-            {/if}
-          </div>
-        </fieldset>
+        {@render valueLookup(true)}
 
         <div class="table-wrap">
           <table class="data stackable edits">
@@ -753,6 +726,40 @@
     {/if}
   </section>
 </div>
+
+{#snippet valueLookup(canAddEdit: boolean)}
+  <fieldset class="sub">
+    <legend>Look up a stored value (optional)</legend>
+    <div class="lookup">
+      <div class="field grow">
+        <label for="w-ins-t">Tensor</label>
+        <input id="w-ins-t" class="input mono" bind:value={inspectTensor} autocomplete="off" spellcheck="false" placeholder="blk.0.attn_q.weight" />
+      </div>
+      <div class="field">
+        <label for="w-ins-i">Coordinate</label>
+        <input id="w-ins-i" class="input mono coord" bind:value={inspectIndex} autocomplete="off" spellcheck="false" placeholder="0, 0" />
+      </div>
+      <Submit variant="secondary" blockers={inspectBlockers} busy={inspectSub.busy} onclick={inspect}>Inspect</Submit>
+    </div>
+    {#if inspectSub.error}<p class="note bad" role="alert">{inspectSub.error}</p>{/if}
+    <div aria-live="polite">
+      {#if lastInspect}
+        <div class="ins">
+          <div class="row">
+            <JobState job={lastInspect} />
+            <a class="xs" href="#/jobs/{encodeURIComponent(lastInspect.id)}">Latest inspect</a>
+            {#if lastInspect.created_at}<span class="xs muted">{formatTime(lastInspect.created_at)}</span>{/if}
+          </div>
+          {#if lastInspect.error}<p class="xs err break">{lastInspect.error}</p>{/if}
+          {#if inspectDetail}
+            <WeightReport job={inspectDetail} />
+            {#if canAddEdit && inspected}<button type="button" class="btn small" onclick={useInspected} disabled={rows.length >= MAX_EDITS}>Add as edit row</button>{/if}
+          {/if}
+        </div>
+      {/if}
+    </div>
+  </fieldset>
+{/snippet}
 
 <style>
   .head {

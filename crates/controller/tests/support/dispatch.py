@@ -24,6 +24,8 @@ if sys.argv[1] == "stat":
         sys.exit(2)
     print(json.dumps({
         "/models/current.gguf": {"state":"file","bytes":7},
+        "/models/current.safetensors": {"state":"file","bytes":7},
+        "/models/current.safetensors/.": {"state":"missing"},
         "/models/missing.gguf": {"state":"missing"},
     }.get(path, {"state":"outside_roots"})))
     sys.exit(0)

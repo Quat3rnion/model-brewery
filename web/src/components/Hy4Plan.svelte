@@ -23,6 +23,8 @@
   const host = $derived(brewery.state?.hosts.find(h => h.id === source?.host));
   const problem = $derived(!source || source.kind !== 'hf' ? 'Select the registered HF directory for the pinned revision.'
     : source.available === false ? 'The source is unavailable. Restore it or select another registered copy.'
+    : host?.scheduling_paused ? 'Resume job scheduling on the source host.'
+    : host?.capabilities?.[encode ? 'convert' : 'plan'] !== true ? `Enable ${encode ? 'Convert' : 'Plan'} on the source host.`
     : host?.capabilities?.[capability] !== true ? `Select a copy on a worker that supports this Hy4 ${action}. ${host?.reasons?.[capability] ?? ''}` : '');
   let busy = $state(false);
   let outcome = $state<{ source: string; error?: string; id?: string } | null>(null);

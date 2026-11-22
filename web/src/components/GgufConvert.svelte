@@ -1,6 +1,5 @@
 <script lang="ts">
-  // GGUF output conversion: source, preset or saved GGUF profile, imatrix when
-  // required, host. One POST /api/conversions with format 'gguf'.
+  // GGUF output conversion: source, preset or saved profile, and importance matrix.
   import { brewery } from '../lib/store.svelte';
   import { capability, hostName, modelLabel } from '../lib/format';
   import { profileStore } from '../lib/profiles.svelte';
@@ -56,7 +55,7 @@
   const fork = $derived(forkSelected(catalog, rev?.preset ?? preset, rev?.overrides ?? {}));
   const needsImatrix = $derived(rev ? imatrixRequired(catalog, rev.preset, rev.overrides) : !!catalog.presets.find((p) => p.id === preset)?.requiresImatrix);
   const built = $derived(
-    buildGgufConversion(catalog, { source, sourceKind:src?.kind, assets, preset, revision: rev ? { revision: rev.revision, needsImatrix } : null, imatrix: needsImatrix ? imatrix : '', threads, host: src?.host ?? '' }),
+    buildGgufConversion(catalog, { source, sourceKind:src?.kind, assets, preset, revision: rev ? { revision: rev.revision, needsImatrix } : null, imatrix, threads, host: src?.host ?? '' }),
   );
   const target = $derived(hosts.find((h) => h.id === src?.host));
   const hostBlockers = $derived.by((): Blocker[] => {
@@ -81,7 +80,7 @@
     if (source && (!src || src.available===false || !['hf','gguf','safetensors'].includes(src.kind))) out.push('Choose an available HF checkpoint, standalone SafeTensors file or GGUF input.');
     if (hostBlockers.length) out.push('Select a source on a host that can write GGUF.');
     if (standalone && assets && !assetChoices.some(m=>m.id===assets)) out.push('Choose available assets on the source host.');
-    if (imatrix && needsImatrix && !sameHostMatrix.some(m=>m.id===imatrix)) out.push('Choose an available importance matrix on the source host.');
+    if (imatrix && !sameHostMatrix.some(m=>m.id===imatrix)) out.push('Choose an available importance matrix on the source host.');
     if (choice.startsWith('rev:') && !rev) out.push('The chosen GGUF profile revision is no longer listed.');
     if (conversions.status === 'unavailable') out.push('This controller does not provide managed conversions.');
     return out;
@@ -135,8 +134,8 @@
   {:else if src}<ComponentPicker source={src} idPrefix="gg-comp" gguf />{/if}
   {#if src?.kind==='hf' || standalone}<p class="xs muted">The GGUF exporter does not support the Flash-Next layout. For a Flash-Next HF checkpoint, choose Managed HGN instead.</p>{/if}
   <div class="grid-2">
-    {#if needsImatrix}
-      <ModelSelect bind:value={imatrix} kinds={[IMATRIX_KIND]} exclude={models.filter(m=>!sameHostMatrix.some(x=>x.id===m.id)).map(m=>m.id)} label="Importance matrix (imatrix)" hint="Register a matching importance matrix on the source host." id="gg-imatrix" />
+    {#if needsImatrix || imatrix}
+      <ModelSelect bind:value={imatrix} kinds={[IMATRIX_KIND]} exclude={models.filter(m=>!sameHostMatrix.some(x=>x.id===m.id)).map(m=>m.id)} label="Importance matrix (imatrix)" optional={!needsImatrix} hint="Register a matching importance matrix on the source host." id="gg-imatrix" />
     {/if}
     <div class="field">
       <label for="gg-threads">Threads <span class="muted">(optional)</span></label>

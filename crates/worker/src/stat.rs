@@ -14,6 +14,14 @@ pub fn get(path: &str) -> Result<PathState> {
     {
         return Ok(PathState::OutsideRoots);
     }
+    // Path::strip_prefix in no_symlink_open drops these directory suffixes.
+    // Execution still uses the original path for the source metadata check.
+    let flags = libc::O_PATH
+        | if path.ends_with('/') || path.ends_with("/.") {
+            libc::O_DIRECTORY
+        } else {
+            0
+        };
     let path = Path::new(path);
     let (cfg, _) = Config::load()?;
     if cfg.configured_source_root(path).is_none()
@@ -37,7 +45,7 @@ pub fn get(path: &str) -> Result<PathState> {
     {
         return Ok(PathState::OutsideRoots);
     }
-    let fd = match cache::no_symlink_open(path, libc::O_PATH) {
+    let fd = match cache::no_symlink_open(path, flags) {
         Ok(fd) => fd,
         Err(error) => {
             return match error.downcast_ref::<std::io::Error>() {

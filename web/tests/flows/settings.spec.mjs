@@ -14,6 +14,11 @@ test('Settings explains what the HGN and packed weight switches permit', async (
   await expect(page.getByText('Change weights stored as compressed values without converting the full model first.')).toBeVisible();
 });
 
+test('Settings calls reference readiness Prepare reference results', async ({ page, controller }) => {
+  await controller.open(page, 'settings/evaluation');
+  await expect(page.getByRole('region', { name: 'Evaluation readiness' }).getByText('Prepare reference results', { exact: true })).toBeVisible();
+});
+
 test('Settings updates readiness after saving an admission policy', async ({ page, controller }) => {
   controller.respond('GET', '/api/admin/state', { json: adminState() });
   controller.respond('POST', '/api/admin/actions', () => {
@@ -33,6 +38,37 @@ test('Settings updates readiness after saving an admission policy', async ({ pag
   await page.getByRole('button', { name: 'Confirm admission policy' }).click();
   await expect(readiness.getByText('Configuration not ready', { exact: true })).toBeVisible();
   await expect(readiness.getByText('Not available', { exact: true })).toHaveCount(4);
+});
+
+test('Settings ignores older readiness arriving after an admin action', async ({ page, controller }) => {
+  const before = scenario('live-shaped');
+  const after = scenario('capabilities-off');
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  controller.respond('GET', '/api/settings', async () => {
+    await pending;
+    return { json: { hosts: before.settings } };
+  });
+  controller.respond('GET', '/api/admin/state', { json: adminState() });
+  controller.respond('POST', '/api/admin/actions', () => {
+    const next = adminState(2);
+    next.hosts[0].paused = true;
+    controller.respond('GET', '/api/settings', { json: { hosts: after.settings } });
+    controller.respond('GET', '/api/state', { json: after });
+    return { json: next };
+  });
+  await controller.open(page, 'settings?host=worker-a');
+  await expect.poll(() => controller.requests('GET', '/api/settings').length).toBe(1);
+  await pause(page).check();
+  await page.getByRole('button', { name: 'Review admission changes' }).click();
+  await page.getByRole('button', { name: 'Confirm admission policy' }).click();
+  const readiness = page.getByRole('region', { name: 'Evaluation readiness' });
+  await expect(readiness.getByText('Configuration not ready', { exact: true })).toBeVisible();
+  const older = page.waitForResponse((r) => r.url().endsWith('/api/settings'));
+  release();
+  await (await older).finished();
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await expect(readiness.getByText('Configuration not ready', { exact: true })).toBeVisible();
 });
 
 test('A profile-only host can be ready to run a statically configured workflow', async ({ page, controller }) => {

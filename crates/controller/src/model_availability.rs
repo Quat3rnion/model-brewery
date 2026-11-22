@@ -49,7 +49,7 @@ struct Probe {
     // workers have an installation binding. Remote editor IDs are generations.
     generation: Option<String>,
     host: String,
-    path: PathBuf,
+    path: String,
 }
 
 enum Entry {
@@ -190,8 +190,18 @@ impl ModelAvailability {
                 executor: Executor::for_model(host, model, producer),
                 generation: host.provision_binding.clone(),
                 host: model.host.clone(),
-                // Normalize lexically; path lookup and symlink checks belong to the worker.
-                path: Path::new(&model.path).components().collect(),
+                // The final slash or dot requires a directory on the worker.
+                // PathBuf equality would merge those paths with regular files.
+                path: if model.path.ends_with('/') || model.path.ends_with("/.") {
+                    model.path.clone()
+                } else {
+                    Path::new(&model.path)
+                        .components()
+                        .collect::<PathBuf>()
+                        .into_os_string()
+                        .into_string()
+                        .expect("model paths are UTF-8")
+                },
             };
             registered.insert(probe.clone());
             let due_at = match *cache
@@ -313,7 +323,7 @@ impl ModelAvailability {
             return Check::Unknown;
         };
         let Ok(body) = serde_json::to_vec(&StatRequest {
-            path: probe.path.to_string_lossy().into_owned(),
+            path: probe.path.clone(),
         }) else {
             return Check::Unknown;
         };

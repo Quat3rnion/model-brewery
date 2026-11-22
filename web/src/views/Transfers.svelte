@@ -36,8 +36,19 @@
   let selected = $state<string[]>([]);
   let retryMessage = $state('');
   let retryLoading = $state(false);
+  let previousEntries = $state<string[]>([]);
+  let acknowledgeOmissions = $state(false);
   const destHost = $derived(hosts.find((h) => h.id === dest));
   const candidates = $derived(models.filter((m) => m.host !== dest));
+  const omitted = $derived(previousEntries.flatMap((id) => {
+    const model = models.find((m) => m.id === id);
+    return !model ? [{ id, reason: 'Not in Library.' }]
+      : model.host === dest ? [{ id, reason: 'Already on the destination host.' }]
+      : !selected.includes(id) ? [{ id, reason: 'Not selected.' }] : [];
+  }));
+  // A new set of omissions requires a new acknowledgment.
+  const omittedKey = $derived(JSON.stringify(omitted));
+  $effect(() => { void omittedKey; acknowledgeOmissions = false; });
   let txFilter = $state('');
   const listed = $derived(
     visibleChecklist(
@@ -57,6 +68,7 @@
     const out: Blocker[] = [];
     if (!destHost) out.push({ text: 'Select a destination host.' });
     if (selected.length === 0) out.push({ text: 'Select at least one entry to copy.' });
+    if (omitted.length && !acknowledgeOmissions) out.push({ text: 'Confirm the omitted entries before you continue.' });
     return out;
   }
 
@@ -98,6 +110,7 @@
   $effect(() => {
     const hash = route.hash;
     retryMessage = '';
+    previousEntries = [];
     if (!hashParam(hash, 'retry')) {
       retryLoading = false;
       return;
@@ -113,6 +126,7 @@
         confirmClean = false;
       } else {
         dest = destinationOptions.some((item) => item.value === job.host) ? job.host ?? '' : '';
+        previousEntries = [...job.input_ids];
         selected = [...job.input_ids];
       }
       retryMessage = 'Review the previous job options before you queue a job.';
@@ -181,6 +195,13 @@
           {#if listed.length === 0}<p class="xs muted">No entry matches the filter.</p>{/if}
         {/if}
       </fieldset>
+      {#if omitted.length}
+        <div class="note warn">
+          <p>These entries from the previous request will not be copied:</p>
+          <ul>{#each omitted as { id, reason } (id)}<li class="break">{id}: {reason}</li>{/each}</ul>
+          <label class="inline"><input type="checkbox" bind:checked={acknowledgeOmissions} /> Continue without these entries</label>
+        </div>
+      {/if}
       <div class="row actions">
         <button type="button" class="btn" aria-describedby={copyBlockers.length || previewHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={preview.busy}
           disabled={retryLoading || preview.busy || copyBlockers.length > 0 || previewHostBlockers.length > 0}

@@ -34,6 +34,14 @@ export function conversionRunHref(id: string, mode = 'hgn'): string {
   return `#/convert?${params}`;
 }
 
+export function canRetryManagedHgn(run: Conversion): boolean {
+  return run.state === 'failed' && (run.format == null || run.format === 'hgn') && !run.options.layer_recipe;
+}
+
+export function managedRetryHref(id: string): string {
+  return `#/convert?${new URLSearchParams({ retry_run: id })}`;
+}
+
 export interface Conversion {
   id: string;
   host: string | null;

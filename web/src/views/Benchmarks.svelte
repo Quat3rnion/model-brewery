@@ -65,12 +65,16 @@
   const setupLink = $derived(host && `#/settings/evaluation?host=${encodeURIComponent(host.id)}`);
   const run = new Submitter();
   let retryError = $state(false);
+  let previousSuites = $state<string[]>([]);
+  const unavailableSuites = $derived(previousSuites.filter((id) => !offer.suites.some((suite) => suite.id === id)));
   $effect(() => {
     retryError = false;
+    previousSuites = [];
     return watchRetry(route.hash, ['benchmark'], (job) => {
       const request = requestedOf(job);
       hostId = job.requested_host ?? job.host ?? '';
       target = request.benchmark_target ?? '';
+      previousSuites = request.benchmarks;
       picked = request.benchmarks;
     }, () => { retryError = true; });
   });
@@ -171,6 +175,12 @@
     <WorkflowGate workflow="benchmark">
     <div class="body stack">
       {#if retryError}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
+      {#if unavailableSuites.length}
+        <div class="note warn" role="status">
+          <p>These suites from the previous request were not restored:</p>
+          <ul>{#each unavailableSuites as id (id)}<li class="break">Suite {id} is not available on this host.</li>{/each}</ul>
+        </div>
+      {/if}
       <Blockers blockers={built.blockers.filter((b) => !b.field)} />
       <div class="grid-2">
         <HostSelect bind:value={hostId} workflow="benchmark" kind="benchmark" label="Host" hint="The host runs the suites against the endpoint. No library input is used." error={error('host')} onblur={() => { touched.host = true; }} />

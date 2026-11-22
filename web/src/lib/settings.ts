@@ -15,7 +15,7 @@ type ReadinessKind = keyof HostReadiness['readiness'];
 const readinessJobs = [
   ['Benchmarks', 'benchmark'],
   ['GSM8K evaluation', 'evaluate'],
-  ['Source baseline', 'baseline'],
+  ['Prepare reference results', 'baseline'],
   ['Generation', 'generate'],
 ] as const satisfies readonly (readonly [string, ReadinessKind])[];
 
