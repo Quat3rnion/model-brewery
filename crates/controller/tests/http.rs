@@ -682,6 +682,42 @@ fn same_origin_library_survives_restart() {
 }
 
 #[test]
+fn legacy_model_records_keep_their_identity_and_report_unknown_availability() {
+    let mut app = Fixture::new();
+    let state = app.path("state");
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    let db = rusqlite::Connection::open(state.join("controller.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE models(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+         INSERT INTO models VALUES
+         ('legacy-a','{\"id\":\"legacy-a\",\"name\":\"Manual\",\"host\":\"alpha\",\"path\":\"/models/a.gguf\",\"kind\":\"gguf\"}'),
+         ('legacy-b','{\"id\":\"legacy-b\",\"name\":\"Old host\",\"host\":\"gone\",\"path\":\"/models/b\",\"kind\":\"hf\"}');",
+    )
+    .unwrap();
+    drop(db);
+    app.launch();
+    let state = app.json("GET", "/api/state", None, 200);
+    let models = state["models"].as_array().unwrap();
+    assert_eq!(models.len(), 2);
+    for (model, (id, name, host, path, kind)) in models.iter().zip([
+        ("legacy-a", "Manual", "alpha", "/models/a.gguf", "gguf"),
+        ("legacy-b", "Old host", "gone", "/models/b", "hf"),
+    ]) {
+        assert_eq!(model["id"], id);
+        assert_eq!(model["name"], name);
+        assert_eq!(model["host"], host);
+        assert_eq!(model["path"], path);
+        assert_eq!(model["kind"], kind);
+        assert_eq!(model.get("available"), Some(&Value::Null));
+        assert!(model["reason"].as_str().is_some_and(|s| !s.is_empty()));
+        for missing in ["sha256", "bytes", "job_id"] {
+            assert!(model.get(missing).is_none());
+        }
+    }
+}
+
+#[test]
 fn fifo_holds_slot_during_transport_loss_and_reconciles_restart() {
     let mut app = Fixture::new();
     app.launch();

@@ -32,6 +32,9 @@ pub fn install(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TRIGGER IF NOT EXISTS state_feed_model_delete AFTER DELETE ON models BEGIN
             INSERT INTO state_feed(kind, entity_id) VALUES ('model.deleted', OLD.id);
         END;
+        CREATE TRIGGER IF NOT EXISTS state_feed_model_update AFTER UPDATE OF body ON models BEGIN
+            INSERT INTO state_feed(kind, entity_id) VALUES ('model.updated', NEW.id);
+        END;
         CREATE TRIGGER IF NOT EXISTS state_feed_prompt_insert AFTER INSERT ON prompts BEGIN
             INSERT INTO state_feed(kind, entity_id) VALUES ('prompt.created', NEW.id);
         END;

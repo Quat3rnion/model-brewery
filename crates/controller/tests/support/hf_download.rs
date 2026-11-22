@@ -198,6 +198,10 @@ fn hf_download_registers_only_verified_artifacts_and_recovers_without_relaunch()
     assert_eq!(saved[0]["id"], result["library_model_id"]);
     assert_eq!(saved[0]["kind"], "hf");
     assert_eq!(saved[0]["host"], "beta");
+    assert_eq!(saved[0]["sha256"], "a".repeat(64));
+    assert_eq!(saved[0]["bytes"], 17);
+    assert_eq!(saved[0]["job_id"], whole);
+    assert_eq!(saved[0].get("available"), Some(&Value::Null));
     assert_eq!(
         saved[0]["path"],
         format!("/worker/jobs/{whole}/work/download")
@@ -205,7 +209,17 @@ fn hf_download_registers_only_verified_artifacts_and_recovers_without_relaunch()
     assert_eq!(launches(&app), 1);
 
     app.stop();
+    // Simulate a database written by a controller that saved the verified
+    // receipt but did not include metadata in its model record.
+    let db = rusqlite::Connection::open(app.path("state/controller.db")).unwrap();
+    db.execute(
+        "UPDATE models SET body=json_remove(body,'$.sha256','$.bytes','$.job_id','$.available','$.reason')",
+        [],
+    )
+    .unwrap();
+    drop(db);
     app.launch();
+    assert_eq!(library(&app), saved);
     let (status, body) = app.request(
         "POST",
         "/api/jobs",
