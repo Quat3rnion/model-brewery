@@ -1,4 +1,5 @@
-import { parseHostPolicies, type HostPolicy } from './host-policy';
+import { limits, parseHostPolicies, resourceDisplay, type HostPolicy } from './host-policy';
+import { kindTitle } from './format';
 import { obj } from './reports';
 
 export type AdminAction =
@@ -33,13 +34,49 @@ export interface AdminWorker {
 export interface AdminState {
   hosts: HostPolicy[] | null;
   workers: AdminWorker[];
-  audit: { id: string; at: number | null; action: string; worker: string | null; runtime: string | null; allow_pool: boolean | null; outcome: string | null }[];
+  audit: { id: string; at: number | null; action: string; worker: string | null; detail: string | null; outcome: string | null }[];
   /** Capabilities the backend does not implement, with its reason. Shown, never offered as controls. */
   unavailable: { what: string; reason: string }[];
 }
 
 const b = (v: unknown) => v === true;
 const s = (v: unknown) => (typeof v === 'string' ? v : null);
+
+function auditDetail(a: Record<string, unknown>): string | null {
+  switch (a.action) {
+    case 'enable_runtime':
+    case 'disable_runtime':
+    case 'install_runtime':
+      return s(a.runtime);
+    case 'set_resource_policy':
+      return typeof a.allow_pool === 'boolean' ? (a.allow_pool ? 'Joined the conversion pool' : 'Left the conversion pool') : null;
+    case 'set_host_policy': {
+      const paused = typeof a.paused === 'boolean' ? (a.paused ? 'New work paused' : 'New work permitted') : null;
+      const jobs = Array.isArray(a.disabled_jobs) ? a.disabled_jobs.filter((k): k is string => typeof k === 'string') : null;
+      return [paused, jobs && `Job restrictions: ${jobs.map(kindTitle).join(', ') || 'none'}`].filter(Boolean).join('; ') || null;
+    }
+    case 'set_host_resources': {
+      const resources = obj(a.resources);
+      if (!resources) return null;
+      const details = Object.entries(limits).flatMap(([key, name]) => {
+        const value = resources[key];
+        return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? [`${name}: ${resourceDisplay(key, value)}`] : [];
+      });
+      return details.join('; ') || (Object.values(resources).every(v => v == null) ? 'Use worker defaults' : null);
+    }
+    case 'set_weight_editor':
+      return typeof a.enabled === 'boolean' ? (a.enabled ? 'Enable weight editing' : 'Disable weight editing') : null;
+    case 'setup_weight_editor':
+      return s(a.model_directory) && `Editor model directory: ${a.model_directory}`;
+    case 'set_model_directories':
+      if (typeof a.path !== 'string') return null;
+      if (a.change === 'add') return `Approve read access: ${a.path}`;
+      if (a.change === 'remove') return `Remove read access: ${a.path}`;
+      return a.change === 'replace' && typeof a.previous_path === 'string' ? `Replace ${a.previous_path} with ${a.path}` : null;
+    default:
+      return null;
+  }
+}
 
 export function parseAdminState(v: unknown): AdminState | null {
   const o = obj(v);
@@ -72,8 +109,7 @@ export function parseAdminState(v: unknown): AdminState | null {
         at: typeof a.at_ms === 'number' ? a.at_ms : null,
         action: a.action as string,
         worker: s(a.worker),
-        runtime: s(a.runtime),
-        allow_pool: typeof a.allow_pool === 'boolean' ? a.allow_pool : null,
+        detail: auditDetail(a),
         outcome: s(a.outcome),
       })),
     unavailable: Object.entries(obj(o.unavailable) ?? {})

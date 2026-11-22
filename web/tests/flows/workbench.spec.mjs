@@ -472,8 +472,6 @@ for (const finding of [
   'Transfers keeps entry names readable at narrow widths',
   'Evaluate explains disabled generation and baseline before selection',
   'Calibration keeps reports during navigation',
-  'Settings warns before discarding unsaved evaluation or policy edits',
-  'Settings host selection also selects that infrastructure host',
 ]) {
   test.fixme(finding, async () => {});
 }

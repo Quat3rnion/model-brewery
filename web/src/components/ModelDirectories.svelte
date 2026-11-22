@@ -1,32 +1,49 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { fieldError, visibleBlockers } from '../lib/blockers';
+  import { focusAfterRemoval } from '../lib/focus';
+  import FieldError from './FieldError.svelte';
   import type { HostPolicy } from '../lib/host-policy';
   import type { DirectoryChange } from '../lib/model-directories';
-  let {host,busy,save}: {host:HostPolicy; busy:boolean; save:(change:DirectoryChange)=>Promise<boolean>} = $props();
+  let {host,active,busy,save,onDirty}:
+    {host:HostPolicy; active:boolean; busy:boolean; save:(change:DirectoryChange)=>Promise<boolean>; onDirty:(dirty:boolean)=>void} = $props();
+  const uid = $props.id();
+  const headingId = $derived(active ? 'model-directories-h' : `${uid}-directories`);
   const dirs = $derived(host.directories);
   let action = $state<DirectoryChange['action']>('add');
   let previous = $state('');
   let path = $state('');
+  let touched = $state(false);
   let input = $state<HTMLInputElement>();
   let saveButton = $state<HTMLButtonElement>();
   const problem = $derived(!path ? 'Enter a directory path.' :
     !path.startsWith('/') || path === '/' || path.trim() !== path || /[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/u.test(path)
       ? 'Enter an absolute directory path, not the filesystem root.' :
     action !== 'remove' && (dirs?.configured.includes(path) || dirs?.granted.includes(path)) ? 'This directory is already listed.' : '');
+  const error = $derived(fieldError(visibleBlockers(problem ? [{field: 'path', text: problem}] : [], { path: touched }), 'path'));
+  const pending = $derived(!!path || action !== 'add');
+  $effect(() => {
+    onDirty(pending);
+    return () => onDirty(false);
+  });
+  function reset() { action = 'add'; previous = path = ''; touched = false; }
   async function draft(next:DirectoryChange['action'], old='') {
-    action=next; previous=old; path=old;
+    action=next; previous=old; path=old; touched=false;
     await tick();
     if (action==='remove') saveButton?.focus(); else { input?.focus(); input?.select(); }
   }
   async function submit(e: SubmitEvent) {
     e.preventDefault();
     if (busy || problem || !dirs?.available) return;
-    await save({worker:host.id,revision:host.revision,action,path,...(action==='replace'?{previous_path:previous}:{})});
+    if (await save({worker:host.id,revision:host.revision,action,path,...(action==='replace'?{previous_path:previous}:{})})) {
+      await focusAfterRemoval(reset, () => document.getElementById(headingId));
+      if (document.activeElement === document.body) document.getElementById(headingId)?.focus();
+    }
   }
 </script>
 
-<section class="stack directories" aria-labelledby="model-directories-h">
-  <h4 tabindex="-1" id="model-directories-h">Model source directories</h4>
+<section class="stack directories" aria-labelledby={headingId}>
+  <h4 tabindex="-1" id={headingId}>Model source directories</h4>
   {#if !dirs}
     <p class="small muted">The controller did not report source directory settings for this worker.</p>
   {:else}
@@ -54,9 +71,10 @@
       <form class="stack" onsubmit={submit}>
         {#if action !== 'remove'}
           <div class="field">
-            <label for="model-dir-path">{action === 'replace' ? 'Replacement directory' : 'Add a directory'}</label>
-            <input bind:this={input} id="model-dir-path" class="input mono" bind:value={path} disabled={busy} autocomplete="off" spellcheck="false" placeholder="/path/to/models" aria-invalid={!!path && !!problem} aria-describedby="model-dir-hint" />
-            <span class="hint" id="model-dir-hint">{path && problem ? problem : 'Enter the absolute path to a model directory on this worker.'}</span>
+            <label for="{uid}-path">{action === 'replace' ? 'Replacement directory' : 'Add a directory'}</label>
+            <input bind:this={input} id="{uid}-path" class="input mono" bind:value={path} onblur={() => touched = true} disabled={busy} autocomplete="off" spellcheck="false" placeholder="/path/to/models" aria-invalid={error ? 'true' : undefined} aria-describedby={error ? `${uid}-error` : `${uid}-hint`} />
+            <FieldError id="{uid}-error" {error} />
+            {#if !error}<span class="hint" id="{uid}-hint">Enter the absolute path to a model directory on this worker.</span>{/if}
           </div>
         {/if}
         {#if path && !problem}

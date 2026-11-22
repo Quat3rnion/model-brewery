@@ -6,6 +6,7 @@
 // Saving never starts a job. Readiness comes from the controller, not from the form.
 
 import { capability } from './format';
+import type { Blocker } from './blockers';
 import { obj } from './reports';
 import type { HostReadiness } from './api';
 import type { Host } from './types';
@@ -129,26 +130,28 @@ export function endpointProblem(url: string): string | null {
     'Use http://127.0.0.1:PORT/v1 or http://[::1]:PORT/v1 with a port from 1 to 65535 and no leading zero.';
 }
 
-function endpointProblems(kind: string, list: Endpoint[], ports: number[] | null, baseline = false): string[] {
-  const out: string[] = [];
+function endpointProblems(kind: string, list: Endpoint[], ports: number[] | null, baseline = false): Blocker[] {
+  const out: Blocker[] = [];
   const seen = new Set<string>();
-  for (const e of list) {
+  for (const [i, e] of list.entries()) {
+    const prefix = `${baseline ? 'baselineEndpoints' : 'benchmarkTargets'}-${i}`;
+    const add = (field: string, text: string) => out.push({ field: `${prefix}-${field}`, text });
     const id = idProblem(e.id);
-    if (id) out.push(`${kind} "${e.id || '(no ID)'}": ${id}`);
-    if (seen.has(e.id)) out.push(`Duplicate ${kind.toLowerCase()} ID ${e.id}.`);
+    if (id) add('id', `${kind} "${e.id || '(no ID)'}": ${id}`);
+    if (e.id && seen.has(e.id)) add('id', `Duplicate ${kind.toLowerCase()} ID ${e.id}.`);
     seen.add(e.id);
     const ep = endpointProblem(e.endpoint);
-    if (ep) out.push(`${kind} ${e.id || '(no ID)'}: ${ep}`);
+    if (ep) add('url', `${kind} ${e.id || '(no ID)'}: ${ep}`);
     else if (ports) {
       const port = Number(loopback.exec(e.endpoint)![1]);
-      if (!ports.includes(port)) out.push(`${kind} ${e.id || '(no ID)'}: Port ${port} is not approved on this worker${ports.length ? ` (approved: ${ports.join(', ')})` : '; no port is approved'}.`);
+      if (!ports.includes(port)) add('url', `${kind} ${e.id || '(no ID)'}: Port ${port} is not approved on this worker${ports.length ? ` (approved: ${ports.join(', ')})` : '; no port is approved'}.`);
     }
     if (baseline) {
-      if (!/^[0-9a-f]{64}$/.test(e.source_sha256 ?? '')) out.push(`${kind} ${e.id || '(no ID)'}: enter the reference model SHA-256 (64 lowercase hex).`);
-      if (e.precision && !/^[A-Za-z0-9_.-]{1,32}$/.test(e.precision)) out.push(`${kind} ${e.id || '(no ID)'}: precision must use at most 32 letters, digits, dots, hyphens or underscores.`);
-      if (!(e.runtime_id ?? '').trim()) out.push(`${kind} ${e.id || '(no ID)'}: enter the runtime ID that serves it.`);
+      if (!/^[0-9a-f]{64}$/.test(e.source_sha256 ?? '')) add('sha', `${kind} ${e.id || '(no ID)'}: enter the reference model SHA-256 (64 lowercase hex).`);
+      if (e.precision && !/^[A-Za-z0-9_.-]{1,32}$/.test(e.precision)) add('precision', `${kind} ${e.id || '(no ID)'}: precision must use at most 32 letters, digits, dots, hyphens or underscores.`);
+      if (!(e.runtime_id ?? '').trim()) add('rt', `${kind} ${e.id || '(no ID)'}: enter the runtime ID that serves it.`);
     }
-    if (!e.model.trim()) out.push(`${kind} ${e.id || '(no ID)'}: enter the model name served by the endpoint.`);
+    if (!e.model.trim()) add('model', `${kind} ${e.id || '(no ID)'}: enter the model name served by the endpoint.`);
   }
   return out;
 }
@@ -165,14 +168,18 @@ export function changedBaselines(draft: HostSettings, saved: HostSettings | unde
 }
 
 export function validateHost(h: HostSettings, saved?: HostSettings): string[] {
+  return evaluationBlockers(h, saved).map(({ text }) => text);
+}
+
+export function evaluationBlockers(h: HostSettings, saved?: HostSettings): Blocker[] {
   const approved = new Set(h.approvedSuites.map((s) => s.id));
   const blockedBaselines = h.baselineAllowed === false ? changedBaselines(h, saved) : [];
   return [
-    ...blockedBaselines.map((e) => `Baseline ${e.id || '(no ID)'}: baseline endpoints are not allowed on this worker. Remove the new or changed entry.`),
+    ...blockedBaselines.map((e) => ({ field: `baselineEndpoints-${h.baselineEndpoints.indexOf(e)}-id`, text: `Reference endpoint ${e.id || '(no ID)'}: reference endpoints are not allowed on this worker. Remove the new or changed entry.` })),
     ...endpointProblems('Target', h.benchmarkTargets, h.evaluationStatus === 'profile_only' ? null : h.approvedPorts),
-    ...endpointProblems('Baseline', h.baselineEndpoints, h.approvedPorts, true),
-    ...(h.evaluationEnabled && !h.evaluationAllowed ? ['GSM8K evaluation is not allowed on this worker.'] : []),
-    ...h.enabledSuites.filter((s) => !approved.has(s)).map((s) => `${s} is not an approved suite on this host.`),
+    ...endpointProblems('Reference endpoint', h.baselineEndpoints, h.approvedPorts, true),
+    ...(h.evaluationEnabled && !h.evaluationAllowed ? [{ field: 'gsm8k', text: 'GSM8K evaluation is not allowed on this worker.' }] : []),
+    ...h.enabledSuites.filter((s) => !approved.has(s)).map((s) => ({ field: 'suites', text: `${s} is not an approved suite on this host.` })),
   ];
 }
 
