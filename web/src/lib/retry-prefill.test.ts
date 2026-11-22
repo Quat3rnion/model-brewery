@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { availableId, historicalPrompt, RetryKeys, RetryPrefill, omittedInputs } from './retry-prefill.svelte';
+import { RouteActivity } from './route.svelte';
 
 let slot = 0;
 function setup() {
@@ -148,24 +149,53 @@ describe('retry prefill', () => {
   });
 });
 
-it('isolates launcher keys and reuses only the matching body after a lost reply or route exit', () => {
+it('binds a retry key to its launcher, job kind and exact wire body', () => {
   let sequence = 0;
   const keys = new RetryKeys(() => String(++sequence));
-  const unrelated = new RetryKeys(() => String(++sequence));
+  const body = { input_ids: ['A'], host: 'worker' };
+  const retry = { slot: 'keys', id: 'failed-job', entry: 'one', action: 'editor' };
+  expect(keys.take('plan', body, retry).key).toBe('1');
+  expect(keys.take('plan', { host: 'worker', input_ids: ['A'] }, retry).key).toBe('1');
+  expect(keys.take('plan', body, { ...retry, action: 'previous' }).key).toBe('2');
+  expect(keys.take('inspect', body, retry).key).toBe('3');
+  expect(keys.take('plan', { ...body, input_ids: ['B'] }, retry).key).toBe('4');
+  const independent = keys.take('verify', body);
+  independent.accept({ id: 'independent-job' });
+  expect(keys.take('verify', body).key).not.toBe(independent.key);
+});
+
+it('replays an accepted retry on Back but retires its key for a fresh entry', () => {
+  let sequence = 0;
+  const launch = () => new RetryKeys<{ id: string }>(() => String(++sequence));
+  const keys = launch();
   const body = { input_ids: ['A'] };
-  const retry = (entry: string) => ({ slot: 'convert', id: 'failed-job', entry, action: 'run' });
-  expect(keys.take(body, retry('one')).key).toBe('1');
-  expect(keys.take(body, retry('one')).key).toBe('1');
-  const accepted = keys.take(body, retry('two'));
-  expect(accepted.key).toBe('1');
-  accepted.accept();
-  expect(keys.take(body).key).toBe('1'); // retry_run removed from the route.
-  expect(keys.take({ input_ids: ['B'] }).key).toBe('2');
-  expect(keys.take(body, retry('one')).key).toBe('1');
-  expect(keys.take(body, retry('three')).key).toBe('3');
-  const clean = unrelated.take(body);
-  expect(clean.key).toBe('4');
-  expect(unrelated.take(body).key).toBe('4');
-  clean.accept();
-  expect(unrelated.take(body).key).toBe('5'); // an independent confirmed cleanup
+  const retry = (entry: string) => ({ slot: 'retire', id: 'failed-job', entry, action: 'run' });
+  const initial = keys.take('plan', body, retry('one'));
+  expect(launch().take('plan', body, retry('two')).key).toBe(initial.key);
+  const withoutQuery = keys.take('plan', body);
+  expect(withoutQuery.key).toBe(initial.key);
+  withoutQuery.accept({ id: 'accepted-job' });
+  expect(launch().take('plan', body, retry('one')).result?.id).toBe('accepted-job');
+  expect(launch().take('plan', body, retry('two')).result?.id).toBe('accepted-job');
+  const fresh = launch().take('plan', body, retry('three'));
+  expect(fresh.key).not.toBe(initial.key);
+  expect(fresh.result).toBeUndefined();
+});
+
+it('permits stored results but suppresses presentation after interaction or a round trip', () => {
+  const activity = new RouteActivity();
+  let sameLocation = true;
+  const reply = activity.capture(() => sameLocation);
+  expect(reply.canPresent()).toBe(true);
+  activity.interact();
+  expect(reply.current()).toBe(true);
+  expect(reply.canPresent()).toBe(false);
+  const second = activity.capture(() => sameLocation);
+  sameLocation = false; // The browser moves before the router sees it.
+  expect(second.canPresent()).toBe(false);
+  activity.visit();
+  activity.visit();
+  sameLocation = true;
+  expect(second.current()).toBe(false);
+  expect(activity.capture().canPresent()).toBe(true);
 });

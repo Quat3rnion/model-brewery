@@ -36,12 +36,36 @@ export function parse(hash: string): { view: View; jobId: string | null } {
   return { view: found?.id ?? (path ? 'not-found' : 'library'), jobId: null };
 }
 
+/** An async result may update its record, but not take over a later visit or action. */
+export class RouteActivity {
+  #visit = 0;
+  #action = 0;
+
+  visit() { this.#visit++; }
+  interact() { this.#action++; }
+
+  capture(matchesLocation = () => true) {
+    const visit = this.#visit;
+    const action = this.#action;
+    const current = () => this.#visit === visit && matchesLocation();
+    return { current, canPresent: () => current() && this.#action === action };
+  }
+}
+
 class Route {
   hash = $state('');
   entry = $state('');
   view = $state<View>('library');
   jobId = $state<string | null>(null);
   #guards = new Set<() => boolean>();
+  #activity = new RouteActivity();
+
+  capture() {
+    const { entry } = this;
+    // The URL can change before the browser delivers hashchange/popstate.
+    return this.#activity.capture(() => typeof window === 'undefined' ||
+      (location.hash === this.hash && history.state?.breweryRouteEntry === entry));
+  }
 
   guardHashChange(allow: () => boolean) {
     this.#guards.add(allow);
@@ -50,6 +74,7 @@ class Route {
 
   /** Update an accepted query selection without adding a history entry. */
   replaceQuery(hash: string) {
+    if (hash !== this.hash) this.#activity.interact();
     history.replaceState(history.state, '', hash);
     this.hash = hash;
   }
@@ -65,6 +90,7 @@ class Route {
     };
     let restoring = false;
     const apply = () => {
+      this.#activity.visit();
       this.entry = setEntry(index, window.location.hash === '#/admin' ? '#/settings/infrastructure' : undefined);
       this.hash = window.location.hash;
       const r = parse(this.hash);
@@ -72,6 +98,9 @@ class Route {
       this.jobId = r.jobId;
     };
     apply();
+    for (const type of ['pointerdown', 'keydown', 'click', 'input', 'wheel']) {
+      window.addEventListener(type, () => this.#activity.interact(), { capture: true, passive: true });
+    }
     window.addEventListener('popstate', () => {
       // Back or Forward can move between entries with identical hashes.
       // Different hashes are handled once, by hashchange below.

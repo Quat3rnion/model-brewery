@@ -2,6 +2,7 @@
   import { SvelteMap } from 'svelte/reactivity';
   import ModelSelect from '../components/ModelSelect.svelte';
   import Submit from '../components/Submit.svelte';
+  import SubmitStatus from '../components/SubmitStatus.svelte';
   import Badge from '../components/Badge.svelte';
   import JobState from '../components/JobState.svelte';
   import JobProgress from '../components/JobProgress.svelte';
@@ -166,21 +167,23 @@
   async function propose() {
     if (!source || proposeBlockers.length) return;
     const id = source.id;
+    const visit = route.capture();
     const submitted = draft;
     const request = proposeJob(id, source.host, submitted);
     if (draftPin) request.options = { ...request.options, source_sha256: draftPin, ...(draftPacked ? { packed: true } : {}) };
     const job = await proposeSub.submit(request, retry.action('weight_propose'));
-    if (job && sourceId === id) {
+    if (job && visit.canPresent()) {
       for (const edit of submitted) {
         const key = editKey(edit);
         if (pending.get(key) === edit) pending.delete(key);
       }
-      openReview(job.id);
+      if (!proposeSub.replayed) openReview(job.id);
     }
   }
   function openReview(id: string) {
+    const visit = route.capture();
     reviewId = id;
-    queueMicrotask(() => document.getElementById('w-rev-h')?.focus());
+    queueMicrotask(() => { if (visit.canPresent()) document.getElementById('w-rev-h')?.focus(); });
   }
 
   // ---- Inspect helper. ----
@@ -247,9 +250,10 @@
   });
   async function tune() {
     if (!source || !tuneParsed.t.ok || !tuneParsed.c.ok || !tuneParsed.m.ok || tuneBlockers.length) return;
+    const visit = route.capture();
     const job = await tuneSub.submit(tuneJob(source.id, source.host, calibrationId, heldOutId, tuneParsed.t.value, tuneParsed.c.value, tuneParsed.m.value),
       retry.action('weight_tune'));
-    if (job) openReview(job.id);
+    if (job && !tuneSub.replayed && visit.canPresent()) openReview(job.id);
   }
 
   // ---- Review and apply. ----
@@ -336,7 +340,7 @@
     },
     restore: ({ job, proposal }) => {
       if (sourceId !== job.input_ids[0]) throw new Error('Source mismatch.');
-      return { actions: proposal ? ['weight_apply'] : [job.kind, `previous:${job.kind}`, `visual:${job.kind}`],
+      return { actions: proposal ? ['weight_apply'] : [job.kind, `previous:${job.kind}`, ...(job.kind === 'weight_tune' ? ['visual:weight_tune'] : [])],
         patch: proposal ? { reviewId: proposal.id, confirmed: false } : {}, context: { job, proposal }, focus: 'w-source' };
     },
     clear: () => { confirmed = false; },
@@ -365,9 +369,10 @@
   });
   async function queuePrevious() {
     if (!previous || !source || previousBlockers.length || retrySub.busy) return;
+    const visit = route.capture();
     const { kind, input_ids, options } = previous;
     const queued = await retrySub.submit({ kind, host: source.host, input_ids, options }, retry.action(`previous:${kind}`));
-    if (queued) location.hash = `#/jobs/${encodeURIComponent(queued.id)}`;
+    if (queued && !retrySub.replayed && visit.canPresent()) location.hash = `#/jobs/${encodeURIComponent(queued.id)}`;
   }
 
   $effect.pre(() => {
@@ -445,7 +450,7 @@
         <KeyValues data={previous.options} />
         <p class="hint">Review the prior inputs and options before you queue the job. To change them, use the editor below.</p>
         <Submit blockers={previousBlockers} busy={retrySub.busy} onclick={queuePrevious}>Queue previous request</Submit>
-        {#if retrySub.error}<p class="note bad" role="alert">{retrySub.error}</p>{/if}
+        <SubmitStatus s={retrySub} />
       </div>
     </section>
   {/if}
@@ -503,6 +508,7 @@
           bind:mode
           {pending}
           onproposal={openReview}
+          tuneRetry={retry.action('visual:weight_tune')}
         />
         {/key}
         {/if}
@@ -595,7 +601,7 @@
           <span class="hint" id="w-tune-c-hint">One <span class="mono">row, column</span> pair per line. Start at 0. <span class="num">{coordCount}</span> of {MAX_COORDINATES}.</span>
           <FieldError id="w-tune-c-e" error={fieldError(visibleTune, 'coordinates')} />
         </div>
-        {#if tuneSub.error}<p class="note bad" role="alert">{tuneSub.error}</p>{/if}
+        <SubmitStatus s={tuneSub} replayOnly />
         <Submit blockers={tuneBlockers} busy={tuneSub.busy} disabled={retry.action('weight_tune').blocked} onclick={tune}>Tune selected weights</Submit>
       </div>
     {/if}
@@ -635,7 +641,7 @@
             {:else}
               <p class="xs muted">No edits yet.{#if source.kind === 'gguf'} Add edits from the visual editor or text entry above.{/if}</p>
             {/if}
-            {#if proposeSub.error}<p class="note bad" role="alert">{proposeSub.error}</p>{/if}
+            <SubmitStatus s={proposeSub} replayOnly />
             <Submit blockers={proposeBlockers} busy={proposeSub.busy} disabled={retry.action('weight_propose').blocked} onclick={propose}>Create proposal</Submit>
           </section>
         {/if}
@@ -721,7 +727,7 @@
                       <span>I reviewed all {proposal.edits.length} proposed {proposal.edits.length === 1 ? 'value' : 'values'} for source <span class="mono">{shortHash(proposal.source_sha256)}</span>.{#if tuneRegress}{' '}I accept that the held-out error increased.{/if}</span>
                     </label>
                   {/if}
-                  {#if applySub.error}<p class="note bad" role="alert">{applySub.error}</p>{/if}
+                  <SubmitStatus s={applySub} replayOnly />
                   <Submit blockers={applyBlockers} busy={applySub.busy} disabled={retry.action('weight_apply').blocked} onclick={applyNow}>Apply as new {sourceFormat}</Submit>
                   <p class="xs muted">Apply registers a verified revision as a separate Library entry and keeps the original.</p>
                 {/if}
@@ -748,7 +754,7 @@
       </div>
       <Submit variant="secondary" blockers={inspectBlockers} busy={inspectSub.busy} disabled={retry.action('weight_inspect').blocked} onclick={inspect}>Inspect</Submit>
     </div>
-    {#if inspectSub.error}<p class="note bad" role="alert">{inspectSub.error}</p>{/if}
+    <SubmitStatus s={inspectSub} replayOnly />
     <div aria-live="polite">
       {#if lastInspect}
         <div class="ins">

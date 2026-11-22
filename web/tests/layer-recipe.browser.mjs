@@ -206,7 +206,7 @@ try {
   assert.equal(await receipt.getByRole('link', { name: /in the Library/ }).count(), 0, 'convert completion is not registration');
   await runButton.click();
   await page.getByText(/no second conversion was started/i).waitFor();
-  assert.deepEqual(requests, [requests[0], requests[0]], 'same request intentionally replays with the same key');
+  assert.equal(requests.length, 1, 'an accepted request replays without a second POST');
   verified = true;
   const registered = receipt.getByRole('link', { name: /in the Library/ });
   await registered.waitFor();
@@ -224,7 +224,7 @@ try {
   await runButton.click();
   const native = page.getByRole('article', { name: /Standalone weights.*HGN layer recipe/ });
   await native.getByText('Structural HGN archive ready').waitFor();
-  assert.deepEqual(requests[2].request, {
+  assert.deepEqual(requests[1].request, {
     format: 'hgn', host: standalone.host, input_ids: [standalone.id, assets.id],
     options: { layer_recipe: { ...recipe, layers: { 0: 'HT4', 1: 'BF16' } } },
   });
@@ -260,22 +260,22 @@ try {
   await page.getByRole('alert').filter({ hasText: 'The layer-recipe exporters do not support this Flash-Next checkpoint.' }).waitFor();
   assert.equal(await downloadButton.count(), 0);
   assert.ok(await runButton.isDisabled());
-  assert.equal(requests.length, 3, 'unsupported formats, pinned Flash-Next and unconfigured workers do not submit');
+  assert.equal(requests.length, 2, 'unsupported formats, pinned Flash-Next and unconfigured workers do not submit');
   indexedEnabled = true;
   await choose('Indexed weights');
   await layer(9).selectOption('F16');
   await runButton.click();
   await page.getByRole('link', { name: 'Inspect job indexed-inspect' }).waitFor();
-  assert.deepEqual(requests[3].request, {
+  assert.deepEqual(requests[2].request, {
     format: 'gguf', host: indexed.host, input_ids: [indexed.id],
     options: { layer_recipe: { schema: 'brewery.layer-quant.v1', source_sha256: treeSha, default_type: 'BF16', layers: { 9: 'F16' } } },
   });
-  assert.notEqual(requests[3].key, requests[0].key);
+  assert.notEqual(requests[2].key, requests[0].key);
   await choose('Standalone weights');
   await layer(0).waitFor();
   assert.equal(await downloadButton.isEnabled(), true);
   assert.equal(await assetSelect.inputValue(), '', 'changing source clears the explicit asset choice');
-  assert.equal(requests.length, 4);
+  assert.equal(requests.length, 3);
   assert.deepEqual(reads, ['wrong', 'cached', 'tree-0', 'tree-128'], 'invalid receipt is skipped; verified receipts are reused on return');
   assert.deepEqual(writes, [
     { pathname: '/api/jobs', request: { kind: 'weight_inspect', host: indexed.host, input_ids: [indexed.id], options: first } },

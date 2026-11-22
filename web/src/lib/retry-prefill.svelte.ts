@@ -53,6 +53,8 @@ function resetRestored<D>(value: D, restored: unknown, defaults: unknown): D {
 
 interface Restoration<D, C> {
   actions: readonly string[];
+  /** Other actions can share omission checks without replaying the retry. */
+  historyActions?: readonly string[];
   patch: Partial<D>;
   context?: C;
   focus?: string;
@@ -84,6 +86,7 @@ type Origin = Omit<RetryIdentity, 'action'>;
 interface Applied<D> {
   origin: Origin;
   actions: readonly string[];
+  historyActions?: readonly string[];
   omissions?: (draft: D) => readonly RetryOmission[];
   retains?: (draft: D) => boolean;
 }
@@ -101,12 +104,15 @@ interface Applied<D> {
  *   on restored inputs. One acknowledgment covers only the current omissions.
  * - During retry loading, block Queue and show the reason. Discard work from
  *   departed route entries; clean up untouched retry fields on exit.
- * - Bind each key to one launcher and one request body. Record the actual
- *   key used, including supplied retry keys, so an identical resubmit after
- *   an ambiguous response or retry query removal replays. Changing the body
- *   gets a different key. An unrelated launcher never inherits the retry.
- *   A fresh retry after confirmed acceptance is intentional new work.
- *   Keys do not survive reload; say so when a reply is ambiguous.
+ * - Bind each key to one launcher, job kind and exact wire body. Only actions
+ *   restored by this retry share its history. An ambiguous reply keeps the
+ *   key across Back/Forward and retry query removal. On acceptance, retire
+ *   the key and show the accepted record on replay from the same entry. A
+ *   fresh retry entry after acceptance is intentional new work. Controller
+ *   idempotency remains the backstop; browser keys do not survive reload.
+ * - Async replies may update stored results. Only the visit that started
+ *   the request may navigate or move focus, and only before the user moves
+ *   on. Returning to the same history entry starts a different visit.
  */
 export class RetryPrefill<D extends object, R, C = never> {
   loading = $state(false);
@@ -126,7 +132,8 @@ export class RetryPrefill<D extends object, R, C = never> {
   #baseline: string | undefined;
   #restored: Partial<D> | undefined;
   #record: HistoryRecord<R> | undefined;
-  #deferredFocus?: string;
+  #visit?: ReturnType<typeof route.capture>;
+  #deferredFocus?: { id: string; canPresent: () => boolean };
 
   constructor(private form: Prefill<D, R, C>) {}
 
@@ -161,16 +168,17 @@ export class RetryPrefill<D extends object, R, C = never> {
     const missing = this.omissions(action);
     return {
       blocked: this.loading || (missing.length > 0 && (missing.some(item => item.required) || !this.acknowledged(action))),
-      history: policy && { ...policy.origin, action },
+      history: policy && (policy.historyActions ?? policy.actions).includes(action) ? { ...policy.origin, action } : undefined,
     };
   }
 
-  enter(entry: string, id: string | null) {
+  enter(entry: string, id: string | null, visit?: ReturnType<typeof route.capture>) {
     const routeKey = JSON.stringify([this.form.slot, entry, id]);
     if (routeKey === this.#route) return;
     const edited = this.#edited;
     const wasRetry = this.#isRetry;
     this.dispose();
+    this.#visit = visit;
     this.#route = routeKey;
     this.loading = false;
     this.failed = false;
@@ -199,11 +207,11 @@ export class RetryPrefill<D extends object, R, C = never> {
       this.#receive(saved);
     } else {
       void this.form.load(id, abort.signal).then(request => {
-        if (abort.signal.aborted) return;
+        if (abort.signal.aborted || visit?.current() === false) return;
         const record = { request };
         historyRequests.set(routeKey, record);
         this.#receive(record);
-      }).catch(() => { if (!abort.signal.aborted) this.#fail(); });
+      }).catch(() => { if (!abort.signal.aborted && visit?.current() !== false) this.#fail(); });
     }
   }
 
@@ -241,8 +249,13 @@ export class RetryPrefill<D extends object, R, C = never> {
 
   /** Retry an explicit focus move after a dependent control mounts. */
   resumeFocus() {
-    const id = this.#deferredFocus;
-    if (!id) return;
+    const deferred = this.#deferredFocus;
+    if (!deferred) return;
+    const { id, canPresent } = deferred;
+    if (!canPresent()) {
+      this.#deferredFocus = undefined;
+      return;
+    }
     const target = document.getElementById(id);
     if (!target) return;
     this.#deferredFocus = undefined;
@@ -255,7 +268,7 @@ export class RetryPrefill<D extends object, R, C = never> {
   }
 
   #settle() {
-    if (!this.#ready || !this.#record || !this.loading) return;
+    if (!this.#ready || !this.#record || !this.loading || this.#visit?.current() === false) return;
     const { request } = this.#record;
     this.loading = false;
     if (this.#edited || bodyKey(this.form.read()) !== this.#baseline) this.pending = request;
@@ -265,7 +278,7 @@ export class RetryPrefill<D extends object, R, C = never> {
   #apply(explicit: boolean) {
     const record = this.#record;
     const origin = this.#origin;
-    if (!record || !origin) return;
+    if (!record || !origin || this.#visit?.current() === false) return;
     let restoration: Restoration<D, C>;
     try {
       restoration = this.form.restore(record.request);
@@ -275,8 +288,8 @@ export class RetryPrefill<D extends object, R, C = never> {
     }
     this.#restored = copy(restoration.patch);
     this.form.write({ ...this.form.read(), ...copy(restoration.patch) });
-    const { actions, omissions, retains } = restoration;
-    this.#applied = [{ origin, actions, omissions, retains },
+    const { actions, historyActions, omissions, retains } = restoration;
+    this.#applied = [{ origin, actions, historyActions, omissions, retains },
       ...this.#applied.filter(policy => !policy.actions.some(action => actions.includes(action)))];
     this.context = restoration.context;
     this.pending = undefined;
@@ -284,15 +297,17 @@ export class RetryPrefill<D extends object, R, C = never> {
     const target = explicit ? restoration.focus : restoration.autoFocus;
     if (target) {
       const abort = this.#abort;
+      const visit = explicit && this.#visit ? route.capture() : this.#visit;
+      const canPresent = () => !abort?.signal.aborted && visit?.canPresent() !== false;
       const focus = this.form.focus ?? ((id: string) => {
         const control = document.getElementById(id);
         control?.focus();
         if (explicit && !control) {
-          this.#deferredFocus = id;
+          this.#deferredFocus = { id, canPresent };
           if (document.activeElement === document.body) document.querySelector<HTMLElement>('main h1')?.focus();
         }
       });
-      void tick().then(() => { if (!abort?.signal.aborted) focus(target); });
+      void tick().then(() => { if (canPresent()) focus(target); });
     }
   }
 
@@ -315,7 +330,7 @@ export function watchPrefill<D extends object, R, C>(
   $effect.pre(() => {
     const entry = route.entry;
     const requestId = id(route.hash);
-    untrack(() => retry.enter(entry, requestId));
+    untrack(() => retry.enter(entry, requestId, route.capture()));
   });
   $effect(() => {
     const value = ready();

@@ -158,22 +158,25 @@ export type PostConversion = (body: ConversionBody, key: string) => Promise<unkn
 export class ConversionSubmitter {
   busy = false;
   error: string | null = null;
-  #keys = new RetryKeys(undefined, true);
+  replayed = false;
+  #keys = new RetryKeys<Conversion>(undefined, true);
   #inflight: Promise<Conversion | null> | null = null;
 
   constructor(private post: PostConversion) {}
 
-  submit(body: ConversionBody, retry?: RetrySubmission | string): Promise<Conversion | null> {
+  submit(body: ConversionBody, retry?: RetrySubmission): Promise<Conversion | null> {
     if (this.#inflight) return this.#inflight.then(() => null);
-    if (typeof retry !== 'string' && retry?.blocked) return Promise.resolve(null);
-    const attempt = typeof retry === 'string' ? this.#keys.take(body, undefined, retry) : this.#keys.take(body, retry?.history);
-    this.busy = true;
+    if (retry?.blocked) return Promise.resolve(null);
+    const attempt = this.#keys.take('conversion', body, retry?.history);
     this.error = null;
+    this.replayed = !!attempt.result;
+    if (attempt.result) return Promise.resolve(attempt.result);
+    this.busy = true;
     this.#inflight = (async () => {
       try {
         const c = parseConversion(await this.post(body, attempt.key));
         if (!c) throw new Error('The controller answered without a conversion record.');
-        attempt.accept();
+        attempt.accept(c);
         return c;
       } catch (e) {
         this.error = submissionError(e);

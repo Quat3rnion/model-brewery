@@ -2,7 +2,7 @@
   import { brewery } from '../lib/store.svelte';
   import { api, submissionError } from '../lib/api';
   import { RetryKeys } from '../lib/retry-keys';
-  import type { NewJob } from '../lib/types';
+  import type { JobSummary, NewJob } from '../lib/types';
   import type { RetrySubmission } from '../lib/retry-prefill.svelte';
   import JobLink from './JobLink.svelte';
   import ModelSelect from './ModelSelect.svelte';
@@ -26,22 +26,22 @@
     : host?.capabilities?.[encode ? 'convert' : 'plan'] !== true ? `Enable ${encode ? 'Convert' : 'Plan'} on the source host.`
     : host?.capabilities?.[capability] !== true ? `Select a copy on a worker that supports this Hy4 ${action}. ${host?.reasons?.[capability] ?? ''}` : '');
   let busy = $state(false);
-  let outcome = $state<{ source: string; error?: string; id?: string } | null>(null);
-  const keys = new RetryKeys(undefined, true);
+  let outcome = $state<{ source: string; error?: string; id?: string; replayed?: boolean } | null>(null);
+  const keys = new RetryKeys<JobSummary>(undefined, true);
 
   async function queue() {
     if (loading || retry?.blocked || busy || problem || !source) return;
     const id = source.id;
     const body: NewJob = { kind: encode ? 'convert' : 'plan', host: source.host, input_ids: [id], options: { hy4_overrides: { [tensor]: 'Q8_0' } } };
-    const attempt = keys.take(body, retry?.history);
+    const attempt = keys.take(body.kind, body, retry?.history);
     busy = true;
     outcome = null;
     try {
-      const job = await api.submitJob(body, attempt.key);
+      const job = attempt.result ?? await api.submitJob(body, attempt.key);
       if (typeof job?.id !== 'string' || !job.id) throw new Error('The controller did not return a job ID.');
-      attempt.accept();
-      outcome = { source: id, id: job.id };
-      void brewery.refresh();
+      attempt.accept(job);
+      outcome = { source: id, id: job.id, replayed: !!attempt.result };
+      if (!attempt.result) void brewery.refresh();
     } catch (e) {
       outcome = { source: id, error: submissionError(e) };
     } finally {
@@ -68,6 +68,7 @@
       {#if outcome?.source === sourceId && outcome.error}
         <p class="note bad" role="alert">{outcome.error} Retry with the same source to reuse this request.</p>
       {:else if outcome?.source === sourceId && outcome.id}
+        {#if outcome.replayed}<p class="muted">This request already queued a job. No second job was queued.</p>{/if}
         <JobLink id={outcome.id} label={'View job result: ' + outcome.id} />
       {/if}
     </div>

@@ -1,17 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { buildConversion, parseConversion, parseConversions, stageRows, isActiveConversion, ConversionSubmitter, STAGES } from './conversion';
 
-it('records a supplied retry key for the identical body after retry query removal', async () => {
+it('replays the accepted conversion for the identical body after retry query removal', async () => {
   const sent: string[] = [];
   const s = new ConversionSubmitter(async (_body, key) => {
     sent.push(key);
     return { id: 'started', state: 'running' };
   });
-  await s.submit({ input_ids: ['source'] }, 'retry-key');
-  await s.submit({ input_ids: ['source'] });
+  await s.submit({ input_ids: ['source'] }, { blocked: false, history: { slot: 'managed-test', id: 'retry-run', entry: 'one', action: 'managed' } });
+  expect((await s.submit({ input_ids: ['source'] }))?.id).toBe('started');
+  expect(s.replayed).toBe(true);
+  expect(sent).toHaveLength(1);
   await s.submit({ input_ids: ['different'] });
-  expect(sent.slice(0, 2)).toEqual(['retry-key', 'retry-key']);
-  expect(sent[2]).not.toBe('retry-key');
+  expect(sent).toHaveLength(2);
+  expect(sent[1]).not.toBe(sent[0]);
 });
 import type { ConvertForm } from './convert';
 import type { Model } from './types';
@@ -107,7 +109,7 @@ describe('single submission', () => {
 });
 
 describe('repeat start after success', () => {
-  it('an identical second Start replays the same key (no second workflow); a changed body gets a new key', async () => {
+  it('an identical second Start replays the accepted record; a changed body gets a new key', async () => {
     const keys: string[] = [];
     const s = new ConversionSubmitter(async (_b, key) => {
       keys.push(key);
@@ -115,10 +117,12 @@ describe('repeat start after success', () => {
     });
     const body = { input_ids: ['src'], options: { profile: 'ht43' } };
     await s.submit(body);
-    await s.submit(body);
+    expect((await s.submit(body))?.id).toBe('c1');
+    expect(s.replayed).toBe(true);
+    expect(keys).toHaveLength(1);
     await s.submit({ ...body, options: { profile: 'v2' } });
-    expect(keys[1]).toBe(keys[0]);
-    expect(keys[2]).not.toBe(keys[0]);
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).not.toBe(keys[0]);
   });
 });
 

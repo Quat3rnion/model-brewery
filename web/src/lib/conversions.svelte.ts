@@ -82,10 +82,12 @@ export class ConversionStarter {
     this.busy = false;
     this.error = this.#inner.error;
     if (c) {
-      this.replayed = this.last?.id === c.id;
+      this.replayed = this.#inner.replayed;
       this.last = c;
-      conversions.upsert(c);
-      void conversions.refresh();
+      if (!this.replayed) {
+        conversions.upsert(c);
+        void conversions.refresh();
+      }
     }
     return c;
   }

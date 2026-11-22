@@ -223,7 +223,8 @@
       const diagnostic = restoredForm(job.input_ids, job.options ?? {}, null, target);
       if (verify) diagnostic.bundle = availableId(job.input_ids[1], models.filter(m => VERIFY_OUTPUT_KINDS.has(m.kind)));
       return {
-        actions: ['diagnostic'], patch: { step: STAGES.find(stage => stage === job.kind) ?? 'inspect', diagnosticsOpen: true, diagnostic },
+        actions: STAGES.map(stage => `diagnostic:${stage}`), historyActions: [`diagnostic:${job.kind}`],
+        patch: { step: STAGES.find(stage => stage === job.kind) ?? 'inspect', diagnosticsOpen: true, diagnostic },
         focus: 'cv-source',
         omissions: draft => [
           ...convertOmissions(job.input_ids, job.options ?? {}, target, draft.diagnostic,
@@ -244,7 +245,8 @@
   const managedRetry = $derived(retry.action('managed'));
   const ggufRetry = $derived(retry.action('gguf'));
   const recipeRetry = $derived(retry.action('recipe'));
-  const diagnosticRetry = $derived(retry.action('diagnostic'));
+  const diagnosticAction = $derived(`diagnostic:${step}`);
+  const diagnosticRetry = $derived(retry.action(diagnosticAction));
   $effect(() => {
     if (profileStore.gguf) void tick().then(() => retry.resumeFocus());
   });
@@ -436,12 +438,13 @@
   const visible = $derived(visibleBlockers(wfBlockers, touched, attempted || !!checkBody || (!!wfSource && !!form.profile)));
   const starter = new ConversionStarter();
   async function startConversion() {
-    // One POST per click. The body is built only here, never from an effect.
+    // Submit only on a click, never from an effect.
     attempted = true;
     if (!wfBuilt.body || starter.busy || !checkKey || checked?.key !== checkKey || !checked.decision?.eligible) return;
-    const { hash, entry } = route;
+    const { hash } = route;
+    const visit = route.capture();
     const run = await starter.start(wfBuilt.body, managedRetry);
-    if (run && route.entry === entry && route.hash === hash) {
+    if (run && visit.canPresent()) {
       retry.markClean();
       if (hashParam(hash, 'retry_run')) route.replaceQuery('#/convert');
     }
@@ -454,9 +457,12 @@
   const linkedRun = $derived(hashParam(route.hash, 'run'));
   const visibleFinished = $derived(showOlder ? finishedRuns : finishedRuns.filter((c, i) => i < 5 || c.id === linkedRun));
   const hasLinkedRun = $derived(!!linkedRun && runs.some((c) => c.id === linkedRun));
+  const linkedVisit = $derived(route.capture());
   $effect(() => {
     const id = linkedRun;
+    const visit = linkedVisit;
     if (id && hasLinkedRun) void tick().then(() => {
+      if (!visit.canPresent()) return;
       const target = document.getElementById(`run-${id}`);
       target?.focus({ preventScroll: true });
       target?.scrollIntoView({ block: 'nearest' });
@@ -800,8 +806,8 @@
         </Advanced>
       {/if}
 
-      <RetryWarnings items={retry.omissions('diagnostic')} acknowledged={retry.acknowledged('diagnostic')} acknowledge={() => {
-        retry.acknowledge('diagnostic'); document.getElementById('cv-source')?.focus();
+      <RetryWarnings items={retry.omissions(diagnosticAction)} acknowledged={retry.acknowledged(diagnosticAction)} acknowledge={() => {
+        retry.acknowledge(diagnosticAction); document.getElementById('cv-source')?.focus();
       }} />
       <Submit {blockers} busy={s.busy} disabled={diagnosticRetry.blocked} onclick={submit}>Queue {STEPS.find((x) => x.id === step)?.label.toLowerCase()}</Submit>
       <SubmitStatus {s} />
