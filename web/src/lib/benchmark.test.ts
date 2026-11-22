@@ -36,6 +36,12 @@ const bjob = (id: string, result: unknown, over: Partial<JobDetail> = {}): JobDe
 });
 
 describe('benchmark launcher', () => {
+  it('rejects an advertised target and suite when workflow eligibility denies the host', () => {
+    const decision = { eligible: false, reasons: [{ text: 'Resume job scheduling.', fix_anchor: '#/settings/infrastructure?host=frame&section=policy' }] };
+    const result = buildBenchmarkJob(host, 'local-vllm', ['mmlu'], decision);
+    expect(result.job).toBeNull();
+    expect(result.blockers).toContainEqual({ text: 'Resume job scheduling.', fixAnchor: decision.reasons[0].fix_anchor });
+  });
   it('reads only well-formed target and suite entries', () => {
     const c = benchmarkChoices(host);
     expect(c.targets).toEqual([{ id: 'local-vllm', label: 'Local vLLM' }, { id: 'remote' }]);
@@ -44,18 +50,19 @@ describe('benchmark launcher', () => {
   });
   it('builds one benchmark job with no inputs', () => {
     const r = buildBenchmarkJob(host, 'local-vllm', ['mmlu', 'arc']);
-    expect(r.problems).toEqual([]);
+    expect(r.blockers).toEqual([]);
     expect(r.job).toEqual({ kind: 'benchmark', host: 'frame', input_ids: [], options: { benchmark_target: 'local-vllm', benchmarks: ['mmlu', 'arc'] } });
   });
   it('requires a capable host, an advertised target and 1..8 advertised suites', () => {
     expect(buildBenchmarkJob(undefined, 'local-vllm', ['mmlu']).job).toBeNull();
-    expect(buildBenchmarkJob({ ...host, capabilities: { benchmark: false }, reasons: { benchmark: 'No endpoint' } }, 'local-vllm', ['mmlu']).problems).toContain('No endpoint');
-    expect(buildBenchmarkJob(host, 'other', ['mmlu']).problems.join()).toMatch(/target/i);
-    expect(buildBenchmarkJob(host, 'local-vllm', []).problems.join()).toMatch(/at least one/i);
-    expect(buildBenchmarkJob(host, 'local-vllm', ['nope']).problems.join()).toMatch(/not advertised/);
+    const messages = (...args: Parameters<typeof buildBenchmarkJob>) => buildBenchmarkJob(...args).blockers.map((b) => b.text).join();
+    expect(messages({ ...host, capabilities: { benchmark: false }, reasons: { benchmark: 'No endpoint' } }, 'local-vllm', ['mmlu'])).toContain('No endpoint');
+    expect(messages(host, 'other', ['mmlu'])).toMatch(/target/i);
+    expect(messages(host, 'local-vllm', [])).toMatch(/at least one/i);
+    expect(messages(host, 'local-vllm', ['nope'])).toMatch(/not advertised/);
     const many = Array.from({ length: MAX_SUITES + 1 }, (_, i) => `s${i}`);
     const big: Host = { ...host, benchmarks: many.map((id) => ({ id })) };
-    expect(buildBenchmarkJob(big, 'local-vllm', many).problems.join()).toMatch(/at most 8/);
+    expect(messages(big, 'local-vllm', many)).toMatch(/at most 8/);
     expect(buildBenchmarkJob(host, 'local-vllm', ['mmlu', 'mmlu']).job?.options).toEqual({ benchmark_target: 'local-vllm', benchmarks: ['mmlu'] });
   });
 });

@@ -87,7 +87,8 @@
   {#if report.changes.length}
     <details>
       <summary class="small">Changed entries ({report.changes.length})</summary>
-      <div class="table-wrap">
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex (keyboard scrolling of wide changes) -->
+      <div class="table-wrap" role="region" aria-label="Changed entries" tabindex="0">
         <table class="data changes">
           <caption class="sr-only">Each changed HGN entry, before and after</caption>
           <thead><tr><th scope="col">Tensor</th><th scope="col">Layer · role · kind</th><th scope="col">Before</th><th scope="col">After</th><th scope="col" class="r">Change</th></tr></thead>
