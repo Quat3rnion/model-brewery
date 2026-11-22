@@ -58,6 +58,7 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
         )
         .route("/models/{id}", delete(delete_model))
         .route("/prompts", post(add_prompt))
+        .route("/prompts/{id}", delete(delete_prompt).put(update_prompt))
         .route("/jobs", post(add_job))
         .route("/jobs/{id}", get(job))
         .route("/jobs/{id}/cancel", post(cancel))
@@ -534,6 +535,42 @@ async fn add_prompt(
         .add_prompt(&prompt, submission.as_ref())
         .map_err(ApiError::storage)?;
     Ok((StatusCode::CREATED, Json(prompt)).into_response())
+}
+
+async fn update_prompt(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    payload: std::result::Result<Json<NewPrompt>, JsonRejection>,
+) -> Result<Json<crate::domain::Prompt>> {
+    let prompt = read(payload)?.validate_with_id(id).map_err(ApiError::bad)?;
+    if !app
+        .store
+        .lock()
+        .map_err(ApiError::storage)?
+        .update_prompt(&prompt)
+        .map_err(ApiError::storage)?
+    {
+        return Err(ApiError::not_found("prompt"));
+    }
+    Ok(Json(prompt))
+}
+
+async fn delete_prompt(State(app): State<Shared>, Path(id): Path<String>) -> Result<StatusCode> {
+    use crate::store::PromptDeletion;
+    match app
+        .store
+        .lock()
+        .map_err(ApiError::storage)?
+        .delete_prompt(&id)
+        .map_err(ApiError::storage)?
+    {
+        PromptDeletion::Deleted => Ok(StatusCode::NO_CONTENT),
+        PromptDeletion::Missing => Err(ApiError::not_found("prompt")),
+        PromptDeletion::InUse(job) => Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("Job {job} uses this prompt."),
+        )),
+    }
 }
 
 async fn add_job(

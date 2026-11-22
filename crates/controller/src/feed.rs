@@ -38,6 +38,13 @@ pub fn install(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TRIGGER IF NOT EXISTS state_feed_prompt_insert AFTER INSERT ON prompts BEGIN
             INSERT INTO state_feed(kind, entity_id) VALUES ('prompt.created', NEW.id);
         END;
+        CREATE TRIGGER IF NOT EXISTS state_feed_prompt_update AFTER UPDATE OF body ON prompts
+        WHEN OLD.body IS NOT NEW.body BEGIN
+            INSERT INTO state_feed(kind, entity_id) VALUES ('prompt.updated', NEW.id);
+        END;
+        CREATE TRIGGER IF NOT EXISTS state_feed_prompt_delete AFTER DELETE ON prompts BEGIN
+            INSERT INTO state_feed(kind, entity_id) VALUES ('prompt.deleted', OLD.id);
+        END;
         CREATE TRIGGER IF NOT EXISTS state_feed_job_insert AFTER INSERT ON jobs BEGIN
             INSERT INTO state_feed(kind, entity_id, state) VALUES ('job.created', NEW.id, NEW.state);
         END;

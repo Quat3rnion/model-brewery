@@ -235,6 +235,43 @@
         }
       }
     },
+    "/api/prompts/{id}": {
+      "put": {
+        "operationId": "updatePrompt",
+        "summary": "Replace the name and text of a saved prompt",
+        "description": "Keeps the prompt ID and does not change the prompt text saved with existing jobs.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "requestBody": {
+          "required": true,
+          "x-brewery-max-body-bytes": 262144,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/NewPrompt"}}}
+        },
+        "responses": {
+          "200": {"description": "Updated prompt record.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Prompt"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      },
+      "delete": {
+        "operationId": "deletePrompt",
+        "summary": "Delete a saved prompt",
+        "description": "Does not change job history. A queued or running job that uses this prompt prevents deletion. This includes jobs that wait for cancellation.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "responses": {
+          "204": {"description": "The prompt was removed; no response body."},
+          "400": {"$ref": "#/components/responses/InvalidPath"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"description": "An active job uses the prompt. The error names the job.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
     "/api/jobs": {
       "post": {
         "operationId": "createJob",
@@ -920,7 +957,7 @@
         "type": "object", "required": ["id", "kind", "entity_id"], "additionalProperties": false,
         "properties": {
           "id": {"$ref": "#/components/schemas/EventCursor"}, "entity_id": {"$ref": "#/components/schemas/Id"},
-          "kind": {"enum": ["job.created", "job.updated", "model.created", "model.updated", "model.deleted", "prompt.created"]},
+          "kind": {"enum": ["job.created", "job.updated", "model.created", "model.updated", "model.deleted", "prompt.created", "prompt.updated", "prompt.deleted"]},
           "state": {"$ref": "#/components/schemas/JobState"}
         },
         "if": {"properties": {"kind": {"enum": ["job.created", "job.updated"]}}},

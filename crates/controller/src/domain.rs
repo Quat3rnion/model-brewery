@@ -151,10 +151,14 @@ pub struct NewPrompt {
 
 impl NewPrompt {
     pub fn validate(self) -> Result<Prompt, String> {
+        self.validate_with_id(id())
+    }
+
+    pub fn validate_with_id(self, id: String) -> Result<Prompt, String> {
         check_name(&self.name)?;
         check_prompt(&self.text)?;
         Ok(Prompt {
-            id: id(),
+            id,
             name: self.name,
             text: self.text,
         })

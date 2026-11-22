@@ -54,6 +54,8 @@ export const api = {
   addModel: (model: NewModel) => request<Model>('POST', '/api/models', model),
   removeModel: (id: string) => request<void>('DELETE', `/api/models/${encodeURIComponent(id)}`),
   addPrompt: (prompt: NewPrompt) => request<Prompt>('POST', '/api/prompts', prompt),
+  updatePrompt: (id: string, prompt: NewPrompt) => request<Prompt>('PUT', `/api/prompts/${encodeURIComponent(id)}`, prompt),
+  deletePrompt: (id: string) => request<void>('DELETE', `/api/prompts/${encodeURIComponent(id)}`),
   submitJob: (job: NewJob) => request<JobSummary>('POST', '/api/jobs', job),
   suggestPaths: (host: string, prefix: string, signal?: AbortSignal) => request<unknown>('POST', '/api/suggestions/paths', { host, prefix }, signal),
   // Durable conversion workflow (controller runs inspect → plan → convert → verify).

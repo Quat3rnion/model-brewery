@@ -718,6 +718,126 @@ fn legacy_model_records_keep_their_identity_and_report_unknown_availability() {
 }
 
 #[test]
+fn saved_prompt_put_replaces_fields_without_changing_id() {
+    let mut app = Fixture::new();
+    app.launch();
+    let saved = app.json(
+        "POST",
+        "/api/prompts",
+        Some(json!({"name":"Old name","text":"Old text"})),
+        201,
+    );
+    let path = format!("/api/prompts/{}", id(&saved));
+    let change = json!({"name":"New name","text":"New text\n"});
+    for (request, status) in [
+        (json!({"name":"","text":"Valid text"}), 400),
+        (json!({"name":"Valid name","text":""}), 400),
+        (json!({"name":"Valid name"}), 422),
+    ] {
+        app.json("PUT", &path, Some(request), status);
+    }
+    assert_eq!(
+        app.request(
+            "PUT",
+            &path,
+            Some(change.clone()),
+            "Sec-Fetch-Site: cross-site\r\n"
+        )
+        .0,
+        403
+    );
+    app.json("PUT", &path, None, 415);
+    let before = app.json("GET", "/api/state", None, 200);
+    assert_eq!(before["prompts"], json!([saved]));
+    let updated = app.json("PUT", &path, Some(change.clone()), 200);
+    assert_eq!(
+        updated,
+        json!({"id":id(&saved),"name":"New name","text":"New text\n"})
+    );
+    let updated_state = app.json("GET", "/api/state", None, 200);
+    assert_eq!(
+        updated_state["event_cursor"],
+        before["event_cursor"].as_i64().unwrap() + 1
+    );
+    assert_eq!(app.json("PUT", &path, Some(change.clone()), 200), updated);
+    assert_eq!(app.json("GET", "/api/state", None, 200), updated_state);
+    app.stop();
+    app.launch();
+    assert_eq!(
+        app.json("GET", "/api/state", None, 200)["prompts"],
+        json!([updated])
+    );
+    app.json("PUT", "/api/prompts/missing", Some(change), 404);
+}
+
+#[test]
+fn saved_prompt_delete_refuses_active_jobs_and_preserves_history() {
+    let mut app = Fixture::new();
+    app.launch();
+    let saved = app.json(
+        "POST",
+        "/api/prompts",
+        Some(json!({"name":"Test","text":"Keep this text in job history."})),
+        201,
+    );
+    let other = app.json(
+        "POST",
+        "/api/prompts",
+        Some(json!({"name":"Queued","text":"Text for the queued job."})),
+        201,
+    );
+    let path = format!("/api/prompts/{}", id(&saved));
+    let a = app.register("alpha", "gguf", "/models/a.gguf");
+    let b = app.register("beta", "gguf", "/models/b.gguf");
+    app.touch("hold");
+    let submit = |prompt: &Value| {
+        app.enqueue(json!({"kind":"compare","input_ids":[a,b],"prompt_id":id(prompt)}))
+    };
+    let running = submit(&saved);
+    app.await_job(&running, |job| job["progress"] == "worker progress");
+    let queued = submit(&other);
+    assert_eq!(app.detail(&queued)["state"], "queued");
+    let blocked = |path: &str, job: &str| {
+        assert_eq!(
+            app.json("DELETE", path, None, 409)["error"],
+            format!("Job {job} uses this prompt.")
+        );
+    };
+    blocked(&path, &running);
+    let other_path = format!("/api/prompts/{}", id(&other));
+    blocked(&other_path, &queued);
+    assert_eq!(app.request("DELETE", &path, None, "Origin: null\r\n").0, 403);
+    app.remove("hold");
+    let completed = app.await_job(&running, |job| job["state"] == "succeeded");
+    app.await_job(&queued, |job| job["state"] == "succeeded");
+    app.json("DELETE", &other_path, None, 204);
+
+    app.touch("hold");
+    let active = submit(&saved);
+    app.await_job(&active, |job| job["progress"] == "worker progress");
+    app.touch("offline");
+    let cancelling = app.cancel(&active);
+    assert_eq!(cancelling["state"], "running");
+    assert_eq!(cancelling["cancel_requested"], true);
+    blocked(&path, &active);
+    app.remove("offline");
+    app.await_job(&active, |job| job["state"] == "cancelled");
+    let cursor = app.json("GET", "/api/state", None, 200)["event_cursor"]
+        .as_i64()
+        .unwrap();
+    app.json("DELETE", &path, None, 204);
+    app.json("DELETE", &path, None, 404);
+    let state = app.json("GET", "/api/state", None, 200);
+    assert_eq!(state["prompts"], json!([]));
+    assert_eq!(state["event_cursor"], cursor + 1);
+    assert_eq!(app.detail(&running), completed);
+    assert_eq!(
+        completed["result"]["envelope"]["prompt"],
+        "Keep this text in job history."
+    );
+}
+
+#[test]
 fn fifo_holds_slot_during_transport_loss_and_reconciles_restart() {
     let mut app = Fixture::new();
     app.launch();

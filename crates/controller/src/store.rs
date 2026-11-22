@@ -19,6 +19,12 @@ pub struct Store {
     _lock: File,
 }
 
+pub enum PromptDeletion {
+    Deleted,
+    Missing,
+    InUse(String),
+}
+
 impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
         std::fs::DirBuilder::new()
@@ -164,6 +170,35 @@ impl Store {
     }
     pub fn prompts(&self) -> Result<Vec<Prompt>> {
         read_list(&self.conn, "SELECT body FROM prompts ORDER BY rowid", [])
+    }
+    pub fn update_prompt(&self, prompt: &Prompt) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE prompts SET body=? WHERE id=?",
+            params![encode(prompt)?, prompt.id],
+        )? == 1)
+    }
+    pub fn delete_prompt(&mut self, id: &str) -> Result<PromptDeletion> {
+        let tx = self.conn.transaction()?;
+        // A cancellation request leaves the job running until the worker
+        // confirms a terminal state.
+        let active = tx
+            .query_row(
+                "SELECT j.id FROM jobs j JOIN prompts p ON p.id=json_extract(j.body,'$.prompt_id')
+                 WHERE p.id=? AND j.state IN ('queued','running') ORDER BY j.seq LIMIT 1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(job) = active {
+            return Ok(PromptDeletion::InUse(job));
+        }
+        let deleted = tx.execute("DELETE FROM prompts WHERE id=?", [id])?;
+        tx.commit()?;
+        Ok(if deleted == 1 {
+            PromptDeletion::Deleted
+        } else {
+            PromptDeletion::Missing
+        })
     }
     pub fn enqueue(
         &mut self,
