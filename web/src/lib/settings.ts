@@ -7,7 +7,16 @@
 
 import { capability } from './format';
 import { obj } from './reports';
+import type { HostReadiness } from './api';
 import type { Host } from './types';
+
+type ReadinessKind = keyof HostReadiness['readiness'];
+const readinessJobs = [
+  ['Benchmarks', 'benchmark'],
+  ['GSM8K evaluation', 'evaluate'],
+  ['Source baseline', 'baseline'],
+  ['Generation', 'generate'],
+] as const satisfies readonly (readonly [string, ReadinessKind])[];
 
 export interface Endpoint {
   id: string;
@@ -31,6 +40,7 @@ export interface HostSettings {
   profileBinding: string | null;
   evaluationReason:string|null;
   ready: boolean;
+  readiness: Partial<Record<ReadinessKind, { ready: boolean; reason: string | null }>>;
   reason: string | null;
   revision: number;
   /** Loopback ports the controller accepts for this worker's endpoints. */
@@ -64,6 +74,12 @@ function endpoints(v: unknown, baseline = false): Endpoint[] {
 export function parseHost(v: unknown): HostSettings | null {
   const o = obj(v);
   if (!o || typeof o.id !== 'string' || !o.id) return null;
+  const wireReadiness = obj(o.readiness);
+  const readiness: HostSettings['readiness'] = {};
+  for (const [, kind] of readinessJobs) {
+    const row = obj(wireReadiness?.[kind]);
+    if (typeof row?.ready === 'boolean') readiness[kind] = { ready: row.ready, reason: str(obj(row.reason)?.text) };
+  }
   return {
     id: o.id,
     name: str(o.name),
@@ -75,6 +91,7 @@ export function parseHost(v: unknown): HostSettings | null {
     profileBinding: str(o.profile_binding),
     evaluationReason: str(obj(o.evaluation)?.reason) ?? str(o.reason),
     ready: o.ready === true,
+    readiness,
     reason: str(o.reason),
     revision: typeof o.revision === 'number' && Number.isInteger(o.revision) ? o.revision : 0,
     approvedPorts: Array.isArray(o.approved_ports) ? o.approved_ports.filter((x): x is number => Number.isInteger(x) && (x as number) > 0 && (x as number) < 65536) : [],
@@ -154,7 +171,7 @@ export function validateHost(h: HostSettings, saved?: HostSettings): string[] {
     ...blockedBaselines.map((e) => `Baseline ${e.id || '(no ID)'}: baseline endpoints are not allowed on this worker. Remove the new or changed entry.`),
     ...endpointProblems('Target', h.benchmarkTargets, h.evaluationStatus === 'profile_only' ? null : h.approvedPorts),
     ...endpointProblems('Baseline', h.baselineEndpoints, h.approvedPorts, true),
-    ...(h.evaluationEnabled && !h.evaluationAllowed ? ['GSM8K evaluation is not allowed on this worker (no approved Halogen runtime).'] : []),
+    ...(h.evaluationEnabled && !h.evaluationAllowed ? ['GSM8K evaluation is not allowed on this worker.'] : []),
     ...h.enabledSuites.filter((s) => !approved.has(s)).map((s) => `${s} is not an approved suite on this host.`),
   ];
 }
@@ -173,15 +190,15 @@ export function buildPut(h: HostSettings) {
 }
 
 /** What the controller says this host can run now. Independent of the saved form. */
-export function effectiveReadiness(h: HostSettings, host: Host | undefined): { what: string; allowed: boolean; reason: string | null }[] {
+export function effectiveReadiness(h: HostSettings, host: Host | undefined) {
   const target = host ?? { id: h.id, name: h.name ?? undefined };
-  return [
-    ['Benchmarks', 'benchmark'],
-    ['GSM8K evaluation', 'evaluate'],
-    ['Source baseline', 'baseline'],
-  ].map(([what, kind]) => {
+  return readinessJobs.map(([what, kind]) => {
+    const row = h.readiness[kind];
     const c = capability(target, kind);
-    return { what, allowed: c.allowed, reason: c.allowed ? null : c.reason };
+    const allowed = row?.ready ?? c.allowed;
+    const evaluationReason = kind === 'evaluate' && h.evaluationStatus === 'managed' ? h.evaluationReason : null;
+    const reason = evaluationReason ?? row?.reason ?? host?.capability_reasons?.[kind]?.text ?? c.reason;
+    return { kind, what, allowed, reason: allowed ? null : reason };
   });
 }
 

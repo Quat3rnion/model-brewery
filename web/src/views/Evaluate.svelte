@@ -236,7 +236,7 @@
     <header><h3 id="gen-h" class="ph">Generate</h3></header>
     <div class="body stack">
       <ModelSelect bind:value={gBundle} kinds={BUNDLE_KINDS} label="Bundle" />
-      <HostSelect bind:value={gHost} kind="generate" label="Run on" optional optionalLabel="Host of the bundle" hint="Needs a qualified Halogen host. The run records which files were opened." />
+      <HostSelect bind:value={gHost} kind="generate" label="Run on" optional optionalLabel="Host of the bundle" hint="Needs a worker with an approved Halogen runtime. The run records which files it opens." />
       <div class="seg" role="radiogroup" aria-label="Prompt source">
         <label><input type="radio" bind:group={gMode} value="saved" /> Saved prompt</label>
         <label><input type="radio" bind:group={gMode} value="text" /> Type a prompt</label>

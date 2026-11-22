@@ -120,14 +120,28 @@ function savedProfiles(catalogSha) {
   ];
 }
 
+function policyReason(id, text) {
+  return { text, fix_anchor: `#/settings/infrastructure?host=${id}&section=policy` };
+}
+
 function settings(hosts) {
-  return hosts.map(({ id, name, capabilities }) => ({
-    id, name, managed: true, management: { available: true }, evaluation: { status: 'managed' },
-    ready: true, revision: 1, approved_ports: [8081], evaluation_allowed: capabilities.evaluate,
-    baseline_allowed: capabilities.baseline, approved_suites: capabilities.benchmark ? [suite] : [],
-    benchmark_targets: capabilities.benchmark ? [{ ...target, endpoint: 'http://127.0.0.1:8081/v1', model: 'fixture-model' }] : [],
-    enabled_suites: capabilities.benchmark ? [suite.id] : [], baseline_endpoints: [], evaluation_enabled: capabilities.evaluate,
-  }));
+  return hosts.map(({ id, name, capabilities, capability_reasons, reasons, scheduling_paused }) => {
+    const readiness = Object.fromEntries(['benchmark', 'baseline', 'evaluate', 'generate'].map((kind) => {
+      const reason = !capabilities[kind] ? capability_reasons?.[kind] ?? policyReason(id, reasons[kind])
+        : scheduling_paused ? policyReason(id, 'Resume job scheduling.') : undefined;
+      return [kind, { ready: !reason, ...(reason ? { reason } : {}) }];
+    }));
+    const reason = readiness.evaluate.reason;
+    return {
+      id, name, managed: true, management: { available: true },
+      evaluation: { status: 'managed', ...(reason ? { reason: reason.text, reason_detail: reason } : {}) },
+      ready: Object.values(readiness).some((row) => row.ready), readiness,
+      revision: 1, approved_ports: [8081], evaluation_allowed: capabilities.evaluate,
+      baseline_allowed: capabilities.baseline, approved_suites: capabilities.benchmark ? [suite] : [],
+      benchmark_targets: capabilities.benchmark ? [{ ...target, endpoint: 'http://127.0.0.1:8081/v1', model: 'fixture-model' }] : [],
+      enabled_suites: capabilities.benchmark ? [suite.id] : [], baseline_endpoints: [], evaluation_enabled: capabilities.evaluate,
+    };
+  });
 }
 
 export function scenario(name, catalogSha) {
@@ -145,6 +159,19 @@ export function scenario(name, catalogSha) {
     case 'conversions': data = { ...base, jobs: [...conversionJobs, activeJobs[0]], conversions: runs }; break;
     case 'gguf': data = { ...base, models: models.filter((model) => model.kind === 'gguf') }; break;
     case 'results': data = { ...base, jobs: results }; break;
+    case 'full-split':
+      data = { ...base, jobs: [finished('full-split-result', 'evaluate', { input_ids: ['bundle-a'] }, {
+        dataset: { full_split: true }, identity: { synthetic: false }, score: { correct: 1000, total: 1319, unparsed: 0 },
+      })] };
+      break;
+    case 'settings-blocked':
+      data = { ...base, hosts: [workers[0], {
+        ...workers[1], scheduling_paused: true, capabilities: capabilities(['benchmark']),
+        capability_reasons: {
+          evaluate: policyReason('worker-b', 'Allow evaluation in the worker policy.'),
+        },
+      }] };
+      break;
     case 'saved-profiles': data = { ...base, profiles: savedProfiles(catalogSha) }; break;
     case 'api-404': case 'api-500': case 'api-503':
       data = { ...base, status: Number(name.slice(4)) };

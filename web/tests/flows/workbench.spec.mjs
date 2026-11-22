@@ -60,6 +60,17 @@ test('job detail shows a transfer result and links back to the queue', async ({ 
   await expect(page.getByRole('heading', { name: 'Jobs', exact: true })).toBeVisible();
 });
 
+test('Job detail does not mark a verification that was not performed as Failed', async ({ page, controller }) => {
+  controller.load('conversions');
+  await controller.open(page, 'jobs/plan-stage');
+  const result = page.getByRole('region', { name: 'Result' });
+  await expect(result.getByRole('heading', { name: 'File verification' })).toBeVisible();
+  await expect(result.getByText('Not performed', { exact: true })).toHaveClass(/\bmuted\b/);
+  await expect(result.getByText('Failed', { exact: true })).toHaveCount(0);
+  await controller.open(page, 'jobs/verify-stage');
+  await expect(result.getByText('Passed', { exact: true })).toHaveClass(/\bok\b/);
+});
+
 test('a missing job deep link shows an error without a result', async ({ page, controller }) => {
   await controller.open(page, 'jobs/missing');
   await expect(page.getByRole('alert')).toBeVisible();
@@ -149,7 +160,24 @@ test('Evaluate presents synthetic scores without treating them as release proof'
   const bundle = page.getByRole('row').filter({ hasText: 'Fixture bundle' });
   await expect(bundle.getByText('Synthetic fixture', { exact: true })).toBeVisible();
   await expect(bundle).toContainText('3 / 4 correct (75.00%)');
-  await expect(bundle).toContainText('does not qualify a release');
+  await expect(bundle).toContainText('Not release-qualified.');
+});
+
+test('Evaluate and job detail mark even full-split GSM8K scores as not release-qualified', async ({ page, controller }) => {
+  controller.load('full-split');
+  await controller.open(page, 'evaluate');
+  const bundle = page.getByRole('row').filter({ hasText: 'Fixture bundle' });
+  await expect(bundle.getByText('Standalone GSM8K score', { exact: true })).toBeVisible();
+  await expect(bundle).toContainText('Not release-qualified.');
+  await bundle.getByRole('link', { name: 'Benchmark quality job for Fixture bundle' }).click();
+  const result = page.getByRole('region', { name: 'Result' });
+  await expect(result.getByText('Full pinned split', { exact: true })).toBeVisible();
+  await expect(result.getByText('Not release-qualified', { exact: true })).toBeVisible();
+});
+
+test('Evaluate asks for an approved runtime, not a qualified host', async ({ page, controller }) => {
+  await controller.open(page, 'evaluate');
+  await expect(page.getByText('Needs a worker with an approved Halogen runtime.', { exact: false })).toBeVisible();
 });
 
 test('Benchmarks loads an endpoint result and restricts runs to advertised choices', async ({ page, controller }) => {
@@ -195,6 +223,22 @@ test('Settings saves an evaluation edit without starting a job', async ({ page, 
   expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
 });
 
+test('Settings readiness does not contradict live capabilities', async ({ page, controller }) => {
+  controller.load('settings-blocked');
+  await controller.open(page, 'settings');
+  const readiness = page.getByRole('region', { name: 'Evaluation readiness' });
+  await expect(readiness.getByText('Configuration ready', { exact: true })).toBeVisible();
+  await expect(readiness.getByRole('row', { name: /^Benchmarks/ })).toContainText('Available');
+  await page.getByRole('navigation', { name: 'Workers' }).getByRole('button', { name: /Worker B/ }).click();
+  await expect(readiness.getByText('Configuration not ready', { exact: true })).toBeVisible();
+  await expect.soft(readiness.getByText('Not available', { exact: true })).toHaveCount(4);
+  await expect.soft(readiness.getByRole('row', { name: /^Benchmarks/ })).toContainText('Resume job scheduling.');
+  await expect.soft(readiness.getByRole('row', { name: /^GSM8K evaluation/ })).toContainText('Allow evaluation in the worker policy.');
+  const gsm8k = page.getByRole('checkbox', { name: 'Allow GSM8K evaluation on this worker' });
+  await expect(gsm8k).toBeDisabled();
+  await expect(gsm8k).toHaveAccessibleDescription('Allow evaluation in the worker policy.');
+});
+
 // Audit regressions for later tasks. Replace each placeholder with an assertion
 // of the corrected behavior; do not lock in the current broken behavior.
 for (const finding of [
@@ -206,13 +250,11 @@ for (const finding of [
   'Job detail clears a previous result when the id changes',
   'A missing job id stops polling after a 404',
   'Inspection results support inventory and tile modes',
-  'Job detail does not mark a verification that was not performed as Failed',
   'Transfers keeps entry names readable at narrow widths',
   'Compare explains missing capability before selection',
   'Evaluate explains disabled generation and baseline before selection',
   'Calibration keeps reports during navigation',
   'Settings warns before discarding unsaved evaluation or policy edits',
-  'Settings readiness does not contradict live capabilities',
   'Settings host selection also selects that infrastructure host',
 ]) {
   test.fixme(finding, async () => {});
