@@ -5,6 +5,7 @@ mod exl3_layer;
 mod gguf;
 mod gguf_conversion;
 mod hf_download;
+mod hgn_recipe;
 mod integrity;
 mod native_progress;
 mod progress;
@@ -396,6 +397,11 @@ fn run() -> Result<i32> {
         }
         "inspect" | "plan" | "convert" | "verify" if job.options["output_format"] == "gguf" => {
             gguf_conversion::run(&job, &cwd, &progress)?
+        }
+        "inspect" | "plan" | "convert" | "verify"
+            if job.options["output_format"] == brewery_worker::hgn_recipe::FORMAT =>
+        {
+            hgn_recipe::run(&job, &cwd, &progress)?
         }
         "inspect" | "plan" | "convert" | "verify" => converter::run(&job, &cwd, &progress)?,
         _ => bail!("unsupported job kind {:?}", job.kind),

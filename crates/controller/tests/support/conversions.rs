@@ -29,6 +29,41 @@ fn layer_recipe_requires_an_explicitly_capable_source_worker() {
 }
 
 #[test]
+fn native_layer_recipe_queues_only_on_its_configured_local_worker() {
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts":{
+            "alpha":{"local":true,"capabilities":{"hgn_layer_recipe":true}},
+            "beta":{"local":true}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let source = app.register("alpha", "hf", "/source/base");
+    let other = app.register("beta", "hf", "/source/other");
+    app.json("POST", "/api/models", Some(json!({
+        "host":"alpha","path":"/source/not-verified","kind":"hgn-archive"
+    })), 400);
+    let policy = json!({"schema":"brewery.layer-quant.v1","source_sha256":"1".repeat(64),
+                        "default_type":"BF16","layers":{"0":"HT3","1":"HT4"}});
+    let request = json!({"format":"hgn","input_ids":[source],"options":{"layer_recipe":policy}});
+    let mut unsupported = request.clone();
+    unsupported["input_ids"] = json!([other]);
+    app.json("POST", "/api/conversions", Some(unsupported), 409);
+    let mut extra = request.clone();
+    extra["options"]["helper"] = json!("/untrusted/helper");
+    app.json("POST", "/api/conversions", Some(extra), 400);
+    let mut kt = request.clone();
+    kt["options"]["layer_recipe"]["layers"]["0"] = json!("QTIP_3_KT");
+    app.json("POST", "/api/conversions", Some(kt), 400);
+    let queued = app.json("POST", "/api/conversions", Some(request), 201);
+    assert_eq!(queued["host"], "alpha");
+    assert_eq!(queued["stage"], "inspect");
+}
+
+#[test]
 fn profile_export_options_are_preview_only_for_both_encoders() {
     let mut app = Fixture::new();
     app.launch();

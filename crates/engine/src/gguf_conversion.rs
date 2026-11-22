@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     env, fs,
-    io::Seek,
+    io::{Read, Seek},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -85,9 +85,9 @@ struct Options {
     encoder_revision: Option<String>,
 }
 
-struct Tool {
+pub(crate) struct Tool {
     path: PathBuf,
-    sha: String,
+    pub(crate) sha: String,
     stamp: integrity::Stamp,
 }
 
@@ -97,10 +97,14 @@ impl Tool {
             .map(PathBuf::from)
             .with_context(|| format!("{var} is required"))?;
         ensure!(path.is_absolute(), "{var} must be absolute");
+        Self::from_path(path)
+    }
+
+    pub(crate) fn from_path(path: PathBuf) -> Result<Self> {
         let metadata = integrity::canonical(&path)?;
         ensure!(
             metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
-            "{var} must name a regular executable"
+            "tool must be a regular executable"
         );
         let (member, stamp) = integrity::file_digest(&path, "binary".into())?;
         Ok(Self {
@@ -113,30 +117,28 @@ impl Tool {
     fn rocmfpx(work: &Path) -> Result<Self> {
         const VAR: &str = "BREWERY_GGUF_ROCMFPX_QUANTIZER";
         const SHA: &str = "BREWERY_GGUF_ROCMFPX_SHA256";
-        let expected = env::var(SHA).with_context(|| format!("{SHA} is required"))?;
+        Self::pinned(work, VAR, SHA, "rocmfpx-quantize", "ROCmFPX quantizer")
+    }
+
+    pub(crate) fn pinned(work: &Path, var: &str, sha: &str, name: &str, label: &str) -> Result<Self> {
+        let expected = env::var(sha).with_context(|| format!("{sha} is required"))?;
         ensure!(
             expected.len() == 64
                 && expected
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-            "{SHA} must be lowercase hexadecimal SHA-256"
+            "{sha} must be lowercase hexadecimal SHA-256"
         );
-        let configured = Tool::open(VAR)?;
-        ensure!(
-            configured.sha == expected,
-            "ROCmFPX quantizer SHA-256 mismatch"
-        );
+        let configured = Tool::open(var)?;
+        ensure!(configured.sha == expected, "{label} SHA-256 mismatch");
         // Run private verified bytes, not the mutable configured pathname.
         // The operator must supply a self-contained CPU quantizer (no adjacent libraries).
-        let path = work.join("rocmfpx-quantize");
+        let path = work.join(name);
         fs::copy(&configured.path, &path)?;
         configured.stamp.check(&configured.path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
         let (member, stamp) = integrity::file_digest(&path, "binary".into())?;
-        ensure!(
-            member.sha256 == expected,
-            "staged ROCmFPX quantizer SHA-256 mismatch"
-        );
+        ensure!(member.sha256 == expected, "staged {label} SHA-256 mismatch");
         Ok(Self {
             path,
             sha: member.sha256,
@@ -144,7 +146,11 @@ impl Tool {
         })
     }
 
-    fn command(&self, work: &Path, threads: usize) -> Command {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn command(&self, work: &Path, threads: usize) -> Command {
         let mut cmd = Command::new(&self.path);
         cmd.current_dir(work)
             .env_clear()
@@ -162,7 +168,7 @@ impl Tool {
         cmd
     }
 
-    fn capture(&self, cmd: &mut Command, work: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
+    pub(crate) fn capture(&self, cmd: &mut Command, work: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
         let mut out = tempfile::tempfile_in(work)?;
         let mut err = tempfile::tempfile_in(work)?;
         self.stamp.check(&self.path)?;
@@ -182,11 +188,19 @@ impl Tool {
             {
                 let _ = child.kill();
                 let _ = child.wait();
-                bail!("offline GGUF tool exceeded log or time limit");
+                bail!("offline tool exceeded log or time limit");
             }
             match child.try_wait()? {
                 Some(exit) => {
-                    ensure!(exit.success(), "offline GGUF tool failed ({exit})");
+                    if !exit.success() {
+                        err.rewind()?;
+                        let mut diagnostic = Vec::new();
+                        (&mut err).take(2048).read_to_end(&mut diagnostic)?;
+                        bail!(
+                            "offline tool failed ({exit}): {}",
+                            String::from_utf8_lossy(&diagnostic).trim()
+                        );
+                    }
                     break;
                 }
                 None => thread::sleep(Duration::from_millis(40)),

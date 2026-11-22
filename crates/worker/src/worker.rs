@@ -731,6 +731,48 @@ impl Worker {
                 Reply::error("This worker only runs Hugging Face download jobs"),
             );
         }
+        if job.options["output_format"] == hgn_recipe::FORMAT {
+            if self.cfg.pinned_publication.is_some()
+                || self
+                    .cfg
+                    .engine_env
+                    .contains_key("BREWERY_EXPECTED_SOURCE_SHA256")
+                || env::var_os("BREWERY_EXPECTED_SOURCE_SHA256").is_some()
+            {
+                return self.record_prepare(
+                    id, action, job,
+                    Reply::error("Native HT3/HT4 layer recipes cannot run on a source-pinned worker"),
+                );
+            }
+            let configured = self.cfg.backend_weight_download_root.is_none()
+                && self.cfg.weight_editor_host.is_none()
+                && self
+                    .cfg
+                    .engine_env
+                    .get(hgn_recipe::HELPER)
+                    .is_some_and(|p| Path::new(p).is_absolute())
+                && self
+                    .cfg
+                    .engine_env
+                    .get(hgn_recipe::HELPER_SHA)
+                    .is_some_and(|sha| is_digest(sha));
+            if !configured
+                || action != "start"
+                || job.prompt.is_some()
+                || !hgn_recipe::options(&job.kind, &job.options)
+                || !hgn_recipe::layout(
+                    job.kind == "verify",
+                    job.inputs
+                        .iter()
+                        .map(|i| (i.kind.as_str(), i.host.as_str())),
+                )
+            {
+                return self.record_prepare(
+                    id, action, job,
+                    Reply::error("Native HT3/HT4 layer recipes require a pinned helper and direct local inputs"),
+                );
+            }
+        }
         if job.options.get("encoder_family").is_some()
             || job.options.get("encoder_revision").is_some()
         {
@@ -1051,9 +1093,14 @@ impl Worker {
             return Ok(to_value(input)?);
         }
         let standalone = standalone_gguf(job);
+        let native_hgn = job.options["output_format"] == hgn_recipe::FORMAT;
         ensure!(
             !standalone || provided.is_none(),
             "standalone SafeTensors GGUF requires direct inputs"
+        );
+        ensure!(
+            !native_hgn || provided.is_none(),
+            "native HGN layer recipes require direct inputs"
         );
         let exl3 = job.kind == brewery_worker::exl3_layer::JOB;
         let native_safe = index == 0
@@ -1172,6 +1219,18 @@ impl Worker {
                         "standalone SafeTensors GGUF requires regular files and an assets directory"
                     );
                 }
+                if native_hgn {
+                    let metadata = fs::symlink_metadata(&p)?;
+                    ensure!(
+                        if input.kind == "safetensors" {
+                            metadata.is_file()
+                                && p.extension().is_some_and(|ext| ext == "safetensors")
+                        } else {
+                            metadata.is_dir()
+                        },
+                        "native HGN recipes require an indexed HF directory or standalone SafeTensors and an assets directory"
+                    );
+                }
                 // A concurrent cache cleanup may not delete a direct source in use.
                 if let Ok(rel) = p.strip_prefix(&self.cache.complete) {
                     r.pins.insert(
@@ -1220,6 +1279,12 @@ impl Worker {
                         )?;
                         weight_source::bounded_inventory(&p, &input.kind, limit)?;
                         limit
+                    } else if native_hgn {
+                        if input.kind == hgn_recipe::ARCHIVE {
+                            128 << 20
+                        } else {
+                            64 << 20
+                        }
                     } else if expected.is_some() {
                         match input.kind.as_str() {
                             "weight-calibration" => 256 << 10,

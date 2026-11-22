@@ -1,6 +1,7 @@
 use crate::conversion::{self, Conversion};
-use crate::domain::{Envelope, Event, Job, Model, Prompt, State, now};
+use crate::domain::{Envelope, Event, Job, Model, NewModel, Prompt, State, now};
 use crate::idempotency::{self, Replay, Submission};
+use brewery_worker::hgn_recipe;
 use brewery_worker::operational::Settings;
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 use serde::{Serialize, de::DeserializeOwned};
@@ -278,18 +279,20 @@ impl Store {
                     }
                 }
             };
-            let verified_output =
-                if row.format == crate::gguf::Format::Gguf && row.state == State::Succeeded {
-                    Some(
-                        self.envelope(&job.id)?
-                            .inputs
-                            .into_iter()
-                            .nth(1)
-                            .ok_or("verified GGUF model missing")?,
-                    )
-                } else {
-                    None
-                };
+            let verified_output = if (row.format == crate::gguf::Format::Gguf
+                || row.native_layer_recipe())
+                && row.state == State::Succeeded
+            {
+                Some(
+                    self.envelope(&job.id)?
+                        .inputs
+                        .into_iter()
+                        .nth(1)
+                        .ok_or("verified conversion output missing")?,
+                )
+            } else {
+                None
+            };
             let tx = self.conn.transaction()?;
             if let Some(model) = verified_output {
                 tx.execute(
@@ -320,6 +323,9 @@ impl Store {
         job: &Job,
     ) -> Result<std::result::Result<Option<NextConversion>, String>> {
         let result = self.job_result(&job.id)?.unwrap_or(Value::Null);
+        if row.native_layer_recipe() {
+            return self.next_hgn_recipe(row, job, &result);
+        }
         if row.format == crate::gguf::Format::Gguf {
             return self.next_gguf(row, job, &result);
         }
@@ -367,6 +373,158 @@ impl Store {
                 inspect.options.get("profile_recipe"),
             )?;
             Ok(Some((next, envelope, artifact)))
+        })())
+    }
+
+    fn next_hgn_recipe(
+        &self,
+        row: &Conversion,
+        job: &Job,
+        result: &Value,
+    ) -> Result<std::result::Result<Option<NextConversion>, String>> {
+        use sha2::{Digest, Sha256};
+        let inspect_id = &row.job_ids["inspect"];
+        let inspect = self.envelope(inspect_id)?;
+        let inspected = self.job_result(inspect_id)?.unwrap_or(Value::Null);
+        let convert = row
+            .job_ids
+            .get("convert")
+            .map(|id| self.job_result(id))
+            .transpose()?
+            .flatten();
+        let current = self.envelope(&job.id)?;
+        Ok((|| {
+            let plan = &result["layer_recipe_plan"];
+            let receipt = &result["layer_recipe_receipt"];
+            let expected_sha = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(plan).map_err(|_| "invalid native HGN plan")?)
+            );
+            let policy = &inspect.options["layer_recipe"];
+            let inputs = result["inputs"]
+                .as_array()
+                .ok_or("missing native HGN input receipts")?;
+            if result["kind"] != job.kind
+                || result["host"] != job.host
+                || result["output_format"] != "hgn"
+                || result["report"]["passed"] != true
+                || result["runtime_load_verified"] != false
+                || result["release_qualified"] != false
+                || inputs.len() != current.inputs.len()
+                || inputs
+                    .iter()
+                    .zip(&current.inputs)
+                    .any(|(actual, expected)| {
+                        actual["id"] != expected.id
+                            || actual["path"] != expected.path
+                            || actual["host"] != expected.host
+                            || actual["kind"] != expected.kind
+                            || actual["source_host"] != expected.host
+                    })
+                || inputs[0]["sha256"] != policy["source_sha256"]
+                || plan["recipe"] != *policy
+                || plan["source_bundle_sha256"] != result["source_sha256"]
+                || result["layer_plan_sha256"] != expected_sha
+                || ![
+                    "helper_sha256",
+                    "exporter_sha256",
+                    "python_sha256",
+                    "safetensors_reader_sha256",
+                    "source_bundle_sha256",
+                ]
+                .iter()
+                .all(|key| plan[key].as_str().is_some_and(brewery_worker::is_digest))
+                || !plan["compiled"]["tensors"]
+                    .as_array()
+                    .is_some_and(|t| !t.is_empty())
+                || plan["calibration"] != "none"
+            {
+                return Err("worker did not attest the source-bound native HGN layer plan".into());
+            }
+            if job.id != *inspect_id
+                && (inspected["layer_recipe_plan"] != *plan
+                    || inspected["layer_plan_sha256"] != expected_sha)
+            {
+                return Err("native HGN layer plan changed after inspection".into());
+            }
+            if matches!(job.kind.as_str(), "convert" | "verify")
+                && (result["structural_reader_verified"] != true
+                    || receipt["structural_reader_verified"] != true
+                    || receipt["runtime_load_verified"] != false
+                    || receipt["format"] != "native_hgn_v2"
+                    || receipt["source_sha256"] != policy["source_sha256"]
+                    || receipt["trellis"] != plan["compiled"]["trellis"])
+            {
+                return Err("native HGN structural reader attestation missing".into());
+            }
+            let (stage, output) = match job.kind.as_str() {
+                "inspect" | "plan" => {
+                    if result["report"]["disk"]["fits"] != true {
+                        return Err("native HGN layer recipe does not fit on disk".into());
+                    }
+                    (
+                        if job.kind == "inspect" {
+                            "plan"
+                        } else {
+                            "convert"
+                        },
+                        None,
+                    )
+                }
+                "convert" => {
+                    let a = &result["artifact"];
+                    let path = a["path"].as_str().unwrap_or_default();
+                    if a["kind"] != hgn_recipe::ARCHIVE
+                        || !path.starts_with('/')
+                        || !path.ends_with(&format!("/jobs/{}/work/{}", job.id, hgn_recipe::OUTPUT))
+                        || path.contains('\\')
+                        || path[1..].split('/').any(|s| matches!(s, "" | "." | ".."))
+                        || !a["sha256"].as_str().is_some_and(brewery_worker::is_digest)
+                        || !a["bytes"].as_u64().is_some_and(|n| n > 0)
+                    {
+                        return Err("worker did not return a valid native HGN archive".into());
+                    }
+                    (
+                        "verify",
+                        Some(
+                            NewModel {
+                                name: Some(format!("Structural HGN archive ({})", job.id)),
+                                host: job.host.clone(),
+                                kind: hgn_recipe::ARCHIVE.into(),
+                                path: path.into(),
+                            }
+                            .validate()?,
+                        ),
+                    )
+                }
+                "verify" => {
+                    let published = convert
+                        .as_ref()
+                        .ok_or("missing native HGN producer result")?;
+                    let artifact = &published["artifact"];
+                    let verdict = &result["file_verification"];
+                    if verdict["status"] != "passed"
+                        || verdict["scope"] != "structure_only"
+                        || verdict["archive_sha256"] != artifact["sha256"]
+                        || verdict["model_sha256"] != receipt["model"]["sha256"]
+                        || receipt != &published["layer_recipe_receipt"]
+                        || ["kind", "path", "sha256", "bytes", "files"]
+                            .iter()
+                            .any(|key| inputs[1][key] != artifact[key])
+                    {
+                        return Err("independent native HGN verification did not attest the producer archive".into());
+                    }
+                    return Ok(None);
+                }
+                _ => return Err("unexpected native HGN recipe stage".into()),
+            };
+            let (next, envelope) = row.build(
+                stage,
+                inspect.inputs,
+                output,
+                Some(&result["layer_plan_sha256"]),
+            )?;
+            Ok(Some((next, envelope, None)))
         })())
     }
     fn next_gguf(

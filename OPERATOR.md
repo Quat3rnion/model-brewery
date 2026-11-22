@@ -74,6 +74,45 @@ Do not use this path for a fused rank-3 Flash-Next expert matrix.
 The receipt's `runtime_load_verified` field distinguishes a verified
 archive from a model that has run in Halogen.
 
+To enable managed native HT3/HT4 recipes in Convert, install the same locked
+helper on a local source worker. Set `BREWERY_LAYER_HGN_HELPER` to its absolute,
+symlink-free executable path and `BREWERY_LAYER_HGN_HELPER_SHA256` to its
+lowercase SHA-256 in the worker's `engine_env`. The engine uses the system
+`/usr/bin/python3` and its bundled exporter. The helper must support `identity`,
+`plan`, `write`, and `inspect`; rebuild older helpers. Set `capabilities.hgn_layer_recipe`
+to `true` for this local worker in the controller dispatch configuration.
+Do not enable this capability on a worker that does not have the pinned helper
+or that uses a pinned publication or `BREWERY_EXPECTED_SOURCE_SHA256`.
+
+The Convert screen also needs read-only SafeTensors inventory on the **same
+worker**. [Install the local CPU weight runtime](#package-the-local-cpu-weight-runtime).
+In `engine_env`, set `BREWERY_WEIGHT_EDIT` to the absolute, symlink-free path to
+the packaged `brewery-weight-edit`, set `BREWERY_WEIGHT_VISUAL` and
+`BREWERY_WEIGHT_SAFETENSORS` to `"1"`, and set
+`BREWERY_WEIGHT_SAFETENSORS_VERIFY_BYTES` to `"67108864"` for bounded sources
+without a publication proof. Set `capabilities.weight_inspect`,
+`capabilities.weight_visual`, and `capabilities.weight_safetensors` to `true`.
+You do not need to enable `weight_propose`, `weight_apply`, or `weight_tune`.
+The conversion API can run with a known digest without the inventory helper.
+Register a changed checkpoint as a new Library entry so Convert reads a new
+digest and layer list instead of reusing the previous entry's inventory.
+
+Select Layer recipe and HGN archive in Convert. Use an indexed dense Llama or
+Qwen2 HF source, or register standalone SafeTensors and matching config and
+tokenizer assets on the same worker. Each source input is limited to 64 MiB.
+Choose HT3 or HT4 for at least one layer. The worker checks the source digest,
+asset digests, helper identity, and geometry before it encodes. No calibration
+input is used. A changed recipe produces a new archive and does not modify the
+source or previous output.
+
+The controller registers an `hgn-archive` only after a separate verify stage
+reopens the archive and checks its files and tensor layout. It is not a runnable
+Halogen model, an EXL3 checkpoint, or a reference QTIP checkpoint. Do not use
+verification as a quality or release claim. Fork GGUF KT recipes are not enabled
+by this capability. Preflight includes the archive that stays on disk and the
+temporary verification copy. Verify checks the space for its copy, not for a
+second conversion. The check does not reserve space.
+
 ## Crates
 
 | Crate | Binary | Purpose |

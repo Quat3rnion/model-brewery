@@ -661,6 +661,10 @@
               "ggufLayerRecipe": {"summary": "Source-bound recipe for an indexed Hugging Face snapshot", "value": {
                 "format": "gguf", "input_ids": ["a1314ac4-3570-4549-9111-67b904f8bdad"],
                 "options": {"layer_recipe": {"schema": "brewery.layer-quant.v1", "source_sha256": "1111111111111111111111111111111111111111111111111111111111111111", "default_type": "BF16", "layers": {"0": "Q8_0", "1": "F16"}}}
+              }},
+              "hgnLayerRecipe": {"summary": "Native HT3 and HT4 layer overrides", "value": {
+                "format": "hgn", "input_ids": ["a1314ac4-3570-4549-9111-67b904f8bdad"],
+                "options": {"layer_recipe": {"schema": "brewery.layer-quant.v1", "source_sha256": "1111111111111111111111111111111111111111111111111111111111111111", "default_type": "BF16", "layers": {"0": "HT3", "1": "HT4"}}}
               }}
             }
           }}
@@ -807,14 +811,14 @@
         "x-brewery-max-utf8-bytes": 4096,
         "description": "Absolute worker path, at most 4096 UTF-8 bytes, without '..' segments or control characters. Registration also requires a filename component."
       },
-      "ModelKind": {"type": "string", "enum": ["gguf", "hf", "safetensors", "hgn", "brewery-bundle", "hgn-v2", "ht43", "gsm8k-baseline", "gsm8k-predictions", "gsm8k-evaluation", "assets", "imatrix", "ngram", "vision", "mtp", "weight-calibration"]},
+      "ModelKind": {"type": "string", "enum": ["gguf", "hf", "safetensors", "hgn", "hgn-archive", "brewery-bundle", "hgn-v2", "ht43", "gsm8k-baseline", "gsm8k-predictions", "gsm8k-evaluation", "assets", "imatrix", "ngram", "vision", "mtp", "weight-calibration"], "description": "hgn-archive is a structural native HGN archive, not an inference input."},
       "NewModel": {
         "type": "object", "required": ["host", "path", "kind"], "additionalProperties": false,
         "properties": {
           "name": {"description": "If null or omitted, use the path's filename.", "anyOf": [{"$ref": "#/components/schemas/Name"}, {"type": "null"}]},
           "host": {"$ref": "#/components/schemas/HostId"},
           "path": {"$ref": "#/components/schemas/AbsoluteWorkerPath", "pattern": "/(?!\\.(?:/|$))[^/]+(?:/+\\.)*/*$"},
-          "kind": {"anyOf": [{"$ref": "#/components/schemas/ModelKind"}, {"const": "bf16-checkpoint"}]}
+          "kind": {"anyOf": [{"$ref": "#/components/schemas/ModelKind"}, {"const": "bf16-checkpoint"}], "not": {"const": "hgn-archive"}}
         }
       },
       "Model": {
@@ -862,7 +866,7 @@
       "HostCapabilityMap": {
         "type": "object",
         "description": "Per-worker availability. It has one boolean for each job kind and the extra capabilities listed below. hf_download is false unless the operator opts in to managed Hugging Face downloads. convert_components is true only if the operator enabled component replacement for a Hugging Face source. custom_profiles is true only if the operator enabled custom profiles with a separate CPU-only converter. gguf_output is true only if the operator set up the GGUF quantizer. gguf_hf_output also requires the bounded Hugging Face exporter. gguf_safetensors_output is a separate opt-in for workers that can pass standalone SafeTensors and a registered assets directory to that exporter. It requires gguf_output; gguf_hf_output alone does not enable it. gguf_layer_recipe opts a worker in to managed GGUF layer recipes; gguf_output and the applicable source capability are also required. This flag is not a job kind and is not in the aggregate capabilities map. weight_visual enables inventory, tiles, and source-pinned proposals and tuning. weight_hgn enables native HGN sources. weight_packed allows packed weight jobs. weight_safetensors enables standalone SafeTensors and indexed HF weight jobs. The weight capabilities are additional to the per-job opt-in and are false by default. The reasons map can say why.",
-        "propertyNames": {"anyOf": [{"$ref": "#/components/schemas/JobKind"}, {"enum": ["convert_components", "custom_profiles", "gguf_output", "gguf_hf_output", "gguf_safetensors_output", "gguf_rocmfpx_output", "gguf_layer_recipe", "hy4_plan", "hy4_encode", "weight_visual", "weight_hgn", "weight_packed", "weight_safetensors"]}]},
+        "propertyNames": {"anyOf": [{"$ref": "#/components/schemas/JobKind"}, {"enum": ["convert_components", "custom_profiles", "gguf_output", "gguf_hf_output", "gguf_safetensors_output", "gguf_rocmfpx_output", "gguf_layer_recipe", "hgn_layer_recipe", "hy4_plan", "hy4_encode", "weight_visual", "weight_hgn", "weight_packed", "weight_safetensors"]}]},
         "additionalProperties": {"type": "boolean"}, "minProperties": 25
       },
       "ConfiguredToken": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
@@ -939,7 +943,8 @@
               {"$ref": "#/components/schemas/BaselineOptions"}, {"$ref": "#/components/schemas/BenchmarkOptions"},
               {"$ref": "#/components/schemas/CacheCleanupOptions"}, {"$ref": "#/components/schemas/EmptyOptions"},
               {"$ref": "#/components/schemas/GgufLayerRecipeOptions"},
-              {"$ref": "#/components/schemas/Exl3LayerOptions"}
+              {"$ref": "#/components/schemas/Exl3LayerOptions"},
+              {"$ref": "#/components/schemas/HgnLayerRecipeOptions"}
             ]
           },
           "prompt_id": {"$ref": "#/components/schemas/Id"},
@@ -1517,11 +1522,31 @@
         "type": "object", "additionalProperties": false, "required": ["layer_recipe"],
         "properties": {"layer_recipe": {"$ref": "#/components/schemas/GgufLayerRecipe"}}
       },
+      "HgnLayerRecipe": {
+        "type": "object", "additionalProperties": false,
+        "required": ["schema", "source_sha256", "default_type", "layers"],
+        "properties": {
+          "schema": {"const": "brewery.layer-quant.v1"},
+          "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}(?![\\s\\S])", "description": "SHA-256 of standalone SafeTensors or the indexed HF source tree."},
+          "default_type": {"enum": ["F32", "F16", "BF16", "Q8G64"]},
+          "layers": {
+            "type": "object", "minProperties": 1, "maxProperties": 256,
+            "description": "At least one layer must select HT3 or HT4. Each trellis-encoded matrix needs both dimensions divisible by 128.",
+            "propertyNames": {"pattern": "^(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])(?![\\s\\S])"},
+            "additionalProperties": {"enum": ["F32", "F16", "BF16", "Q8G64", "HT3", "HT4"]},
+            "not": {"additionalProperties": {"enum": ["F32", "F16", "BF16", "Q8G64"]}}
+          }
+        }
+      },
+      "HgnLayerRecipeOptions": {
+        "type": "object", "additionalProperties": false, "required": ["layer_recipe"],
+        "properties": {"layer_recipe": {"$ref": "#/components/schemas/HgnLayerRecipe"}}
+      },
       "NewConversion": {
         "description": "Request for the one-submit workflow inspect, plan, convert and verify. Top-level fields are closed. For HGN output, the input rules and options are the same as for the convert job. The verify stage uses decode_backend. To use a saved custom profile, set profile_revision and do not set options.profile. A custom profile needs a Hugging Face source, the cpu backend for every encoder and for decode_backend, and a worker with capabilities.custom_profiles true; otherwise the controller returns 400 or 409.\n\nOrdinary GGUF output (format gguf, without options.layer_recipe). For hf and gguf sources, input_ids is [source, optional imatrix]. For standalone safetensors, input_ids is [weights, assets, optional imatrix]. The second ID must identify a registered assets directory with model config and tokenizer files. The worker does not search next to the weights file. The weights, assets and any imatrix must be registered on the same worker, and the job must run there. All GGUF workflows need capabilities.gguf_output; hf also needs gguf_hf_output, and safetensors also needs gguf_safetensors_output. The bounded exporter accepts only a small set of dense architectures and rejects Flash-Next. A GGUF source must hold only floating-point weights and be one file. An hgn source is refused. options accepts only preset (an ID from getGgufCatalog; default is the catalog default) and threads. decode_backend and every other option are refused. profile_revision must name a GGUF profile and cannot be combined with options.preset. A preset or tensor type that the catalog marks requires_imatrix needs the imatrix input, or the controller returns 400.\n\nManaged GGUF layer recipe (format gguf, with options.layer_recipe). The recipe is the only option. Submit one indexed HF snapshot ID or [standalone SafeTensors ID, assets directory ID]. Use the source worker, which must also advertise gguf_layer_recipe. Do not use auto, an imatrix, a saved profile or a decode backend.\n\nFor either GGUF form, the controller registers artifact_model_id, a gguf model, only after independent verification passes. A GGUF conversion is not a release qualification.",
         "type": "object", "required": ["input_ids"], "additionalProperties": false,
         "properties": {
-          "format": {"enum": ["hgn", "gguf"], "default": "hgn", "description": "Output format. Absent or hgn: the HGN workflow, unchanged. gguf: see the GGUF rules in the description of this schema."},
+          "format": {"enum": ["hgn", "gguf"], "default": "hgn", "description": "Output format. HGN with options.layer_recipe uses the managed native HT3/HT4 workflow. HGN without it keeps the ordinary HGN workflow."},
           "host": {
             "anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}, {"type": "null"}],
             "description": "Omitted or null: the source model's host. auto: an eligible worker of the configured quantization pool. Otherwise: that worker."
@@ -1557,12 +1582,25 @@
             }}
           }, "not": {"required": ["decode_backend"]}}
         },
-        "else": {"properties": {
+        "else": {
+          "if": {"required": ["options"], "properties": {"options": {"required": ["layer_recipe"]}}},
+          "then": {
+            "description": "Managed native HGN HT3/HT4 recipe. Submit an indexed dense Llama or Qwen2 HF source, or standalone SafeTensors followed by registered configuration and tokenizer assets. The same local source worker must advertise hgn_layer_recipe and support all four stages. No imatrix or calibration input is used. The controller registers an hgn-archive only after structural verification. This is not an EXL3 or reference QTIP checkpoint and is not runnable.",
+            "properties": {
+              "host": {"not": {"const": "auto"}},
+              "input_ids": {"minItems": 1, "maxItems": 2, "x-brewery-input-kinds": [["hf", "safetensors"]], "x-brewery-additional-input-kinds": ["assets"]},
+              "options": {"$ref": "#/components/schemas/HgnLayerRecipeOptions"},
+              "decode_backend": {"type": "null"},
+              "profile_revision": {"type": "null"}
+            }
+          },
+          "else": {"properties": {
           "input_ids": {"$ref": "#/components/schemas/ConversionInputIds"},
           "options": {"$ref": "#/components/schemas/ConversionOptions"},
           "decode_backend": {"$ref": "#/components/schemas/EncoderBackend"},
           "profile_revision": {"$ref": "#/components/schemas/ProfileRevision"}
-        }}
+          }}
+        }
       },
       "ConversionState": {
         "type": "string", "enum": ["running", "succeeded", "failed", "cancelled"],
@@ -1577,7 +1615,7 @@
           "requested_host": {"const": "auto", "description": "Present if auto routing was requested."},
           "format": {"const": "gguf", "description": "Present only for a GGUF conversion. Absent means HGN."},
           "input_ids": {"type": "array", "items": {"$ref": "#/components/schemas/Id"}},
-          "options": {"type": "object", "description": "Options submitted for the workflow.", "properties": {"layer_recipe": {"$ref": "#/components/schemas/GgufLayerRecipe"}}},
+          "options": {"type": "object", "description": "Options submitted for the workflow.", "properties": {"layer_recipe": {"anyOf": [{"$ref": "#/components/schemas/GgufLayerRecipe"}, {"$ref": "#/components/schemas/HgnLayerRecipe"}]}}},
           "state": {"$ref": "#/components/schemas/ConversionState"},
           "stage": {"$ref": "#/components/schemas/ConversionStage", "description": "The current stage while running. After a stop, the stage where the workflow stopped or finished."},
           "job_ids": {
@@ -1594,7 +1632,7 @@
           "error": {"type": "string", "description": "Error of the failed child job when the worker gave one. Human-readable, not a stable machine code."},
           "artifact_model_id": {
             "$ref": "#/components/schemas/Id",
-            "description": "Model record of the converted output. For GGUF, the controller registers it only after verify passes. For HGN, it can be registered before verification passes. Check state."
+            "description": "Model record of the converted output. For GGUF and managed native HGN layer recipes, the controller registers it only after verify passes. Ordinary HGN can register it before verification. Check state."
           },
           "created_at": {"$ref": "#/components/schemas/UnixMillis"}, "updated_at": {"$ref": "#/components/schemas/UnixMillis"},
           "finished_at": {"$ref": "#/components/schemas/UnixMillis"}

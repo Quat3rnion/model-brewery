@@ -234,7 +234,8 @@ def tensor_plan(tensors, recipe, config):
 
 
 def write_input(source, plan, stream):
-    stream.write(json.dumps(plan, separators=(",", ":")).encode("ascii") + b"\n")
+    if stream is not None:
+        stream.write(plan_header(plan))
     hashes = {}
     for row in plan:
         t = source.tensors[row["name"]]
@@ -244,10 +245,16 @@ def write_input(source, plan, stream):
             for offset in range(0, size, CHUNK):
                 raw = read_at(fd, t.start + offset, min(CHUNK, size - offset))
                 digest.update(raw)
-                stream.write(raw)
+                if stream is not None:
+                    stream.write(raw)
         hashes[t.name] = digest.hexdigest()
-    stream.seek(0)
+    if stream is not None:
+        stream.seek(0)
     return hashes
+
+
+def plan_header(plan):
+    return json.dumps(plan, separators=(",", ":")).encode("ascii") + b"\n"
 
 
 def helper_run(helper, command, model, **kwargs):
@@ -255,6 +262,81 @@ def helper_run(helper, command, model, **kwargs):
     need(out.returncode == 0,
          f"native HGN {command} failed: {out.stderr[:2048].decode('utf-8', errors='replace').strip()}")
     return out.stdout
+
+
+def checked_plan(source, recipe, assets, stage):
+    assets_hashes = copy_assets(source, assets, stage)
+    cfg = parse_json((stage / "config.json").read_bytes())
+    plan = tensor_plan(source.tensors, recipe, cfg)
+    label = "Qwen2" if cfg["model_type"] == "qwen2" else "Llama"
+    check_tokenizer(stage / "tokenizer.json", cfg["vocab_size"], label)
+    return assets_hashes, cfg, plan
+
+
+def check_tied_head(source, cfg, hashes):
+    if cfg.get("tie_word_embeddings") and "lm_head.weight" in source.tensors:
+        head, embed = source.tensors["lm_head.weight"], source.tensors["model.embed_tokens.weight"]
+        need(head.dtype == embed.dtype and hashes[head.name] == hashes[embed.name],
+             "tied Llama head differs from input embeddings")
+
+
+def compile_recipe(source_path, recipe_path, assets, helper, work):
+    recipe, recipe_sha = parse_recipe(recipe_path)
+    source = Files(source_path, recipe["source_sha256"])
+    with tempfile.TemporaryDirectory(prefix=".hgn-plan-", dir=work) as scratch:
+        stage = Path(scratch)
+        asset_hashes, cfg, plan = checked_plan(source, recipe, assets, stage)
+        asset_bytes = sum((stage / name).stat().st_size for name in asset_hashes)
+        # Ask the same pinned native layout code used to write the archive.
+        estimate = subprocess.run([helper, "plan"], input=plan_header(plan),
+                                  capture_output=True, timeout=120, check=True)
+        sizes = parse_json(estimate.stdout)
+        # The indented receipt has fixed fields, bounded asset names, and
+        # per-tensor metadata with at most two named rotation planes.
+        sizes.update(asset_bytes=asset_bytes, receipt_max_bytes=4096 + 2048 * len(plan))
+    source.check_current()
+    return {"architecture": cfg["architectures"][0], "asset_sha256": asset_hashes,
+            "recipe_sha256": recipe_sha, "tensors": plan, "sizes": sizes,
+            "trellis": {"spec_commit": TRELLIS_SPEC_COMMIT,
+                        "encoder_sha256": TRELLIS_ENCODER_SHA256}}
+
+
+def verify(source_path, recipe_path, output, assets, helper, work):
+    recipe, recipe_sha = parse_recipe(recipe_path)
+    source = Files(source_path, recipe["source_sha256"])
+    with tempfile.TemporaryDirectory(prefix=".hgn-verify-", dir=work) as scratch:
+        stage = Path(scratch)
+        asset_hashes, cfg, plan = checked_plan(source, recipe, assets, stage)
+        source_hashes = write_input(source, plan, None)
+        check_tied_head(source, cfg, source_hashes)
+        model = stage / "model.hgn"
+        with open_path(output, OPEN_DIR) as root:
+            need(set(os.listdir(root)) == set(asset_hashes) | {"model.hgn", RECEIPT},
+                 "unexpected HGN archive members")
+            for name in [*asset_hashes, "model.hgn", RECEIPT]:
+                with open_at(root, [name], OPEN_FILE) as fd:
+                    info = os.fstat(fd)
+                    limit = (128 << 20) if name == "model.hgn" else (
+                        (8 << 20) if name == RECEIPT else ASSETS[name])
+                    need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                         and 0 < info.st_size <= limit, f"invalid HGN archive member: {name}")
+                    if name == "model.hgn":
+                        # Give the native reader a private regular file, never a
+                        # mutable pathname selected by a job.
+                        with model.open("xb") as out:
+                            for offset in range(0, info.st_size, CHUNK):
+                                out.write(read_at(fd, offset, min(CHUNK, info.st_size - offset)))
+                    elif name == RECEIPT:
+                        recorded = parse_json(read_at(fd, 0, info.st_size))
+                    else:
+                        need(hash_fd(fd, info.st_size) == asset_hashes[name],
+                             f"HGN archive asset changed: {name}")
+                    need(stamp(info) == stamp(os.fstat(fd)), f"HGN archive member changed: {name}")
+        native = parse_json(helper_run(helper, "inspect", model))
+        checked = make_receipt(recipe, recipe_sha, asset_hashes, plan, source_hashes, native, model, cfg)
+        need(checked == recorded, "HGN archive receipt does not match independent reader verification")
+        source.check_current()
+        return checked
 
 
 def export(source_path, recipe_path, output, assets, helper):
@@ -270,18 +352,11 @@ def export(source_path, recipe_path, output, assets, helper):
     with tempfile.TemporaryDirectory(prefix=".layer-recipe-hgn-", dir=output.parent) as scratch:
         stage = Path(scratch) / "bundle"
         stage.mkdir(mode=0o700)
-        assets_hashes = copy_assets(source, assets, stage)
-        cfg = parse_json((stage / "config.json").read_bytes())
-        plan = tensor_plan(source.tensors, recipe, cfg)
-        label = "Qwen2" if cfg["model_type"] == "qwen2" else "Llama"
-        check_tokenizer(stage / "tokenizer.json", cfg["vocab_size"], label)
+        assets_hashes, cfg, plan = checked_plan(source, recipe, assets, stage)
         model = stage / "model.hgn"
         with tempfile.TemporaryFile(dir=scratch) as stream:
             source_hashes = write_input(source, plan, stream)
-            if cfg.get("tie_word_embeddings") and "lm_head.weight" in source.tensors:
-                head, embed = source.tensors["lm_head.weight"], source.tensors["model.embed_tokens.weight"]
-                need(head.dtype == embed.dtype and source_hashes[head.name] == source_hashes[embed.name],
-                     "tied Llama head differs from input embeddings")
+            check_tied_head(source, cfg, source_hashes)
             helper_run(helper, "write", model, stdin=stream)
         native = parse_json(helper_run(helper, "inspect", model))
         receipt = make_receipt(recipe, recipe_sha, assets_hashes, plan, source_hashes, native, model, cfg)
@@ -321,7 +396,7 @@ def make_receipt(recipe, recipe_sha, assets, plan, source_hashes, native, model,
              f"invalid native HGN payload hash: {name}")
         original = source_hashes[name]
         need(src != target or digest == original, f"unchanged HGN payload differs: {name}")
-        detail = {"name": name, "shape": expected["shape"], "source_type": src,
+        detail = {"name": name, "shape": list(expected["shape"]), "source_type": src,
                   "native_type": target, "source_payload_sha256": original,
                   "native_payload_sha256": digest}
         if target in TRELLIS_BITS:
@@ -369,12 +444,21 @@ def main(argv=None):
     parser.add_argument("output", type=Path, help="new HGN bundle directory")
     parser.add_argument("--assets", type=Path, help="directory with standalone checkpoint config/tokenizer")
     parser.add_argument("--helper", required=True, help="trusted upstream native HGN adapter executable")
+    parser.add_argument("--managed", choices=("compile", "convert", "verify"), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     try:
-        receipt = export(args.source, args.recipe, args.output, args.assets, args.helper)
+        if args.managed == "compile":
+            receipt = compile_recipe(args.source, args.recipe, args.assets, args.helper, Path.cwd())
+        elif args.managed == "verify":
+            receipt = verify(args.source, args.recipe, args.output, args.assets, args.helper, Path.cwd())
+        else:
+            receipt = export(args.source, args.recipe, args.output, args.assets, args.helper)
     except (ValueError, OSError, KeyError, TypeError, RecursionError, subprocess.SubprocessError) as exc:
         print(f"layer-recipe-hgn: {exc}", file=sys.stderr)
         return 1
+    if args.managed is not None:
+        print(json.dumps(receipt))
+        return 0
     print(json.dumps({"receipt": str(args.output / RECEIPT),
                       "model_sha256": receipt["model"]["sha256"],
                       "runtime_load_verified": receipt["runtime_load_verified"],

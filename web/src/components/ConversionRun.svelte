@@ -22,8 +22,9 @@
   const source = $derived(models.find((m) => m.id === c.inputIds[0]));
   const output = $derived(c.artifactModelId ? models.find((m) => m.id === c.artifactModelId) : undefined);
   const ggufPreset = $derived(c.format === 'gguf' && typeof c.options.preset === 'string' ? c.options.preset : null);
-  const layerRecipe = $derived(c.format === 'gguf' && !!c.options.layer_recipe);
-  const profile = $derived(layerRecipe ? 'GGUF layer recipe' : c.format === 'gguf' ? `GGUF ${c.profileRevision ? `${c.profileName ?? 'profile'} · ${c.profileRevision.slice(0, 10)}` : (ggufPreset ?? '')}` : c.profileRevision ? `${c.profileName ?? 'Custom profile'} · ${c.profileRevision.slice(0, 10)}` : typeof c.options.profile === 'string' ? (c.options.profile === 'v2' ? 'HGN v2' : c.options.profile === 'ht43' ? 'HT43' : c.options.profile) : 'Converter default');
+  const layerRecipe = $derived(!!c.options.layer_recipe);
+  const nativeRecipe = $derived(c.format !== 'gguf' && layerRecipe);
+  const profile = $derived(layerRecipe ? (nativeRecipe ? 'HGN layer recipe' : 'GGUF layer recipe') : c.format === 'gguf' ? `GGUF ${c.profileRevision ? `${c.profileName ?? 'profile'} · ${c.profileRevision.slice(0, 10)}` : (ggufPreset ?? '')}` : c.profileRevision ? `${c.profileName ?? 'Custom profile'} · ${c.profileRevision.slice(0, 10)}` : typeof c.options.profile === 'string' ? (c.options.profile === 'v2' ? 'HGN v2' : c.options.profile === 'ht43' ? 'HT43' : c.options.profile) : 'Converter default');
 
   const TONE: Record<StageStatus, Tone> = { pending: 'muted', queued: 'muted', running: 'info', succeeded: 'ok', failed: 'bad', cancelled: 'warn', skipped: 'muted', unknown: 'muted' };
   const LABEL: Record<StageStatus, string> = { pending: 'Waiting', queued: 'Queued', running: 'Running', succeeded: 'Done', failed: 'Failed', cancelled: 'Cancelled', skipped: 'Not run', unknown: 'Unknown' };
@@ -42,7 +43,8 @@
       if (id && j && j.state === 'succeeded' && !brewery.details[id]) void brewery.loadJob(id).catch(() => {});
     }
   });
-  const overall = $derived(c.state === 'succeeded' && c.format === 'gguf' ? ['ok', 'Verified GGUF ready'] as [Tone, string]
+  const overall = $derived(c.state === 'succeeded' && nativeRecipe ? ['ok', 'Structural HGN archive ready'] as [Tone, string]
+    : c.state === 'succeeded' && c.format === 'gguf' ? ['ok', 'Verified GGUF ready'] as [Tone, string]
     : OVERALL[c.state] ?? (['muted', c.state] as [Tone, string]));
 
   let confirming = $state(false);
@@ -111,7 +113,8 @@
   {#if c.state === 'succeeded'}
     <p class="small">
       {#if c.artifactModelId}Output: <a href="#/library?entry={encodeURIComponent(c.artifactModelId)}">{output ? modelLabel(output) : c.artifactModelId} in the Library</a>.{:else}Finished; the controller did not name an output entry.{/if}
-      File verification passed. This does not prove GPU execution or quality.
+      {#if nativeRecipe}The native reader verified the archive structure. Runtime loading and quality were not tested.
+      {:else}File verification passed. This does not prove GPU execution or quality.{/if}
     </p>
   {/if}
 </article>

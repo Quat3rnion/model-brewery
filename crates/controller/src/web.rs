@@ -482,6 +482,11 @@ async fn add_model(
         return Ok(response);
     }
     let model = request.validate().map_err(ApiError::bad)?;
+    if model.kind == brewery_worker::hgn_recipe::ARCHIVE {
+        return Err(ApiError::bad(
+            "native HGN archives are registered only by verified recipes",
+        ));
+    }
     if model.host == crate::backend_hf::ID {
         return Err(ApiError::bad(
             "backend files are registered only by verified jobs",

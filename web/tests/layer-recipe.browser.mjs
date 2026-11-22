@@ -23,6 +23,7 @@ const assets = { id: 'assets', name: 'Matching tokenizer', kind: 'assets', host:
 const foreignAssets = { ...assets, id: 'remote-assets', name: 'Foreign tokenizer', host: indexed.host };
 const unavailableAssets = { ...assets, id: 'missing-assets', name: 'Unavailable tokenizer', available: false };
 const output = { id: 'output', name: 'Verified mixed GGUF', kind: 'gguf', host: standalone.host, path: '/models/output.gguf' };
+const archive = { id: 'archive', name: 'Native HGN archive', kind: 'hgn-archive', host: standalone.host, path: '/models/converted.hgn-bundle' };
 const first = { mode: 'inventory', offset: 0, limit: 128 };
 const writes = [];
 const requests = [];
@@ -30,6 +31,7 @@ let run;
 let verified = false;
 let indexedEnabled = false;
 let indexedRun;
+let nativeRun;
 let releaseStart;
 const startGate = new Promise(resolve => { releaseStart = resolve; });
 const jobs = new Map();
@@ -74,16 +76,16 @@ try {
     if (method === 'GET') {
       if (pathname === '/api/state') return route.fulfill({ json: {
         hosts: [
-          { id: standalone.host, capabilities: { ...capabilities, ...managed } },
+          { id: standalone.host, capabilities: { ...capabilities, ...managed, hgn_layer_recipe: true } },
           { id: indexed.host, capabilities: { ...capabilities, ...managed, gguf_hf_output: true, gguf_layer_recipe: indexedEnabled },
             reasons: { gguf_layer_recipe: 'GGUF recipe exporter is not enabled on the source host.' } },
         ],
-        models: [standalone, indexed, flash, assets, foreignAssets, unavailableAssets, ...(verified ? [output] : [])],
+        models: [standalone, indexed, flash, assets, foreignAssets, unavailableAssets, ...(verified ? [output] : []), ...(nativeRun ? [archive] : [])],
         prompts: [], jobs: [...jobs.values()].map(({ result, ...summary }) => summary),
       } });
       if (pathname === '/api/profiles') return route.fulfill({ json: [] });
       if (pathname === '/api/conversions') return route.fulfill({ json: run ? [
-        verified ? { ...run, state: 'succeeded', artifact_model_id: output.id } : run, ...(indexedRun ? [indexedRun] : []),
+        verified ? { ...run, state: 'succeeded', artifact_model_id: output.id } : run, ...(indexedRun ? [indexedRun] : []), ...(nativeRun ? [nativeRun] : []),
       ] : [] });
       if (pathname === '/api/profiles/catalog') return route.fulfill({ json: { schema: 1, tensors: [] } });
       if (pathname === '/api/profiles/gguf-catalog') {
@@ -98,6 +100,13 @@ try {
       const request = route.request().postDataJSON();
       if (pathname === '/api/conversions') {
         requests.push({ request, key: route.request().headers()['idempotency-key'] });
+        if (request.format === 'hgn') {
+          const { format, ...native } = request;
+          nativeRun = { ...native, id: 'native-workflow', state: 'succeeded', stage: 'verify',
+            job_ids: { inspect: 'native-inspect', plan: 'native-plan', convert: 'native-convert', verify: 'native-verify' },
+            artifact_model_id: archive.id };
+          return route.fulfill({ json: nativeRun, status: 201 });
+        }
         if (request.input_ids[0] === indexed.id) {
           indexedRun = { ...request, id: 'indexed-workflow', state: 'running', stage: 'inspect', job_ids: { inspect: 'indexed-inspect' } };
           return route.fulfill({ json: indexedRun, status: 201 });
@@ -197,7 +206,6 @@ try {
   assert.equal(await registered.getAttribute('href'), '#/library?entry=output');
   await page.getByRole('radio', { name: 'HGN archive' }).check();
   await page.getByText(/Offline HGN exporter:/).waitFor();
-  await page.getByText(/Managed HGN layer recipes are not supported/).waitFor();
   assert.ok(await runButton.isDisabled());
   await page.getByRole('alert').filter({ hasText: /Q8_0.*HGN/ }).waitFor();
   assert.equal(await layer(0).inputValue(), 'Q8_0');
@@ -205,6 +213,17 @@ try {
   assert.ok(await downloadButton.isDisabled());
   await layer(0).selectOption('Q8G64');
   assert.deepEqual(await download(), { ...recipe, layers: { 0: 'Q8G64', 1: 'BF16' } });
+  await layer(0).selectOption('HT4');
+  await runButton.click();
+  const native = page.getByRole('article', { name: /Standalone weights.*HGN layer recipe/ });
+  await native.getByText('Structural HGN archive ready').waitFor();
+  assert.deepEqual(requests[2].request, {
+    format: 'hgn', host: standalone.host, input_ids: [standalone.id, assets.id],
+    options: { layer_recipe: { ...recipe, layers: { 0: 'HT4', 1: 'BF16' } } },
+  });
+  await native.getByText(/Runtime loading and quality were not tested/).waitFor();
+  assert.equal(await native.getByRole('link', { name: /in the Library/ }).getAttribute('href'), '#/library?entry=archive');
+  await layer(0).selectOption('Q8G64');
 
   const defaultType = page.getByRole('combobox', { name: 'Default type', exact: true });
   await defaultType.selectOption('Q8G64');
@@ -232,22 +251,22 @@ try {
   await page.getByRole('alert').filter({ hasText: /No layer-recipe exporter admits this pinned Flash-Next checkpoint/ }).waitFor();
   assert.equal(await downloadButton.count(), 0);
   assert.ok(await runButton.isDisabled());
-  assert.equal(requests.length, 2, 'unsupported formats, pinned Flash-Next and unconfigured workers do not submit');
+  assert.equal(requests.length, 3, 'unsupported formats, pinned Flash-Next and unconfigured workers do not submit');
   indexedEnabled = true;
   await choose('Indexed weights');
   await layer(9).selectOption('F16');
   await runButton.click();
   await page.getByRole('link', { name: 'Inspect job indexed-inspect' }).waitFor();
-  assert.deepEqual(requests[2].request, {
+  assert.deepEqual(requests[3].request, {
     format: 'gguf', host: indexed.host, input_ids: [indexed.id],
     options: { layer_recipe: { schema: 'brewery.layer-quant.v1', source_sha256: treeSha, default_type: 'BF16', layers: { 9: 'F16' } } },
   });
-  assert.notEqual(requests[2].key, requests[0].key);
+  assert.notEqual(requests[3].key, requests[0].key);
   await choose('Standalone weights');
   await layer(0).waitFor();
   assert.equal(await downloadButton.isEnabled(), true);
   assert.equal(await assetSelect.inputValue(), '', 'changing source clears the explicit asset choice');
-  assert.equal(requests.length, 3);
+  assert.equal(requests.length, 4);
   assert.deepEqual(reads, ['wrong', 'cached', 'tree-0', 'tree-128'], 'invalid receipt is skipped; verified receipts are reused on return');
   assert.deepEqual(writes, [
     { pathname: '/api/jobs', request: { kind: 'weight_inspect', host: indexed.host, input_ids: [indexed.id], options: first } },

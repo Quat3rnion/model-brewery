@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, ensure};
 pub mod exl3_layer;
 pub mod hf_download;
+pub mod hgn_recipe;
 pub mod hy4;
 pub mod operational;
 pub mod resources;

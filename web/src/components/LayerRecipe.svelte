@@ -25,7 +25,7 @@
   const currentJobs = $derived([...submitted.values()].flatMap(job =>
     job ? [brewery.state?.jobs.find(j => j.id === job.id) ?? job] : []));
   // Terminal inventory jobs may be reused only after their receipts have been
-  // checked. The offline exporter verifies those bytes again before it writes.
+  // checked. The exporter verifies those bytes again before it writes.
   const jobs = $derived([
     ...currentJobs,
     ...(brewery.state?.jobs ?? []).filter(job => job.kind === 'weight_inspect' &&
@@ -124,11 +124,11 @@
   const assets = $derived((brewery.state?.models ?? []).filter(m => m.kind === 'assets' && m.host === source.host && m.available !== false));
   let assetId = $state('');
   const selectedAsset = $derived(assets.find(asset => asset.id === assetId));
-  const setup = $derived(format !== 'gguf' || flash ? '' : !host ? 'The controller did not report a worker for this source.'
-    : [...new Set(['gguf_layer_recipe', 'gguf_output', standalone ? 'gguf_safetensors_output' : 'gguf_hf_output', ...STAGES]
-      .map(kind => capability(host, kind)).flatMap(c => !c.allowed && c.reason ? [c.reason] : []))].join(' '));
+  const requirements = $derived(format === 'hgn' ? ['hgn_layer_recipe', ...STAGES]
+    : ['gguf_layer_recipe', 'gguf_output', standalone ? 'gguf_safetensors_output' : 'gguf_hf_output', ...STAGES]);
+  const setup = $derived(flash ? '' : !host ? 'The controller did not report a worker for this source.'
+    : [...new Set(requirements.map(kind => capability(host, kind)).flatMap(c => !c.allowed && c.reason ? [c.reason] : []))].join(' '));
   const runBlockers = $derived.by(() => {
-    if (format === 'hgn') return ['Managed HGN layer recipes are not supported by the conversion API. HGN output is an offline archive, not a runnable model.'];
     if (flash) return ['Select a checkpoint supported by the layer-recipe exporter.'];
     const out: string[] = [];
     if (setup) out.push(setup);
@@ -136,11 +136,14 @@
     if (!recipe && !problem) out.push(!complete ? 'Wait for the source inventory.' : !layers.length
       ? 'Choose a source with recognized layer matrices.' : tooMany ? 'Use at most 256 layer overrides.' : 'Change the incompatible types.');
     if (problem) out.push('Resolve the source inventory problem above.');
+    if (format === 'hgn' && recipe && !Object.values(recipe.layers).some(type => type === 'HT3' || type === 'HT4')) {
+      out.push('Select HT3 or HT4 for at least one layer to run a managed HGN recipe.');
+    }
     if (standalone && !selectedAsset) out.push('Select matching config and tokenizer assets on the source host.');
     return out;
   });
   const body = $derived<ConversionBody | null>(recipe && !runBlockers.length ? {
-    format: 'gguf',
+    format,
     host: source.host,
     input_ids: selectedAsset && standalone ? [source.id, selectedAsset.id] : [source.id],
     options: { layer_recipe: recipe },
@@ -211,11 +214,12 @@
     <p class="hint">The GGUF exporter supports GPT-2 and Qwen2 layouts. Layer overrides apply to decoder layer matrices. The default also applies to other eligible matrices.</p>
   {:else}
     <p class="hint">Offline HGN exporter: <code>python3 tools/layer_recipe_hgn.py SOURCE layer-recipe.json OUTPUT --helper PATH</code>. For a standalone file, also supply <code>--assets DIR</code>.</p>
-    <p class="hint">Verified for dense Llama. Audited dense Qwen2 support is in progress. Types apply to layer matrices only. The native HGN archive is not a runnable model.</p>
+    <p class="hint">Managed native HGN checks dense Llama and Qwen2 layouts on a configured local worker. HT3 and HT4 apply only to layer matrices. Verification checks the archive structure; it does not check runtime loading or model quality.</p>
+    <p class="hint">Native HGN HT3/HT4 is not EXL3 or a reference QTIP checkpoint. GGUF KT encoding is not available through this recipe.</p>
   {/if}
 {/if}
 
-{#if format === 'gguf' && standalone}
+{#if standalone}
   <label class="field">
     Config and tokenizer assets
     <select class="input" bind:value={assetId} disabled={!assets.length}>
@@ -227,7 +231,7 @@
 {/if}
 <Submit blockers={runBlockers} busy={starter.busy} onclick={run}>Run layer recipe</Submit>
 {#if setup}
-  <p class="hint">Ask an operator to configure managed GGUF layer recipes on this worker. <a href="#/settings/infrastructure?host={encodeURIComponent(source.host)}">Open host settings</a>.</p>
+  <p class="hint">Ask an operator to configure managed {format.toUpperCase()} layer recipes on this worker. <a href="#/settings/infrastructure?host={encodeURIComponent(source.host)}">Open host settings</a>.</p>
 {/if}
 <div aria-live="polite" class="xs">
   {#if currentSubmission && starter.error}

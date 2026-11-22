@@ -3,7 +3,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use bf16_to_hgn::{
     codec::{encode_rows, generate_signs, ht_row_scales, Encoding, QuantMeta},
-    container::{Reader, Writer},
+    container::{layout, Reader, Writer},
     rows_cols, ContainerPlan, Origin, Rotation, TensorPlan, ENCODER_SHA256, SPEC_COMMIT,
 };
 use half::{bf16, f16};
@@ -158,7 +158,9 @@ fn write_tensor(
     Ok(())
 }
 
-fn write(path: &Path, mut input: impl BufRead) -> Result<()> {
+type Source = (usize, Encoding, usize, usize, usize);
+
+fn plan(mut input: impl BufRead) -> Result<(ContainerPlan, Vec<Source>, usize)> {
     let mut header = Vec::new();
     input
         .by_ref()
@@ -254,6 +256,11 @@ fn write(path: &Path, mut input: impl BufRead) -> Result<()> {
         }
         sources.push((index, from, rows, cols, bytes));
     }
+    Ok((plan, sources, header.len() + total))
+}
+
+fn write(path: &Path, mut input: impl BufRead) -> Result<()> {
+    let (plan, sources, _) = plan(&mut input)?;
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -323,8 +330,25 @@ fn inspect(path: &Path) -> Result<()> {
 fn main() -> Result<()> {
     let args: Vec<_> = env::args_os().skip(1).collect();
     match args.as_slice() {
+        [cmd] if cmd == "identity" => {
+            println!(
+                "{}",
+                json!({"protocol":"brewery-layer-hgn.v1",
+                    "spec_commit": SPEC_COMMIT, "encoder_sha256": ENCODER_SHA256,
+                    "layer_types": ["HT3", "HT4"]})
+            );
+            Ok(())
+        }
+        [cmd] if cmd == "plan" => {
+            let (plan, _, stream_bytes) = plan(io::stdin().lock())?;
+            println!(
+                "{}",
+                json!({"model_bytes": layout(&plan)?.file_size, "source_stream_bytes": stream_bytes})
+            );
+            Ok(())
+        }
         [cmd, path] if cmd == "write" => write(Path::new(path), io::stdin().lock()),
         [cmd, path] if cmd == "inspect" => inspect(Path::new(path)),
-        _ => bail!("usage: brewery-layer-quant-hgn write|inspect PATH"),
+        _ => bail!("usage: brewery-layer-quant-hgn identity|plan OR write|inspect PATH"),
     }
 }

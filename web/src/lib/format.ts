@@ -181,6 +181,7 @@ export const CONVERT_SOURCE_KINDS: ReadonlySet<string> = new Set(['hf', 'gguf', 
 export const EXTRA_INPUT_KINDS = ['assets', 'ngram', 'vision', 'mtp'] as const;
 
 export function kindLabel(kind: string): string {
+  if (kind === 'hgn-archive') return 'Structural HGN archive';
   return MODEL_KINDS.find((k) => k.value === kind)?.label ?? kind;
 }
 

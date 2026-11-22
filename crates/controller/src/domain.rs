@@ -67,6 +67,7 @@ impl NewModel {
                 | "hf"
                 | "safetensors"
                 | "hgn"
+                | brewery_worker::hgn_recipe::ARCHIVE
                 | "brewery-bundle"
                 | "hgn-v2"
                 | "ht43"
@@ -480,6 +481,14 @@ impl Host {
                 });
             }
         }
+        let native = brewery_worker::hgn_recipe::CAPABILITY;
+        let native_enabled = options.remove(native).unwrap_or(false) && config["local"] == true;
+        capabilities.insert(native.into(), native_enabled);
+        if !native_enabled {
+            reasons.entry(native.into()).or_insert_with(|| {
+                "Native HT3/HT4 layer recipes require a configured local source worker".into()
+            });
+        }
         let custom_profiles = options.remove("custom_profiles").unwrap_or(false);
         capabilities.insert("custom_profiles".into(), custom_profiles);
         if !custom_profiles {
@@ -752,6 +761,15 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
             _ => false,
         };
     let components_allowed = |host: &Host| {
+        if envelope
+            .options
+            .get("output_format")
+            .and_then(Value::as_str)
+            == Some(brewery_worker::hgn_recipe::FORMAT)
+        {
+            return host.capabilities[brewery_worker::hgn_recipe::CAPABILITY]
+                && inputs.iter().all(|input| input.host == host.id);
+        }
         if !job.format.is_hgn() {
             return host.capabilities["gguf_output"]
                 && (!envelope.options.contains_key("layer_recipe")
@@ -868,6 +886,25 @@ impl NewJob {
         prompt: Option<String>,
         format: crate::gguf::Format,
     ) -> Result<(Job, Envelope), String> {
+        self.build_inner(host, inputs, prompt, format, false)
+    }
+
+    pub(crate) fn build_hgn_recipe(
+        self,
+        host: String,
+        inputs: Vec<Model>,
+    ) -> Result<(Job, Envelope), String> {
+        self.build_inner(host, inputs, None, crate::gguf::Format::Hgn, true)
+    }
+
+    fn build_inner(
+        self,
+        host: String,
+        inputs: Vec<Model>,
+        prompt: Option<String>,
+        format: crate::gguf::Format,
+        hgn_recipe: bool,
+    ) -> Result<(Job, Envelope), String> {
         if let Some(text) = &prompt {
             check_prompt(text)?;
             if self.kind == "compare" && text.len() > 8192 {
@@ -887,7 +924,18 @@ impl NewJob {
         let weight_source = matches!(main, "gguf" | "hgn") || crate::weights::is_safetensors(main);
         let source = matches!(main, "hf" | "gguf" | "hgn");
         let baseline_source = self.options.contains_key("baseline_source");
-        let valid = if !format.is_hgn() {
+        let valid = if hgn_recipe {
+            matches!(
+                self.kind.as_str(),
+                "inspect" | "plan" | "convert" | "verify"
+            ) && inputs.iter().all(|input| input.host == host)
+                && brewery_worker::hgn_recipe::layout(
+                    self.kind == "verify",
+                    inputs
+                        .iter()
+                        .map(|input| (input.kind.as_str(), input.host.as_str())),
+                )
+        } else if !format.is_hgn() {
             if main == "safetensors" && host != "auto" && inputs[0].host != host {
                 return Err("standalone SafeTensors GGUF must run on the source worker".into());
             }
@@ -942,7 +990,7 @@ impl NewJob {
             {
                 return Err("Hy4 jobs require one same-worker HF source and the exact operation-specific Q8_0 override".into());
             }
-        } else if format.is_hgn() {
+        } else if format.is_hgn() && !hgn_recipe {
             if self.kind == brewery_worker::exl3_layer::JOB {
                 brewery_worker::exl3_layer::Spec::parse(&Value::Object(self.options.clone()))
                     .map_err(|e| format!("{e:#}"))?;

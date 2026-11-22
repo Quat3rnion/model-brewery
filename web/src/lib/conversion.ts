@@ -22,8 +22,8 @@ export interface ConversionBody {
   decode_backend?: string;
   /** Saved custom profile revision (64 hex). Replaces options.profile. */
   profile_revision?: string;
-  /** 'gguf' for llama.cpp GGUF output; omitted for HGN. */
-  format?: 'gguf';
+  /** The controller defaults to HGN if omitted. */
+  format?: 'gguf' | 'hgn';
 }
 
 /** Form value prefix for a saved profile revision in the profile select. */

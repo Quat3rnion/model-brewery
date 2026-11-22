@@ -1,6 +1,7 @@
 use crate::domain::{Envelope, Host, Job, Model, NewJob, NewModel, State, candidates, id, now};
 use crate::gguf::{Format, Selection};
 use crate::profiles::Profile;
+use brewery_worker::hgn_recipe;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -73,12 +74,11 @@ impl Conversion {
         }
         let layer_recipe = request.options.get("layer_recipe");
         if let Some(policy) = layer_recipe {
-            if request.format != Format::Gguf
-                || request.options.len() != 1
+            if request.options.len() != 1
                 || request.profile_revision.is_some()
                 || request.decode_backend.is_some()
             {
-                return Err("layer_recipe requires GGUF output and cannot be combined with other options, a profile or a decode backend".into());
+                return Err("layer_recipe cannot be combined with other options, a profile or a decode backend".into());
             }
             if !matches!(source.kind.as_str(), "hf" | "safetensors")
                 || request
@@ -86,11 +86,25 @@ impl Conversion {
                     .as_deref()
                     .is_some_and(|host| host != source.host)
                 || inputs.iter().any(|input| input.host != source.host)
-                || crate::gguf::input_layout(&inputs, false)?.is_some()
             {
                 return Err("layer_recipe requires indexed HF or standalone SafeTensors with assets, on the source worker, without an imatrix".into());
             }
-            crate::gguf::layer_recipe(policy)?;
+            if request.format.is_hgn() {
+                hgn_recipe::policy(policy)?;
+                if !hgn_recipe::layout(
+                    false,
+                    inputs
+                        .iter()
+                        .map(|input| (input.kind.as_str(), input.host.as_str())),
+                ) {
+                    return Err("native HGN recipes require one indexed HF source or standalone SafeTensors with registered assets".into());
+                }
+            } else {
+                if crate::gguf::input_layout(&inputs, false)?.is_some() {
+                    return Err("GGUF layer recipes do not accept an imatrix".into());
+                }
+                crate::gguf::layer_recipe(policy)?;
+            }
         }
         let gguf = if request.format == Format::Gguf && layer_recipe.is_none() {
             if request.decode_backend.is_some()
@@ -198,6 +212,31 @@ impl Conversion {
         output: Option<Model>,
         recipe: Option<&Value>,
     ) -> Result<(Job, Envelope), String> {
+        if self.native_layer_recipe() {
+            if stage == "verify" {
+                inputs.insert(1, output.ok_or("native HGN archive missing")?);
+            }
+            let (mut job, mut envelope) = NewJob {
+                kind: stage.into(),
+                host: Some(self.host.clone()),
+                input_ids: inputs.iter().map(|input| input.id.clone()).collect(),
+                options: Map::new(),
+                prompt_id: None,
+                prompt: None,
+            }
+            .build_hgn_recipe(self.host.clone(), inputs)?;
+            job.options = self.options.clone();
+            envelope.options = self.options.clone();
+            envelope
+                .options
+                .insert("output_format".into(), hgn_recipe::FORMAT.into());
+            if let Some(plan) = recipe {
+                envelope
+                    .options
+                    .insert("layer_plan_sha256".into(), plan.clone());
+            }
+            return Ok((job, envelope));
+        }
         if self.format == Format::Gguf {
             let verify = stage == "verify";
             if verify {
@@ -292,6 +331,10 @@ impl Conversion {
 
     pub fn current_job(&self) -> &str {
         &self.job_ids[&self.stage]
+    }
+
+    pub fn native_layer_recipe(&self) -> bool {
+        self.format.is_hgn() && self.options.contains_key("layer_recipe")
     }
 
     pub fn gguf_selection(
