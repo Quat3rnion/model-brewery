@@ -9,7 +9,7 @@
   import { selectionFrom } from '../../lib/components';
   import { missingSuites, readBenchmarkReport, requestedOf } from '../../lib/benchmark';
   import { formatBytes, shortHash } from '../../lib/format';
-  import { referenceInfo, accuracyText, isFullSplit, isSynthetic, loadProofText, obj, readScore, verifyVerdict, explicitVerdict } from '../../lib/reports';
+  import { referenceInfo, accuracyText, isFullSplit, isSynthetic, loadProofText, obj, readScore, fileVerificationStatus, explicitVerdict, NOT_RELEASE_QUALIFIED } from '../../lib/reports';
   import type { JobDetail } from '../../lib/types';
 
   let { job }: { job: JobDetail } = $props();
@@ -127,11 +127,11 @@
     {/if}
 
     {#if kind === 'verify' || result.file_verification}
-      {@const v = verifyVerdict(result)}
+      {@const v = fileVerificationStatus(result)}
       <section>
         <h3 class="h">File verification</h3>
         <div class="row">
-          <Badge tone={v === true ? 'ok' : v === false ? 'bad' : 'muted'} label={v === true ? 'Passed' : v === false ? 'Failed' : 'No verdict'} />
+          <Badge tone={v === 'passed' ? 'ok' : v === 'failed' ? 'bad' : 'muted'} label={v === 'passed' ? 'Passed' : v === 'failed' ? 'Failed' : v === 'not_performed' ? 'Not performed' : 'No verdict'} />
         </div>
         {#if result.file_verification}<KeyValues data={result.file_verification} />{/if}
       </section>
@@ -183,20 +183,21 @@
         <h3 class="h">GSM8K score</h3>
         {#if score}<p class="num">{accuracyText(score)}{typeof score.unparsed === 'number' ? ` · ${score.unparsed} unparsed` : ''}</p>{/if}
         <div class="row">
+          <Badge tone="muted" label={NOT_RELEASE_QUALIFIED} />
           {#if full === true}
-            <Badge tone="ok" label="Full pinned split{typeof result.protocol_id === 'string' ? ` · ${result.protocol_id}` : ''}" />
+            <Badge tone="muted" label="Full pinned split{typeof result.protocol_id === 'string' ? ` · ${result.protocol_id}` : ''}" />
           {:else if isSynthetic(result)}
-            <Badge tone="warn" label="Synthetic fixture — does not qualify" />
+            <Badge tone="warn" label="Synthetic fixture" />
           {:else if full === false}
-            <Badge tone="warn" label="Not the full split — does not qualify" />
+            <Badge tone="warn" label="Not the full split" />
           {:else}
-            <Badge tone="warn" label="Split not confirmed — does not qualify" />
+            <Badge tone="warn" label="Split not confirmed" />
           {/if}
           {#if kind === 'evaluate' && !reference}<Badge tone="muted" label="Standalone evaluation" />{/if}
         </div>
         {#if reference}
           <h4>Reference comparison</h4>
-          <p class="small">{reference.scope === 'attested_bf16_same_source' ? 'Attested BF16 reference from the same source.' : 'Diagnostic reference.'} Precision: {reference.precision ?? 'not reported'}. This comparison does not qualify a release.</p>
+          <p class="small">{reference.scope === 'attested_bf16_same_source' ? 'Attested BF16 reference from the same source.' : 'Diagnostic reference.'} Precision: {reference.precision ?? 'not reported'}.</p>
           {@const rs = readScore({score:reference.score})}
           {#if rs}<p class="small num">Reference: {accuracyText(rs)}</p>{/if}
           {#if reference.identity}<details><summary class="small">Reference identity and provenance</summary><KeyValues data={reference.identity} /></details>{/if}

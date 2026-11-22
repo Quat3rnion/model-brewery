@@ -6,6 +6,8 @@
 import type { JobDetail, JobSummary } from './types';
 import { isActive } from './format';
 
+export const NOT_RELEASE_QUALIFIED = 'Not release-qualified';
+
 export type ReportStatus =
   | 'not-run'
   | 'queued'
@@ -70,18 +72,20 @@ export function verificationLine(job: JobSummary | null, detail: JobDetail | und
   const id = job!.id;
   const result = obj(detail?.result);
   if (!result) return { status: 'completed', label: 'Finished', detail: 'Result not loaded.', jobId: id };
-  const v = verifyVerdict(result);
-  if (v === true) return { status: 'passed', label: 'Files verified', detail: 'File verification passed and the verify report states a pass.', jobId: id };
-  if (v === false) return { status: 'failed', label: 'Verification failed', detail: 'The verify result states a failure.', jobId: id };
+  const v = fileVerificationStatus(result);
+  if (v === 'passed') return { status: 'passed', label: 'Files verified', detail: 'File verification passed and the verify report states a pass.', jobId: id };
+  if (v === 'failed') return { status: 'failed', label: 'Verification failed', detail: 'The verify result states a failure.', jobId: id };
+  if (v === 'not_performed') return { status: 'completed', label: 'Not performed', detail: 'The job did not verify the files.', jobId: id };
   return { status: 'completed', label: 'No verdict', detail: 'The job finished, but the result has no explicit verdict. Read the report.', jobId: id };
 }
 
 /** Pass only when file_verification.status is passed AND report.passed is true. */
-export function verifyVerdict(result: Record<string, unknown>): boolean | null {
+export function fileVerificationStatus(result: Record<string, unknown>): 'passed' | 'failed' | 'not_performed' | null {
   const fileStatus = obj(result.file_verification)?.status;
   const reportPassed = obj(result.report)?.passed;
-  if (fileStatus === 'passed' && reportPassed === true) return true;
-  if ((typeof fileStatus === 'string' && fileStatus !== 'passed') || reportPassed === false) return false;
+  if (fileStatus === 'not_performed') return 'not_performed';
+  if (fileStatus === 'passed' && reportPassed === true) return 'passed';
+  if (explicitVerdict({ status: fileStatus }) === false || reportPassed === false) return 'failed';
   return null;
 }
 
@@ -153,25 +157,30 @@ export function referenceInfo(r: Record<string, unknown> | null) {
 }
 
 export function benchmarkLine(job: JobSummary | null, detail: JobDetail | undefined): ReportLine {
+  const disclaimer = `${NOT_RELEASE_QUALIFIED}.`;
   const early = nonTerminal(job, 'GSM8K evaluation');
-  if (early) return early;
+  if (early) return { ...early, detail: `${early.detail} ${disclaimer}` };
   const id = job!.id;
   const result = obj(detail?.result);
-  if (!result) return { status: 'completed', label: 'Finished', detail: 'Result not loaded.', jobId: id };
+  if (!result) return { status: 'completed', label: 'Finished', detail: `Result not loaded. ${disclaimer}`, jobId: id };
   const score = readScore(result);
-  if (!score) return { status: 'completed', label: 'No score', detail: 'The job finished without a score.', jobId: id };
+  if (!score) return { status: 'completed', label: 'No score', detail: `The job finished without a score. ${disclaimer}`, jobId: id };
   const full = isFullSplit(result);
   if (full !== true)
     return {
       status: 'not-qualifying',
       label: isSynthetic(result) ? 'Synthetic fixture' : full === false ? 'Not the full split' : 'Split not confirmed',
-      detail: `${accuracyText(score)}. ${isSynthetic(result) ? 'A synthetic fixture score' : full === false ? 'A score outside the full pinned split' : 'A result without full-split and real-data confirmation'} does not qualify a release.`,
+      detail: `${accuracyText(score)}. ${disclaimer}`,
       jobId: id,
     };
   const comparison = obj(result.comparison);
-  if (!comparison) return {status:'completed', label:'Standalone GSM8K score', detail:accuracyText(score), jobId:id};
-  const delta = typeof comparison.delta_correct === 'number' ? ` Candidate minus reference: ${comparison.delta_correct >= 0 ? '+' : ''}${comparison.delta_correct} correct.` : '';
-  return {status:'completed', label:'GSM8K score with reference', detail:`${accuracyText(score)}.${delta}`, jobId:id};
+  const delta = typeof comparison?.delta_correct === 'number' ? ` Candidate minus reference: ${comparison.delta_correct >= 0 ? '+' : ''}${comparison.delta_correct} correct.` : '';
+  return {
+    status: 'completed',
+    label: comparison ? 'GSM8K score with reference' : 'Standalone GSM8K score',
+    detail: `${accuracyText(score)}.${delta} ${disclaimer}`,
+    jobId: id,
+  };
 }
 
 export function lineTone(status: ReportStatus): 'ok' | 'bad' | 'warn' | 'info' | 'muted' {
