@@ -30,6 +30,11 @@
   });
   const dirty = $derived(!!draft && !!savedHost && hostDirty(draft, savedHost));
   const readiness = $derived(savedHost ? effectiveReadiness(savedHost, hosts.find((h) => h.id === savedHost.id)) : []);
+  // Older controllers do not send readiness rows and may report a static ready flag.
+  const ready = $derived(savedHost && !profileOnly && (Object.keys(savedHost.readiness).length > 0
+    ? savedHost.ready
+    : readiness.some((r) => r.allowed)));
+  const evaluationReadiness = $derived(readiness.find((r) => r.kind === 'evaluate'));
 
   async function load(keepSelection = true) {
     try {
@@ -206,7 +211,7 @@
             <header><h2 id="rd-h">Evaluation readiness</h2><span class="xs muted">Revision {savedHost.revision}</span></header>
             <div class="body stack">
               <p class="small">
-                <Badge tone={savedHost.ready ? 'ok' : 'muted'} label={savedHost.ready ? 'Configuration ready' : profileOnly ? 'Profile only' : 'Configuration not ready'} />
+                <Badge tone={ready ? 'ok' : 'muted'} label={ready ? 'Configuration ready' : profileOnly ? 'Profile only' : 'Configuration not ready'} />
                 {#if savedHost.reason}<span class="muted">{savedHost.reason}</span>{/if}
               </p>
               <div class="table-wrap">
@@ -214,7 +219,7 @@
                   <caption class="sr-only">What the controller currently allows on this worker</caption>
                   <thead><tr><th scope="col">Job</th><th scope="col">Controller reports</th></tr></thead>
                   <tbody>
-                    {#each readiness.slice(0, 2) as r (r.what)}
+                    {#each readiness as r (r.kind)}
                       <tr><th scope="row">{r.what}</th><td class="rc"><Badge tone={r.allowed ? 'ok' : 'muted'} label={r.allowed ? 'Available' : 'Not available'} />{#if r.reason}<span class="xs muted">{r.reason}</span>{/if}</td></tr>
                     {/each}
                   </tbody>
@@ -258,13 +263,12 @@
               <fieldset class="group">
                 <legend>GSM8K evaluation</legend>
                 <label class="chk"><input type="checkbox" bind:checked={draft.evaluationEnabled} disabled={!draft.evaluationAllowed && !draft.evaluationEnabled} aria-describedby="ev-allow-h" /> Allow GSM8K evaluation on this worker</label>
-                <p class="xs muted" id="ev-allow-h">{draft.evaluationAllowed ? 'The controller still checks the Halogen runtime; this only allows it.' : 'Not available: this worker has no approved Halogen runtime. An operator must provision one first.'}</p>
+                <p class="xs muted" id="ev-allow-h">{draft.evaluationAllowed ? 'This setting allows GSM8K evaluation. The controller still checks the Halogen runtime.' : evaluationReadiness?.reason ?? 'GSM8K evaluation is not allowed on this worker.'}</p>
               </fieldset>
 
               {#key draft.id}
                 <details class="disclosure">
                   <summary>Comparison endpoints (optional){draft.baselineEndpoints.length ? ` · ${draft.baselineEndpoints.length}` : ''}</summary>
-                  {#if readiness[2]}<p class="small">Reference scoring on this worker: {readiness[2].allowed ? 'available' : 'not available'}. {readiness[2].reason ?? ''}</p>{/if}
                   {@render endpointList('Reference endpoints', 'baselineEndpoints', 'Compare with predictions from a model served on this worker. Standalone evaluation does not use these endpoints.')}
                 </details>
               {/key}

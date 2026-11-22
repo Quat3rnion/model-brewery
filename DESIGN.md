@@ -48,7 +48,7 @@ Keep requested values separate from reported values. `web/src/components/Compone
 
 Keep workflow stages and result types distinct. `web/src/components/ConversionRun.svelte` lists Inspect, Plan, Convert, and Verify with links to their jobs. `web/src/components/results/JobResult.svelte` keeps file verification separate from hardware proof.
 
-Preserve provenance in reports. Keep the host, target, model, job ID, hashes, protocol, and reported metrics near the result when the view provides them. `web/src/components/results/BenchmarkReport.svelte` labels endpoint benchmark results as not release-qualified. Do not present a requested option or a single score as proof.
+Preserve provenance in reports. Keep the host, target, model, job ID, hashes, protocol, and reported metrics near the result when the view provides them. Label endpoint benchmark results and GSM8K scores as not release-qualified. This also applies to scores on the full pinned split. Do not present a requested option or a single score as proof.
 
 ## Accessibility and responsive layout
 
