@@ -158,8 +158,10 @@ test('Settings reviews pool changes, checks resource fields and describes audite
   await expect(page.getByRole('status').filter({ hasText: 'Pool membership saved' })).toBeVisible();
   expect(controller.requests('POST', '/api/admin/actions')[0].body).toEqual({ action: 'set_resource_policy', worker: 'worker-a', allow_pool: true });
   await page.getByRole('button', { name: 'Review resource changes' }).click();
+  const limitsPost = page.waitForRequest(request =>
+    request.method() === 'POST' && new URL(request.url()).pathname === '/api/admin/actions');
   await page.getByRole('button', { name: 'Confirm resource limits' }).click();
-  expect(controller.requests('POST', '/api/admin/actions')[1].body).toMatchObject({ resources: { min_free_ram_bytes: 1.5 * gib } });
+  expect((await limitsPost).postDataJSON()).toMatchObject({ resources: { min_free_ram_bytes: 1.5 * gib } });
 });
 
 test('Settings clears the SSH pin for a changed address and probes the new address', async ({ page, controller }) => {
