@@ -10,9 +10,13 @@ export const tile = weightRead('tile-read', {
 }, source);
 export const failedCompare = detail(job('981c4194-1044-43d3-910b-b32b1fe820ca', 'compare', {
   input_ids: ['gguf-a', 'gguf-b'], host: 'worker-a', state: 'failed', progress: 'failed',
-  prompt: 'Compare the fixture answers.', options: { n: 32, raw: true },
+  prompt_text: 'Compare the fixture answers.', options: { n: 32, raw: true },
   error: 'No space left on device (os error 28)',
 }));
+export const historicalPrompt = {
+  ...failedCompare, id: 'historical-prompt', state: 'succeeded', prompt_id: 'prompt-a',
+  prompt_text: 'The original saved prompt.',
+};
 export const cancelling = detail(job('explicit-cancelling', 'transfer', {
   state: 'cancelling', host: 'worker-b', input_ids: ['gguf-a'], progress: 0.5,
 }));

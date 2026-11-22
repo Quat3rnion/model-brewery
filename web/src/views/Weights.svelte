@@ -11,13 +11,15 @@
   import CalibrationSplit from '../components/weights/CalibrationSplit.svelte';
   import FieldError from '../components/FieldError.svelte';
   import Blockers from '../components/Blockers.svelte';
+  import KeyValues from '../components/KeyValues.svelte';
   import { brewery } from '../lib/store.svelte';
   import { errorText } from '../lib/api';
   import { Submitter } from '../lib/submit.svelte';
   import { hashParam, route } from '../lib/route.svelte';
+  import { watchRetry } from '../lib/rerun';
   import { fieldError, visibleBlockers, type Blocker } from '../lib/blockers';
   import { WEIGHT_SOURCES, isSafeSource, formatTime, hostName, isActive, isTerminal, kindTitle, modelLabel, newestFirst, shortHash } from '../lib/format';
-  import { weightAccess, weightCapability, weightFormat } from '../lib/weight-access';
+  import { canInspectVisually, weightAccess, weightCapability, weightFormat } from '../lib/weight-access';
   import { addDraftEdits, editKey, type DraftEdit } from '../lib/weight-draft';
   import { focusAfterRemoval } from '../lib/focus';
   import { unsavedChanges } from '../lib/unsaved-changes.svelte';
@@ -72,8 +74,11 @@
   const capLabels = { weight_inspect: 'Inspect', weight_propose: 'Manual proposal', weight_tune: 'Automatic tuning', weight_apply: 'Apply' } as const;
   const visual = $derived(weightCapability(sourceHost, 'weight_visual', source?.host));
   const access = $derived(source ? weightAccess(source, sourceHost) : null);
-  const unavailable = (model: Model) => weightAccess(model, hosts.find((host) => host.id === model.host)).reason;
-  const canVisual = $derived(!!source && source.available !== false && caps.weight_inspect.allowed && visual.allowed && formatAllowed);
+  function unavailable(model: Model) {
+    const host = hosts.find((host) => host.id === model.host);
+    return canInspectVisually(model, host) ? null : weightAccess(model, host).reason;
+  }
+  const canVisual = $derived(!!source && canInspectVisually(source, sourceHost));
   const sourceBlockers = $derived.by(() => {
     if (!sourceId) return ['Select a registered source.'];
     if (!source) return ['This Library entry is missing or does not have a supported weight format.'];
@@ -90,8 +95,9 @@
   // ---- Mode. ----
   let mode = $state<'manual' | 'auto'>('manual');
   let autoEntry = $state<'visual' | 'text'>('visual');
-  const showText = $derived(source?.kind === 'gguf' && (mode === 'manual' || !canVisual || autoEntry === 'text'));
-  const showVisual = $derived(mode === 'manual' || source?.kind !== 'gguf' || autoEntry === 'visual');
+  const canChange = $derived(!!access?.allowed && (mode === 'manual' ? caps.weight_propose.allowed : caps.weight_tune.allowed));
+  const showText = $derived(canChange && source?.kind === 'gguf' && (mode === 'manual' || !canVisual || autoEntry === 'text'));
+  const showVisual = $derived(!canChange || mode === 'manual' || source?.kind !== 'gguf' || autoEntry === 'visual');
 
   // ---- Manual edits. ----
   let seq = 0;
@@ -245,7 +251,11 @@
   }
 
   // ---- Review and apply. ----
-  const proposals = $derived(newestFirst(jobsFor(jobs, sourceId, PROPOSAL_KINDS)).slice(0, 20));
+  let retryProposal = $state<JobDetail | null>(null);
+  const proposals = $derived.by(() => {
+    const list = newestFirst(jobsFor(jobs, sourceId, PROPOSAL_KINDS)).slice(0, 20);
+    return retryProposal && !list.some((job) => job.id === retryProposal?.id) ? [...list, retryProposal] : list;
+  });
   let reviewId = $state<string | null>(null);
   const reviewed = $derived(proposals.find((j) => j.id === reviewId) ?? null);
   let detail = $state<JobDetail | null>(null);
@@ -305,6 +315,56 @@
   const applied = $derived(appliedDetail ? readApplied(appliedDetail.result) : null);
   const appliedModel = $derived(applied?.library_model_id ? models.find((m) => m.id === applied.library_model_id) : undefined);
 
+  let previous = $state<JobDetail | null>(null);
+  let retryError = $state(false);
+  const retrySub = new Submitter();
+  $effect(() => {
+    previous = null;
+    retryProposal = null;
+    retryError = false;
+    return watchRetry(route.hash, WEIGHT_KINDS, async (job, signal) => {
+      if (sourceId !== job.input_ids[0]) throw new Error('Source mismatch.');
+      if (job.kind !== 'weight_apply') {
+        previous = job;
+        return;
+      }
+      const id = job.options?.proposal_job_id;
+      if (typeof id !== 'string') throw new Error('No prior proposal.');
+      const proposal = await brewery.loadJob(id);
+      if (signal.aborted) return;
+      if (proposal.id !== id || proposal.input_ids[0] !== sourceId || !PROPOSAL_KINDS.has(proposal.kind)) throw new Error('Proposal mismatch.');
+      retryProposal = proposal;
+      reviewId = id;
+      confirmed = false;
+    }, () => { retryError = true; });
+  });
+  const previousBlockers = $derived.by(() => {
+    if (!previous || !source) return ['Select an available source entry.'];
+    const kind = WEIGHT_KINDS.find((kind) => kind === previous?.kind);
+    if (!kind) return ['This request is not a weight job.'];
+    const out = [...gate(kind)];
+    if (previous.host !== source.host || previous.input_ids.some((id) => !models.some((m) =>
+      m.id === id && m.host === source?.host && m.available !== false))) {
+      out.push('The original inputs must be available on the original host.');
+    }
+    if ((previous.options?.mode || previous.options?.source_sha256 || (kind !== 'weight_inspect' && source.kind !== 'gguf')) && !canVisual) {
+      out.push(visual.reason ?? 'Visual inspection is not available.');
+    }
+    if (previous.options?.packed === true && sourceHost?.capabilities?.weight_packed !== true) {
+      out.push('Packed editing is not enabled on this host.');
+    }
+    if (kind !== 'weight_inspect' && jobs.some((job) => isActive(job.state) && job.kind === kind && job.input_ids[0] === source?.id)) {
+      out.push('Wait until the active job on this source finishes.');
+    }
+    return out;
+  });
+  async function queuePrevious() {
+    if (!previous || !source || previousBlockers.length || retrySub.busy) return;
+    const { kind, input_ids, options } = previous;
+    const queued = await retrySub.submit({ kind, host: source.host, input_ids, options });
+    if (queued) location.hash = `#/jobs/${encodeURIComponent(queued.id)}`;
+  }
+
   $effect.pre(() => {
     void sourceId;
     pending.clear();
@@ -340,7 +400,7 @@
   <section class="panel" aria-labelledby="w-src-h">
     <header><h2 id="w-src-h">Source</h2>{#if source}<a class="xs" href="#/library">Library</a>{/if}</header>
     <div class="body stack">
-      <ModelSelect bind:value={() => sourceId, selectSource} {unavailable} kinds={WEIGHT_SOURCES} label="Source model" id="w-source" hint="Choose a GGUF, native HGN, SafeTensors file or indexed Hugging Face checkpoint. Jobs run on the source host." />
+      <ModelSelect bind:value={() => sourceId, selectSource} {unavailable} kinds={WEIGHT_SOURCES} label="Source entry" id="w-source" hint="Choose a GGUF, native HGN, SafeTensors file or indexed Hugging Face checkpoint. Jobs run on the source host." />
       {#if sourceId && !source}
         <p class="note warn">{sourceBlockers[0]}</p>
       {:else if source}
@@ -368,18 +428,34 @@
     </div>
   </section>
 
+  {#if retryError}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
+  {#if previous}
+    <section class="panel" aria-labelledby="w-previous-h">
+      <header><h2 id="w-previous-h">Previous weight request</h2></header>
+      <div class="body stack">
+        <p>{kindTitle(previous.kind)} on {hostName(hosts, previous.host)}</p>
+        <p class="small">Inputs: {previous.input_ids.map((id) => models.find((m) => m.id === id)?.name ?? id).join(', ')}</p>
+        <KeyValues data={previous.options} />
+        <p class="hint">Review the prior inputs and options before you queue the job. To change them, use the editor below.</p>
+        <Submit blockers={previousBlockers} busy={retrySub.busy} onclick={queuePrevious}>Queue previous request</Submit>
+        {#if retrySub.error}<p class="note bad" role="alert">{retrySub.error}</p>{/if}
+      </div>
+    </section>
+  {/if}
+
   <section class="panel" aria-labelledby="w-make-h">
     <header>
       <h2 id="w-make-h">Choose and change weights</h2>
       {#if access?.allowed}<div class="fmt" role="radiogroup" aria-label="Editing mode">
-        <label class:on={mode === 'manual'}><input type="radio" name="w-mode" bind:group={mode} value="manual" /> Manual</label>
-        <label class:on={mode === 'auto'}><input type="radio" name="w-mode" bind:group={mode} value="auto" /> Automatic</label>
+        <label class:on={mode === 'manual'}><input type="radio" name="w-mode" bind:group={mode} value="manual" disabled={!caps.weight_propose.allowed} /> Manual</label>
+        <label class:on={mode === 'auto'}><input type="radio" name="w-mode" bind:group={mode} value="auto" disabled={!caps.weight_tune.allowed} /> Automatic</label>
       </div>{/if}
     </header>
 
     <div class="body stack">
-      {#if source && access?.allowed}
-        {#if mode === 'auto'}
+      {#if source && (access?.allowed || canVisual)}
+        {#if !canChange}<p class="note warn small">Read-only: {sentence((mode === 'manual' ? caps.weight_propose.reason : caps.weight_tune.reason) ?? 'Select an available editing mode.')}</p>{/if}
+        {#if mode === 'auto' && canChange}
           {#key source.id}
             <h3>Calibration and held-out data</h3>
             <p class="small muted">Choose two different splits on {hostName(hosts, source.host)}. Use one to fit the selected tensor and one to measure its error. Their activation rows must not overlap.</p>
@@ -390,12 +466,12 @@
               {:else}Each file can be at most 8 MiB. Register the file as <code>weight-calibration</code> on this host in <a href="#/library">Library</a>.{/if}
             </p>
             <div class="grid-2">
-              <CalibrationSplit host={sourceHost} label="Calibration split (fitting)" bind:value={calibrationId} other={heldOutId} />
-              <CalibrationSplit host={sourceHost} label="Held-out split (measurement only)" bind:value={heldOutId} other={calibrationId} />
+              <CalibrationSplit host={sourceHost} label="Calibration data" uploadLabel="Upload calibration data (JSON)" bind:value={calibrationId} other={heldOutId} />
+              <CalibrationSplit host={sourceHost} label="Held-out data" uploadLabel="Upload held-out data (JSON)" bind:value={heldOutId} other={calibrationId} />
             </div>
           {/key}
         {/if}
-        {#if mode === 'auto' && source.kind === 'gguf' && canVisual}
+        {#if mode === 'auto' && canChange && source.kind === 'gguf' && canVisual}
           <div class="field">
             <label for="w-auto-entry">Automatic tuning input</label>
             <select id="w-auto-entry" class="input" bind:value={autoEntry}>
@@ -409,6 +485,7 @@
         <VisualEditor
           {source}
           {canVisual}
+          {canChange}
           canTune={caps.weight_tune.allowed}
           {calibrationId}
           {heldOutId}
@@ -544,7 +621,7 @@
     {/if}
       </details>
       {/if}
-        {#if mode === 'manual'}
+        {#if mode === 'manual' && canChange}
           <section class="stack draft" aria-labelledby="w-draft-h">
             <div class="row between">
               <h3 id="w-draft-h" tabindex="-1">Proposal <span class="muted num">({draft.length} of {MAX_EDITS} edits)</span></h3>

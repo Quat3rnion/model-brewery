@@ -26,4 +26,5 @@
 <style>
   section { margin: var(--s-4); }
   ul { margin: 0; padding-inline-start: var(--s-5); }
+  li a { display: inline-block; min-height: 24px; min-width: 24px; }
 </style>

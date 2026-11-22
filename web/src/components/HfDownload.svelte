@@ -1,6 +1,8 @@
 <script lang="ts">
   import { brewery } from '../lib/store.svelte';
   import { Submitter } from '../lib/submit.svelte';
+  import { hashParam, route } from '../lib/route.svelte';
+  import { watchRetry } from '../lib/rerun';
   import Submit from './Submit.svelte';
 
   const submitter = new Submitter();
@@ -9,6 +11,19 @@
   let revision = $state('');
   let scope = $state('file');
   let filename = $state('');
+  let open = $state(false);
+  let retryError = $state(false);
+  $effect(() => {
+    const hash = route.hash;
+    retryError = false;
+    if (hashParam(hash, 'retry')) open = true;
+    return watchRetry(hash, ['hf_download'], ({ options }) => {
+      repo = typeof options?.repo_id === 'string' ? options.repo_id : '';
+      revision = typeof options?.revision === 'string' ? options.revision : '';
+      filename = typeof options?.filename === 'string' ? options.filename : '';
+      scope = filename ? 'file' : 'repo';
+    }, () => { retryError = true; });
+  });
   const safePart = (s: string) => /^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(s) && !s.includes('..');
   const blockers = $derived.by(() => {
     const errors: string[] = [];
@@ -30,9 +45,10 @@
   }
 </script>
 
-<details class="disclosure">
+<details class="disclosure" bind:open>
   <summary><strong>Download from Hugging Face</strong></summary>
   <div class="stack fields">
+    {#if retryError}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
     <div class="grid-2">
       <div class="field">
         <label for="hf-repo">Repository ID</label>

@@ -164,10 +164,17 @@
                 </ol>
               </div>
             {/if}
-            {#if prompt || job.prompt}
+            {#if detail && (detail.prompt_text != null || job.prompt_id)}
               <div>
-                <h3 class="h">Prompt{prompt ? `: ${prompt.name}` : ''}</h3>
-                <pre class="block">{prompt?.text ?? job.prompt}</pre>
+                <h3 class="h">Prompt{detail.prompt_text == null && prompt ? `: ${prompt.name}` : ''}</h3>
+                {#if detail.prompt_text != null}
+                  <pre class="block">{detail.prompt_text}</pre>
+                {:else if prompt}
+                  <p class="small muted">Current saved prompt. The text may have changed after this job ran.</p>
+                  <pre class="block">{prompt.text}</pre>
+                {:else}
+                  <p class="small muted">The text used by this job is not available.</p>
+                {/if}
               </div>
             {/if}
             {#if job.options && Object.keys(job.options).length}

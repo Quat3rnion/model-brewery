@@ -103,7 +103,7 @@
       </nav>
     {/if}
   {/if}
-  <p class="xs muted">Sizes include companion tensors. Base sizes: v2 {formatBytes(catalog.baseBytes.v2)}, HT43 {formatBytes(catalog.baseBytes.ht43)}.</p>
+  <p class="xs muted">Sizes include the data used to decode the weights. Base sizes: v2 {formatBytes(catalog.baseBytes.v2)}, HT43 {formatBytes(catalog.baseBytes.ht43)}.</p>
 </div>
 
 <style>

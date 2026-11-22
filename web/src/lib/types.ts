@@ -128,7 +128,6 @@ export interface JobSummary {
   input_ids: string[];
   options?: Record<string, unknown>;
   prompt_id?: string | null;
-  prompt?: string | null;
   has_result?: boolean;
   cancel_requested?: boolean;
   /** Unix milliseconds. */

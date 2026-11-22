@@ -49,6 +49,7 @@
   let saveError = $state<string | null>(null);
   let savedRev = $state<SavedProfile | null>(null);
   let opener = $state<HTMLButtonElement>();
+  let saveBarHeight = $state(0);
 
   const startOverrides = $derived(from.kind === 'saved' ? from.p.overrides : {});
   const dirty = $derived(editing && format === 'hgn' && (JSON.stringify(overrides) !== JSON.stringify(startOverrides)
@@ -135,7 +136,7 @@
       {:else}
         Choose, tensor by tensor, between the two built-in encodings. HGN v2 and HT43 stay read-only; a custom profile starts from one of them and changes only tensors where the other profile has a different, legal encoding.
       {/if}
-      Each save is a new immutable revision. <a href="#/convert">Back to Convert</a>
+      Each save adds a new revision. Earlier revisions do not change. <a href="#/convert">Back to Convert</a>
     </p>
   </div>
 
@@ -198,7 +199,7 @@
     </section>
 
     {#if editing}
-      <section class="panel" aria-labelledby="ed-h">
+      <section class="panel profile-editor" aria-labelledby="ed-h" style:--save-bar-height="{saveBarHeight}px">
         <header>
           <h2 id="ed-h">{from.kind === 'saved' ? `Editing ${from.p.name}` : `New profile from ${BASE_LABEL[base]}`}</h2>
           <button type="button" class="btn small ghost" onclick={close} disabled={saving}>Close editor</button>
@@ -211,7 +212,7 @@
             <div><span class="xs muted">Change</span><strong class="num">{signedBytes(size?.delta ?? null)}</strong></div>
             <button type="button" class="btn small" onclick={reset} disabled={!dirty}>Reset changes</button>
           </div>
-          <p class="xs muted">A size prediction from the catalog, including companion tensors. It is not a quality result.</p>
+          <p class="xs muted">This size estimate includes helper tensors that store scales or rotation data. It does not measure quality.</p>
 
           <div class="block">
             <h3 class="h">Trunk layers <span class="muted">({cat.trunkLayers.length})</span></h3>
@@ -284,7 +285,7 @@
               {/if}
             </div>
           </div>
-          <div class="save-bar">
+          <div class="save-bar" bind:offsetHeight={saveBarHeight}>
             {#if !name.trim()}<a href="#pf-name" onclick={(event) => { event.preventDefault(); document.getElementById('pf-name')?.focus(); }}>Enter a profile name</a>{/if}
             <button type="button" class="btn primary" disabled={!built.body || saving || (!dirty && from.kind === 'saved')} onclick={save}>{saving ? 'Saving…' : 'Save revision'}</button>
           </div>
@@ -431,6 +432,9 @@
     padding: var(--s-2);
     background: var(--surface-2);
     border-radius: var(--r-md);
+  }
+  .profile-editor :global(:focus) {
+    scroll-margin-bottom: var(--save-bar-height);
   }
   .why {
     margin: 0;

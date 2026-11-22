@@ -11,7 +11,7 @@
   import RecentJobs from '../components/RecentJobs.svelte';
   import ConversionRun from '../components/ConversionRun.svelte';
   import ComponentPicker from '../components/ComponentPicker.svelte';
-  import { componentBlockers } from '../lib/components';
+  import { COMPONENT_ROLES, componentBlockers } from '../lib/components';
   import { profileStore } from '../lib/profiles.svelte';
   import { BASE_LABEL, shortRev } from '../lib/profiles';
   import { REV_PREFIX } from '../lib/conversion';
@@ -19,13 +19,14 @@
   import LayerRecipe from '../components/LayerRecipe.svelte';
   import Hy4Plan from '../components/Hy4Plan.svelte';
   import { conversions, ConversionStarter } from '../lib/conversions.svelte';
-  import { buildConversion, conversionRunHref, isActiveConversion, STAGES } from '../lib/conversion';
+  import { buildConversion, conversionRunHref, isActiveConversion, parseConversions, STAGES, type Conversion } from '../lib/conversion';
   import { api, errorText } from '../lib/api';
   import { fieldError, visibleBlockers, type Blocker } from '../lib/blockers';
   import { hostWorkflowEligibility } from '../lib/eligibility';
   import { validSha } from '../lib/ggufSource';
   import { hashParam, route } from '../lib/route.svelte';
-  import type { EligibilityEntry, Host, Workflow } from '../lib/types';
+  import { watchRetry } from '../lib/rerun';
+  import type { EligibilityEntry, Host, JobDetail, Workflow } from '../lib/types';
   import Blockers from '../components/Blockers.svelte';
   import FieldError from '../components/FieldError.svelte';
   import WorkflowGate from '../components/WorkflowGate.svelte';
@@ -34,6 +35,12 @@
   const hosts = $derived(brewery.state?.hosts ?? []);
   const models = $derived(brewery.state?.models ?? []);
   const stateReady = $derived(!!brewery.state);
+  const encoders = {
+    ht_backend: 'HT uses 3-bit or 4-bit values to store weights.',
+    i4r_backend: 'I4R uses 4-bit values after it applies a rotation to the weights.',
+    q4cp_backend: 'Q4CP uses 4-bit values to look up weights in a codebook.',
+  };
+  const seedHint = `Enter a whole number from 0 to ${Number.MAX_SAFE_INTEGER.toLocaleString('en-US')}.`;
 
   let step = $state<ConvertStep>('inspect');
   const emptyForm = (): ConvertForm => ({
@@ -98,6 +105,81 @@
   let layerSource = $state('');
   const recipeFormat = $derived(hashParam(route.hash, 'output') === 'gguf' ? 'gguf' : 'hgn');
   let diagnosticsOpen = $state(false);
+  let retryRequest = $state<{ job: JobDetail; parent?: Conversion } | null>(null);
+  let retryError = $state(false);
+  $effect(() => {
+    retryRequest = null;
+    retryError = false;
+    return watchRetry(route.hash, STAGES, async (job, signal) => {
+      // GGUF stage records store the preset, not the full conversion request.
+      const parent = (job.format === 'gguf' && !job.options?.layer_recipe) || job.profile_revision
+        ? parseConversions(await api.conversions(signal)).find((run) => Object.values(run.jobIds).includes(job.id))
+        : undefined;
+      if (!signal.aborted) retryRequest = { job, parent };
+    }, () => { retryError = true; });
+  });
+  const retryJob = $derived(retryRequest?.job);
+  const priorConversion = $derived(retryRequest?.parent);
+  const priorInputs = $derived(priorConversion?.inputIds ?? retryJob?.input_ids ?? []);
+  const priorOptions = $derived({ ...retryJob?.options, ...priorConversion?.options });
+  const priorProfile = $derived(priorConversion?.profileRevision ?? (typeof retryJob?.profile_revision === 'string' ? retryJob.profile_revision : ''));
+  const hy4Retry = $derived(retryJob?.options?.hy4_overrides && (retryJob.kind === 'plan' || retryJob.kind === 'convert') ? retryJob : null);
+  const ggufRetry = $derived(retryJob && retryJob.format === 'gguf' && !priorOptions.layer_recipe ? {
+    id: retryJob.id, source: priorInputs[0] ?? '', inputIds: priorInputs, options: priorOptions, profileRevision: priorProfile,
+  } : null);
+  const recipeRetry = $derived(retryJob && priorOptions.layer_recipe ? {
+    id: retryJob.id, inputIds: priorInputs, recipe: priorOptions.layer_recipe,
+  } : null);
+  $effect(() => {
+    const job = retryJob;
+    if (!job) return;
+    if (recipeRetry) {
+      layerSource = priorInputs[0] ?? '';
+      return;
+    }
+    if (ggufRetry) {
+      ggufSource = ggufRetry.source;
+      return;
+    }
+    if (hy4Retry) {
+      diagnosticsOpen = true;
+      return;
+    }
+    // For a saved custom profile, use the managed form: a single HGN step
+    // accepts built-ins only. Wait for the parent to recover the full request.
+    const inputIds = priorProfile ? priorInputs : job.input_ids;
+    const opts = priorProfile ? priorOptions : job.options ?? {};
+    const draft = emptyForm();
+    draft.source = inputIds[0] ?? '';
+    draft.bundle = !priorProfile && job.kind === 'verify' ? inputIds[1] ?? '' : '';
+    const target = job.requested_host ?? job.host ?? '';
+    draft.host = target === 'auto' ? '' : target;
+    draft.anyHost = target === 'auto';
+    draft.profile = priorProfile ? `${REV_PREFIX}${priorProfile}` : typeof opts.profile === 'string' ? opts.profile : '';
+    for (const key of ['ht_backend', 'i4r_backend', 'q4cp_backend', 'decode_backend'] as const) {
+      const value = opts[key];
+      if (typeof value === 'string') draft[key] = value;
+    }
+    for (const key of ['threads', 'seed', 'ht_beam'] as const) {
+      const value = opts[key];
+      if (typeof value === 'number') draft[key] = value;
+    }
+    for (const { kind } of COMPONENT_ROLES) {
+      const index = opts[kind];
+      if (typeof index === 'number') draft.extras[kind] = inputIds[index] ?? '';
+    }
+    if (priorProfile) {
+      form = draft;
+      if (priorConversion?.decodeBackend) form.decode_backend = priorConversion.decodeBackend;
+      wfAny = (priorConversion?.requestedHost ?? target) === 'auto';
+      wfHost = wfAny ? '' : priorConversion?.host ?? draft.host;
+    } else {
+      const stage = STAGES.find((stage) => stage === job.kind);
+      if (stage) step = stage;
+      diagnosticsOpen = true;
+      diagnostic = draft;
+    }
+  });
   $effect(() => {
     const hash = route.hash;
     const source = hashParam(hash, 'model');
@@ -199,25 +281,30 @@
     return out;
   });
   const checkBody = $derived(mode === 'hgn' && conversions.status !== 'unavailable' && !localBlockers.length && wfBuilt.body ? JSON.stringify(wfBuilt.body) : null);
-  let checked = $state<{ body: string; decision?: EligibilityEntry; error?: string }>();
+  // Compare by value: polling an unchanged snapshot must not repeat the check.
+  const checkState = $derived(checkBody ? JSON.stringify([hosts, snapshot, brewery.state?.event_cursor,
+    models.filter((model) => wfBuilt.body?.input_ids.includes(model.id))]) : '');
+  let checked = $state<{ key: string; decision?: EligibilityEntry; error?: string }>();
+  const checkKey = $derived(checkBody && JSON.stringify([checkBody, checkState]));
   let retryCheck = $state(0);
   $effect(() => {
     const body = checkBody;
+    const key = checkKey;
     void retryCheck;
     checked = undefined;
-    if (!body) return;
+    if (!body || !key) return;
     const abort = new AbortController();
     const timer = window.setTimeout(async () => {
       try {
         const decision = await api.conversionEligibility(JSON.parse(body), abort.signal);
-        if (!abort.signal.aborted) checked = { body, decision };
+        if (!abort.signal.aborted) checked = { key, decision };
       } catch (error) {
-        if (!abort.signal.aborted) checked = { body, error: errorText(error) };
+        if (!abort.signal.aborted) checked = { key, error: errorText(error) };
       }
     }, 250);
     return () => { window.clearTimeout(timer); abort.abort(); };
   });
-  const checking = $derived(checkBody !== null && checked?.body !== checkBody);
+  const checking = $derived(checkKey !== null && checked?.key !== checkKey);
   const wfBlockers = $derived.by((): Blocker[] => {
     if (conversions.status === 'unavailable') return [{ text: 'This controller does not provide managed conversions. Use the individual steps below.' }];
     if (!checkBody || checking) return localBlockers;
@@ -231,7 +318,7 @@
   async function startConversion() {
     // One POST per click. The body is built only here, never from an effect.
     attempted = true;
-    if (!wfBuilt.body || starter.busy || !checkBody || checked?.body !== checkBody || !checked.decision?.eligible) return;
+    if (!wfBuilt.body || starter.busy || !checkKey || checked?.key !== checkKey || !checked.decision?.eligible) return;
     await starter.start(wfBuilt.body);
   }
   $effect(() => conversions.watch());
@@ -278,6 +365,7 @@
 <div class="stack">
   <div class="head">
     <h1 tabindex="-1">Convert</h1>
+    {#if retryError}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
     <p class="muted small">Convert a source checkpoint to an HGN bundle or a GGUF file.</p>
   </div>
 
@@ -310,7 +398,7 @@
         </div>
         {#if recipeSource}
           {#key recipeKey}
-            <LayerRecipe source={recipeSource} format={recipeFormat} starter={recipeStarter} />
+            <LayerRecipe source={recipeSource} format={recipeFormat} starter={recipeStarter} retry={recipeRetry} />
           {/key}
         {:else}
           <p class="hint">Select a source to see if it supports a layer recipe.</p>
@@ -319,7 +407,7 @@
     {:else if mode === 'gguf'}
     <WorkflowGate workflow="gguf_output">
     <div class="body">
-      {#if profileStore.gguf}<GgufConvert catalog={profileStore.gguf} bind:source={ggufSource} />
+      {#if profileStore.gguf}<GgufConvert catalog={profileStore.gguf} bind:source={ggufSource} retry={ggufRetry} />
       {:else if profileStore.ggufStatus === 'unavailable'}<p class="note warn">This controller does not offer GGUF output.</p>
       {:else if profileStore.status === 'loading' || profileStore.status === 'idle'}<p class="muted">Loading GGUF types…</p>
       {:else}<p class="note bad" role="alert">The GGUF catalog could not be loaded.</p>{/if}
@@ -331,7 +419,7 @@
       <div class="grid-2">
         <ModelSelect bind:value={form.source} kinds={CONVERT_SOURCE_KINDS} label="Source checkpoint" hint="Hugging Face BF16 directory, GGUF or HGN." id="wf-source" error={fieldError(visible, 'source')} onblur={() => (touched.source = true)} />
         <div class="field">
-          <label for="wf-profile">Profile</label>
+          <label for="wf-profile">Output profile</label>
           <select id="wf-profile" class="input" bind:value={form.profile} onblur={() => (touched.profile = true)}
             aria-invalid={!!fieldError(visible, 'profile')} aria-describedby={fieldError(visible, 'profile') ? 'wf-profile-error wf-profile-hint' : 'wf-profile-hint'} aria-required="true">
             <option value="" disabled>Choose a profile</option>
@@ -373,16 +461,17 @@
           {#each ['ht_backend', 'i4r_backend', 'q4cp_backend'] as const as key (key)}
             <div class="field">
               <label for="wf-{key}">{key.replace('_backend', '').toUpperCase()} encoder backend</label>
-              <select id="wf-{key}" class="input" bind:value={form[key]}>
+              <select id="wf-{key}" class="input" bind:value={form[key]} aria-describedby="wf-{key}-hint">
                 <option value="">Converter default</option>
                 {#each CONVERT_ENUMS.backend as b (b)}<option value={b}>{b}</option>{/each}
               </select>
+              <span class="hint" id="wf-{key}-hint">{encoders[key]}</span>
             </div>
           {/each}
           <div class="field">
             <label for="wf-seed">Seed <span class="muted">(optional)</span></label>
-            <input id="wf-seed" class="input num" type="number" min="0" step="1" bind:value={form.seed} inputmode="numeric" />
-            <span class="hint">Whole number, 0 or more.</span>
+            <input id="wf-seed" class="input num" type="number" min="0" max={Number.MAX_SAFE_INTEGER} step="1" bind:value={form.seed} inputmode="numeric" aria-describedby="wf-seed-hint" />
+            <span class="hint" id="wf-seed-hint">{seedHint}</span>
           </div>
           <div class="field">
             <label for="wf-threads">Threads <span class="muted">(optional)</span></label>
@@ -409,7 +498,7 @@
       <div class="row">
         <button type="button" class="btn primary" disabled={!checked?.decision?.eligible || !checkBody || checking || !!wfBlockers.length || starter.busy} onclick={startConversion}>Start conversion</button>
         {#if checking && conversions.status !== 'unavailable'}<span class="hint" role="status">Checking this conversion.</span>{/if}
-        {#if checkBody && checked?.body === checkBody && checked.error}
+        {#if checkKey && checked?.key === checkKey && checked.error}
           <button type="button" class="btn small" onclick={() => { checked = undefined; retryCheck++; }}>Check again</button>
         {/if}
       </div>
@@ -505,7 +594,7 @@
       {#if usesBackends}
         <div class="grid-2">
           <div class="field">
-            <label for="cv-profile">Profile</label>
+            <label for="cv-profile">Output profile</label>
             <select id="cv-profile" class="input" bind:value={diagnostic.profile} aria-describedby="cv-profile-hint" aria-required="true">
               <option value="" disabled>Choose a profile</option>
               {#each CONVERT_ENUMS.profile as p (p)}<option value={p}>{p === 'v2' ? 'HGN v2' : p === 'ht43' ? 'HT43' : p}</option>{/each}
@@ -526,18 +615,19 @@
               {#each ['ht_backend', 'i4r_backend', 'q4cp_backend'] as const as key (key)}
                 <div class="field">
                   <label for="cv-{key}">{key.replace('_backend', '').toUpperCase()} encoder backend</label>
-                  <select id="cv-{key}" class="input" bind:value={diagnostic[key]}>
+                  <select id="cv-{key}" class="input" bind:value={diagnostic[key]} aria-describedby="cv-{key}-hint">
                     <option value="">Converter default</option>
                     {#each CONVERT_ENUMS.backend as b (b)}<option value={b}>{b}</option>{/each}
                   </select>
+                  <span class="hint" id="cv-{key}-hint">{encoders[key]}</span>
                 </div>
               {/each}
             {/if}
             {#if usesPlanOpts}
               <div class="field">
                 <label for="cv-seed">Seed <span class="muted">(optional)</span></label>
-                <input id="cv-seed" class="input num" type="number" min="0" step="1" bind:value={diagnostic.seed} inputmode="numeric" />
-                <span class="hint">Whole number, 0 or more.</span>
+                <input id="cv-seed" class="input num" type="number" min="0" max={Number.MAX_SAFE_INTEGER} step="1" bind:value={diagnostic.seed} inputmode="numeric" aria-describedby="cv-seed-hint" />
+                <span class="hint" id="cv-seed-hint">{seedHint}</span>
               </div>
               <div class="field">
                 <label for="cv-threads">Threads <span class="muted">(optional)</span></label>
@@ -568,7 +658,7 @@
       <SubmitStatus {s} />
     </div>
   </div>
-      <Hy4Plan />
+      <Hy4Plan retry={hy4Retry} />
     </div>
   </details>
 

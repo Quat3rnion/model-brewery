@@ -68,8 +68,9 @@
       b = models.some((m) => m.id === second && m.kind === 'gguf') ? second : '';
       host = job.requested_host ?? job.host ?? '';
       promptId = job.prompt_id ?? '';
-      promptText = job.prompt ?? '';
-      promptMode = promptId ? 'saved' : 'text';
+      promptText = job.prompt_text ?? '';
+      promptMode = promptId && (job.prompt_text == null || prompts.some((prompt) => prompt.id === promptId && prompt.text === promptText))
+        ? 'saved' : 'text';
       // A restored prompt is not a new edit.
       lastSubmittedPrompt = promptText;
       const o = job.options;
@@ -141,8 +142,7 @@
   );
 
   const s = new Submitter();
-  async function submit(event: SubmitEvent) {
-    event.preventDefault();
+  async function submit() {
     attempted = true;
     if (blockers.length || s.busy || retryLoading) return;
     const text = promptMode === 'text' ? promptText : undefined;
@@ -176,7 +176,7 @@
   <section class="panel" aria-labelledby="cmp-h">
     <header><h2 id="cmp-h">New comparison</h2></header>
     <WorkflowGate workflow="compare" decision={setup}>
-    <form class="body stack" onsubmit={submit} novalidate>
+    <div class="body stack">
       {#if retryLoading || retryMessage}
         <p class="small muted" role="status">{retryLoading ? 'Loading the previous job options.' : retryMessage}</p>
       {/if}
@@ -248,12 +248,12 @@
       </Advanced>
 
       <div class="row">
-        <button type="submit" class="btn primary" disabled={s.busy || retryLoading} aria-busy={s.busy}>{s.busy ? 'Submitting…' : 'Queue comparison'}</button>
+        <button type="button" class="btn primary" onclick={submit} disabled={s.busy || retryLoading} aria-busy={s.busy}>{s.busy ? 'Submitting…' : 'Queue comparison'}</button>
       </div>
       <Blockers blockers={visible} />
       <SubmitStatus {s} />
       </fieldset>
-    </form>
+    </div>
     </WorkflowGate>
   </section>
 

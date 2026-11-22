@@ -36,6 +36,8 @@
   import Ids from '../components/calibration/Ids.svelte';
   import type { JobDetail, JobSummary } from '../lib/types';
   import { errorText } from '../lib/api';
+  import { route } from '../lib/route.svelte';
+  import { watchRetry } from '../lib/rerun';
 
   const hosts = $derived(brewery.state?.hosts ?? []);
   const models = $derived(brewery.state?.models ?? []);
@@ -62,6 +64,16 @@
   const error = (field: string) => fieldError(visible, field);
   const setupLink = $derived(host && `#/settings/evaluation?host=${encodeURIComponent(host.id)}`);
   const run = new Submitter();
+  let retryError = $state(false);
+  $effect(() => {
+    retryError = false;
+    return watchRetry(route.hash, ['benchmark'], (job) => {
+      const request = requestedOf(job);
+      hostId = job.requested_host ?? job.host ?? '';
+      target = request.benchmark_target ?? '';
+      picked = request.benchmarks;
+    }, () => { retryError = true; });
+  });
 
   // ---- Scorecard selection ----
   const benchJobs = $derived(newestFirst(jobs.filter((j) => j.kind === 'benchmark')));
@@ -158,6 +170,7 @@
     <header><h2 id="bl-h">Run benchmarks</h2></header>
     <WorkflowGate workflow="benchmark">
     <div class="body stack">
+      {#if retryError}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
       <Blockers blockers={built.blockers.filter((b) => !b.field)} />
       <div class="grid-2">
         <HostSelect bind:value={hostId} workflow="benchmark" kind="benchmark" label="Host" hint="The host runs the suites against the endpoint. No library input is used." error={error('host')} onblur={() => { touched.host = true; }} />

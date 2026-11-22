@@ -96,7 +96,7 @@ export function job(id, kind, fields = {}) {
 
 export function detail(summary, result) {
   return {
-    ...summary, has_result: result !== undefined, result,
+    prompt_text: null, ...summary, has_result: result !== undefined, result,
     events: [{ state: summary.state, progress: summary.progress, at: summary.updated_at }],
   };
 }

@@ -67,6 +67,11 @@ class Route {
       this.jobId = r.jobId;
     };
     apply();
+    window.addEventListener('popstate', () => {
+      // Back or Forward can move between entries with identical hashes.
+      // Different hashes are handled once, by hashchange below.
+      if (this.hash === window.location.hash) index = entryIndex() ?? index;
+    });
     window.addEventListener('hashchange', (event) => {
       if (restoring && this.hash === window.location.hash) {
         restoring = false;
@@ -77,11 +82,16 @@ class Route {
       const target = entryIndex() ?? index + 1;
       if ([...this.#guards].some((allow) => !allow())) {
         event.stopImmediatePropagation();
+        const delta = index - target;
+        if (!delta) {
+          setEntry(index, this.hash || `${location.pathname}${location.search}`);
+          return;
+        }
         // Remember the new entry and return to the accepted one. Back and
         // Forward still work if the user changes their mind.
         setEntry(target);
         restoring = true;
-        history.go(index - target);
+        history.go(delta);
         return;
       }
       index = target;

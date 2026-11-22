@@ -1,11 +1,51 @@
 import AxeBuilder from '@axe-core/playwright';
 import { test, expect } from './fixtures.mjs';
 import { adminState, fingerprint, gib, sshHost } from './mock/settings.mjs';
+import { scenario } from './mock/scenarios.mjs';
 
 const workers = (page) => page.getByRole('navigation', { name: 'Workers' });
 const select = (page) => page.getByLabel('Defined host');
 const pause = (page) => page.getByRole('checkbox', { name: 'Pause new work' });
 const gsm8k = (page) => page.getByLabel('Allow GSM8K evaluation on this worker');
+
+test('Settings explains what the HGN and packed weight switches permit', async ({ page, controller }) => {
+  await controller.open(page, 'settings/infrastructure?host=worker-a&section=weights');
+  await expect.soft(page.getByText('Inspect and edit supported weights in Model Brewery HGN files.')).toBeVisible();
+  await expect(page.getByText('Change weights stored as compressed values without converting the full model first.')).toBeVisible();
+});
+
+test('Settings updates readiness after saving an admission policy', async ({ page, controller }) => {
+  controller.respond('GET', '/api/admin/state', { json: adminState() });
+  controller.respond('POST', '/api/admin/actions', () => {
+    const next = adminState(2);
+    next.hosts[0].paused = true;
+    const blocked = scenario('capabilities-off');
+    blocked.hosts[0].scheduling_paused = true;
+    controller.respond('GET', '/api/state', { json: blocked });
+    controller.respond('GET', '/api/settings', { json: { hosts: blocked.settings } });
+    return { json: next };
+  });
+  await controller.open(page, 'settings');
+  const readiness = page.getByRole('region', { name: 'Evaluation readiness' });
+  await expect(readiness.getByText('Configuration ready', { exact: true })).toBeVisible();
+  await pause(page).check();
+  await page.getByRole('button', { name: 'Review admission changes' }).click();
+  await page.getByRole('button', { name: 'Confirm admission policy' }).click();
+  await expect(readiness.getByText('Configuration not ready', { exact: true })).toBeVisible();
+  await expect(readiness.getByText('Not available', { exact: true })).toHaveCount(4);
+});
+
+test('A profile-only host can be ready to run a statically configured workflow', async ({ page, controller }) => {
+  const data = scenario('live-shaped');
+  const host = data.settings[0];
+  host.evaluation = { status: 'profile_only' };
+  host.ready = true;
+  controller.respond('GET', '/api/settings', { json: { hosts: data.settings } });
+  await controller.open(page, 'settings');
+  const readiness = page.getByRole('region', { name: 'Evaluation readiness' });
+  await expect(readiness.getByText('Configuration ready', { exact: true })).toBeVisible();
+  await expect(readiness.getByText('Profile only: the controller stores these targets but does not apply them to this worker.')).toBeVisible();
+});
 
 test('Settings uses one host selection and focuses fix links', async ({ page, controller }) => {
   await controller.open(page, 'settings/evaluation?host=worker-b');

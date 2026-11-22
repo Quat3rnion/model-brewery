@@ -39,6 +39,7 @@
   let {
     source,
     canVisual,
+    canChange,
     canTune,
     calibrationId,
     heldOutId,
@@ -49,6 +50,7 @@
   }: {
     source: Model;
     canVisual: boolean;
+    canChange: boolean;
     canTune: boolean;
     calibrationId: string;
     heldOutId: string;
@@ -232,7 +234,7 @@
     return true;
   }
   function apply(fn: (before: number, current: number) => number | null) {
-    if (mode !== 'manual' || !tensor) return;
+    if (!canChange || mode !== 'manual' || !tensor) return;
     let refused = 0;
     for (const c of selectedCells()) {
       const current = pending.get(`${tensor.name}|${c.key}`);
@@ -253,7 +255,7 @@
     selected = next;
   }
   function neighbor(direction: keyof Neighbors) {
-    if (!tensor || !tileOk?.steps || mode !== 'manual') return;
+    if (!canChange || !tensor || !tileOk?.steps || mode !== 'manual') return;
     let skipped = 0;
     for (const c of selectedCells()) {
       const value = levels.get(`${tensor.name}|${c.key}`)?.[direction];
@@ -331,7 +333,7 @@
     if (created) onproposal(created.id);
   }
 
-  const selectable = $derived((index: number[]) => mode === 'manual' || index.length === 2);
+  const selectable = $derived((index: number[]) => canChange && (mode === 'manual' || index.length === 2));
   const scheme = $derived(theme.resolved === 'light' ? 'light' : 'dark');
 </script>
 
@@ -452,7 +454,7 @@
               {selectable}
               onnudge={nudge}
               onreset={reset}
-              label="Stored values of {tensor.name}, {mode === 'manual' ? 'select cells to edit' : 'select weights to tune'}"
+              label="Stored values of {tensor.name}{canChange ? (mode === 'manual' ? ', select cells to edit' : ', select weights to tune') : ', read-only'}"
             />
             <div class="scale xs" aria-label="Colour scale from {short(-tileOk.absMax)} to {short(tileOk.absMax)}, this tile only">
               <span class="num">{short(-tileOk.absMax)}</span>
@@ -465,7 +467,7 @@
       </section>
 
       <!-- 3. Edit or tune -->
-      <section class="step" aria-labelledby="vw-edit-h">
+      {#if canChange}<section class="step" aria-labelledby="vw-edit-h">
         <div class="row between">
           <h3 class="h" id="vw-edit-h">3. {mode === 'manual' ? 'Change values' : 'Tune selected weights'}</h3>
           <div class="row">
@@ -553,9 +555,10 @@
           </div>
         {/if}
       </section>
+      {/if}
     {/if}
 
-    {#if mode === 'auto' && tensor}
+    {#if canChange && mode === 'auto' && tensor}
       <section class="step">
         {#if tuneSub.error}<p class="note bad" role="alert">{tuneSub.error}</p>{/if}
         <Submit blockers={tuneBlockers} busy={tuneSub.busy} onclick={tune}>Tune {selected.size || ''} selected {selected.size === 1 ? 'weight' : 'weights'}</Submit>

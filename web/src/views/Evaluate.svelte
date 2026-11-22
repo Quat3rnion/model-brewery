@@ -6,6 +6,8 @@
   import { fieldError, visibleBlockers, type Blocker } from '../lib/blockers';
   import { hostWorkflowEligibility } from '../lib/eligibility';
   import { unsavedChanges } from '../lib/unsaved-changes.svelte';
+  import { route } from '../lib/route.svelte';
+  import { watchRetry } from '../lib/rerun';
   import HostSelect from '../components/HostSelect.svelte';
   import Combobox from '../components/Combobox.svelte';
   import { idOptions, promptOptions } from '../lib/pickers';
@@ -123,6 +125,34 @@
   ]);
   const visible = $derived(visibleBlockers([...gFields, ...eFields, ...bFields], touched));
   const error = (field: string) => fieldError(visible, field);
+  let retryError = $state(false);
+  $effect(() => {
+    retryError = false;
+    return watchRetry(route.hash, ['evaluate', 'baseline', 'generate'], (job) => {
+      const [first = '', second = ''] = job.input_ids;
+      const host = job.requested_host ?? job.host ?? '';
+      const endpoint = typeof job.options?.baseline_source === 'string' ? job.options.baseline_source : '';
+      if (job.kind === 'generate') {
+        gBundle = first;
+        gHost = host;
+        gText = job.prompt_text ?? '';
+        submittedText = gText;
+        gPromptId = job.prompt_id ?? '';
+        gMode = job.prompt_text != null || !gPromptId ? 'text' : 'saved';
+      } else if (job.kind === 'evaluate') {
+        eBundle = first;
+        eHost = host;
+        eBaseFile = second;
+        eSource = endpoint;
+        eBaseMode = endpoint ? 'source' : second ? 'file' : 'none';
+      } else {
+        bHost = host;
+        bFile = first;
+        bSource = endpoint;
+        bMode = endpoint ? 'source' : 'file';
+      }
+    }, () => { retryError = true; });
+  });
 </script>
 
 <div class="stack">
@@ -132,6 +162,7 @@
       Score a bundle on the pinned GSM8K split. To measure a difference, compare it with another model’s results from the same protocol. File verification and generated text are separate checks.
     </p>
   </div>
+  {#if retryError}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
 
   <section class="panel" aria-labelledby="st-h">
     <header><h2 id="st-h">Bundle status</h2></header>

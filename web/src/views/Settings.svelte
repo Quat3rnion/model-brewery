@@ -68,7 +68,7 @@
   const stale = $derived(!!edit && !!savedHost && dirty && hostDirty(edit.base, savedHost));
   const readiness = $derived(savedHost ? effectiveReadiness(savedHost, hosts.find((h) => h.id === savedHost.id)) : []);
   // Older controllers do not send readiness rows and may report a static ready flag.
-  const ready = $derived(savedHost && !profileOnly && (Object.keys(savedHost.readiness).length > 0
+  const ready = $derived(savedHost && (Object.keys(savedHost.readiness).length > 0
     ? savedHost.ready
     : readiness.some((r) => r.allowed)));
   const evaluationReadiness = $derived(readiness.find((r) => r.kind === 'evaluate'));
@@ -378,7 +378,7 @@
     </div>
   {/if}
   <Infrastructure hostId={selectedId} selectHost={select} {confirmRefresh} {trackDraft} {focusRequest} settingsLoaded={loaded}
-    clearFocus={() => focusRequest = ''} />
+    clearFocus={() => focusRequest = ''} refreshReadiness={load} />
   <HfTokenSettings confirmRefresh={() => confirmRefresh(true)} onDirty={(dirty) => trackDraft('token', '', dirty)} />
 </div>
 

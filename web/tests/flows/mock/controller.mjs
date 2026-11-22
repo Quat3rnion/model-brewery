@@ -7,7 +7,7 @@ const hgnCatalog = JSON.parse(readFileSync(catalog, 'utf8'));
 const gguf = JSON.parse(readFileSync(ggufCatalog, 'utf8'));
 const json = (body, status = 200) => ({ status, json: body });
 const error = (status, message) => json({ error: message }, status);
-const summary = ({ result, events, ...rest }) => rest;
+const summary = ({ result, events, prompt_text, ...rest }) => rest;
 
 // Only model the response and state transitions that browser tests need.
 // Tests can set a response for additional endpoints without changing defaults.
@@ -58,9 +58,12 @@ export async function startController(assets) {
       case 'POST /api/jobs': {
         const jobId = id('job');
         const model = data.models.find((m) => m.id === body.input_ids[0]);
+        const { prompt, ...request } = body;
         const entry = data.finishWeightReads && body.kind === 'weight_inspect' && model
           ? weightRead(jobId, body, model)
-          : detail(job(jobId, body.kind, body));
+          : detail(job(jobId, body.kind, {
+            ...request, prompt_text: body.prompt_id ? data.prompts.find((p) => p.id === body.prompt_id)?.text ?? null : prompt ?? null,
+          }));
         data.jobs.push(entry);
         return json(summary(entry), 201);
       }

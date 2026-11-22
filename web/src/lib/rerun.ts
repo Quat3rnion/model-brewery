@@ -10,7 +10,6 @@ export function rerunAction(job: JobSummary): { label: string; href: string } | 
   if (!canRetry(job)) return null;
   const params = new URLSearchParams();
   const model = job.input_ids[0];
-  const host = job.requested_host ?? job.host;
   const result = (name: string, view = name.toLowerCase()) => ({
     label: `Open in ${name}`,
     href: `#/${view}${params.size ? `?${params}` : ''}`,
@@ -28,11 +27,17 @@ export function rerunAction(job: JobSummary): { label: string; href: string } | 
     case 'plan':
     case 'convert':
     case 'verify': {
-      params.set('step', job.kind);
-      if (model) params.set('model', model);
-      if (host) params.set('host', host);
-      const profile = job.options?.profile;
-      if (profile === 'v2' || profile === 'ht43') params.set('profile', profile);
+      params.set('retry', job.id);
+      if (job.options?.layer_recipe) {
+        params.set('format', 'recipe');
+        if (job.format === 'gguf') params.set('output', 'gguf');
+      } else if (job.options?.hy4_overrides) {
+        params.set('step', job.kind);
+      } else if (job.format === 'gguf') {
+        params.set('format', 'gguf');
+      } else if (!job.profile_revision) {
+        params.set('step', job.kind);
+      }
       return result('Convert');
     }
     case 'weight_inspect':
@@ -40,14 +45,18 @@ export function rerunAction(job: JobSummary): { label: string; href: string } | 
     case 'weight_tune':
     case 'weight_apply':
       if (model) params.set('source', model);
+      params.set('retry', job.id);
       return result('Weights');
     case 'generate':
     case 'evaluate':
     case 'baseline':
+      params.set('retry', job.id);
       return result('Evaluate');
     case 'benchmark':
+      params.set('retry', job.id);
       return result('Benchmarks');
     case 'hf_download':
+      params.set('retry', job.id);
       return result('Library');
     default:
       return null;
@@ -61,6 +70,18 @@ export async function readRetry(hash: string, kinds: readonly string[], signal: 
   const job = await api.job(id, signal);
   if (job.id !== id || !kinds.includes(job.kind) || !canRetry(job)) throw new Error('This job cannot fill this form.');
   return job;
+}
+
+/** Call from a route effect. Ignore a response if the operator left the form. */
+export function watchRetry(hash: string, kinds: readonly string[], apply: (job: Awaited<ReturnType<typeof api.job>>, signal: AbortSignal) => void | Promise<void>, failed: () => void) {
+  if (!hashParam(hash, 'retry')) return;
+  const controller = new AbortController();
+  void readRetry(hash, kinds, controller.signal).then((job) => {
+    if (job && !controller.signal.aborted) return apply(job, controller.signal);
+  }).catch(() => {
+    if (!controller.signal.aborted) failed();
+  });
+  return () => controller.abort();
 }
 
 export function rerunHint(error: string | null | undefined): string | null {

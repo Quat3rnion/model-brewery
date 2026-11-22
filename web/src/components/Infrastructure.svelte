@@ -13,10 +13,10 @@
   import SshHosts from './SshHosts.svelte';
   import Badge from '../components/Badge.svelte';
 
-  let { hostId, selectHost, confirmRefresh, trackDraft, focusRequest, clearFocus, settingsLoaded }:
+  let { hostId, selectHost, confirmRefresh, trackDraft, focusRequest, clearFocus, settingsLoaded, refreshReadiness }:
     { hostId: string; selectHost: (id: string) => boolean; confirmRefresh: () => boolean;
       trackDraft: (id: string, host: string, dirty: boolean) => void; focusRequest: string;
-      clearFocus: () => void; settingsLoaded: boolean } = $props();
+      clearFocus: () => void; settingsLoaded: boolean; refreshReadiness: () => Promise<void> } = $props();
   let st = $state<AdminState | null>(null);
   let status = $state<'idle' | 'loading' | 'ok' | 'unavailable' | 'error'>('idle');
   let error = $state<string | null>(null);
@@ -121,6 +121,7 @@
         : a.action === 'set_host_resources' ? `Resource limits saved for ${a.worker}.`
         : `${label}: complete.`;
       void brewery.refresh();
+      void refreshReadiness();
       return true;
     } catch (e) {
       if (e instanceof ApiError && [401,403].includes(e.status)) handle(e);

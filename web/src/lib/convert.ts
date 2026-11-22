@@ -71,7 +71,7 @@ export function buildConvertJob(step: ConvertStep, f: ConvertForm, models: Model
     if (f.profile) options.profile = f.profile;
     for (const key of ['ht_backend', 'i4r_backend', 'q4cp_backend'] as const) if (f[key]) options[key] = f[key];
     if (step !== 'inspect') {
-      if (!intIn(f.seed, 0, Number.MAX_SAFE_INTEGER)) problems.push('Seed must be a whole number of 0 or more.');
+      if (!intIn(f.seed, 0, Number.MAX_SAFE_INTEGER)) problems.push(`Seed: enter a whole number from 0 to ${Number.MAX_SAFE_INTEGER.toLocaleString('en-US')}.`);
       if (!intIn(f.threads, 1, 64)) problems.push('Threads must be 1 to 64.');
       if (!intIn(f.ht_beam, 1, 256)) problems.push('HT beam must be 1 to 256.');
       if (f.seed !== null) options.seed = f.seed;

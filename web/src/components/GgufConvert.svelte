@@ -8,6 +8,7 @@
   import { hostWorkflowEligibility } from '../lib/eligibility';
   import { type Blocker, blockerText } from '../lib/blockers';
   import { validSha } from '../lib/ggufSource';
+  import { roleLabel } from '../lib/components';
   import { conversions, ConversionStarter } from '../lib/conversions.svelte';
   import { buildGgufConversion, imatrixRequired, IMATRIX_KIND, forkSelected, profileMatches, FORK_NOTICE, type GgufCatalog } from '../lib/gguf';
   import { shortRev } from '../lib/profiles';
@@ -16,7 +17,9 @@
   import Blockers from './Blockers.svelte';
   import Submit from './Submit.svelte';
 
-  let { catalog, source=$bindable('') }: { catalog: GgufCatalog; source?:string } = $props();
+  let { catalog, source=$bindable(''), retry = null }: { catalog: GgufCatalog; source?:string;
+    retry?: { id: string; source: string; inputIds: string[]; options: Record<string, unknown>; profileRevision: string | null } | null;
+  } = $props();
   const hosts = $derived(brewery.state?.hosts ?? []);
   const models = $derived(brewery.state?.models ?? []);
 
@@ -38,6 +41,16 @@
   const assetChoices = $derived(models.filter(m=>m.kind==='assets' && m.host===src?.host && m.available!==false));
   const sameHostMatrix = $derived(models.filter(m=>m.kind===IMATRIX_KIND && m.host===src?.host && m.available!==false));
   $effect(()=>{void source; assets=''; imatrix='';});
+  let restored = '';
+  $effect(() => {
+    if (!retry || source !== retry.source || retry.id === restored) return;
+    restored = retry.id;
+    const { inputIds, options, profileRevision } = retry;
+    choice = profileRevision ? `rev:${profileRevision}` : typeof options.preset === 'string' ? `preset:${options.preset}` : '';
+    assets = models.find((m) => m.kind === 'assets' && inputIds.includes(m.id))?.id ?? '';
+    imatrix = models.find((m) => m.kind === IMATRIX_KIND && inputIds.includes(m.id))?.id ?? '';
+    threads = typeof options.threads === 'number' ? options.threads : null;
+  });
   const rev = $derived(choice.startsWith('rev:') ? profileStore.ggufSaved.find((p) => p.revision === choice.slice(4)) : undefined);
   const preset = $derived(choice.startsWith('preset:') ? choice.slice(7) : '');
   const fork = $derived(forkSelected(catalog, rev?.preset ?? preset, rev?.overrides ?? {}));
@@ -111,7 +124,7 @@
   {/if}
   {#if standalone && src}
     <div class="field">
-      <label for="gg-assets">Config and tokenizer assets (required)</label>
+      <label for="gg-assets">{roleLabel('assets')} (required)</label>
       <select bind:value={assets} id="gg-assets" class="input" disabled={!assetChoices.length} aria-describedby="gg-assets-hint">
         <option value="">Select matching assets</option>
         {#each assetChoices as m (m.id)}<option value={m.id}>{modelLabel(m)} · {m.path}</option>{/each}
