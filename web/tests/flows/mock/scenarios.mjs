@@ -66,6 +66,29 @@ const finished = (id, kind, fields, result) => detail(job(id, kind, {
   state: 'succeeded', started_at: time, finished_at: time + 1000, ...fields,
 }), result);
 
+const matrix = { name: 'blk.0.ffn_down.weight', dtype: 'F32', shape: [2, 33] };
+
+export function weightRead(id, body, model) {
+  const { mode, offset, tensor, origin, shape } = body.options;
+  if (mode === 'tile') {
+    return finished(id, body.kind, body, { report: {
+      mode, source_sha256: sha, tensor, origin, tile_shape: shape,
+      shape: matrix.shape, dtype: matrix.dtype,
+      values: Array.from({ length: shape[0] }, () => Array(shape[1]).fill(0.5)),
+    } });
+  }
+  const gguf = model.kind === 'gguf';
+  const tensors = !gguf ? [{ ...matrix, name: 'model.layers.0.mlp.down_proj.weight' }]
+    : offset === 0 ? [matrix, ...Array.from({ length: 127 }, (_, i) => ({
+      name: `blk.0.fixture_${i}.weight`, dtype: 'F32', shape: [1],
+    }))] : [{ name: 'blk.1.output.weight', dtype: 'F32', shape: [1] }];
+  return finished(id, body.kind, body, {
+    inputs: [{ id: model.id, source_host: model.host, kind: model.kind, sha256: sha, bundle_sha256: sha }],
+    report: { mode, source_format: model.kind, source_sha256: sha, offset, tensors,
+      total: gguf ? 129 : 1, next_offset: gguf && offset === 0 ? 128 : null },
+  });
+}
+
 const results = [
   finished('evaluation-result', 'evaluate', { input_ids: ['bundle-a'] }, {
     dataset: { full_split: false }, identity: { synthetic: true }, score: { correct: 3, total: 4, unparsed: 0 },
@@ -158,6 +181,10 @@ export function scenario(name, catalogSha) {
     case 'active-jobs': data = { ...base, jobs: activeJobs }; break;
     case 'conversions': data = { ...base, jobs: [...conversionJobs, activeJobs[0]], conversions: runs }; break;
     case 'gguf': data = { ...base, models: models.filter((model) => model.kind === 'gguf') }; break;
+    case 'weight-reads':
+      data = { ...base, finishWeightReads: true, hosts: workers.map((host) => host.id === 'worker-a'
+        ? { ...host, capabilities: { ...host.capabilities, weight_visual: true, weight_safetensors: true } } : host) };
+      break;
     case 'results': data = { ...base, jobs: results }; break;
     case 'full-split':
       data = { ...base, jobs: [finished('full-split-result', 'evaluate', { input_ids: ['bundle-a'] }, {
