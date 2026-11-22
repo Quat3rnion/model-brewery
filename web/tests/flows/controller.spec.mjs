@@ -30,7 +30,7 @@ test('registers a model and records exactly one request', async ({ page, control
   await controller.open(page, 'library');
   await expect(page.getByText('Fixture checkpoint', { exact: true })).toBeVisible();
   const model = { name: 'New sample', host: 'worker-a', kind: 'gguf', path: '/fixtures/new.gguf' };
-  const form = page.getByRole('region', { name: 'Register a source' });
+  const form = page.getByRole('region', { name: 'Register an entry' });
   await form.getByRole('combobox', { name: 'Host', exact: true }).click();
   await page.getByRole('option', { name: 'Worker A', exact: false }).click();
   await form.getByRole('combobox', { name: 'Path on host' }).fill(model.path);

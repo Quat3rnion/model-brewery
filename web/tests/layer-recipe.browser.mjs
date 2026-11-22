@@ -178,7 +178,7 @@ try {
   await layer(0).selectOption('F16');
   await layer(1).selectOption('BF16');
   await outputFormat('gguf');
-  const assetSelect = page.getByRole('combobox', { name: 'Config and tokenizer assets', exact: true });
+  const assetSelect = page.getByRole('combobox', { name: 'Tokenizer and config files', exact: true });
   await assetSelect.waitFor();
   assert.equal(await assetSelect.inputValue(), '', 'assets must be selected explicitly');
   assert.equal(await assetSelect.getByRole('option', { name: /foreign|unavailable/i }).count(), 0);

@@ -1,6 +1,50 @@
 import { test, expect } from './fixtures.mjs';
 import { convertState } from './mock/convert.mjs';
 
+test('Profiles keeps the focused layer above the sticky Save bar', async ({ page, controller }) => {
+  test.skip(page.viewportSize().width !== 1280, 'Reproduce the desktop layout at 1280×900.');
+  await controller.open(page, 'profiles');
+  await page.getByRole('button', { name: 'Start from HGN v2', exact: true }).click();
+  await page.getByRole('button', { name: 'Close editor' }).focus();
+  await page.keyboard.press('Tab');
+  const layer = page.getByRole('option', { name: /^Layer 0:/ });
+  await expect(layer).toBeFocused();
+  await expect.poll(() => layer.evaluate((el) => {
+    const { x, y, width, height } = el.getBoundingClientRect();
+    return el.contains(document.elementFromPoint(x + width / 2, y + height / 2));
+  })).toBe(true);
+});
+test('Convert explains the encoder options and uses one label for the output profile', async ({ page, controller }) => {
+  await controller.open(page, 'convert?step=convert&model=source-a');
+  await expect.soft(page.getByLabel('Output profile', { exact: true })).toHaveCount(2);
+  for (const panel of [page.getByRole('region', { name: 'Convert a checkpoint' }), page.getByRole('tabpanel')]) {
+    const advanced = panel.getByText('Advanced options', { exact: true });
+    if (!(await advanced.locator('xpath=../..').evaluate((el) => el.open))) await advanced.click();
+    await expect.soft(panel.getByLabel('I4R encoder backend')).toHaveAccessibleDescription(/4-bit.*rotation/);
+    await expect.soft(panel.getByLabel('Q4CP encoder backend')).toHaveAccessibleDescription(/4-bit.*codebook/);
+    await expect.soft(panel.getByLabel(/Seed/)).toHaveAccessibleDescription('Enter a whole number from 0 to 9,007,199,254,740,991.');
+  }
+});
+
+test('Profiles explains saved versions and the tensors in a size estimate', async ({ page, controller }) => {
+  await controller.open(page, 'profiles');
+  await expect.soft(page.getByText('Each save adds a new revision. Earlier revisions do not change.', { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: 'Start from HGN v2', exact: true }).click();
+  await expect(page.getByText(/helper tensors that store scales or rotation data/).first()).toBeVisible();
+});
+
+test('Convert uses the Library component name for tokenizer and config files', async ({ page, controller }) => {
+  const state = convertState();
+  state.models.push({ id: 'standalone', name: 'Standalone weights', kind: 'safetensors', host: 'worker-a', path: '/fixtures/model.safetensors' });
+  controller.respond('GET', '/api/state', { json: state });
+  await controller.open(page, 'convert?format=gguf');
+  await pick(page, '#gg-source', /^Standalone weights/);
+  await expect(page.getByLabel('Tokenizer and config files (required)', { exact: true })).toBeVisible();
+  await controller.open(page, 'convert?format=recipe');
+  await pick(page, '#recipe-source', /^Standalone weights/);
+  await expect(page.getByRole('combobox', { name: 'Tokenizer and config files', exact: true })).toBeVisible();
+});
+
 async function pick(page, id, option) {
   await page.locator(id).click();
   await page.getByRole('option', { name: option }).click();
@@ -87,6 +131,32 @@ test('custom profiles mark unknown source hashes and check the exact selection w
   expect(checks).toBe(1);
   expect(controller.requests('POST', '/api/conversions')).toHaveLength(0);
   expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
+});
+
+test('Managed eligibility rechecks the same request when an input host resumes', async ({ page, controller }) => {
+  const data = convertState();
+  data.models.push({ id: 'vision-aux', name: 'Fixture vision', kind: 'vision', host: 'worker-b', path: '/fixtures/vision' });
+  data.hosts[0].capabilities.convert_components = true;
+  data.hosts[1].scheduling_paused = true;
+  controller.respond('GET', '/api/state', () => ({ json: data }));
+  const check = '/api/conversions/eligibility';
+  controller.respond('POST', check, () => ({ json: data.hosts[1].scheduling_paused
+    ? { eligible: false, reasons: [{ text: 'Resume Worker B before using this input.', fix_anchor: '#/settings' }] }
+    : { eligible: true, reasons: [] } }));
+  await controller.open(page, 'convert');
+  await pick(page, '#wf-source', /^Fixture checkpoint/);
+  await page.locator('#wf-comp-vision').selectOption('vision-aux');
+  await page.locator('#wf-profile').selectOption('v2');
+  const start = page.getByRole('button', { name: 'Start conversion', exact: true });
+  await expect(page.getByRole('link', { name: 'Resume Worker B before using this input.' })).toBeVisible();
+  await expect(start).toBeDisabled();
+  const previous = controller.requests('POST', check);
+  data.hosts[1].scheduling_paused = false;
+  await expect(start).toBeEnabled();
+  const requests = controller.requests('POST', check);
+  expect(requests.length).toBe(previous.length + 1);
+  expect(requests.at(-1).body).toEqual(previous.at(-1).body);
+  expect(controller.requests('POST', '/api/conversions')).toHaveLength(0);
 });
 
 test('Hy4 is inside diagnostics and does not use the managed source', async ({ page, controller }) => {

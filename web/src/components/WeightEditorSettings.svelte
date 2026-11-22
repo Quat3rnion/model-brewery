@@ -30,7 +30,7 @@
   const sources = $derived((brewery.state?.models ?? []).filter(m => m.available !== false && WEIGHT_SOURCES.includes(m.kind)));
   const owners = $derived(policies.filter(p => p.id !== host.id && p.weightEditor?.available)
     .map(p => ({policy:p, models:sources.filter(m => m.host === p.id)})).filter(o => o.models.length));
-  const features = [ ['weight_inspect','Inspect weights'],['weight_propose','Manual proposals'],['weight_tune','Automatic tuning'],['weight_apply','Apply reviewed revisions'],['weight_visual','Visual tensor selection'],['weight_hgn','Native HGN','Models in Brewery’s HGN format'],['weight_safetensors','SafeTensors and indexed HF'],['weight_packed','Packed-code editing','Edit quantized weights without first converting the whole model'] ];
+  const features = [ ['weight_inspect','Inspect weights'],['weight_propose','Manual proposals'],['weight_tune','Automatic tuning'],['weight_apply','Apply reviewed revisions'],['weight_visual','Visual tensor selection'],['weight_hgn','Native HGN','Inspect and edit supported weights in Model Brewery HGN files.'],['weight_safetensors','SafeTensors and indexed HF'],['weight_packed','Packed-code editing','Change weights stored as compressed values without converting the full model first.'] ];
   async function change() {
     if (!w?.available || busy) return;
     await save({action:'set_weight_editor',worker:host.id,revision:host.revision,enabled:!w.enabled},`${w.enabled ? 'Disable' : 'Enable'} weight editing on ${host.id}`);

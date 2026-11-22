@@ -16,6 +16,12 @@ export function weightFormat(model: Model, host: Host | undefined) {
   if (model.kind === 'hgn') return weightCapability(host, 'weight_hgn', model.host);
 }
 
+export function canInspectVisually(model: Model, host: Host | undefined): boolean {
+  return model.available !== false && weightFormat(model, host)?.allowed !== false
+    && weightCapability(host, 'weight_inspect', model.host).allowed
+    && weightCapability(host, 'weight_visual', model.host).allowed;
+}
+
 /** A GGUF proposal can use text entry without a visual reader. */
 export function weightAccess(model: Model, host: Host | undefined) {
   const manual = weightCapability(host, 'weight_propose', model.host);

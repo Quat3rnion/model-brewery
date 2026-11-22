@@ -5,15 +5,15 @@ import type { JobSummary } from './types';
 const base: JobSummary = { id: 'job / 1', kind: 'plan', state: 'failed', host: 'worker-a', input_ids: ['source & 1'] };
 
 describe('retry actions', () => {
-  it('links to the matching form without putting prompts or preserving private options in the URL', () => {
+  it('links to the matching form without putting prompts or private options in the URL', () => {
     expect(rerunAction({ ...base, options: { profile: 'v2', token: 'secret' } })).toEqual({
-      label: 'Open in Convert', href: '#/convert?step=plan&model=source+%26+1&host=worker-a&profile=v2',
+      label: 'Open in Convert', href: '#/convert?retry=job+%2F+1&step=plan',
     });
-    expect(rerunAction({ ...base, kind: 'compare', prompt: 'Private prompt' })).toEqual({
+    expect(rerunAction({ ...base, kind: 'compare', prompt_text: 'Private prompt' })).toEqual({
       label: 'Open in Compare', href: '#/compare?retry=job+%2F+1',
     });
-    expect(rerunAction({ ...base, kind: 'benchmark', state: 'interrupted' })?.href).toBe('#/benchmarks');
-    expect(rerunAction({ ...base, kind: 'weight_inspect', state: 'cancelled' })?.href).toBe('#/weights?source=source+%26+1');
+    expect(rerunAction({ ...base, kind: 'benchmark', state: 'interrupted' })?.href).toBe('#/benchmarks?retry=job+%2F+1');
+    expect(rerunAction({ ...base, kind: 'weight_inspect', state: 'cancelled' })?.href).toBe('#/weights?source=source+%26+1&retry=job+%2F+1');
     expect(rerunAction({ ...base, state: 'succeeded' })).toBeNull();
   });
 

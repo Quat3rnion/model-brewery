@@ -1,6 +1,7 @@
 import AxeBuilder from '@axe-core/playwright';
 import { test, expect } from './fixtures.mjs';
 import { libraryWeights, verifiedHash } from './mock/library-weights.mjs';
+import { scenario } from './mock/scenarios.mjs';
 
 test('Library shows controller identity and does not link unusable weights to the editor', async ({ page, controller }) => {
   libraryWeights(controller);
@@ -26,7 +27,7 @@ test('Library shows controller identity and does not link unusable weights to th
 test('Register excludes the download host and explains what is needed before input', async ({ page, controller }) => {
   libraryWeights(controller);
   await controller.open(page);
-  const form = page.getByRole('region', { name: 'Register a source' });
+  const form = page.getByRole('region', { name: 'Register an entry' });
   await expect(form.getByRole('button', { name: 'Register', exact: true })).toHaveAccessibleDescription(/Select a host/);
   await form.getByRole('combobox', { name: 'Host', exact: true }).click();
   await expect(form.getByRole('option', { name: /Worker A/ })).toBeVisible();
@@ -75,11 +76,29 @@ test('Library updates a saved prompt and shows the controller job conflict befor
   expect(controller.requests('DELETE', '/api/prompts/editable')).toHaveLength(2);
 });
 
+test('Library keeps a new prompt draft when the operator declines to leave', async ({ page, controller }) => {
+  await controller.open(page);
+  const name = page.getByLabel('Name', { exact: true }).last();
+  await name.fill('New draft');
+  await page.getByLabel('Prompt text').fill('Keep this text.');
+  const jobs = page.getByRole('navigation', { name: 'Sections' }).getByRole('link', { name: /^Jobs/ });
+  const dialog = page.waitForEvent('dialog', { timeout: 2000 }).then((d) => d.dismiss());
+  await jobs.click();
+  await dialog;
+  await expect(name).toHaveValue('New draft');
+  await expect(page.getByLabel('Prompt text')).toHaveValue('Keep this text.');
+  const leave = page.waitForEvent('dialog').then((d) => d.accept());
+  await jobs.click();
+  await leave;
+  await expect(page.getByRole('heading', { name: 'Jobs', exact: true })).toBeVisible();
+  expect(controller.requests('POST', '/api/prompts')).toHaveLength(0);
+});
+
 test('Weights labels unusable entries and blocks a missing entry opened by a deep link', async ({ page, controller }) => {
   libraryWeights(controller);
   await controller.open(page, 'weights');
   await expect(page.getByRole('radiogroup', { name: 'Editing mode' })).toHaveCount(0);
-  const picker = page.getByRole('combobox', { name: 'Source model' });
+  const picker = page.getByRole('combobox', { name: 'Source entry' });
   await picker.click();
   await expect(page.getByRole('option', { name: /Missing GGUF.*The source file does not exist/ })).toHaveAttribute('aria-disabled', 'true');
   await expect(page.getByRole('option', { name: /Fixture GGUF copy.*weight_propose/ })).toHaveAttribute('aria-disabled', 'true');
@@ -87,6 +106,26 @@ test('Weights labels unusable entries and blocks a missing entry opened by a dee
   await expect(page.getByText('The source file does not exist.', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: /Read tensor|Create proposal|Tune selected weights/ })).toHaveCount(0);
   expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
+});
+
+test('Inspect and visual capabilities permit explicit read-only inspection without edit permission', async ({ page, controller }) => {
+  controller.load('weight-reads');
+  const state = scenario('weight-reads');
+  const host = state.hosts[0];
+  host.capabilities.weight_propose = false;
+  host.capabilities.weight_tune = false;
+  controller.respond('GET', '/api/state', { json: state });
+  await controller.open(page, 'weights?source=gguf-a');
+  const read = page.getByRole('button', { name: 'Read tensor list', exact: true });
+  await expect(read).toBeEnabled();
+  await expect(page.getByText(/Read-only:.*weight_propose/i)).toBeVisible();
+  expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
+  await read.click();
+  await page.getByRole('option', { name: /^blk\.0\.ffn_down\.weight,/ }).click();
+  await page.getByRole('button', { name: 'Read tile', exact: true }).click();
+  await expect(page.getByRole('gridcell').first()).toBeVisible();
+  await expect(page.getByRole('button', { name: /Raise by|Create proposal|Tune selected weights/ })).toHaveCount(0);
+  expect(controller.requests('POST', '/api/jobs').map(({ body }) => body.kind)).toEqual(['weight_inspect', 'weight_inspect']);
 });
 
 test('GGUF combines text and visual edits in one proposal and validates text on blur', async ({ page, controller }) => {
@@ -101,7 +140,7 @@ test('GGUF combines text and visual edits in one proposal and validates text on 
   await expect(coordinate).toHaveAccessibleDescription('Coordinates are whole numbers from 0, separated by commas.');
   await coordinate.fill('0, 1');
   await page.getByRole('textbox', { name: 'Value, edit 1' }).fill('0.25');
-  const picker = page.getByRole('combobox', { name: 'Source model' });
+  const picker = page.getByRole('combobox', { name: 'Source entry' });
   await picker.click();
   page.once('dialog', (dialog) => dialog.dismiss());
   await page.getByRole('option', { name: /^Fixture checkpoint/ }).click();
@@ -135,6 +174,17 @@ test('Weights states the upload and worker calibration limits together', async (
   await expect(copy).toHaveCount(1);
   await expect(copy).toContainText('16,384 columns');
   await expect(copy).toContainText('256 KiB');
+});
+
+test('Library and Weights use consistent entry and calibration labels', async ({ page, controller }) => {
+  libraryWeights(controller);
+  await controller.open(page);
+  await expect.soft(page.getByRole('heading', { name: 'Register an entry' })).toBeVisible();
+  await expect.soft(page.getByRole('heading', { name: /^Library entries/ })).toBeVisible();
+  await controller.open(page, 'weights?source=downloaded');
+  await expect.soft(page.getByRole('combobox', { name: 'Source entry' })).toHaveValue('Verified GGUF');
+  await page.getByRole('radio', { name: 'Automatic' }).check();
+  await expect(page.getByLabel('Upload calibration data (JSON)')).toBeVisible();
 });
 
 test('Running jobs have AA contrast and can collapse on mobile', async ({ page, controller }, info) => {

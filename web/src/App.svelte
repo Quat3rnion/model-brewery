@@ -57,7 +57,10 @@
 <header class="top">
   <div class="brand">
     <span class="mark" aria-hidden="true"></span>
-    <span class="name" translate="no">Model Brewery</span>
+    <div>
+      <span class="name" translate="no">Model Brewery</span>
+      <p class="qualification xs muted">This workbench is not release-qualified.</p>
+    </div>
   </div>
   <nav aria-label="Sections">
     <ul class="seg">
@@ -185,6 +188,11 @@
     height: 17px;
     background: currentColor;
     clip-path: polygon(15% 0, 85% 0, 100% 100%, 0 100%);
+  }
+  .qualification {
+    margin: 0;
+    font-weight: 400;
+    letter-spacing: normal;
   }
   nav {
     flex: 1;

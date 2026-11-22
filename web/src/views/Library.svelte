@@ -137,7 +137,7 @@
   let deleteBusy = $state(false);
   let deleteError = $state<string | null>(null);
   const promptToggleId = (id: string) => `prompt-${encodeURIComponent(id)}`;
-  const promptGuard = unsavedChanges(() => !!editing && (editing.name !== pName || editing.text !== pText));
+  const promptGuard = unsavedChanges(() => (editing?.name ?? '') !== pName || (editing?.text ?? '') !== pText);
   async function editPrompt(p: Prompt) {
     if (pBusy || !promptGuard.confirm()) return;
     editing = p;
@@ -214,7 +214,7 @@
 
   <HfDownload />
   <section class="panel" aria-labelledby="reg-h">
-    <header><h2 id="reg-h">Register a source</h2></header>
+    <header><h2 id="reg-h">Register an entry</h2></header>
     <WorkflowGate workflow="register_manual">
     <form class="body stack" onsubmit={register} novalidate>
       <div class="reg">
@@ -279,7 +279,7 @@
 
   <section class="panel" aria-labelledby="models-h">
     <header>
-      <h2 id="models-h">Entries <span class="muted num small">({models.length})</span></h2>
+      <h2 id="models-h">Library entries <span class="muted num small">({models.length})</span></h2>
       <div class="filters">
         <label class="sr-only" for="lib-filter">Filter entries</label>
         <input id="lib-filter" class="input" type="search" bind:value={filter} placeholder="Filter…" autocomplete="off" />

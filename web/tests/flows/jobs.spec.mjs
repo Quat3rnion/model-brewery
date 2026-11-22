@@ -1,6 +1,7 @@
 import { test, expect } from './fixtures.mjs';
 import { scenario } from './mock/scenarios.mjs';
-import { cancelling, failedCompare, hy4Conversion, hy4Plan, interruptedTransfer, inventory, tile } from './mock/jobs.mjs';
+import { libraryWeights } from './mock/library-weights.mjs';
+import { cancelling, failedCompare, historicalPrompt, hy4Conversion, hy4Plan, interruptedTransfer, inventory, tile } from './mock/jobs.mjs';
 
 const jobPath = (id) => `/api/jobs/${id}`;
 const setJob = (controller, job) => controller.respond('GET', jobPath(job.id), { json: job });
@@ -75,7 +76,7 @@ test('Failed comparison explains the fix and opens a prefilled form without queu
   await expect(log.getByText(/Failed · failed/i)).toHaveCount(0);
   await expect(page.getByText('Free space on the host before you try again.', { exact: true })).toBeVisible();
   await page.getByRole('link', { name: 'Open in Compare' }).click();
-  await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(failedCompare.prompt);
+  await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(failedCompare.prompt_text);
   await expect(page.getByRole('combobox', { name: 'Model A' })).toHaveValue('Fixture GGUF');
   await expect(page.getByRole('combobox', { name: 'Model B' })).toHaveValue('Fixture GGUF copy');
   const tokens = page.getByRole('spinbutton', { name: 'Decode tokens' });
@@ -85,6 +86,41 @@ test('Failed comparison explains the fix and opens a prefilled form without queu
   await expect(tokens).toHaveAttribute('aria-invalid', 'true');
   await expect(tokens).toHaveAccessibleDescription('Enter a whole number from 0 to 128.');
   expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
+});
+
+test('Job detail distinguishes the submitted prompt from the current Library text', async ({ page, controller }) => {
+  libraryWeights(controller);
+  const submitted = { ...historicalPrompt, prompt_id: 'editable', prompt_text: 'Original text.' };
+  setJob(controller, submitted);
+  const legacy = { ...submitted, id: 'legacy-prompt', prompt_text: null };
+  setJob(controller, legacy);
+  await controller.open(page, 'library');
+  await page.getByRole('button', { name: /Original prompt/ }).click();
+  await page.getByRole('button', { name: 'Edit prompt' }).click();
+  await page.getByLabel('Prompt text').fill('Updated Library text.');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  await expect(page.getByRole('button', { name: /Original prompt Updated Library text/ })).toBeVisible();
+  await go(page, submitted.id);
+  const request = page.getByRole('region', { name: 'Request' });
+  await expect(request.getByText(submitted.prompt_text)).toBeVisible();
+  await expect(request.getByText('Updated Library text.')).toHaveCount(0);
+  await go(page, legacy.id);
+  await expect(request.getByText('Updated Library text.')).toBeVisible();
+  await expect(request.getByText('Current saved prompt. The text may have changed after this job ran.')).toBeVisible();
+});
+
+test('Compare queues only on explicit activation, not Enter in a numeric field', async ({ page, controller }) => {
+  setJob(controller, failedCompare);
+  await controller.open(page, `jobs/${failedCompare.id}`);
+  await page.getByRole('link', { name: 'Open in Compare' }).click();
+  const tokens = page.getByRole('spinbutton', { name: 'Decode tokens' });
+  await expect(tokens).toHaveValue('32');
+  await tokens.press('Enter');
+  await page.getByRole('spinbutton', { name: /CPU threads/i }).press('Enter');
+  await expect(page.getByText(/Queued as job/)).toHaveCount(0);
+  expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
+  await page.getByRole('button', { name: 'Queue comparison' }).click();
+  await expect.poll(() => controller.requests('POST', '/api/jobs').length).toBe(1);
 });
 
 test('Hy4 plan and conversion explain their evidence and link a registered output', async ({ page, controller }) => {

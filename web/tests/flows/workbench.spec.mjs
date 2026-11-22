@@ -260,7 +260,7 @@ test('Convert shows stage links and starts one managed conversion', async ({ pag
   const convert = page.getByRole('button', { name: 'Start conversion', exact: true });
   await expect(convert).toBeDisabled();
   await pick(page, 'Source checkpoint', /^Fixture checkpoint/);
-  await page.getByRole('region', { name: 'Convert a checkpoint' }).getByLabel('Profile', { exact: true }).selectOption('v2');
+  await page.getByRole('region', { name: 'Convert a checkpoint' }).getByLabel('Output profile', { exact: true }).selectOption('v2');
   await convert.click();
   await expect(page.getByText(/Started conversion conversion-mock-/)).toBeVisible();
   const requests = controller.requests('POST', '/api/conversions');
@@ -276,7 +276,7 @@ test('Profiles shows a saved HGN revision and carries it into Convert', async ({
   await expect(page.getByRole('rowheader', { name: 'Fixture HGN profile' })).toBeVisible();
   await page.getByRole('button', { name: /Use in Convert: Fixture HGN profile revision/ }).click();
   await expect(page).toHaveURL(/#\/convert$/);
-  await expect(page.getByRole('region', { name: 'Convert a checkpoint' }).getByLabel('Profile', { exact: true })).toHaveValue(`rev:${'a'.repeat(64)}`);
+  await expect(page.getByRole('region', { name: 'Convert a checkpoint' }).getByLabel('Output profile', { exact: true })).toHaveValue(`rev:${'a'.repeat(64)}`);
 });
 
 test('Profiles keeps GGUF revisions separate from HGN revisions', async ({ page, controller }) => {
@@ -334,7 +334,7 @@ test('Profiles reads GGUF editor tensors only on request', async ({ page, contro
 test('Weights does not submit inspection jobs until explicitly requested', async ({ page, controller }) => {
   controller.load('weight-reads');
   await controller.open(page, 'weights');
-  await pick(page, 'Source model', /^Fixture GGUF\b(?! copy)/);
+  await pick(page, 'Source entry', /^Fixture GGUF\b(?! copy)/);
   await expectNoNewJobs(page, controller);
   await page.reload(); // The URL now includes the selected source.
   await expect(page.getByRole('heading', { name: '1. Tensor' })).toBeVisible();

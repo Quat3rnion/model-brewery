@@ -82,4 +82,4 @@ Import `test` and `expect` from `web/tests/flows/fixtures.mjs`. Each test gets a
 
 Use `controller.requests('POST', '/api/jobs')` to check the number of requests and their JSON bodies. Use `controller.respond('GET', '/api/state', { status: 503, json: { error: 'Unavailable' } })` to change one response. `load()` clears response overrides but keeps the request log. The mock does not run native tools or jobs.
 
-The accessibility tests report WCAG A and AA violations for each view. The [known-violations allowlist](web/tests/flows/known-violations.mjs) lists the existing failures by view, rule, project, and element. Remove the entry for a fixed violation. A new failing element or rule fails the test.
+The accessibility tests scan default and supplementary views for WCAG A and AA violations without an allowlist. The Profiles keyboard test checks that the sticky Save bar does not cover the focused layer at 1280 × 900.

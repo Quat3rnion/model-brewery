@@ -5,6 +5,7 @@
   import type { Blocker } from '../lib/blockers';
   import { conversions, type ConversionStarter } from '../lib/conversions.svelte';
   import { capability, hostName, isActive, modelLabel } from '../lib/format';
+  import { roleLabel } from '../lib/components';
   import { inventoryBlocker, validSha } from '../lib/ggufSource';
   import { obj } from '../lib/reports';
   import { brewery } from '../lib/store.svelte';
@@ -15,7 +16,9 @@
   import Submit from './Submit.svelte';
   import { trellisProblem } from '../lib/trellis-layer';
 
-  let { source, format, starter }: { source: Model; format: 'gguf' | 'hgn'; starter: ConversionStarter } = $props();
+  let { source, format, starter, retry = null }: { source: Model; format: 'gguf' | 'hgn'; starter: ConversionStarter;
+    retry?: { id: string; inputIds: string[]; recipe: unknown } | null;
+  } = $props();
 
   const submitted = new SvelteMap<number, JobSummary | null>();
   const loaded = new SvelteMap<string, JobDetail | 'rejected' | null>();
@@ -131,6 +134,18 @@
   const standalone = $derived(source.kind === 'safetensors');
   const assets = $derived((brewery.state?.models ?? []).filter(m => m.kind === 'assets' && m.host === source.host && m.available !== false));
   let assetId = $state('');
+  const priorRecipe = $derived(obj(retry?.recipe));
+  let restored = '';
+  $effect(() => {
+    if (!retry || !priorRecipe || retry.id === restored || retry.inputIds[0] !== source.id) return;
+    restored = retry.id;
+    const types = [...formatTypes, ...trellis];
+    const type = (value: unknown): value is OutputType => types.some((type) => type === value);
+    if (type(priorRecipe.default_type)) defaultType = priorRecipe.default_type;
+    overrides = Object.fromEntries(Object.entries(obj(priorRecipe.layers) ?? {})
+      .filter(([index, value]) => /^(0|[1-9]\d*)$/.test(index) && type(value))) as typeof overrides;
+    assetId = assets.find((m) => retry?.inputIds.includes(m.id))?.id ?? '';
+  });
   const selectedAsset = $derived(assets.find(asset => asset.id === assetId));
   const requirements = $derived(format === 'hgn' ? ['hgn_layer_recipe', ...STAGES]
     : ['gguf_layer_recipe', 'gguf_output', standalone ? 'gguf_safetensors_output' : 'gguf_hf_output', ...STAGES]);
@@ -154,6 +169,8 @@
     if (!recipe && !problem) out.push(!complete ? 'Read the source layers first.' : !layers.length
       ? 'Choose a source with recognized layer matrices.' : tooMany ? 'Use at most 256 layer overrides.' : 'Change the incompatible types.');
     if (problem) out.push('Resolve the source inventory problem above.');
+    if (recipe && priorRecipe && sourceSha !== priorRecipe.source_sha256) out.push('The source file changed. Select the original source or start a new recipe.');
+    if (complete && priorRecipe && Object.keys(overrides).some((index) => !layers.includes(Number(index)))) out.push('The source does not contain all layers in the previous recipe.');
     if (format === 'hgn' && recipe && !Object.values(recipe.layers).some(type => type === 'HT3' || type === 'HT4')) {
       out.push('Select HT3 or HT4 for at least one layer to run a managed HGN recipe.');
     }
@@ -197,6 +214,9 @@
 {/snippet}
 
 <Blockers blockers={setup} />
+{#if priorRecipe && !complete}
+  <p class="hint">Previous recipe: {String(priorRecipe.default_type)} default{#each Object.entries(obj(priorRecipe.layers) ?? {}) as [layer, type]} · Layer {layer}: {String(type)}{/each}. Read the source layers to check the recipe.</p>
+{/if}
 <p class="hint">Supported architectures: {format === 'gguf' ? 'GPT-2 and Qwen2' : 'dense Llama and Qwen2'}. The exporter checks the architecture and assets before it writes output.</p>
 {#if readJob && !flash}
   <div class="row" role="status">
@@ -255,7 +275,7 @@
 
 {#if standalone}
   <label class="field">
-    Config and tokenizer assets
+    {roleLabel('assets')}
     <select class="input" bind:value={assetId} disabled={!assets.length}>
       <option value="">Select matching assets</option>
       {#each assets as asset (asset.id)}<option value={asset.id}>{modelLabel(asset)} · {asset.path}</option>{/each}

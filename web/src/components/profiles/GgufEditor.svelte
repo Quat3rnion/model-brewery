@@ -1,4 +1,5 @@
 <script lang="ts">
+  let saveBarHeight = $state(0);
   import { unsavedChanges } from '../../lib/unsaved-changes.svelte';
   import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
@@ -212,7 +213,7 @@
   const typeNote = (id: string) => (catalog.typeById.get(id)?.fork ? ' · ROCmFPX' : '') + (catalog.typeById.get(id)?.requiresImatrix ? ' (needs imatrix)' : '');
 </script>
 
-<div class="stack">
+<div class="stack profile-editor" style:--save-bar-height="{saveBarHeight}px">
   <p class="note info">
     GGUF output uses llama.cpp tensor types. A preset sets every tensor; overrides change single tensors by their exact GGUF name. Only types the worker's llama.cpp build supports are listed. Sizes are shown only where the block size and the tensor shape are known.
   </p>
@@ -393,13 +394,16 @@
     {#if saveErr}<p class="note bad" role="alert">{saveErr} Your changes are kept.</p>{/if}
     {#if saved}<div class="note info"><p>Saved <strong>{saved.name}</strong>, revision <span class="mono">{shortRev(saved.revision)}</span>.</p><button type="button" class="btn small primary" onclick={() => useInConvert(saved!)}>Use in Convert</button></div>{/if}
   </div>
-  <div class="save-bar">
+  <div class="save-bar" bind:offsetHeight={saveBarHeight}>
     {#if !name.trim()}<a href="#{uid}-name" onclick={(event) => { event.preventDefault(); document.getElementById(`${uid}-name`)?.focus(); }}>Enter a profile name</a>{/if}
     <button type="button" class="btn primary" disabled={!built.body || saving || discovering || nativeOverrides || (!dirty && !!start)} onclick={save}>{saving ? 'Saving…' : 'Save revision'}</button>
   </div>
 </div>
 
 <style>
+  .profile-editor :global(:focus) {
+    scroll-margin-bottom: var(--save-bar-height);
+  }
   .save-bar {
     position: sticky;
     bottom: 0;
