@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { capability } from '../lib/format';
   import { brewery } from '../lib/store.svelte';
   import { Submitter } from '../lib/submit.svelte';
+  import { fieldError, visibleBlockers } from '../lib/blockers';
+  import { hostWorkflowEligibility } from '../lib/eligibility';
   import { formatTime, hostName, isTerminal, modelLabel, newestFirst, stateLabel } from '../lib/format';
   import { benchmarkLine, lineTone, accuracyText, readScore, obj } from '../lib/reports';
   import {
@@ -15,6 +16,7 @@
     directionText,
     formatValue,
     missingSuites,
+    provenanceRows,
     readBenchmarkReport,
     requestedOf,
     statusTone,
@@ -23,12 +25,15 @@
   import HostSelect from '../components/HostSelect.svelte';
   import Combobox from '../components/Combobox.svelte';
   import { idOptions, visibleChecklist } from '../lib/pickers';
-  import Submit from '../components/Submit.svelte';
+  import WorkflowGate from '../components/WorkflowGate.svelte';
+  import Blockers from '../components/Blockers.svelte';
+  import FieldError from '../components/FieldError.svelte';
   import SubmitStatus from '../components/SubmitStatus.svelte';
   import RecentJobs from '../components/RecentJobs.svelte';
   import Badge from '../components/Badge.svelte';
   import JobState from '../components/JobState.svelte';
   import BenchmarkReport from '../components/results/BenchmarkReport.svelte';
+  import Ids from '../components/calibration/Ids.svelte';
   import type { JobDetail, JobSummary } from '../lib/types';
   import { errorText } from '../lib/api';
 
@@ -50,12 +55,18 @@
   });
   let suiteFilter = $state('');
   const suitesShown = $derived(visibleChecklist(offer.suites.map((x) => ({ ...x, text: `${x.label ?? ''} ${x.id}` })), suiteFilter, picked));
-  const built = $derived(buildBenchmarkJob(host, target, picked));
+  const hostDecision = $derived(hostWorkflowEligibility(brewery.state?.eligibility, hostId, 'benchmark'));
+  const built = $derived(buildBenchmarkJob(host, target, picked, hostDecision));
+  const touched = $state({ host: false, target: false, suites: false });
+  const visible = $derived(visibleBlockers(built.blockers, touched));
+  const error = (field: string) => fieldError(visible, field);
+  const setupLink = $derived(host && `#/settings/evaluation?host=${encodeURIComponent(host.id)}`);
   const run = new Submitter();
 
   // ---- Scorecard selection ----
   const benchJobs = $derived(newestFirst(jobs.filter((j) => j.kind === 'benchmark')));
   const gsmJobs = $derived(newestFirst(jobs.filter((j) => j.kind === 'evaluate' && isTerminal(j.state))));
+  const canSelectJobs = $derived(benchJobs.length > 0 || gsmJobs.length > 0);
   let selected = $state<string[]>([]);
   let gsmSelected = $state<string[]>([]);
   let seeded = false;
@@ -143,27 +154,29 @@
     </p>
   </div>
 
-  {#if hosts.length && !hosts.some((h) => capability(h, 'benchmark').allowed)}
-    <p class="note info">No worker can run benchmarks yet. <a href="#/settings">Set up targets and suites in Settings</a>.</p>
-  {/if}
-
   <section class="panel" aria-labelledby="bl-h">
     <header><h2 id="bl-h">Run benchmarks</h2></header>
+    <WorkflowGate workflow="benchmark">
     <div class="body stack">
+      <Blockers blockers={built.blockers.filter((b) => !b.field)} />
       <div class="grid-2">
-        <HostSelect bind:value={hostId} kind="benchmark" label="Host" hint="The host runs the suites against the endpoint. No library input is used." />
+        <HostSelect bind:value={hostId} workflow="benchmark" kind="benchmark" label="Host" hint="The host runs the suites against the endpoint. No library input is used." error={error('host')} onblur={() => { touched.host = true; }} />
         <div class="field">
-          <Combobox bind:value={target} id="bm-target" label="Endpoint target" options={idOptions(offer.targets)} disabled={!host || offer.targets.length === 0} describedby="bm-target-hint" placeholder={!host ? 'Select a host first' : offer.targets.length ? 'Select or type a target' : 'None advertised'} emptyText="No target matches." />
-          <span class="hint" id="bm-target-hint">{host && offer.targets.length === 0 ? 'No target on this host. ' : ''}Targets are configured in <a href="#/settings">Settings</a>. The run sends only the ID.</span>
+          <Combobox bind:value={target} id="bm-target" label="Endpoint target" options={idOptions(offer.targets)} disabled={!host || offer.targets.length === 0} invalid={!!error('target')} describedby="bm-target-hint{error('target') ? ' bm-target-error' : ''}" placeholder={!host ? 'Select a host first' : offer.targets.length ? 'Select or type a target' : 'None advertised'} emptyText="No target matches." onblur={() => { touched.target = true; }} />
+          <FieldError id="bm-target-error" error={error('target')} />
+          <span class="hint" id="bm-target-hint">
+            {#if setupLink && !offer.targets.length}<a href={setupLink}>Set up a benchmark target for {host?.name ?? hostId}</a>.
+            {:else}The run sends only the target ID.{/if}
+          </span>
         </div>
       </div>
 
-      <fieldset class="suites" aria-describedby="bm-count">
+      <fieldset class="suites" aria-describedby="bm-count{error('suites') ? ' bm-suites-error' : ''}">
         <legend class="small">Suites <span class="muted xs" id="bm-count">{picked.length} of at most {MAX_SUITES} selected</span></legend>
         {#if !host}
           <p class="xs muted">Select a host to see its suites.</p>
         {:else if offer.suites.length === 0}
-          <p class="xs muted">No suites are enabled on this host. <a href="#/settings">Set up suites in Settings</a>.</p>
+          <p class="xs muted">No suites are enabled on this host. <a href={setupLink}>Set up suites for {host.name ?? hostId}</a>.</p>
         {:else}
           {#if offer.suites.length > 6}
             <div class="sfilter">
@@ -176,30 +189,36 @@
             {#each suitesShown as s (s.id)}
               {@const on = picked.includes(s.id)}
               <label class="check" class:off={!on && picked.length >= MAX_SUITES}>
-                <input type="checkbox" checked={on} disabled={!on && picked.length >= MAX_SUITES} onchange={(e) => (picked = toggle(picked, s.id, e.currentTarget.checked))} />
+                <input type="checkbox" checked={on} disabled={!on && picked.length >= MAX_SUITES} onblur={() => { touched.suites = true; }} onchange={(e) => (picked = toggle(picked, s.id, e.currentTarget.checked))} />
                 <span>{s.label ?? s.id}{#if s.label && s.label !== s.id}{' '}<span class="mono xs muted">{s.id}</span>{/if}</span>
               </label>
             {/each}
           </div>
         {/if}
+        <FieldError id="bm-suites-error" error={error('suites')} />
       </fieldset>
 
-      <Submit blockers={built.problems} busy={run.busy} onclick={() => built.job && run.submit(built.job)}>Queue benchmark run</Submit>
+      <div><button type="button" class="btn primary" disabled={!built.job || run.busy} aria-busy={run.busy} onclick={() => built.job && run.submit(built.job)}>{run.busy ? 'Submitting…' : 'Queue benchmark run'}</button></div>
       <SubmitStatus s={run} />
     </div>
+    </WorkflowGate>
   </section>
 
   <section class="panel" aria-labelledby="sc-h">
     <header>
       <h2 id="sc-h">Scorecard</h2>
-      <button type="button" class="btn small" onclick={exportJson} disabled={blockers.length > 0} aria-describedby="sc-export-hint{blockers.length ? ' sc-export-why' : ''}">Export JSON</button>
+      {#if canSelectJobs}
+        <button type="button" class="btn small" onclick={exportJson} disabled={blockers.length > 0} aria-describedby="sc-export-hint{blockers.length ? ' sc-export-why' : ''}">Export JSON</button>
+      {/if}
     </header>
     <div class="body stack">
-      <p class="xs muted" id="sc-export-hint">
-        The export lists each selected job with its ID, host, request, verbatim report, failed and missing suites. GSM8K evaluations are separate entries with their own identity and baseline provenance; they are not matched to benchmark jobs.
-      </p>
-      {#if blockers.length}<ul class="why xs" id="sc-export-why">{#each blockers as b (b)}<li>{b}</li>{/each}</ul>{/if}
-      <p class="sr-only" aria-live="polite">{exportNote}</p>
+      {#if canSelectJobs}
+        <p class="xs muted" id="sc-export-hint">
+          The export lists each selected job with its ID, host, request, full report, and any failed or missing suites. GSM8K evaluations have separate entries with their own identity and reference provenance. The export does not match them to benchmark jobs.
+        </p>
+        {#if blockers.length}<ul class="why xs" id="sc-export-why">{#each blockers as b (b)}<li>{b}</li>{/each}</ul>{/if}
+        <p class="sr-only" aria-live="polite">{exportNote}</p>
+      {/if}
 
       <div class="grid-2 pick">
         <fieldset>
@@ -308,9 +327,9 @@
           <dl class="prov xs">
             <dt>Source SHA-256</dt><dd class="mono break">{typeof id?.source_sha256 === 'string' ? id.source_sha256 : 'Not stated'}</dd>
             <dt>Data</dt><dd>{id?.synthetic === false ? 'Real (not synthetic)' : id?.synthetic === true ? 'Synthetic fixture' : 'Not stated'}</dd>
-            <dt>Provenance</dt><dd class="mono break">{id?.provenance != null ? JSON.stringify(id.provenance) : 'Not stated'}</dd>
-            {#if r?.baseline_identity}<dt>Reference identity</dt><dd class="mono break">{JSON.stringify(r.baseline_identity)}</dd>{/if}
           </dl>
+          <Ids title="Provenance" items={provenanceRows(id?.provenance)} compact={false} />
+          {#if r?.baseline_identity}<Ids title="Reference identity" items={provenanceRows(r.baseline_identity)} compact={false} />{/if}
         {/if}
         <p class="xs muted">Separate evaluation of library input {j.input_ids.map((id) => modelLabel(models.find((m) => m.id === id))).join(' · ') || '—'}. It is not matched to any benchmark job's endpoint or model.</p>
       </div>
@@ -324,7 +343,8 @@
         <p class="note info">
           Rows align only when benchmark, version, protocol, metric and unit are identical. A shared row does not make the runs comparable: the jobs can use different endpoints, models or hosts. No combined score is computed.
         </p>
-        <div class="table-wrap">
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex (keyboard scrolling of wide metrics) -->
+        <div class="table-wrap" role="region" aria-label="Benchmark metrics" tabindex="0">
           <table class="data cmp">
             <caption class="sr-only">Metric values per selected benchmark job. Empty cells mean the job has no such metric.</caption>
             <thead>

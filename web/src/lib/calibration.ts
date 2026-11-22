@@ -330,7 +330,7 @@ export function parseReportText(text: string): Parsed {
     const x = readSpeculation(r);
     return typeof x === 'string' ? { kind: 'error', message: x } : { kind: 'speculation', report: x };
   }
-  return { kind: 'error', message: `Not supported (${schemaLabel(r.schema)}). Open a usage, profile preview or speculation report.` };
+  return { kind: 'error', message: `Not supported (${schemaLabel(r.schema)}). Open an expert map, expert usage report, profile size preview or speculation report.` };
 }
 
 /** Minimal File shape so tests do not need a DOM. */

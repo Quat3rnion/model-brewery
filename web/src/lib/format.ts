@@ -172,7 +172,7 @@ export const MODEL_KINDS: { value: string; label: string; hint: string }[] = [
   { value: 'mtp', label: 'MTP draft head', hint: 'Role-only safetensors file, indexed safetensors directory, or HGN sidecar.' },
   { value: 'imatrix', label: 'GGUF importance matrix (imatrix)', hint: 'llama.cpp imatrix file computed for this source model. Required by IQ1/IQ2 types.' },
   { value: 'weight-calibration', label: 'Weight calibration split', hint: 'JSON file with activations and targets for one layer, at most 8 MiB and 1,024 rows. Register calibration and held-out data as two entries.' },
-  { value: 'gsm8k-baseline', label: 'GSM8K baseline results', hint: 'Scored baseline results file.' },
+  { value: 'gsm8k-baseline', label: 'GSM8K reference results', hint: 'Scored reference results file.' },
   { value: 'gsm8k-predictions', label: 'GSM8K source predictions', hint: 'Per-question predictions with provenance.' },
 ];
 
@@ -196,7 +196,7 @@ const KIND_TITLES: Record<string, string> = {
   verify: 'Bundle verify',
   generate: 'Generation',
   evaluate: 'GSM8K evaluation',
-  baseline: 'GSM8K baseline',
+  baseline: 'GSM8K reference',
   benchmark: 'Benchmark run',
   weight_inspect: 'Weight inspect',
   hf_download: 'Download from Hugging Face',

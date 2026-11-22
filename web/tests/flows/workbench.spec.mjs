@@ -237,9 +237,9 @@ test('Compare returns focus to the file input when a report closes', async ({ pa
 test('Evaluate and Benchmarks explain when no worker can run those jobs', async ({ page, controller }) => {
   controller.load('capabilities-off');
   await controller.open(page, 'evaluate');
-  await expect(page.getByText('No worker can run GSM8K evaluation yet.', { exact: false })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'GSM8K evaluation', exact: true }).getByText('No host can run this workflow.')).toBeVisible();
   await controller.open(page, 'benchmarks');
-  await expect(page.getByText('No worker can run benchmarks yet.', { exact: false })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Run benchmarks' }).getByText('No host can run this workflow.')).toBeVisible();
   expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
 });
 
@@ -389,7 +389,7 @@ test('Evaluate and job detail mark even full-split GSM8K scores as not release-q
   const bundle = page.getByRole('row').filter({ hasText: 'Fixture bundle' });
   await expect(bundle.getByText('Standalone GSM8K score', { exact: true })).toBeVisible();
   await expect(bundle).toContainText('Not release-qualified.');
-  await bundle.getByRole('link', { name: 'Benchmark quality job for Fixture bundle' }).click();
+  await bundle.getByRole('link', { name: 'GSM8K score job for Fixture bundle' }).click();
   const result = page.getByRole('region', { name: 'Result' });
   await expect(result.getByText('Full pinned split', { exact: true })).toBeVisible();
   await expect(result.getByText('Not release-qualified', { exact: true })).toBeVisible();
@@ -470,8 +470,6 @@ for (const finding of [
   'A missing job id stops polling after a 404',
   'Inspection results support inventory and tile modes',
   'Transfers keeps entry names readable at narrow widths',
-  'Evaluate explains disabled generation and baseline before selection',
-  'Calibration keeps reports during navigation',
   'Settings warns before discarding unsaved evaluation or policy edits',
   'Settings host selection also selects that infrastructure host',
 ]) {
