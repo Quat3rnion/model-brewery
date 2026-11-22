@@ -324,7 +324,7 @@
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
         "responses": {
           "200": {
-            "description": "Current job, ordered lifecycle events and, if present, the worker's result object.",
+            "description": "Current job, submission-time prompt text, ordered lifecycle events and, if present, the worker's result object.",
             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JobDetail"}}}
           },
           "400": {"$ref": "#/components/responses/InvalidPath"},
@@ -885,7 +885,7 @@
           "path": {"$ref": "#/components/schemas/AbsoluteWorkerPath"}, "kind": {"$ref": "#/components/schemas/ModelKind"},
           "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$", "description": "SHA-256 from an accepted output receipt. This is not a live hash."},
           "bytes": {"type": "integer", "minimum": 0, "description": "Size in bytes from the same receipt, or from the worker's file check if no receipt is available."},
-          "available": {"type": ["boolean", "null"], "description": "Cached path availability on the owning worker. False means the worker is disabled or not configured, or the path is missing or outside its allowed model roots. Null means the controller has no current answer. Availability does not verify the current file hash."},
+          "available": {"type": ["boolean", "null"], "description": "Cached path availability on the owning worker. False means the worker is disabled or not configured, or the path is missing or outside its allowed model roots. Null means the controller has no current answer, including when the ordinary worker cannot check access on a separate weight editor. Availability does not verify the current file hash."},
           "reason": {"type": "string", "description": "Why availability is unknown or false."},
           "job_id": {"$ref": "#/components/schemas/Id", "description": "Job that produced the registered output."}
         }
@@ -1072,8 +1072,9 @@
       },
       "JobDetail": {
         "allOf": [{"$ref": "#/components/schemas/Job"}, {
-          "type": "object", "required": ["events"],
+          "type": "object", "required": ["events", "prompt_text"],
           "properties": {
+            "prompt_text": {"type": ["string", "null"], "description": "The text sent to the worker at submission, whether typed or resolved from prompt_id. Null if the job has no recorded prompt."},
             "events": {"type": "array", "items": {"$ref": "#/components/schemas/JobEvent"}},
             "result": {"$ref": "#/components/schemas/JobResult"}
           }
@@ -1259,7 +1260,7 @@
           "profile_binding": {"type": "string", "description": "Opaque binding for the selected controller-stored profile."},
           "saved_profile": {"$ref": "#/components/schemas/NewSettings", "description": "Previously saved controller profile available for review. Not automatically applied to a worker."},
           "managed": {"type": "boolean", "description": "Compatibility field. Use evaluation.status to distinguish saved profiles from active worker settings."},
-          "ready": {"type": "boolean", "description": "True if at least one managed job is configured and enabled. Not a check of any endpoint."},
+          "ready": {"type": "boolean", "description": "True if the worker allows at least one of benchmark, baseline, evaluate, or generate, through either static configuration or a managed policy. Not a check of any endpoint."},
           "readiness": {
             "type": "object", "required": ["benchmark", "baseline", "evaluate", "generate"],
             "propertyNames": {"enum": ["benchmark", "baseline", "evaluate", "generate"]},

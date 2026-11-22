@@ -55,8 +55,8 @@ fn backend_and_legacy_hosts_have_management_without_evaluation_enrollment() {
     let hosts = settings["hosts"].as_array().unwrap();
     assert_eq!(hosts.len(), 3);
     for (index, (id, reason, job)) in [
-        ("alpha", "eligible local worker", "inspect"),
-        ("beta", "eligible local worker", "evaluate"),
+        ("alpha", "managed evaluation settings", "inspect"),
+        ("beta", "managed evaluation settings", "evaluate"),
         ("backend-hf", "does not run evaluation", "hf_download"),
     ]
     .into_iter()

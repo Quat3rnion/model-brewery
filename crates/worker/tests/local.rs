@@ -1246,7 +1246,7 @@ fn local_hosts_preview_resume_reuse_and_cleanup_bundles() {
     assert_eq!(
         t.rpc(Rpc::Write {
             id: "move".into(),
-            digest: bundle.digest,
+            digest: bundle.digest.clone(),
             entry: bundle.files[1].clone(),
             offset: 0,
             data: STANDARD.encode(&bytes[..CHUNK])
@@ -1265,6 +1265,24 @@ fn local_hosts_preview_resume_reuse_and_cleanup_bundles() {
     assert_eq!(done["result"]["missing_bytes"], 349);
     let path = Path::new(done["result"]["inputs"][0]["path"].as_str().unwrap());
     assert_eq!(fs::read(path.join("nested/weights")).unwrap(), bytes);
+    let cached = serde_json::from_value(json!({"host":"b","path":path,"kind":"hgn"})).unwrap();
+    let cached_desc: Description =
+        serde_json::from_value(t.rpc(Rpc::Describe { input: cached })).unwrap();
+    assert_eq!(cached_desc.bundle.digest, bundle.digest);
+    let stat = |path: &Path| t.rpc_raw(&json!({"op":"stat","path":path}))["ok"].clone();
+    assert_eq!(stat(path), json!({"state":"directory"}));
+    assert_eq!(
+        stat(&path.join("nested/weights")),
+        json!({"state":"file","bytes":bytes.len()})
+    );
+    assert_eq!(
+        stat(&path.parent().unwrap().join("manifest.json")),
+        json!({"state":"outside_roots"})
+    );
+    let escape = path.join("escape");
+    symlink(&t.b, &escape).unwrap();
+    assert_eq!(stat(&escape), json!({"state":"outside_roots"}));
+    fs::remove_file(escape).unwrap();
     let reuse = t.dispatch("transfer", "reuse", Some(&job));
     assert_eq!(reuse["result"]["missing_bytes"], 0);
     assert_eq!(reuse["result"]["inputs"][0]["cached"], true);

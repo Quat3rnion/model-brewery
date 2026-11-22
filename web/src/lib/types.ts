@@ -149,6 +149,8 @@ export interface JobEvent {
 }
 
 export interface JobDetail extends JobSummary {
+  /** Text sent to the worker at submission. Null if no prompt was recorded. */
+  prompt_text?: string | null;
   result?: unknown;
   events?: JobEvent[];
 }

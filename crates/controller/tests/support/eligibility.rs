@@ -36,6 +36,10 @@ fn workflow_eligibility_matches_admission() {
             "cpu":{"local":true,"component_cpu_only":true,"capabilities":{
                 "convert_components":true,"gguf_output":true,"gguf_safetensors_output":true,"gguf_rocmfpx_output":true
             }},
+            "legacy":{"ssh":"legacy","capabilities":{
+                "generate":true,"evaluate":true,"baseline":true,"benchmark":true,
+                "gguf_output":true,"gguf_hf_output":true
+            },"benchmark_targets":[{"id":"target"}],"benchmarks":[{"id":"suite"}]},
             "hy4":{"local":true,"capabilities":{"hy4_encode":true}}
         }}).to_string(),
     )
@@ -94,7 +98,19 @@ fn workflow_eligibility_matches_admission() {
         );
     }
 
-    for (host, row, enabled) in [("alpha", a, true), ("beta", b, false)] {
+    let settings = app.json("GET", "/api/settings", None, 200);
+    let legacy = settings["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|host| host["id"] == "legacy")
+        .unwrap();
+    assert_eq!(legacy["evaluation"]["status"], "profile_only");
+    for (host, row, enabled) in [
+        ("alpha", a, true),
+        ("beta", b, false),
+        ("legacy", &eligibility["hosts"]["legacy"], true),
+    ] {
         let hf = app.register(host, "hf", "/fixture/checkpoint");
         let assets = app.register(host, "assets", "/fixture/assets");
         let gguf_a = app.register(host, "gguf", "/fixture/a.gguf");
@@ -129,6 +145,13 @@ fn workflow_eligibility_matches_admission() {
                 }),
                 enabled,
             );
+            if host == "legacy" && ["generate", "evaluate", "baseline", "benchmark"].contains(&kind)
+            {
+                assert_eq!(
+                    legacy["readiness"][kind]["ready"], row[kind]["eligible"],
+                    "{legacy}"
+                );
+            }
         }
         matches_admission(
             &app,
@@ -184,6 +207,7 @@ fn workflow_eligibility_matches_admission() {
             true,
         );
     }
+    assert_eq!(legacy["ready"], true);
     matches_admission(
         &app,
         &eligibility["hosts"]["backend-hf"]["register_manual"],

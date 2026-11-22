@@ -1,4 +1,4 @@
-use crate::domain::{BaselineSource, BenchmarkChoice, Host, Reason};
+use crate::domain::{BaselineSource, BenchmarkChoice, Host, Reason, standard_job_host_blocker};
 use crate::store::Store;
 use brewery_worker::operational::{self, Catalog, Policy, Settings};
 use serde::{Deserialize, Serialize};
@@ -161,7 +161,7 @@ impl Managed {
             let reason = if id == crate::backend_hf::ID {
                 "Saved on the controller only; the backend worker does not run evaluation"
             } else {
-                "Saved on the controller only; execution needs an eligible local worker policy"
+                "Saved on the controller only; this worker does not apply managed evaluation settings"
             };
             return profile_only(reason, explicit);
         };
@@ -312,21 +312,9 @@ impl Managed {
         let readiness = KINDS
             .iter()
             .map(|&kind| {
-                let reason = match (&native, effective) {
-                    (Native::ProfileOnly { reason, .. }, _) => {
-                        let mut detail =
-                            Reason::settings(host, "evaluation", "Check the worker policy");
-                        detail.text = format!("{reason}. {}", detail.text);
-                        Some(detail)
-                    }
-                    (_, None) => Some(Reason::settings(host, "policy", "Activate this worker")),
-                    (_, Some(host)) if !host.capabilities[kind] => {
-                        Some(host.capability_reason(kind))
-                    }
-                    (_, Some(host)) if host.scheduling_paused => {
-                        Some(Reason::settings(host, "policy", "Resume job scheduling"))
-                    }
-                    _ => None,
+                let reason = match effective {
+                    None => Some(Reason::settings(host, "policy", "Activate this worker")),
+                    Some(host) => standard_job_host_blocker(host, kind),
                 };
                 (
                     kind,
@@ -338,6 +326,7 @@ impl Managed {
             })
             .collect::<BTreeMap<_, _>>();
         let evaluation_reason = readiness["evaluate"].reason.clone();
+        let ready = readiness.values().any(|row| row.ready);
         match native {
             Native::Managed(profile) => View {
                 id: &host.id,
@@ -349,7 +338,7 @@ impl Managed {
                     reason_detail: evaluation_reason,
                 },
                 managed: true,
-                ready: readiness.values().any(|row| row.ready),
+                ready,
                 readiness,
                 reason: None,
                 approved_ports: profile.policy.allowed_ports,
@@ -375,7 +364,7 @@ impl Managed {
                     reason_detail: evaluation_reason,
                 },
                 managed: false,
-                ready: false,
+                ready,
                 readiness,
                 reason: Some(reason),
                 approved_ports: Vec::new(),

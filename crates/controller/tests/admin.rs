@@ -443,6 +443,13 @@ printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","w
     );
     let model_path = sources.join("test.gguf");
     fs::write(&model_path, "fixture").unwrap();
+    // The regular worker cannot see the directory approved for the editor.
+    let dispatch = t.root.path().join("dispatch");
+    fs::write(
+        &dispatch,
+        "#!/bin/sh\ncat >/dev/null\nprintf '{\"state\":\"outside_roots\"}\\n'\n",
+    )
+    .unwrap();
     let (status, model) = t.request(
         "/api/models",
         "",
@@ -456,6 +463,26 @@ printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","w
     fs::write(t.root.path().join("hold"), "").unwrap();
     let (status, running) = t.request("/api/jobs", "", Some(request.clone()));
     assert_eq!(status, 201, "{running}");
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let (_, state) = t.request("/api/state", "", None);
+        let row = state["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == model["id"])
+            .unwrap();
+        if row["reason"] != "The controller has not checked this path on the worker." {
+            assert_eq!(row["available"], Value::Null, "{row}");
+            assert_eq!(
+                row["reason"],
+                "The standard worker could not find or access this path. Editor access is not checked."
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "{row}");
+        sleep(Duration::from_millis(15));
+    }
     let poll = |id: &Value, field, expected: &str| {
         let deadline = Instant::now() + Duration::from_secs(4);
         let path = format!("/api/jobs/{}", id.as_str().unwrap());
