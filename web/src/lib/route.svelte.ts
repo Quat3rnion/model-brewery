@@ -1,6 +1,6 @@
-export type View = 'library' | 'queue' | 'transfers' | 'compare' | 'convert' | 'evaluate' | 'benchmarks' | 'calibration' | 'settings' | 'profiles' | 'weights' | 'job';
+export type View = 'library' | 'queue' | 'transfers' | 'compare' | 'convert' | 'evaluate' | 'benchmarks' | 'calibration' | 'settings' | 'profiles' | 'weights' | 'job' | 'not-found';
 
-export const VIEWS: { id: Exclude<View, 'job'>; label: string }[] = [
+export const VIEWS: { id: Exclude<View, 'job' | 'not-found'>; label: string }[] = [
   { id: 'library', label: 'Library' },
   { id: 'queue', label: 'Jobs' },
   { id: 'transfers', label: 'Transfers' },
@@ -19,30 +19,68 @@ export function hashParam(hash: string, name: string): string | null {
 }
 
 export function parse(hash: string): { view: View; jobId: string | null } {
-  const parts = hash.replace(/^#\/?/, '').split('/');
-  if (parts[0] === 'jobs' && parts[1]) return { view: 'job', jobId: decodeURIComponent(parts[1]) };
-  if (parts[0] === 'admin') return { view: 'settings', jobId: null };
-  if (parts[0].split('?')[0] === 'profiles') return { view: 'profiles', jobId: null };
-  if (parts[0].split('?')[0] === 'weights') return { view: 'weights', jobId: null };
-  if (parts[0].split('?')[0] === 'library') return { view: 'library', jobId: null };
-  const found = VIEWS.find((v) => v.id === parts[0]);
-  return { view: found?.id ?? 'library', jobId: null };
+  const path = hash.replace(/^#\/?/, '').split('?')[0];
+  const job = /^(?:jobs|job)\/([^/]+)$/.exec(path);
+  if (job) {
+    try {
+      return { view: 'job', jobId: decodeURIComponent(job[1]) };
+    } catch {
+      return { view: 'not-found', jobId: null };
+    }
+  }
+  if (path === 'admin' || path === 'settings/infrastructure' || path === 'settings/evaluation') {
+    return { view: 'settings', jobId: null };
+  }
+  if (path === 'profiles' || path === 'weights') return { view: path, jobId: null };
+  const found = VIEWS.find((v) => v.id === path);
+  return { view: found?.id ?? (path ? 'not-found' : 'library'), jobId: null };
 }
 
 class Route {
+  hash = $state('');
   view = $state<View>('library');
   jobId = $state<string | null>(null);
+  #guards = new Set<() => boolean>();
+
+  guardHashChange(allow: () => boolean) {
+    this.#guards.add(allow);
+    return () => { this.#guards.delete(allow); };
+  }
 
   constructor() {
     if (typeof window === 'undefined') return;
+    const entryIndex = (): number | undefined => history.state?.breweryRouteIndex;
+    let index = entryIndex() ?? 0;
+    const setEntry = (entry: number, url?: string) => history.replaceState({ ...history.state, breweryRouteIndex: entry }, '', url);
+    let restoring = false;
     const apply = () => {
-      if (window.location.hash === '#/admin') history.replaceState(null, '', '#/settings/infrastructure');
-      const r = parse(window.location.hash);
+      setEntry(index, window.location.hash === '#/admin' ? '#/settings/infrastructure' : undefined);
+      this.hash = window.location.hash;
+      const r = parse(this.hash);
       this.view = r.view;
       this.jobId = r.jobId;
     };
     apply();
-    window.addEventListener('hashchange', apply);
+    window.addEventListener('hashchange', (event) => {
+      if (restoring && this.hash === window.location.hash) {
+        restoring = false;
+        event.stopImmediatePropagation();
+        return;
+      }
+      if (this.hash === window.location.hash) return;
+      const target = entryIndex() ?? index + 1;
+      if ([...this.#guards].some((allow) => !allow())) {
+        event.stopImmediatePropagation();
+        // Remember the new entry and return to the accepted one. Back and
+        // Forward still work if the user changes their mind.
+        setEntry(target);
+        restoring = true;
+        history.go(index - target);
+        return;
+      }
+      index = target;
+      apply();
+    }, { capture: true });
   }
 }
 

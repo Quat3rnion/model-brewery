@@ -104,8 +104,8 @@
   <div class="head">
     <h1 tabindex="-1">Conversion profiles</h1>
     <div class="fmt" role="radiogroup" aria-label="Output format">
-      <label class:on={format === 'hgn'}><input type="radio" bind:group={format} value="hgn" /> HGN (v2 / HT43)</label>
-      <label class:on={format === 'gguf'}><input type="radio" bind:group={format} value="gguf" /> GGUF (llama.cpp)</label>
+      <label class:on={format === 'hgn'}><input type="radio" name="profile-format" bind:group={format} value="hgn" /> HGN (v2 / HT43)</label>
+      <label class:on={format === 'gguf'}><input type="radio" name="profile-format" bind:group={format} value="gguf" /> GGUF (llama.cpp)</label>
     </div>
     <p class="muted small">
       {#if format === 'gguf'}

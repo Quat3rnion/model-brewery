@@ -56,6 +56,14 @@ Keep a skip link and focus the main landmark when an operator activates it. Afte
 
 Use semantic links, buttons, forms, labels, and fieldsets. Connect hints to controls with `aria-describedby`. Use `aria-invalid` for invalid fields. Keep the global `:focus-visible` outline and reduced-motion rule in `web/src/app.css`.
 
+### Shared workflow controls
+
+- Wrap the form in `<WorkflowGate workflow="compare">…</WorkflowGate>`. Keep the page heading and job history outside the gate. The gate uses `eligibility.global[workflow]` unless you pass an `EligibilityEntry` as `decision`. An ineligible decision replaces the form with the controller reasons and their fix links. A missing decision leaves the form visible.
+- Use `<HostSelect workflow="compare" kind="compare" bind:value={host} />`. `kind` is the capability to check when eligibility is absent. Pass `gguf={{ kind: 'hf', rocmfpx: true }}` with `workflow="gguf_output"` to check a specific GGUF source and encoder. Ineligible hosts remain visible with their reasons, but cannot be selected. When the form can use a default host or keep a previous choice, check its current decision with `hostWorkflowEligibility(snapshot, hostId, workflow, gguf?)`.
+- For each problem, make a `Blocker` with `text` and optional `field`, `host` and `fixAnchor`. Keep the complete list for validation. Set `touched[field] = true` when the operator leaves a field and set `attempted = true` on submit. Pass `visibleBlockers(all, touched, attempted)` to `<Blockers blockers={visible} />`. Use `fieldError(visible, field)` for the first inline error. `ModelSelect` and `HostSelect` accept `error` and `onblur`; for native controls, set `aria-invalid` and point `aria-describedby` to the `id` of `<FieldError {id} {error} />` when an error is visible.
+- Call `const guard = unsavedChanges(() => dirty)` during setup. Use `if (!guard.confirm()) return` before a host switch or editor close. The guard also prompts before hash navigation or browser unload while the draft is dirty. Read `route.hash` for accepted deep links.
+- Use `focusAfterRemoval(() => { open = false; }, () => openButton)` when an action removes the focused control. Give the helper a function that finds the next control after the update. It does not move focus if the action leaves focus on another control.
+
 Pair status color with words and shapes. `web/src/components/Badge.svelte` gives each status a text label and a shape. Do not use color as the only state signal.
 
 At 760 px, the header stops being sticky and the section links wrap. Shared two- and three-column grids become one column. At 640 px, `stackable` tables use a block layout. Cells with `data-label` show their labels. Put wide tables in `.table-wrap`.

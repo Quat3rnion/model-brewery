@@ -1,7 +1,7 @@
 import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { catalog, ggufCatalog, conversion, detail, job, scenario, weightRead } from './scenarios.mjs';
+import { catalog, ggufCatalog, conversion, conversionEligibility, detail, job, scenario, weightRead } from './scenarios.mjs';
 
 const hgnCatalog = JSON.parse(readFileSync(catalog, 'utf8'));
 const gguf = JSON.parse(readFileSync(ggufCatalog, 'utf8'));
@@ -22,7 +22,7 @@ export async function startController(assets) {
     switch (key(method, path)) {
       case 'GET /api/state':
         return json({ hosts: data.hosts, models: data.models, prompts: data.prompts,
-          jobs: data.jobs.map(summary), capabilities: data.capabilities, event_cursor: data.eventCursor });
+          jobs: data.jobs.map(summary), capabilities: data.capabilities, eligibility: data.eligibility, event_cursor: data.eventCursor });
       case 'GET /api/conversions': return json(data.conversions);
       case 'GET /api/profiles': return json(data.profiles);
       case 'GET /api/profiles/catalog': return json(hgnCatalog);
@@ -64,6 +64,7 @@ export async function startController(assets) {
         data.jobs.push(entry);
         return json(summary(entry), 201);
       }
+      case 'POST /api/conversions/eligibility': return json(conversionEligibility(data, body));
       case 'POST /api/conversions': {
         const entry = conversion(id('conversion'), body);
         const child = detail(job(id('job'), 'inspect', { host: entry.host, input_ids: entry.input_ids }));

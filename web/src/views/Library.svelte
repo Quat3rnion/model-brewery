@@ -5,7 +5,7 @@
   import { WEIGHT_SOURCES, isSafeSource, MODEL_KINDS, basename, formatBytes, hostName, isActive, kindLabel, modelLabel, shortHash } from '../lib/format';
   import HostSelect from '../components/HostSelect.svelte';
   import HfDownload from '../components/HfDownload.svelte';
-  import { hashParam } from '../lib/route.svelte';
+  import { hashParam, route } from '../lib/route.svelte';
   import Combobox from '../components/Combobox.svelte';
   import { hostOptions, nameSuggestions } from '../lib/pickers';
   import { completionText, IDLE, PathSuggester, type PathState } from '../lib/paths';
@@ -76,13 +76,19 @@
   }
 
   // Filter
-  let filter = $state(hashParam(location.hash, 'entry') ?? '');
+  let filter = $state('');
   let hostFilter = $state('');
+  $effect(() => {
+    const entry = hashParam(route.hash, 'entry');
+    filter = entry ?? '';
+    if (entry) hostFilter = '';
+  });
+  const exactEntry = $derived(models.some((m) => m.id === filter));
   const shown = $derived(
     models.filter(
       (m) =>
         (!hostFilter || m.host === hostFilter) &&
-        (!filter || m.id === filter || `${m.name ?? ''} ${m.path} ${m.kind}`.toLowerCase().includes(filter.toLowerCase())),
+        (!filter || (exactEntry ? m.id === filter : `${m.name ?? ''} ${m.path} ${m.kind}`.toLowerCase().includes(filter.toLowerCase()))),
     ),
   );
 
