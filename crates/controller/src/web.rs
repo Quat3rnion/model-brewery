@@ -258,9 +258,17 @@ async fn state(State(app): State<Shared>) -> Result<Json<Value>> {
 async fn get_settings(State(app): State<Shared>) -> Result<Json<Value>> {
     let store = app.store.lock().map_err(ApiError::storage)?;
     let hosts = app.defined_hosts().map_err(ApiError::storage)?;
+    let effective = app.effective_hosts().map_err(ApiError::storage)?;
     let views: Vec<_> = hosts
         .iter()
-        .map(|host| app.settings.view(&store, host, app.admin.is_some()))
+        .map(|host| {
+            app.settings.view(
+                &store,
+                host,
+                effective.iter().find(|entry| entry.id == host.id),
+                app.admin.is_some(),
+            )
+        })
         .collect::<std::result::Result<_, _>>()
         .map_err(ApiError::storage)?;
     Ok(Json(json!({"hosts": views})))
@@ -318,9 +326,8 @@ async fn put_settings(
             "worker has queued or running jobs".into(),
         ));
     }
-    let view = app
-        .settings
-        .put(&store, host, native, settings, binding, app.admin.is_some())
+    app.settings
+        .put(&store, host, native, settings, binding)
         .map_err(|err| match err {
             PutError::NotReady(reason) => ApiError(StatusCode::SERVICE_UNAVAILABLE, reason.into()),
             PutError::Storage(error) => ApiError::storage(error),
@@ -329,6 +336,16 @@ async fn put_settings(
             }
             PutError::Invalid(error) => ApiError::bad(error),
         })?;
+    let effective = app.effective_hosts().map_err(ApiError::storage)?;
+    let view = app
+        .settings
+        .view(
+            &store,
+            host,
+            effective.iter().find(|entry| entry.id == id),
+            app.admin.is_some(),
+        )
+        .map_err(ApiError::storage)?;
     Ok(Json(json!(view)))
 }
 

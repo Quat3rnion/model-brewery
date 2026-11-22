@@ -339,6 +339,8 @@ pub struct Host {
     pub capabilities: BTreeMap<String, bool>,
     pub component_cpu_only: bool,
     pub reasons: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub capability_reasons: BTreeMap<String, Reason>,
     pub baseline_sources: Vec<BaselineSource>,
     pub benchmark_targets: Vec<BenchmarkChoice>,
     pub benchmarks: Vec<BenchmarkChoice>,
@@ -352,7 +354,64 @@ pub struct Host {
     pub resources: brewery_worker::resources::Limits,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct Reason {
+    pub text: String,
+    pub fix_anchor: String,
+}
+
+impl Reason {
+    pub fn settings(host: &Host, section: &str, action: &str) -> Self {
+        let (page, label) = match section {
+            "evaluation" => ("evaluation", "Evaluation"),
+            "directories" => ("infrastructure", "Model directories"),
+            _ => ("infrastructure", "Admission and resource limits"),
+        };
+        let suffix = if page == "infrastructure" {
+            format!("&section={section}")
+        } else {
+            String::new()
+        };
+        Self {
+            text: format!("{action} in Settings > Hosts > {} > {label}.", host.name),
+            fix_anchor: format!("#/settings/{page}?host={}{suffix}", host.id),
+        }
+    }
+}
+
 impl Host {
+    pub fn capability_reason(&self, kind: &str) -> Reason {
+        let detail = self.reasons.get(kind);
+        if let Some(reason) = self.capability_reasons.get(kind)
+            && detail == Some(&reason.text)
+        {
+            return reason.clone();
+        }
+        let action = match detail.map(String::as_str) {
+            Some(
+                "Disabled by infrastructure job policy"
+                | "Disabled by infrastructure administration",
+            ) => {
+                format!("Enable {kind} in the worker policy")
+            }
+            _ => format!("Check the {kind} runtime and worker policy"),
+        };
+        let mut reason = Reason::settings(self, "policy", &action);
+        if let Some(detail) = detail {
+            reason.text = format!("{}. {}", detail.trim_end_matches('.'), reason.text);
+        }
+        reason
+    }
+
+    pub fn refresh_capability_reasons(&mut self) {
+        self.capability_reasons = self
+            .capabilities
+            .iter()
+            .filter(|&(_, enabled)| !enabled)
+            .map(|(kind, _)| (kind.clone(), self.capability_reason(kind)))
+            .collect();
+    }
+
     pub fn effective_resources(&self) -> brewery_worker::resources::Limits {
         brewery_worker::resources::Limits {
             concurrency: Some(if self.quantization_pool {
@@ -563,7 +622,8 @@ impl Host {
         capabilities.insert(brewery_worker::hy4::CAPABILITY.into(), hy4);
         capabilities.insert(brewery_worker::hy4::ENCODE.into(), hy4_encode);
         if !hy4_encode {
-            reasons.entry(brewery_worker::hy4::ENCODE.into())
+            reasons
+                .entry(brewery_worker::hy4::ENCODE.into())
                 .or_insert_with(|| "Hy4 gate encoding is not configured on this worker".into());
         }
         if !hy4 {
@@ -646,6 +706,7 @@ impl Host {
             capabilities,
             component_cpu_only,
             reasons,
+            capability_reasons: BTreeMap::new(),
             baseline_sources,
             benchmark_targets,
             benchmarks,
@@ -719,7 +780,9 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
     }
     let inputs = &envelope.inputs;
     if envelope.options.contains_key(brewery_worker::hy4::OPTION) {
-        let Some(capability) = brewery_worker::hy4::capability(&job.kind, &Value::Object(envelope.options.clone())) else {
+        let Some(capability) =
+            brewery_worker::hy4::capability(&job.kind, &Value::Object(envelope.options.clone()))
+        else {
             return Vec::new();
         };
         if inputs.len() != 1 || inputs[0].kind != "hf" || !job.format.is_hgn() {
@@ -982,7 +1045,8 @@ impl NewJob {
         }
         if self.options.contains_key(brewery_worker::hy4::OPTION) {
             if !format.is_hgn()
-                || brewery_worker::hy4::capability(&self.kind, &Value::Object(self.options.clone())).is_none()
+                || brewery_worker::hy4::capability(&self.kind, &Value::Object(self.options.clone()))
+                    .is_none()
                 || n != 1
                 || main != "hf"
                 || inputs[0].host != host
