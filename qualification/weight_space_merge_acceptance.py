@@ -46,6 +46,13 @@ def exercise(base, args, run):
         while time.monotonic() < end:
             state = call("get_job", id=job["id"], wait_ms=5000)
             if state["state"] not in ("queued", "running"):
+                if state["state"] != "succeeded":
+                    w8.save(args.evidence, "failed-job", state)
+                    work = run / "state/local-edit/local/worker/jobs" / job["id"]
+                    for log in sorted(work.glob("*.log")):
+                        with log.open("rb") as stream:
+                            stream.seek(max(0, log.stat().st_size - 64 * 1024))
+                            (args.evidence / f"failed-{log.name}").write_bytes(stream.read(64 * 1024))
                 w8.require(state["state"] == "succeeded", f"{job['id']}: {state}")
                 return state["result"]
         raise TimeoutError(job["id"])
@@ -71,13 +78,6 @@ def exercise(base, args, run):
         w8.require(result["revision_sha256"] == revision["sha256"], f"{name}: GGUF pin differs")
         return result
 
-    parents = []
-    for i in (0, 1):
-        values = [(((j * (3 + i) + i) % 17) - 8) / 128 for j in range(640)]
-        op = {"op": "add", "tensor": w8.TENSOR, "origin": [i * 64], "shape": [640], "values": values}
-        parent = submit("apply_edit", f"input-{i}", id=root["id"], operations=[op])
-        parents.append({"id": parent["id"], "sha256": parent["sha256"], "weight": (0.5, 0.75)[i]})
-    w8.save(args.evidence, "inputs", parents)
     parent_gguf = convert(root, "base")
     print("Converted scratch base to private BF16 GGUF", flush=True)
 
@@ -89,8 +89,20 @@ def exercise(base, args, run):
     ]
     report = {"qualification": w8.QUALIFICATION, "controller": base, "base": root["sha256"],
               "base_gguf": parent_gguf["sha256"], "cases": {}}
+    input_hashes = None
     for algorithm in methods:
         name = algorithm["method"]
+        # Recreate the two inputs so the conversion does not need disk space
+        # for them or for other merged outputs at the same time.
+        parents = []
+        for i in (0, 1):
+            values = [(((j * (3 + i) + i) % 17) - 8) / 128 for j in range(640)]
+            op = {"op": "add", "tensor": w8.TENSOR, "origin": [i * 64], "shape": [640], "values": values}
+            parent = submit("apply_edit", f"{name}-input-{i}", id=root["id"], operations=[op])
+            parents.append({"id": parent["id"], "sha256": parent["sha256"], "weight": (0.5, 0.75)[i]})
+        hashes = [p["sha256"] for p in parents]
+        w8.require(input_hashes in (None, hashes), "direct edits did not reproduce the same input weights")
+        input_hashes = hashes
         start = time.monotonic()
         merged = submit("merge_models", name, base_id=root["id"], base_sha256=root["sha256"],
                         algorithm=algorithm, inputs=parents)
@@ -98,10 +110,13 @@ def exercise(base, args, run):
                    and merged["provenance"]["parent_id"] == root["id"]
                    and merged["provenance"]["merge"]["inputs"] == parents, f"{name}: provenance mismatch")
         w8.save(args.evidence, name + "-revision", merged)
+        for i, parent in enumerate(parents):
+            submit("discard_scratch", f"{name}-discard-input-{i}", id=parent["id"])
         diff = call("diff_tensors", a=root["id"], b=merged["id"])
         tensors = diff["tensors"]
         w8.require(len(tensors) == 1 and tensors[0]["name"] == w8.TENSOR
                    and tensors[0]["l2"] > 0, f"{name}: unexpected diff")
+        w8.save(args.evidence, name + "-tensor-diff", diff)
         gguf = convert(merged, name)
         wait(submit("run_checks", "checks-" + name, id=merged["id"], sha256=merged["sha256"]))
         checks = call("get_checks", id=merged["id"])
