@@ -133,6 +133,8 @@ for (const kind of ['hy4', 'generate']) {
       await expect(limit).toHaveValue('7');
       await limit.fill('11');
     }
+    await expect(page.getByText('Result of the previous submission', { exact: true })).toBeVisible();
+    await expect(page.getByText(/submitted inputs, not the current form/)).toBeVisible();
     await button(page, 'Start a new run').click();
     await expect(page).not.toHaveURL(/retry=/);
     expect(controller.requests('POST', '/api/jobs')).toHaveLength(2);
@@ -156,6 +158,203 @@ test('cleanup replay restores focus when the confirmation is removed', async ({ 
   await button(page, 'Queue cleanup').press('Enter');
   await expect(page.getByText('No second job was queued.', { exact: false })).toBeVisible();
   await expect(clean).toBeFocused();
+});
+
+test('keeping the cache returns keyboard focus without queueing cleanup', async ({ page, controller }) => {
+  await open(page, controller, detail(job('failed-cleanup', 'cache_cleanup', { state: 'failed', host: 'worker-b',
+    options: { bundle_sha256: 'a'.repeat(64) } })), 'Transfers');
+  const clean = button(page, 'Clean cache…');
+  await clean.press('Enter');
+  await button(page, 'Keep cache').press('Enter');
+  await expect(clean).toBeFocused();
+  expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
+});
+
+for (const kind of ['transfer', 'benchmark']) {
+  test(`${kind} repeat checks unavailable items from the submitted request`, async ({ page, controller }) => {
+    const state = scenario('live-shaped');
+    const transfer = kind === 'transfer';
+    const extra = { id: 'repeat-extra', label: 'Repeat extra' };
+    state.models.push({ ...state.models.find(model => model.id === 'gguf-a'), id: extra.id, name: extra.label });
+    state.hosts[0].benchmarks.push(extra);
+    controller.respond('GET', '/api/state', () => ({ json: state }));
+    const label = transfer ? 'Transfer' : 'Queue benchmark run';
+    const prior = detail(job(`failed-${kind}`, kind, { state: 'failed', ...(transfer
+      ? { host: 'worker-b', input_ids: ['gguf-a'] }
+      : { options: { benchmark_target: 'fixture-endpoint', benchmarks: ['smoke'] } }) }));
+    await open(page, controller, prior, transfer ? 'Transfers' : 'Benchmarks');
+    const choice = page.getByRole('checkbox', { name: /^Repeat extra/ });
+    await choice.check();
+    const [status, id] = await submit(page, label);
+    expect(status).toBe(201);
+    expect(await submit(page, label)).toEqual([200, id]);
+    state.models = state.models.filter(model => model.id !== extra.id);
+    state.hosts[0].benchmarks = state.hosts[0].benchmarks.filter(suite => suite.id !== extra.id);
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await expect(choice).toHaveCount(0);
+    await button(page, 'Start a new run').click();
+    await expect(page).not.toHaveURL(/retry=/);
+    const queue = button(page, label);
+    await expect(page.getByText(transfer ? 'repeat-extra: Not in Library.' : 'Suite repeat-extra is not available on this host.',
+      { exact: true })).toBeVisible();
+    await expect(queue).toBeDisabled();
+    if (transfer) {
+      await expect(button(page, 'Preview')).toBeDisabled();
+      await page.getByRole('checkbox', { name: 'Continue without these entries' }).check();
+    } else await button(page, 'Acknowledge omitted suites').click();
+    const requests = () => controller.requests('POST', '/api/jobs');
+    expect(requests()).toHaveLength(2);
+    expect((await submit(page, label))[0]).toBe(201);
+    expect(requests()[2].body).toEqual(transfer
+      ? { ...requests()[0].body, input_ids: ['gguf-a'] }
+      : { ...requests()[0].body, options: { ...requests()[0].body.options, benchmarks: ['smoke'] } });
+  });
+}
+
+for (const kind of ['generate', 'benchmark', 'transfer', 'cache_cleanup', 'hf_download']) {
+  test(`${kind} attributes a delayed match and preserves the edited inputs for a new run`, async ({ page, controller }) => {
+    const sha = 'a'.repeat(64);
+    const state = scenario('live-shaped');
+    state.hosts[0].benchmarks.push({ id: 'repeat-extra', label: 'Repeat extra' });
+    state.hosts.push({ ...state.hosts[1], id: 'backend-hf', capabilities: { hf_download: true } });
+    controller.respond('GET', '/api/state', { json: state });
+    const fixture = {
+      generate: { view: 'Evaluate', label: 'Queue generation', field: '#g-max-tokens', edit: '11',
+        request: { input_ids: ['bundle-a'], prompt_text: 'Keep it short.', options: { max_tokens: 7 } } },
+      benchmark: { view: 'Benchmarks', label: 'Queue benchmark run', choice: /^Repeat extra/,
+        request: { options: { benchmark_target: 'fixture-endpoint', benchmarks: ['smoke'] } } },
+      transfer: { view: 'Transfers', label: 'Transfer', choice: /^Fixture checkpoint/,
+        request: { host: 'worker-b', input_ids: ['gguf-a'] } },
+      cache_cleanup: { view: 'Transfers', label: 'Queue cleanup', field: '#cl-digest', edit: 'b'.repeat(64),
+        request: { host: 'worker-b', options: { bundle_sha256: sha } } },
+      hf_download: { view: 'Library', label: 'Start download', field: '#hf-revision', edit: 'r2',
+        request: { host: 'backend-hf', options: { repo_id: 'fixture/weights', filename: 'fixture.gguf', revision: 'r1' } } },
+    }[kind];
+    const { view, label, request } = fixture;
+    await open(page, controller, detail(job(`failed-${kind}`, kind, { state: 'failed', ...request })), view);
+    const field = fixture.field ? page.locator(fixture.field) : page.getByRole('checkbox', { name: fixture.choice });
+    const prepare = async () => { if (kind === 'cache_cleanup') await button(page, 'Clean cache…').click(); };
+    // Keep the first HF result on the form: moving focus while the reply is
+    // pending prevents a successful plain response from taking over the visit.
+    const firstHeld = gate(), firstAccepted = gate();
+    if (kind === 'hf_download') await page.route('**/api/jobs', async route => {
+      const response = await route.fetch();
+      firstAccepted.release();
+      await firstHeld.wait;
+      await route.fulfill({ response });
+    }, { times: 1 });
+    await prepare();
+    const first = submit(page, label);
+    if (kind === 'hf_download') {
+      try {
+        await firstAccepted.wait;
+        await field.press('Escape');
+      } finally { firstHeld.release(); }
+    }
+    const [status, id] = await first;
+    expect(status).toBe(201);
+    await expect(page.getByText(/^Queued as job/)).toContainText(id);
+    const held = gate(), accepted = gate();
+    await page.route('**/api/jobs', async route => {
+      const response = await route.fetch();
+      accepted.release();
+      await held.wait;
+      await route.fulfill({ response });
+    }, { times: 1 });
+    const requests = () => controller.requests('POST', '/api/jobs');
+    try {
+      await prepare();
+      await button(page, label).click();
+      await accepted.wait;
+      if (fixture.edit) await field.fill(fixture.edit);
+      else await field.check();
+      held.release();
+      await expect(page.getByText(/^This request was already queued as job/)).toContainText(id);
+      await expect(page.getByText('Result of the previous submission', { exact: true })).toBeVisible();
+      await expect(page.getByText(/submitted inputs, not the current form/)).toBeVisible();
+      await expect(field).toBeFocused();
+      await field.press('Enter');
+      await expect(page).toHaveURL(/retry=/);
+      expect(requests()).toHaveLength(2);
+      await button(page, 'Start a new run with the current form').click();
+      await expect(page).not.toHaveURL(/retry=/);
+      if (fixture.edit) await expect(field).toHaveValue(fixture.edit);
+      else await expect(field).toBeChecked();
+      expect(requests()).toHaveLength(2);
+      await prepare();
+      expect((await submit(page, label))[0]).toBe(201);
+      const original = requests()[0].body;
+      const edited = {
+        generate: { options: { ...original.options, max_tokens: 11 } },
+        benchmark: { options: { ...original.options, benchmarks: ['smoke', 'repeat-extra'] } },
+        transfer: { input_ids: ['gguf-a', 'source-a'] },
+        cache_cleanup: { options: { ...original.options, bundle_sha256: fixture.edit } },
+        hf_download: { options: { ...original.options, revision: fixture.edit } },
+      }[kind];
+      expect(requests()[2].body).toEqual({ ...original, ...edited });
+      expect(key(requests()[2])).toMatch(/^conv-/);
+    } finally { held.release(); }
+  });
+}
+
+test('a succeeded Weight Apply can be repeated after a lost reply', async ({ page, controller }) => {
+  const state = scenario('weight-reads');
+  const proposalId = '6ecf76ee-0473-4544-ac77-106a37c05ddd';
+  const proposal = detail(job(proposalId, 'weight_propose', { state: 'succeeded', input_ids: ['gguf-a'] }), {
+    report: { proposal: { schema: 'brewery.weight-edit-proposal.v1', source_sha256: 'a'.repeat(64),
+      edits: [{ tensor: 'blk.0.ffn_down.weight', index: [0, 1], op: 'set', value: .125, dtype: 'F32', before: .5, after: .125 }] } },
+  });
+  state.jobs.push(proposal);
+  controller.respond('GET', `/api/jobs/${proposalId}`, { json: proposal });
+  controller.respond('GET', '/api/state', () => ({ json: state }));
+  let finished;
+  await page.route('**/api/jobs', async route => {
+    const response = await route.fetch();
+    expect(response.status()).toBe(201);
+    finished = detail(job((await response.json()).id, 'weight_apply', {
+      ...route.request().postDataJSON(), state: 'succeeded',
+    }));
+    await route.fulfill({ status: 502, json: { error: 'Accepted reply lost.' } });
+  }, { times: 1 });
+  await open(page, controller, detail(job('failed-apply', 'weight_apply', { state: 'failed',
+    input_ids: ['gguf-a'], options: { proposal_job_id: proposalId, reviewed: true } })), 'Weights');
+  const review = page.getByRole('checkbox', { name: /I reviewed all/ });
+  await review.check();
+  const action = 'Apply as new GGUF';
+  await button(page, action).click();
+  await expect(page.getByRole('alert').filter({ hasText: 'Accepted reply lost.' })).toBeVisible();
+  state.jobs.push(finished);
+  controller.respond('GET', `/api/jobs/${finished.id}`, { json: finished });
+  await page.reload();
+  await expect(page.getByText(/^Applied by/).getByRole('link')).toHaveText(finished.id);
+  await expect(button(page, 'Start a new run')).toBeVisible();
+  const requests = () => controller.requests('POST', '/api/jobs');
+  expect(requests()).toHaveLength(1);
+  await button(page, 'Start a new run').click();
+  await expect(page).not.toHaveURL(/retry=/);
+  await expect(review).not.toBeChecked();
+  await expect(button(page, action)).toBeDisabled();
+  expect(requests()).toHaveLength(1);
+  await review.check();
+  const [again, repeatId] = await submit(page, action);
+  expect(again).toBe(201);
+  expect(key(requests()[1])).toMatch(/^conv-/);
+  expect(requests()[1].body).toEqual(requests()[0].body);
+
+  // Plain proposal review offers the same repeat, but not while it is active.
+  const active = job(repeatId, 'weight_apply', { ...requests()[1].body, state: 'running' });
+  state.jobs.push(active);
+  await controller.open(page, 'weights?source=gguf-a');
+  await page.getByRole('radio', { name: new RegExp(proposalId) }).check();
+  await expect(page.getByText(/^Applied by/).getByRole('link')).toHaveText(finished.id);
+  await expect(button(page, 'Start a new run')).toHaveCount(0);
+  active.state = 'succeeded';
+  active.updated_at++;
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await button(page, 'Start a new run').click();
+  await expect(review).not.toBeChecked();
+  await expect(button(page, action)).toBeDisabled();
+  expect(requests()).toHaveLength(2);
 });
 
 test('a late cleanup match does not move focus back from another field', async ({ page, controller }) => {

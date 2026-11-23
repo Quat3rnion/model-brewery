@@ -32,6 +32,7 @@
   import type { RetrySubmission } from '../lib/retry-prefill.svelte';
   import { bodyKey, resultOfPreviousSubmission } from '../lib/retry-keys';
   import NewRun from './NewRun.svelte';
+  import ResultAttribution from './ResultAttribution.svelte';
   import KeyValues from './KeyValues.svelte';
 
   let { source, format, starter, draft = $bindable(), retry, originalSha, loading }: {
@@ -46,7 +47,7 @@
   let plainRead = $state.raw<NewJob>();
   let repeatedRead = $state(false);
   function prepareRead() {
-    if (!reads.acceptedBody || reads.acceptedBody.input_ids[0] !== source.id || !reads.newRun?.()) return false;
+    if (!reads.acceptedBody || reads.acceptedBody.input_ids[0] !== source.id || !reads.newRun?.('current')) return false;
     plainRead = reads.acceptedBody;
     return true;
   }
@@ -246,7 +247,9 @@
     <JobState job={readJob} />
   </div>
 {/if}
-{#if reads.error || reads.replayed || repeatedRead}<SubmitStatus s={reads} prepare={reads.newRun ? prepareRead : undefined} />{/if}
+{#if reads.error || reads.replayed || repeatedRead}
+  <SubmitStatus s={reads} current={plainRead ?? reads.acceptedBody} prepare={reads.newRun ? prepareRead : undefined} />
+{/if}
 {#if plainRead}
   <div class="note info stack">
     <p>New layer read for {modelLabel(source)}</p>
@@ -323,8 +326,11 @@
   {#if currentAttempt && starter.error}
     <p class="note bad" role="alert">{starter.error} Run the same recipe again to retry the same request.</p>
   {:else if !starter.busy && starter.last}
-    {#if resultOfPreviousSubmission(starter.acceptedBodyKey, body)}<p class="muted">Result of the previous submission</p>{/if}
+    <ResultAttribution accepted={starter.acceptedBodyKey} current={body} />
     <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a href={conversionRunHref(starter.last.id, 'recipe')}>{starter.last.id}</a>. {#if starter.replayed}No second conversion was started.{/if}</p>
   {/if}
 </div>
-{#if starter.replayed && starter.newRun && !starter.error}<NewRun prepare={starter.newRun} disabled={starter.busy} />{/if}
+{#if starter.replayed && starter.newRun && !starter.error}
+  <NewRun prepare={starter.newRun} current={() => starter.newRun?.('current') ?? false}
+    changed={resultOfPreviousSubmission(starter.acceptedBodyKey, body)} disabled={starter.busy} />
+{/if}

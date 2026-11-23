@@ -223,12 +223,64 @@ describe('retry prefill', () => {
     retry.setReady(true);
     t.resolve('prior');
     await vi.waitFor(() => expect(t.draft().limit).toBe(7));
-    const prepare = retry.action('queue').preparePlain!();
+    const prepare = retry.action('queue').preparePlain!({ kind: 'generate', input_ids: [] });
     t.draft().limit = 9;
     expect(prepare()).toBe(true);
     expect(openPlain).toHaveBeenCalledOnce();
     retry.enter('entry', null);
     expect(t.draft().limit).toBe(7);
+    expect(retry.action('queue').failedId).toBeUndefined();
+  });
+
+  it('checks a plain repeat against submitted inputs even when none can be restored', async () => {
+    let selected: string[] = [];
+    let available = ['old', 'new'];
+    const retry = new RetryPrefill({
+      slot: `test-${++slot}`, defaults: { selected: [] as string[] },
+      read: () => ({ selected }),
+      write: draft => { selected = draft.selected; },
+      load: async () => ['old'],
+      fromSubmission: body => body.input_ids,
+      restore: ids => ({
+        actions: ['preview', 'copy'],
+        patch: { selected: ids.filter(id => available.includes(id)) },
+        omissions: draft => omittedInputs(ids, draft.selected).map(id => ({ id, text: `Missing ${id}` })),
+        retains: draft => draft.selected.some(id => ids.includes(id)),
+      }),
+      openPlain: () => {},
+    });
+    retry.enter('retry', 'failed');
+    retry.setReady(true);
+    await vi.waitFor(() => expect(selected).toEqual(['old']));
+    selected = ['new'];
+    retry.acknowledge('copy'); // Acknowledge dropping only the failed request's input.
+    expect(retry.action('copy').blocked).toBe(false);
+    const repeat = retry.action('copy').preparePlain!({ kind: 'transfer', input_ids: ['new'] });
+    available = [];
+    expect(repeat()).toBe(true);
+    retry.enter('plain', null);
+    expect(selected).toEqual([]);
+    expect(retry.omissions('copy')).toEqual([{ id: 'new', text: 'Missing new' }]);
+    expect(retry.action('copy').failedId).toBeUndefined();
+    expect(retry.action('copy').blocked).toBe(true);
+    expect(retry.action('preview').blocked).toBe(true);
+    retry.acknowledge('copy');
+    expect(retry.action('copy').blocked).toBe(false);
+    expect(retry.action('preview').blocked).toBe(false);
+  });
+
+  it('leaves the edited form intact when opening a new run with the current inputs', async () => {
+    const t = setup();
+    const retry = new RetryPrefill({ ...t.form, openPlain: vi.fn() });
+    retry.enter('retry', 'failed');
+    retry.setReady(true);
+    t.resolve('prior');
+    await vi.waitFor(() => expect(t.draft().limit).toBe(7));
+    const repeat = retry.action('queue').preparePlain!({ kind: 'generate', input_ids: [], options: { max_tokens: 7 } });
+    t.draft().limit = 9;
+    expect(repeat('current')).toBe(true);
+    retry.enter('plain', null);
+    expect(t.draft().limit).toBe(9);
     expect(retry.action('queue').failedId).toBeUndefined();
   });
 });

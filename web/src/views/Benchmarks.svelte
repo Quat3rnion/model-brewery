@@ -96,19 +96,7 @@
   const launch = $derived(retry.action('benchmark'));
   function queueBenchmark() {
     if (!built.job || launch.blocked || run.busy) return;
-    const request = built.job;
-    const order = ordered;
-    void run.submit(request, {
-      ...launch,
-      preparePlain: () => {
-        const prepare = launch.preparePlain!();
-        return () => {
-          if (!prepare()) return false;
-          suiteOrder = order;
-          return true;
-        };
-      },
-    });
+    void run.submit(built.job, launch);
   }
 
   // ---- Scorecard selection ----
@@ -256,7 +244,7 @@
       </fieldset>
 
       <div><button type="button" class="btn primary" disabled={launch.blocked || !built.job || run.busy} aria-busy={run.busy} onclick={queueBenchmark}>{run.busy ? 'Submitting…' : 'Queue benchmark run'}</button></div>
-      <SubmitStatus s={run} />
+      <SubmitStatus s={run} current={built.job} />
     </div>
     </WorkflowGate>
   </section>

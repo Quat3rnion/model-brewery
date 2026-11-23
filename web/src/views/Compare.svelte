@@ -155,28 +155,29 @@
   );
 
   const s = new Submitter('compare.run');
+  const request = $derived({
+    kind: 'compare',
+    host: host || undefined,
+    input_ids: [a, b],
+    prompt_id: promptMode === 'saved' ? promptId : undefined,
+    prompt: promptMode === 'text' ? promptText : undefined,
+    options: {
+      n,
+      threads: threads ?? undefined,
+      think: think || undefined,
+      raw: raw || undefined,
+      gpu_device: useGpu ? gpuDevice || undefined : undefined,
+      gpu_layers: useGpu ? (gpuLayers ?? undefined) : undefined,
+    },
+  });
   async function submit() {
     attempted = true;
     if (blockers.length || s.busy || launch.blocked) return;
-    const text = promptMode === 'text' ? promptText : undefined;
-    const job = await s.submit({
-      kind: 'compare',
-      host: host || undefined,
-      input_ids: [a, b],
-      prompt_id: promptMode === 'saved' ? promptId : undefined,
-      prompt: text,
-      options: {
-        n,
-        threads: threads ?? undefined,
-        think: think || undefined,
-        raw: raw || undefined,
-        gpu_device: useGpu ? gpuDevice || undefined : undefined,
-        gpu_layers: useGpu ? (gpuLayers ?? undefined) : undefined,
-      },
-    }, launch);
+    const submitted = request;
+    const job = await s.submit(submitted, launch);
     if (job) {
       retry.markClean();
-      if (text !== undefined) lastSubmittedPrompt = text;
+      if (submitted.prompt !== undefined) lastSubmittedPrompt = submitted.prompt;
     }
   }
 </script>
@@ -270,7 +271,7 @@
         <button type="button" class="btn primary" onclick={submit} disabled={s.busy || launch.blocked} aria-busy={s.busy}>{s.busy ? 'Submitting…' : 'Queue comparison'}</button>
       </div>
       <Blockers blockers={visible} />
-      <SubmitStatus {s} />
+      <SubmitStatus {s} current={request} />
       </fieldset>
     </div>
     </WorkflowGate>

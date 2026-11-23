@@ -3,6 +3,7 @@
   import ModelSelect from '../components/ModelSelect.svelte';
   import Submit from '../components/Submit.svelte';
   import SubmitStatus from '../components/SubmitStatus.svelte';
+  import NewRun from '../components/NewRun.svelte';
   import Badge from '../components/Badge.svelte';
   import JobState from '../components/JobState.svelte';
   import JobProgress from '../components/JobProgress.svelte';
@@ -170,20 +171,23 @@
     ...(draft.some((edit) => edit.observed && edit.observed.sha !== draftPin) ? ['Read the source again before you submit.'] : []),
     ...(draftPacked && sourceHost?.capabilities?.weight_packed !== true ? ['Packed editing is not enabled on this host.'] : []),
   ]);
+  const proposeRequest = $derived.by(() => {
+    if (!source) return null;
+    const request = proposeJob(source.id, source.host, draft);
+    if (draftPin) request.options = { ...request.options, source_sha256: draftPin, ...(draftPacked ? { packed: true } : {}) };
+    return request;
+  });
   async function propose() {
-    if (!source || proposeBlockers.length) return;
-    const id = source.id;
+    if (!proposeRequest || proposeBlockers.length) return;
     const visit = route.capture();
     const submitted = draft;
-    const request = proposeJob(id, source.host, submitted);
-    if (draftPin) request.options = { ...request.options, source_sha256: draftPin, ...(draftPacked ? { packed: true } : {}) };
-    const job = await proposeSub.submit(request, retry.action('weight_propose'));
-    if (job && visit.canPresent()) {
+    const job = await proposeSub.submit(proposeRequest, retry.action('weight_propose'));
+    if (job && !proposeSub.replayed && visit.canPresent()) {
       for (const edit of submitted) {
         const key = editKey(edit);
         if (pending.get(key) === edit) pending.delete(key);
       }
-      if (!proposeSub.replayed) openReview(job.id);
+      openReview(job.id);
     }
   }
   function openReview(id: string) {
@@ -202,9 +206,11 @@
     ...(inspectParsed.t.ok ? [] : [inspectParsed.t.error]),
     ...(inspectParsed.i.ok ? [] : [inspectParsed.i.error]),
   ]);
+  const inspectRequest = $derived(source && inspectParsed.t.ok && inspectParsed.i.ok
+    ? inspectJob(source.id, source.host, inspectParsed.t.value, inspectParsed.i.value) : null);
   async function inspect() {
-    if (!source || inspectBlockers.length || !inspectParsed.t.ok || !inspectParsed.i.ok) return;
-    await inspectSub.submit(inspectJob(source.id, source.host, inspectParsed.t.value, inspectParsed.i.value), retry.action('weight_inspect:value'));
+    if (!inspectRequest || inspectBlockers.length) return;
+    await inspectSub.submit(inspectRequest, retry.action('weight_inspect:value'));
   }
   const lastInspect = $derived(newestFirst(jobsFor(jobs, sourceId, new Set(['weight_inspect'])))[0]);
   let inspectDetail = $state<JobDetail | null>(null);
@@ -254,16 +260,18 @@
     if (source && ((calibrationId && !sameHost(calibrationId)) || (heldOutId && !sameHost(heldOutId)))) out.push(`Both splits must be on ${hostName(hosts, source.host)}, the host of the source.`);
     return out;
   });
+  const tuneRequest = $derived(source && tuneParsed.t.ok && tuneParsed.c.ok && tuneParsed.m.ok
+    ? tuneJob(source.id, source.host, calibrationId, heldOutId, tuneParsed.t.value, tuneParsed.c.value, tuneParsed.m.value) : null);
   async function tune() {
-    if (!source || !tuneParsed.t.ok || !tuneParsed.c.ok || !tuneParsed.m.ok || tuneBlockers.length) return;
+    if (!tuneRequest || tuneBlockers.length) return;
     const visit = route.capture();
-    const job = await tuneSub.submit(tuneJob(source.id, source.host, calibrationId, heldOutId, tuneParsed.t.value, tuneParsed.c.value, tuneParsed.m.value),
-      retry.action('weight_tune'));
+    const job = await tuneSub.submit(tuneRequest, retry.action('weight_tune'));
     if (job && !tuneSub.replayed && visit.canPresent()) openReview(job.id);
   }
 
   // ---- Review and apply. ----
   let repeatApply = $state.raw<JobSummary>();
+  let knownApplies = $state.raw<Set<string>>();
   const proposals = $derived.by(() => {
     const retryProposal = retry.context?.proposal ?? (repeatApply?.input_ids[0] === sourceId ? repeatApply : undefined);
     const list = newestFirst(jobsFor(jobs, sourceId, PROPOSAL_KINDS)).slice(0, 20);
@@ -300,7 +308,12 @@
     confirmed = false;
   });
   const applySub = new Submitter('weights.apply');
-  const repeatingApply = $derived(!!repeatApply && repeatApply.id === reviewId && !hashParam(route.hash, 'retry'));
+  const applyRequest = $derived(reviewed && source ? applyJob(reviewed.input_ids[0], source.host, reviewed.id) : null);
+  const repeatingApply = $derived(!!repeatApply && repeatApply.id === reviewId && !hashParam(route.hash, 'retry')
+    && !applies.some(j => j.state === 'succeeded' && !knownApplies?.has(j.id)));
+  const matchedApply = $derived(!applySub.error && applySub.replayed && !!applySub.newRun &&
+    applySub.acceptedBody?.options?.proposal_job_id === reviewId);
+  const canRepeatApply = $derived(!!proposal && !!applyRequest && !applySub.busy && !activeApply && !repeatingApply && !gate('weight_apply').length);
   const applyBlockers = $derived.by(() => {
     const out = [...gate('weight_apply')];
     if (!reviewed) return [...out, 'Select a proposal.'];
@@ -312,16 +325,22 @@
     return out;
   });
   async function applyNow() {
-    if (!reviewed || !source || applyBlockers.length) return;
+    if (!applyRequest || applyBlockers.length) return;
     // The controller requires the exact source of the proposal job.
-    if (await applySub.submit(applyJob(reviewed.input_ids[0], source.host, reviewed.id), retry.action('weight_apply'))) {
+    if (await applySub.submit(applyRequest, retry.action('weight_apply'))) {
       repeatApply = undefined;
     }
   }
-  function prepareApply() {
-    const proposal = proposals.find(item => item.id === applySub.acceptedBody?.options?.proposal_job_id);
-    if (!proposal || !applySub.newRun?.()) return false;
-    repeatApply = proposal;
+  function prepareApply(matched: boolean) {
+    if (!canRepeatApply || !reviewed || !applyRequest) return false;
+    const prior = matched ? proposals.find(item => item.id === applySub.acceptedBody?.options?.proposal_job_id) : reviewed;
+    if (!prior || appliesOf(jobs, prior.id).some(j => isActive(j.state))) return false;
+    const opened = matched ? applySub.newRun?.() : retry.action('weight_apply').preparePlain?.(applyRequest)('current');
+    if (!opened) return false;
+    applySub.forgetPlainAttempt();
+    repeatApply = prior;
+    knownApplies = new Set(appliesOf(jobs, prior.id).filter(j => j.state === 'succeeded').map(j => j.id));
+    reviewId = prior.id;
     confirmed = false;
     return true;
   }
@@ -368,6 +387,9 @@
   });
   watchPrefill(retry, () => !!brewery.state);
   const previous = $derived(repeat ?? (retry.context && !retry.context.proposal ? retry.context.job : undefined));
+  const previousRequest = $derived(repeat ?? (previous && source ? {
+    kind: previous.kind, host: source.host, input_ids: previous.input_ids, options: previous.options,
+  } : null));
   function openRepeat(request?: NewJob) {
     if (!request?.input_ids[0]) return false;
     route.replaceQuery(`#/weights?${new URLSearchParams({ source: request.input_ids[0] })}`);
@@ -382,9 +404,10 @@
     const kind = WEIGHT_KINDS.find((kind) => kind === previous?.kind);
     if (!kind) return ['This request is not a weight job.'];
     const out = [...gate(kind)];
-    if (previous.host !== source.host || previous.input_ids.some((id) => !models.some((m) =>
-      m.id === id && m.host === source?.host && m.available !== false))) {
-      out.push('The original inputs must be available on the original host.');
+    if (previous.host !== source.host) out.push(`Use the original host ${previous.host ?? ''}.`);
+    for (const id of previous.input_ids) {
+      if (!models.some(m => m.id === id && m.host === source?.host && m.available !== false))
+        out.push(`Input ${id} is not available on the original host.`);
     }
     if ((previous.options?.mode || previous.options?.source_sha256 || (kind !== 'weight_inspect' && source.kind !== 'gguf')) && !canVisual) {
       out.push(visual.reason ?? 'Visual inspection is not available.');
@@ -398,14 +421,13 @@
     return out;
   });
   async function queuePrevious() {
-    if (!previous || !source || previousBlockers.length || retrySub.busy || repeatSub.busy) return;
+    if (!previousRequest || previousBlockers.length || retrySub.busy || repeatSub.busy) return;
     const visit = route.capture();
-    const { kind, input_ids, options } = previous;
     if (repeat) {
       if (!hashParam(route.hash, 'retry') && await repeatSub.submit(repeat)) repeat = undefined;
       return;
     }
-    const queued = await retrySub.submit({ kind, host: source.host, input_ids, options }, retry.action(`previous:${kind}`));
+    const queued = await retrySub.submit(previousRequest, retry.action(`previous:${previousRequest.kind}`));
     if (queued && !retrySub.replayed && visit.canPresent()) location.hash = `#/jobs/${encodeURIComponent(queued.id)}`;
   }
 
@@ -487,11 +509,11 @@
         <KeyValues data={previous.options} />
         <p class="hint">Review the inputs and options before you queue the job. To change them, use the editor below.</p>
         <Submit blockers={previousBlockers} busy={repeat ? repeatSub.busy : retrySub.busy} disabled={retry.unavailable} onclick={queuePrevious}>{repeat ? 'Queue new weight request' : 'Queue previous request'}</Submit>
-        {#if !repeat}<SubmitStatus s={retrySub} prepare={() => openRepeat(retrySub.acceptedBody)} />{/if}
+        {#if !repeat}<SubmitStatus s={retrySub} current={previousRequest} prepare={() => openRepeat(retrySub.acceptedBody)} />{/if}
       </div>
     </section>
   {/if}
-  <SubmitStatus s={repeatSub} prepare={() => openRepeat(repeatSub.acceptedBody)} />
+  <SubmitStatus s={repeatSub} current={repeat ?? repeatSub.acceptedBody} prepare={() => openRepeat(repeatSub.acceptedBody)} />
 
   <section class="panel" aria-labelledby="w-make-h">
     <header>
@@ -642,7 +664,7 @@
           <span class="hint" id="w-tune-c-hint">One <span class="mono">row, column</span> pair per line. Start at 0. <span class="num">{coordCount}</span> of {MAX_COORDINATES}.</span>
           <FieldError id="w-tune-c-e" error={fieldError(visibleTune, 'coordinates')} />
         </div>
-        <SubmitStatus s={tuneSub} prepare={() => openRepeat(tuneSub.acceptedBody)} />
+        <SubmitStatus s={tuneSub} current={tuneRequest} prepare={() => openRepeat(tuneSub.acceptedBody)} />
         <Submit blockers={tuneBlockers} busy={tuneSub.busy} disabled={retry.action('weight_tune').blocked} onclick={tune}>Tune selected weights</Submit>
       </div>
     {/if}
@@ -682,7 +704,7 @@
             {:else}
               <p class="xs muted">No edits yet.{#if source.kind === 'gguf'} Add edits from the visual editor or text entry above.{/if}</p>
             {/if}
-            <SubmitStatus s={proposeSub} prepare={() => openRepeat(proposeSub.acceptedBody)} />
+            <SubmitStatus s={proposeSub} current={proposeRequest} prepare={() => openRepeat(proposeSub.acceptedBody)} />
             <Submit blockers={proposeBlockers} busy={proposeSub.busy} disabled={retry.action('weight_propose').blocked} onclick={propose}>Create proposal</Submit>
           </section>
         {/if}
@@ -754,15 +776,18 @@
                       New Library entry: <a href="#/weights?source={encodeURIComponent(applied.library_model_id)}">{appliedModel ? modelLabel(appliedModel) : applied.library_model_id}</a>{#if applied.output_sha256}, SHA-256 <span class="mono" title={applied.output_sha256}>{shortHash(applied.output_sha256)}</span>{/if}.
                     {/if}
                   </p>
+                  {#if canRepeatApply && !matchedApply}
+                    <NewRun prepare={() => prepareApply(false)} />
+                  {/if}
                 {/if}
-                {#if !doneApply || repeatingApply}
-                  {#each applies.filter((a) => a.state !== 'succeeded').slice(0, 3) as a (a.id)}
+                {#each applies.filter(a => isActive(a.state) || (!doneApply || repeatingApply) && a.state !== 'succeeded').slice(0, 3) as a (a.id)}
                     <div class="row">
                       <JobState job={a} /><a class="xs mono" href="#/jobs/{encodeURIComponent(a.id)}">{a.id}</a>
                       {#if a.error}<span class="xs err break">{a.error}</span>{/if}
                     </div>
                     {#if a.state === 'running'}<JobProgress job={a} label="Progress of apply {a.id}" />{/if}
-                  {/each}
+                {/each}
+                {#if !doneApply || repeatingApply}
                   {#if proposal}
                     <label class="confirm">
                       <input type="checkbox" bind:checked={confirmed} disabled={!!activeApply} />
@@ -772,7 +797,8 @@
                   <Submit blockers={applyBlockers} busy={applySub.busy} disabled={retry.action('weight_apply').blocked} onclick={applyNow}>Apply as new {sourceFormat}</Submit>
                   <p class="xs muted">Apply registers a verified revision as a separate Library entry and keeps the original.</p>
                 {/if}
-                <SubmitStatus s={applySub} prepare={applySub.newRun ? prepareApply : undefined} />
+                <SubmitStatus s={applySub} current={applyRequest} allowRepeat={canRepeatApply && matchedApply}
+                  prepare={matchedApply ? () => prepareApply(true) : undefined} />
               </div>
             {/if}
           {/if}
@@ -796,7 +822,7 @@
       </div>
       <Submit variant="secondary" blockers={inspectBlockers} busy={inspectSub.busy} disabled={retry.action('weight_inspect:value').blocked} onclick={inspect}>Inspect</Submit>
     </div>
-    <SubmitStatus s={inspectSub} prepare={() => openRepeat(inspectSub.acceptedBody)} />
+    <SubmitStatus s={inspectSub} current={inspectRequest} prepare={() => openRepeat(inspectSub.acceptedBody)} />
     <div aria-live="polite">
       {#if lastInspect}
         <div class="ins">

@@ -6,7 +6,7 @@ import { api, errorText } from './api';
 import { ConversionSubmitter, isActiveConversion, newerConversion, parseConversions, type Conversion, type ConversionBody } from './conversion';
 import type { RetrySubmission } from './retry-prefill.svelte';
 import { captureSubmissionVisit } from './route.svelte';
-import { bodyKey } from './retry-keys';
+import { bodyKey, openOnce, type OpenPlain } from './retry-keys';
 
 const ACTIVE_MS = 2_000;
 const IDLE_MS = 10_000;
@@ -75,7 +75,7 @@ export class ConversionStarter {
   /** True when the last click replayed an earlier identical request instead of starting a new workflow. */
   replayed = $state(false);
   acceptedBodyKey = $state<string>();
-  newRun = $state.raw<(() => boolean) | undefined>();
+  newRun = $state.raw<OpenPlain>();
   #inner: ConversionSubmitter;
 
   constructor(launcher: string) { this.#inner = new ConversionSubmitter(launcher, api.startConversion); }
@@ -85,7 +85,7 @@ export class ConversionStarter {
     this.busy = true;
     this.error = null;
     const submitted = bodyKey(body);
-    const prepare = retry?.preparePlain?.();
+    const prepare = retry?.preparePlain?.(body);
     const c = await this.#inner.submit(body, retry, captureSubmissionVisit());
     this.busy = false;
     this.error = this.#inner.error;
@@ -93,11 +93,7 @@ export class ConversionStarter {
       this.replayed = this.#inner.replayed;
       this.last = c;
       this.acceptedBodyKey = submitted;
-      this.newRun = this.replayed && prepare ? () => {
-        if (!prepare()) return false;
-        this.newRun = undefined;
-        return true;
-      } : undefined;
+      this.newRun = this.replayed && prepare ? openOnce(prepare, () => { this.newRun = undefined; }) : undefined;
       conversions.upsert(c);
       void conversions.refresh();
     }

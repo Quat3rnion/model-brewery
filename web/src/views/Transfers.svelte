@@ -12,7 +12,7 @@
   import RetryOffer from '../components/RetryOffer.svelte';
   import RetryRecovery from '../components/RetryRecovery.svelte';
   import type { Blocker } from '../lib/blockers';
-  import type { Host } from '../lib/types';
+  import type { Host, NewJob } from '../lib/types';
   import SubmitStatus from '../components/SubmitStatus.svelte';
   import RecentJobs from '../components/RecentJobs.svelte';
   import { tick } from 'svelte';
@@ -132,6 +132,21 @@
   const copyRetry = $derived(retry.action('transfer'));
   const previewRetry = $derived(retry.action('transfer_preview'));
   const cleanRetry = $derived(retry.action('cache_cleanup'));
+  const previewJob = $derived<NewJob>({ kind: 'transfer_preview', host: dest, input_ids: selected });
+  const transferJob = $derived<NewJob>({ kind: 'transfer', host: dest, input_ids: selected });
+  const cleanupJob = $derived<NewJob>({
+    kind: 'cache_cleanup', host: cleanHost, input_ids: [],
+    options: digest.trim() ? { bundle_sha256: digest.trim() } : undefined,
+  });
+
+  async function closeCleanup(visit: ReturnType<typeof route.capture>, restoreFocus: boolean) {
+    confirmClean = false;
+    await tick();
+    if (restoreFocus && visit.current() && document.activeElement === document.body) {
+      const resultLink = cleanButton?.closest('section')?.querySelector<HTMLElement>('a[href^="#/jobs/"]');
+      (cleanButton?.disabled ? resultLink : cleanButton)?.focus();
+    }
+  }
 
   async function runCleanup() {
     const visit = route.capture();
@@ -142,22 +157,10 @@
     };
     document.addEventListener('focusin', observe);
     document.addEventListener('pointerdown', observe);
-    const job = await cleaner.submit({
-      kind: 'cache_cleanup',
-      host: cleanHost,
-      input_ids: [],
-      options: digest.trim() ? { bundle_sha256: digest.trim() } : undefined,
-    }, cleanRetry);
+    const job = await cleaner.submit(cleanupJob, cleanRetry);
     document.removeEventListener('focusin', observe);
     document.removeEventListener('pointerdown', observe);
-    if (job && visit.current() && confirmation === group) {
-      confirmClean = false;
-      await tick();
-      if (stayed && visit.current() && document.activeElement === document.body) {
-        const resultLink = cleanButton?.closest('section')?.querySelector<HTMLElement>('a[href^="#/jobs/"]');
-        (cleanButton?.disabled ? resultLink : cleanButton)?.focus();
-      }
-    }
+    if (job && visit.current() && confirmation === group) await closeCleanup(visit, stayed);
   }
 </script>
 
@@ -220,16 +223,16 @@
       <div class="row actions">
         <button type="button" class="btn" aria-describedby={copyBlockers.length || previewHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={preview.busy}
           disabled={previewRetry.blocked || preview.busy || copyBlockers.length > 0 || previewHostBlockers.length > 0}
-          onclick={() => preview.submit({ kind: 'transfer_preview', host: dest, input_ids: selected }, previewRetry)}>{preview.busy ? 'Submitting…' : 'Preview'}</button>
+          onclick={() => preview.submit(previewJob, previewRetry)}>{preview.busy ? 'Submitting…' : 'Preview'}</button>
         <button type="button" class="btn primary" aria-describedby={copyBlockers.length || transferHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={transfer.busy}
           disabled={copyRetry.blocked || transfer.busy || copyBlockers.length > 0 || transferHostBlockers.length > 0}
-          onclick={() => transfer.submit({ kind: 'transfer', host: dest, input_ids: selected }, copyRetry)}>{transfer.busy ? 'Submitting…' : 'Transfer'}</button>
+          onclick={() => transfer.submit(transferJob, copyRetry)}>{transfer.busy ? 'Submitting…' : 'Transfer'}</button>
       </div>
       {#if copyBlockers.length || previewHostBlockers.length || transferHostBlockers.length}
         <Blockers id="copy-blockers" blockers={[...copyBlockers, ...previewHostBlockers, ...transferHostBlockers]} />
       {/if}
-      <SubmitStatus s={preview} />
-      <SubmitStatus s={transfer} />
+      <SubmitStatus s={preview} current={previewJob} />
+      <SubmitStatus s={transfer} current={transferJob} />
       <p class="xs muted">Preview and transfer are queued jobs. Open a job to see the preview result, progress and cancel.</p>
     </div>
     </WorkflowGate>
@@ -254,7 +257,7 @@
           <p class="small">Remove {digest.trim() ? 'this cached bundle' : 'all unused cached copies'} on {hostName(hosts, cleanHost)}? Later jobs copy the files again.</p>
           <div class="row" style="margin-top:8px">
           <button type="button" class="btn danger" disabled={cleanRetry.blocked || cleaner.busy || cleanBlockers.length > 0} onclick={runCleanup}>{cleaner.busy ? 'Submitting…' : 'Queue cleanup'}</button>
-            <button type="button" class="btn ghost" onclick={() => (confirmClean = false)}>Keep cache</button>
+            <button type="button" class="btn ghost" onclick={() => closeCleanup(route.capture(), !!confirmation?.contains(document.activeElement))}>Keep cache</button>
           </div>
         </div>
       {:else}
@@ -264,7 +267,7 @@
         </div>
       {/if}
       <Blockers id="cleanup-blockers" blockers={cleanBlockers} />
-      <SubmitStatus s={cleaner} />
+      <SubmitStatus s={cleaner} current={cleanupJob} />
     </div>
   </section>
 

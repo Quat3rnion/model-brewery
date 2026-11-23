@@ -1,7 +1,7 @@
 import { api, rejectedSubmission, submissionError } from './api';
 import { brewery } from './store.svelte';
 import type { JobSummary, NewJob } from './types';
-import { PlainAttempt, retryKey, type RetrySubmission } from './retry-keys';
+import { openOnce, PlainAttempt, retryKey, type OpenPlain, type RetrySubmission } from './retry-keys';
 import { captureSubmissionVisit } from './route.svelte';
 
 type AcceptedJob = JobSummary | Pick<JobSummary, 'id'>;
@@ -13,10 +13,13 @@ export class Submitter {
   job = $state<AcceptedJob | null>(null);
   replayed = $state(false);
   acceptedBody = $state.raw<NewJob>();
-  newRun = $state.raw<(() => boolean) | undefined>();
+  newRun = $state.raw<OpenPlain>();
   #plain = new PlainAttempt();
 
   constructor(private launcher: string | ((job: NewJob) => string)) {}
+
+  /** An explicit new run must not reuse the key of an unconfirmed plain attempt. */
+  forgetPlainAttempt() { this.#plain = new PlainAttempt(); }
 
   async submit(job: NewJob, retry?: RetrySubmission): Promise<AcceptedJob | null> {
     if (this.busy || retry?.blocked) return null;
@@ -27,7 +30,7 @@ export class Submitter {
     try {
       // Freeze the actual wire body before yielding to Web Crypto.
       const body: NewJob = JSON.parse(JSON.stringify(stripEmpty(job)));
-      const prepare = retry?.preparePlain?.();
+      const prepare = retry?.preparePlain?.(body);
       const launcher = retry?.launcher ?? (typeof this.launcher === 'string' ? this.launcher : this.launcher(body));
       if (!failedId) plain = this.#plain.take(launcher, body, captureSubmissionVisit());
       const key = plain?.key ?? await retryKey(failedId!, launcher, body);
@@ -37,11 +40,7 @@ export class Submitter {
       this.job = created;
       this.replayed = !('state' in created);
       this.acceptedBody = body;
-      this.newRun = this.replayed && prepare ? () => {
-        if (!prepare()) return false;
-        this.newRun = undefined;
-        return true;
-      } : undefined;
+      this.newRun = this.replayed && prepare ? openOnce(prepare, () => { this.newRun = undefined; }) : undefined;
       void brewery.refresh();
       return created;
     } catch (e) {

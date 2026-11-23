@@ -343,13 +343,17 @@
     if ((calibrationId && !sameHost(calibrationId)) || (heldOutId && !sameHost(heldOutId))) out.push(`Both splits must be on ${hostName(brewery.state?.hosts ?? [], source.host)}.`);
     return out;
   });
-  async function tune() {
-    if (!tensor || !sha || !maxUpdate.ok || tuneBlockers.length) return;
-    const visit = route.capture();
+  const tuneRequest = $derived.by(() => {
+    if (!tensor || !sha || !maxUpdate.ok) return null;
     const indices = [...selected].map((k) => k.split(',').map(Number) as [number, number]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
     const job = tuneJob(source.id, source.host, calibrationId, heldOutId, tensor.name, indices, maxUpdate.value);
     job.options = { ...job.options, source_sha256: sha, ...(!float ? {packed:true} : {}) };
-    const created = await tuneSub.submit(job, tuneRetry);
+    return job;
+  });
+  async function tune() {
+    if (!tuneRequest || tuneBlockers.length) return;
+    const visit = route.capture();
+    const created = await tuneSub.submit(tuneRequest, tuneRetry);
     if (created && !tuneSub.replayed && visit.canPresent()) onproposal(created.id);
   }
 
@@ -388,7 +392,7 @@
       {/if}
       {#if inventoryError}<p class="note bad" role="alert">{inventoryError}</p>{/if}
       {#if reads.replayed && reads.acceptedBody?.options?.mode === 'inventory'}
-        <SubmitStatus s={reads} prepare={() => openRepeat(reads.acceptedBody)} />
+        <SubmitStatus s={reads} current={inventoryRequest ?? reads.acceptedBody} prepare={() => openRepeat(reads.acceptedBody)} />
       {/if}
       {#if tensors.length}
         <TensorMap {tensors} selected={tensorName} onopen={openTensor} />
@@ -461,7 +465,7 @@
         {/if}
         {#if tileError}<p class="note bad" role="alert">{tileError}</p>{/if}
         {#if reads.replayed && reads.acceptedBody?.options?.mode === 'tile'}
-          <SubmitStatus s={reads} prepare={() => openRepeat(reads.acceptedBody)} />
+          <SubmitStatus s={reads} current={tileRead} prepare={() => openRepeat(reads.acceptedBody)} />
         {/if}
         {#if !tileJobFound || tileError}
           <div class="row">
@@ -586,7 +590,7 @@
 
     {#if canChange && mode === 'auto' && tensor}
       <section class="step">
-        <SubmitStatus s={tuneSub} prepare={() => openRepeat(tuneSub.acceptedBody)} />
+        <SubmitStatus s={tuneSub} current={tuneRequest} prepare={() => openRepeat(tuneSub.acceptedBody)} />
         <Submit blockers={tuneBlockers} busy={tuneSub.busy} disabled={tuneRetry.blocked} onclick={tune}>Tune {selected.size || ''} selected {selected.size === 1 ? 'weight' : 'weights'}</Submit>
       </section>
     {/if}

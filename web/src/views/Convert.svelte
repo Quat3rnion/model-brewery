@@ -8,6 +8,7 @@
   import ModelSelect from '../components/ModelSelect.svelte';
   import Submit from '../components/Submit.svelte';
   import SubmitStatus from '../components/SubmitStatus.svelte';
+  import ResultAttribution from '../components/ResultAttribution.svelte';
   import NewRun from '../components/NewRun.svelte';
   import RetryRecovery from '../components/RetryRecovery.svelte';
   import { bodyKey, resultOfPreviousSubmission } from '../lib/retry-keys';
@@ -30,7 +31,7 @@
   import { hashParam, route } from '../lib/route.svelte';
   import { IMATRIX_KIND } from '../lib/gguf';
   import { obj } from '../lib/reports';
-  import { availableId, loadRetryJob, type RetryOmission, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
+  import { availableId, loadRetryJob, submittedJob, type RetryOmission, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
   import RetryOffer from '../components/RetryOffer.svelte';
   import RetryWarnings from '../components/RetryWarnings.svelte';
   import type { EligibilityEntry, Host, JobDetail, Workflow } from '../lib/types';
@@ -144,6 +145,13 @@
         ? parseConversions(await api.conversions(signal)).find(run => Object.values(run.jobIds).includes(job.id))
         : undefined;
       return { job, parent };
+    },
+    fromSubmission: body => {
+      if ('kind' in body) return (STAGES as readonly string[]).includes(body.kind) ? { job: submittedJob(body) } : undefined;
+      if (body.format === 'gguf' || body.options?.layer_recipe)
+        return { job: { ...submittedJob({ kind: 'convert', ...body }), format: body.format, profile_revision: body.profile_revision } };
+      const run = parseConversion({ ...body, id: '', state: 'running' });
+      return run ? { run } : undefined;
     },
     restore: prior => {
       if ('run' in prior) {
@@ -681,11 +689,14 @@
       <div aria-live="polite" class="xs">
         {#if starter.error}<p class="note bad" role="alert">{starter.error} Pressing Start again retries the same request; it will not start a second conversion.</p>
         {:else if starter.last}
-          {#if resultOfPreviousSubmission(starter.acceptedBodyKey, wfBuilt.body)}<p class="muted">Result of the previous submission</p>{/if}
+          <ResultAttribution accepted={starter.acceptedBodyKey} current={wfBuilt.body} />
           <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a href={conversionRunHref(starter.last.id)}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : 'The run continues if you leave this page.'}</p>
         {/if}
       </div>
-      {#if !starter.error && starter.replayed && starter.newRun}<NewRun prepare={starter.newRun} disabled={starter.busy} />{/if}
+      {#if !starter.error && starter.replayed && starter.newRun}
+        <NewRun prepare={starter.newRun} current={() => starter.newRun?.('current') ?? false}
+          changed={resultOfPreviousSubmission(starter.acceptedBodyKey, wfBuilt.body)} disabled={starter.busy} />
+      {/if}
     </div>
     </WorkflowGate>
     {/if}
@@ -838,7 +849,7 @@
         retry.acknowledge(diagnosticAction); document.getElementById('cv-source')?.focus();
       }} />
       <Submit {blockers} busy={s.busy} disabled={diagnosticRetry.blocked} onclick={submit}>Queue {STEPS.find((x) => x.id === step)?.label.toLowerCase()}</Submit>
-      <SubmitStatus {s} />
+      <SubmitStatus {s} current={built.job} />
     </div>
   </div>
       <RetryWarnings items={retry.omissions(hy4Action)} />

@@ -1,7 +1,6 @@
 <script lang="ts">
   import { brewery } from '../lib/store.svelte';
-  import { stripEmpty, Submitter } from '../lib/submit.svelte';
-  import { bodyKey, resultOfPreviousSubmission } from '../lib/retry-keys';
+  import { Submitter } from '../lib/submit.svelte';
   import type { RetrySubmission } from '../lib/retry-prefill.svelte';
   import type { NewJob } from '../lib/types';
   import ModelSelect from './ModelSelect.svelte';
@@ -56,8 +55,7 @@
       <p class="xs muted">Reads metadata only. Does not read or verify weight payloads, write a GGUF file, or test runtime support or quality.</p>
     {/if}
     <Submit blockers={problem ? [problem] : []} busy={submission.busy} disabled={loading || retry?.blocked} onclick={queue}>Queue Hy4 {action}</Submit>
-    <SubmitStatus s={submission}
-      previous={resultOfPreviousSubmission(bodyKey(submission.acceptedBody), request && stripEmpty(request))}
+    <SubmitStatus s={submission} current={request}
       resultLinkLabel={submission.job ? 'View job result: ' + submission.job.id : undefined} />
   </div>
 </details>
