@@ -268,6 +268,41 @@
         }
       }
     },
+    "/api/scratch/{id}/checks": {
+      "get": {
+        "operationId": "getScratchChecks",
+        "summary": "Read the check bundle for a scratch revision",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "responses": {
+          "200": {"description": "The current check bundle.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ScratchCheckBundle"}}}},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      },
+      "post": {
+        "operationId": "runScratchChecks",
+        "summary": "Check a scratch revision and save the results",
+        "description": "Checks the exact child and immediate parent SafeTensors files. You can also include an offline behavior report and references to completed evaluation or benchmark jobs. These are not verified model results. Each run replaces the last bundle and clears its acknowledgement. You cannot change results after a publish request.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false, "required": ["sha256"], "properties": {
+            "sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "job_refs": {"type": "array", "maxItems": 8, "items": {"$ref": "#/components/schemas/ScratchCheckJobReference"}},
+            "offline_report": {"anyOf": [{"$ref": "#/components/schemas/ScratchOfflineReport"}, {"type": "null"}]}
+          }
+        }}}},
+        "responses": {
+          "200": {"$ref": "#/components/responses/ScratchRow"},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "503": {"$ref": "#/components/responses/ScratchBusy"}
+        }
+      }
+    },
     "/api/scratch/{id}/discard": {
       "post": {
         "operationId": "discardScratch",
@@ -287,9 +322,14 @@
       "post": {
         "operationId": "requestScratchPublish",
         "summary": "Request publication of an exact scratch hash",
-        "description": "Changes the state to publish_requested. This does not register a Library model.",
+        "description": "Requires passing integrity checks for this hash. If other checks did not pass, give the current bundle ID in acknowledge_bundle. Changes the state to publish_requested. This does not register a Library model.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
-        "requestBody": {"$ref": "#/components/requestBodies/ScratchReview"},
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false, "required": ["sha256"], "properties": {
+            "sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "acknowledge_bundle": {"anyOf": [{"$ref": "#/components/schemas/Id"}, {"type": "null"}]}
+          }
+        }}}},
         "responses": {
           "200": {"$ref": "#/components/responses/ScratchRow"},
           "403": {"$ref": "#/components/responses/Forbidden"},
@@ -951,7 +991,7 @@
     },
     "responses": {
       "ScratchRow": {"description": "The current scratch revision record.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ScratchRevision"}}}},
-      "ScratchConflict": {"description": "The key, admission, hash, disk space, capacity, or state does not permit the change.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "ScratchConflict": {"description": "The key, admission, hash, disk space, capacity, check bundle, or state does not permit the change.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "ScratchBusy": {"description": "Another scratch write is in progress. Retry with the same key.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "BadRequest": {"description": "Malformed JSON, invalid header or cursor, or a request that fails controller validation.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "Forbidden": {"description": "The loopback Host, Origin, or Fetch Metadata guard rejected this request.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}, "example": {"error": "host or origin is not allowed"}}}},
@@ -1018,7 +1058,73 @@
           "state": {"enum": ["scratch", "publish_requested", "approved", "discarded"]},
           "sha256": {"$ref": "#/components/schemas/ScratchHash"}, "qualification": {"const": "not release-qualified"},
           "library_model_id": {"anyOf": [{"$ref": "#/components/schemas/Id"}, {"type": "null"}]},
-          "provenance": {"$ref": "#/components/schemas/ScratchProvenance"}, "delta": {"$ref": "#/components/schemas/ScratchDelta"}
+          "provenance": {"$ref": "#/components/schemas/ScratchProvenance"}, "delta": {"$ref": "#/components/schemas/ScratchDelta"},
+          "check_bundle": {"$ref": "#/components/schemas/ScratchCheckBundle"}
+        }
+      },
+      "ScratchCheckStatus": {
+        "oneOf": [
+          {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "passed"}}},
+          {"type": "object", "additionalProperties": false, "required": ["status", "reason"],
+            "properties": {"status": {"enum": ["failed", "not_run", "reported"]}, "reason": {"type": "string"}}}
+        ]
+      },
+      "ScratchCheckJobReference": {
+        "type": "object", "additionalProperties": false, "required": ["job_id", "role"],
+        "properties": {"job_id": {"$ref": "#/components/schemas/Id"}, "role": {"enum": ["parent", "child"]}}
+      },
+      "ScratchOfflineReport": {
+        "type": "object", "additionalProperties": false,
+        "required": ["schema", "qualification", "parent_sha256", "revision_sha256", "parent_gguf_sha256", "revision_gguf_sha256", "runner_sha256", "fixture_sha256", "metrics", "parent_generation", "child_generation"],
+        "properties": {
+          "schema": {"const": "brewery.scratch-behavior.v1"},
+          "qualification": {"const": "not release-qualified"},
+          "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "parent_gguf_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "revision_gguf_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "runner_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "fixture_sha256": {
+            "type": "object", "additionalProperties": false, "required": ["counterfact.jsonl", "zsre.jsonl", "heldout.txt"],
+            "properties": {
+              "counterfact.jsonl": {"const": "5aaebce44fb2f53e28b9bbaa97e6563c3b316677ee5ad90933bfa6cb2ed46e00"},
+              "zsre.jsonl": {"const": "becf61059dc599a5865810d2b574b5d8dbf7c40a6a2947b1700c93eb4627a5a3"},
+              "heldout.txt": {"const": "9678f9afdc31b2a9be7fec2045997e2360693ee72b893287c0d539983bff4923"}
+            }
+          },
+          "metrics": {
+            "type": "array", "minItems": 17, "maxItems": 17, "items": {
+              "type": "object", "additionalProperties": false, "required": ["name", "parent", "child", "better"],
+              "properties": {
+                "name": {"enum": ["counterfact_efficacy", "counterfact_target_probability", "counterfact_target_rank", "counterfact_paraphrase", "counterfact_paraphrase_probability", "counterfact_paraphrase_rank", "counterfact_locality_probability", "counterfact_locality_rank", "zsre_efficacy", "zsre_target_probability", "zsre_target_rank", "zsre_paraphrase", "zsre_paraphrase_probability", "zsre_paraphrase_rank", "zsre_locality_probability", "zsre_locality_rank", "perplexity"]},
+                "parent": {"type": "number"}, "child": {"type": "number"}, "better": {"enum": ["higher", "lower", "neither"]}
+              }
+            }
+          },
+          "parent_generation": {"type": "string", "minLength": 1, "maxLength": 4096},
+          "child_generation": {"type": "string", "minLength": 1, "maxLength": 4096}
+        }
+      },
+      "ScratchCheckBundle": {
+        "type": "object",
+        "required": ["schema", "id", "revision_sha256", "parent_sha256", "created_at_ms", "qualification", "integrity", "smoke", "behavior", "job_refs", "acknowledged_at_ms"],
+        "properties": {
+          "schema": {"const": "brewery.scratch-checks.v1"}, "id": {"$ref": "#/components/schemas/Id"},
+          "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "created_at_ms": {"type": "integer", "minimum": 0},
+          "qualification": {"const": "not release-qualified"},
+          "integrity": {"$ref": "#/components/schemas/ScratchCheckStatus"},
+          "smoke": {"$ref": "#/components/schemas/ScratchCheckStatus"},
+          "behavior": {"$ref": "#/components/schemas/ScratchCheckStatus"},
+          "offline_report": {"$ref": "#/components/schemas/ScratchOfflineReport"},
+          "acknowledged_at_ms": {"type": ["integer", "null"], "minimum": 0},
+          "job_refs": {"type": "array", "maxItems": 8, "items": {"type": "object", "required": ["job_id", "role", "kind", "verified_revision"],
+            "properties": {
+              "job_id": {"$ref": "#/components/schemas/Id"}, "role": {"enum": ["parent", "child"]},
+              "kind": {"enum": ["evaluate", "baseline", "benchmark"]}, "verified_revision": {"const": false}
+            }
+          }}
         }
       },
       "DiscoveryDocument": {

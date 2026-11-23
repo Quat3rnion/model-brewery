@@ -1242,8 +1242,10 @@ Do not delete the Library entry if you need to select that parent later.
 | `POST /api/scratch/{id}/edits` | `{"operations":[...]}` | New scratch child of `{id}` (`201`). |
 | `GET /api/scratch` | None | List of scratch records with provenance (`200`). |
 | `GET /api/scratch/{id}/delta` | None | Parent and child hashes, delta hash and size, and counts of changed tensors and bytes (`200`). |
+| `POST /api/scratch/{id}/checks` | `{"sha256":"<hash>"}` | Current scratch record with a new `check_bundle` (`200`). |
+| `GET /api/scratch/{id}/checks` | None | Current check bundle (`200`), or `404` if there is none. |
 | `POST /api/scratch/{id}/discard` | `{}` | Record with state `discarded` (`200`). The controller removes the files and omits the record from the list. Discard unapproved children before their parent. You cannot discard an approved revision. |
-| `POST /api/scratch/{id}/publish-request` | `{"sha256":"<hash>"}` | Record with state `publish_requested` (`200`). The Library does not change. |
+| `POST /api/scratch/{id}/publish-request` | `{"sha256":"<hash>","acknowledge_bundle":"<bundle-id>"}` | Record with state `publish_requested` (`200`). The Library does not change. |
 | `POST /api/admin/scratch/{id}/approve` | `{"sha256":"<hash>"}` | Record with state `approved` and `library_model_id` (`200`). |
 
 Send an `Idempotency-Key` with each POST. If the response does not arrive,
@@ -1277,9 +1279,40 @@ keeps at most 64 scratch revisions that are not discarded. It copies the full
 file for each child and checks the local editor's disk reserve. Indexed HF
 directories and SSH workers are not supported by this API.
 
+#### Checks before a publish request
+
+Run checks before you send a publish request. The controller checks the
+parent and child hashes, tensor names, shapes, dtypes, offsets, and finite
+values against the immediate parent and edit record. Read `integrity.status`:
+HTTP `200` means the controller saved the result. It does not mean that the
+check passed. You cannot waive failed integrity checks.
+
+An unapproved scratch ID is not a conversion source. The controller sets
+`smoke.status` to `not_run` with reason `no pre-approval GGUF path`. For local
+scoring, use private test copies and follow [Scratch behavior
+checks](crates/eval/README.md#scratch-behavior-checks). To attach the result,
+include it as `offline_report` when you run checks. The controller checks
+the report format, dataset hashes and revision hashes. It does not verify
+the GGUF conversion or repeat inference. `behavior.status` is `reported`,
+not `passed`.
+
+If your profile calls for GSM8K or benchmarks, run the applicable jobs in the
+existing runner. After the jobs finish, include `job_refs` in the check
+request. Each reference has `job_id` and `role` (`parent` or `child`). Omit
+`job_refs` if the profile does not call for these jobs. The bundle does not
+start jobs or verify that they used the revision under review.
+
+Review `check_bundle` for the exact `sha256`. If smoke or behavior did not
+pass, put the current bundle `id` in `acknowledge_bundle` to confirm that you
+reviewed the incomplete results. A new check replaces the bundle and clears
+its acknowledgement. The controller checks the file hash again before it
+accepts the publish request. You cannot change the bundle after the request.
+Discard and recreate a pending scratch revision if it has no bundle.
+
 **Operator only:** Approve a pending request only after you review the
-selected revision and its SHA-256. Do not expose the approval endpoint in
-agent tools. The endpoint uses the same network and origin checks as Settings.
+selected revision, its SHA-256, and its check bundle. Do not expose the
+approval endpoint in agent tools. The endpoint uses the same network and
+origin checks as Settings.
 The controller has no separate operator identity. A trusted client with
 direct workbench access on loopback, LAN, or tailnet can call this endpoint
 without using the UI. This is an accepted risk. Give direct access only to
@@ -1303,6 +1336,9 @@ The controller stores these files in its private
   and child IDs and SHA-256 hashes, worker ID, timestamp, tool and runtime
   versions, method (`copy` or `direct`), ordered operations with parameters,
   and the name, shape and dtype of each tensor in those operations.
+- `behavior.v1.json`: An atomic file for comparisons with the immediate
+  parent. It contains the parent and child IDs and the reported metrics.
+  The metrics list is empty if the bundle has no behavior report.
 - `delta.bin`: Reversible XOR delta (`brewery.weight-delta.v1`). It starts
   with ASCII `BWDELTA1`, then two 64-byte lowercase ASCII SHA-256 hashes
   (parent first), the full file size (`u64`), and a record count (`u32`).
