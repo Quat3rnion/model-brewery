@@ -1,9 +1,13 @@
+mod behavior_direction;
 mod benchmark;
+mod circuit;
 mod compare;
 mod converter;
+mod damage;
 mod exl3_layer;
 mod gguf;
 mod gguf_conversion;
+mod heretic;
 mod hf_download;
 mod hgn_recipe;
 mod integrity;
@@ -12,6 +16,7 @@ mod progress;
 mod recipe;
 mod scratch_checks;
 mod scratch_locate;
+mod sensitivity;
 mod trace;
 mod w0_libraries;
 mod weight;
@@ -398,8 +403,14 @@ fn run() -> Result<i32> {
         "benchmark" => benchmark::run(&job, &cwd, &progress)?,
         "compare" => compare::run(&job, &cwd, &progress)?,
         brewery_worker::trace::JOB => trace::run(&job, &cwd, &progress)?,
+        brewery_worker::sensitivity::JOB => sensitivity::run(&job, &cwd, &progress)?,
+        brewery_worker::circuit::JOB => circuit::run(&job, &cwd, &progress)?,
+        brewery_worker::damage::JOB => damage::run(&job, &cwd, &progress)?,
+        brewery_worker::ablation_search::SCREEN => ablation_search::run(&job, &cwd, &progress)?,
+        brewery_worker::behavior_direction::JOB => behavior_direction::run(&job, &cwd, &progress)?,
         brewery_worker::scratch_eval::CHECKS => scratch_checks::run(&job, &cwd, &progress)?,
         brewery_worker::locate_edit::JOB => scratch_locate::run(&job, &cwd, &progress)?,
+        kind if brewery_worker::heretic::job(kind) => heretic::run(&job, &cwd)?,
         brewery_worker::scratch_eval::GGUF => {
             ensure!(
                 brewery_worker::scratch_eval::gguf_options(&job.options)
@@ -448,3 +459,4 @@ fn main() {
     };
     std::process::exit(code);
 }
+mod ablation_search;

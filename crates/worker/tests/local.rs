@@ -316,6 +316,42 @@ print(json.dumps(dict(kind="convert", output_format="gguf", gguf_type="BF16",
 }
 
 #[test]
+fn private_circuit_admits_only_its_granted_gguf_digest() {
+    let t = Rig::new();
+    let private = t.root.join("private.gguf");
+    let pin = "c".repeat(64);
+    let mut cfg: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
+    cfg["engine_env"] = json!({
+        "BREWERY_LANTERNFISH_SENSITIVITY_PIN":"/fixture-runtime",
+        "BREWERY_LANTERNFISH_SENSITIVITY_MANIFEST_SHA256":"a".repeat(64)
+    });
+    let mut prepare = |id: &str, model: &Path, sha: &str| {
+        cfg["scratch_access"] = json!({"job_id":id,"paths":{(private.to_str().unwrap()):pin}});
+        fs::write(&t.b, cfg.to_string()).unwrap();
+        fs::set_permissions(&t.b, fs::Permissions::from_mode(0o600)).unwrap();
+        t.rpc_raw(&json!({
+            "op":"prepare", "id":id, "action":"start", "job":{
+                "kind":"circuit","inputs":[{"host":"b","path":model,"kind":"gguf"}],
+                "options":{"model_sha256":sha,"clean_prompt":"clean","corrupt_prompt":"corrupt",
+                "target_id":1,"contrast_id":2,"layers":[0],"positions":[0],
+                "roles":["l_out"],"top_k":1}
+            }
+        }))
+    };
+    // A matching input passes preparation without having to run Lanternfish.
+    let admitted = prepare("private-circuit", &private, &pin);
+    assert_eq!(admitted["ok"]["state"], "queued", "{admitted}");
+    assert_eq!(
+        prepare("wrong-pin", &private, &"d".repeat(64))["ok"]["state"],
+        "failed"
+    );
+    assert_eq!(
+        prepare("wrong-path", &t.src.join("other.gguf"), &pin)["ok"]["state"],
+        "failed"
+    );
+}
+
+#[test]
 fn trace_worker_publishes_slices_rejects_corruption_and_prunes_only_traces() {
     let t = Rig::new();
     let mut cfg: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();

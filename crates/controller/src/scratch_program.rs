@@ -9,6 +9,8 @@ const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495
 const KIND: &str = "compiled_program";
 const SCHEMA: &str = "brewery.compiled-program.v1";
 const CONFIG: &str = "config.json";
+const GROUND_TRUTH: &str = "ground-truth.v1.json";
+const MAX_GROUND_TRUTH: u64 = 64 << 10;
 const MAX_MODEL: u64 = 1 << 20;
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
@@ -48,6 +50,8 @@ pub(super) struct Recipe {
     program: Program,
     config_sha256: String,
     runner_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ground_truth_sha256: Option<String>,
 }
 
 pub(super) fn library_name(row: &Revision) -> String {
@@ -75,6 +79,7 @@ pub(super) struct Run {
 struct Receipt {
     sha256: String,
     config_sha256: String,
+    ground_truth_sha256: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -172,9 +177,15 @@ fn build(app: &App, request: Compile, key: Option<&Submission<'_>>) -> Mutation 
         program: request.program,
         config_sha256: receipt.config_sha256,
         runner_sha256: runner.sha256,
+        ground_truth_sha256: receipt.ground_truth_sha256,
     };
     let (config, tensors) =
         inspect(&output.path, &receipt.sha256, &recipe).map_err(ApiError::storage)?;
+    let assets = [
+        Some(scratch::MODEL),
+        Some(CONFIG),
+        recipe.ground_truth_sha256.as_ref().map(|_| GROUND_TRUTH),
+    ];
     let provenance = Provenance {
         schema: "brewery.scratch-provenance.v1".into(),
         parent_id: ROOT_ID.into(),
@@ -187,6 +198,7 @@ fn build(app: &App, request: Compile, key: Option<&Submission<'_>>) -> Mutation 
         merge: None,
         pruning: None,
         pruning_trace: None,
+        ablation: None,
         tensors,
         tool: config.architecture,
         tool_version: config.compiler_commit,
@@ -197,10 +209,11 @@ fn build(app: &App, request: Compile, key: Option<&Submission<'_>>) -> Mutation 
             config.runtime,
         ),
         locate_edit: None,
+        heretic: None,
         created_at_ms: now(),
         compiled_program: Some(recipe),
     };
-    for leaf in [scratch::MODEL, CONFIG] {
+    for leaf in assets.into_iter().flatten() {
         open_regular(&output.path.join(leaf))
             .map_err(ApiError::storage)?
             .sync_all()
@@ -391,6 +404,19 @@ fn inspect(
     use sha2::{Digest, Sha256};
     if bytes.len() > 4096 || format!("{:x}", Sha256::digest(&bytes)) != recipe.config_sha256 {
         return Err("program config hash does not match provenance".into());
+    }
+    if let Some(digest) = &recipe.ground_truth_sha256 {
+        let mut truth = Vec::new();
+        open_regular(&directory.join(GROUND_TRUTH))
+            .map_err(|_| "cannot open compiler ground truth")?
+            .take(MAX_GROUND_TRUTH + 1)
+            .read_to_end(&mut truth)
+            .map_err(|_| "cannot read compiler ground truth")?;
+        if truth.len() as u64 > MAX_GROUND_TRUTH
+            || format!("{:x}", Sha256::digest(&truth)) != *digest
+        {
+            return Err("compiler ground truth hash does not match provenance".into());
+        }
     }
     let config: Config = serde_json::from_slice(&bytes).map_err(|_| "invalid program config")?;
     let compiler = match recipe.program.vocabulary() {

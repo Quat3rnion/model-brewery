@@ -3,6 +3,134 @@ use super::*;
 const ACCEPT: &str = "Accept: application/json, text/event-stream\r\n";
 const VERSION: &str = "MCP-Protocol-Version: 2025-06-18\r\n";
 
+#[test]
+fn interp_benchmark_reads_the_versioned_report_without_driving_compute() {
+    let mut t = Fixture::new();
+    t.launch();
+    let report = t.json("GET", "/api/interp/benchmark", None, 200);
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["qualification"], "not release-qualified");
+    let circuit_rows = report["methods"]["x5"].as_array().unwrap();
+    for method in ["attribution_patching", "activation_patching"] {
+        let histogram = circuit_rows
+            .iter()
+            .find(|row| row["method"] == method && row["program"] == "histogram")
+            .unwrap();
+        assert_eq!(histogram["evaluation"], "recall_only");
+        assert_eq!(histogram["precision"], Value::Null);
+        assert_eq!(histogram["roc_auc"], Value::Null);
+    }
+    for method in ["x5", "w11"] {
+        for program in ["sort", "histogram"] {
+            assert!(
+                report["methods"][method]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["program"] == program)
+            );
+        }
+    }
+    let reply = call(&t, "interp_benchmark", json!({}));
+    assert_eq!(reply["result"]["structuredContent"], report);
+    assert_eq!(
+        call(&t, "interp_benchmark", json!({"program":"sort"}))["error"]["code"],
+        -32602
+    );
+    assert!(!t.path("launches").exists());
+}
+
+#[test]
+fn routing_atlas_pairs_matching_traces_over_rest_and_mcp() {
+    let mut t = Fixture::new();
+    fs::write(
+        t.path("dispatch.json"),
+        r#"{"hosts":{"alpha":{"local":true,"capabilities":{"trace":true}}}}"#,
+    )
+    .unwrap();
+    t.launch();
+    let model = t.register("alpha", "gguf", "/models/moe.gguf");
+    let run = |key: &str, prompt: &str, edited: bool| {
+        let mut args = json!({"idempotency_key":key,"input_ids":[model],"prompt":prompt,
+            "options":{"layers":[0],"positions":[0],"top_k":1,
+            "roles":["ffn_moe_logits","ffn_moe_topk","ffn_moe_route_weights","l_out"]}});
+        if edited {
+            args["options"]["interventions"] = json!([
+                {"layer":0,"role":"ffn_out","positions":[0],"op":"zero_expert","expert":0}
+            ]);
+        }
+        let result = call(&t, "start_trace", args);
+        assert_eq!(result["result"]["isError"], false, "{result}");
+        let id = result["result"]["structuredContent"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            call(&t, "get_job", json!({"id":id,"wait_ms":4000}))["result"]["structuredContent"]["state"],
+            "succeeded"
+        );
+        id
+    };
+    let baseline = run("routing-baseline", "one", false);
+    let edit = run("routing-edit", "one", true);
+    let mismatch = run("routing-wrong-source", "other", true);
+    let path = format!("/api/jobs/{baseline}/trace/routing-atlas?layer=0&start=0&end=1");
+    let data = t.json("GET", &path, None, 200);
+    assert_eq!(data["experts"][0]["load"], 1.);
+    assert_eq!(data["ablation"], Value::Null);
+    t.touch("routing-digest-mismatch");
+    t.json("GET", &format!("{path}&ablation_job_id={edit}"), None, 422);
+    fs::remove_file(t.path("routing-digest-mismatch")).unwrap();
+    t.json(
+        "GET",
+        &format!("{path}&ablation_job_id={mismatch}"),
+        None,
+        422,
+    );
+    let response = call(
+        &t,
+        "routing_atlas",
+        json!({
+            "id":baseline,"layer":0,"start":0,"end":1,"ablation_job_id":edit
+        }),
+    );
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let data = &response["result"]["structuredContent"];
+    assert_eq!(data["ablation"]["rows"][0]["residual_l2"], 1.);
+    assert_eq!(data["ablation"]["rows"][0]["top_token_changed"], true);
+}
+
+#[test]
+fn search_ablation_rejects_unbounded_budget_and_requires_a_scratch_parent() {
+    let mut t = Fixture::new();
+    t.launch();
+    let sha = "a".repeat(64);
+    let mut request = json!({
+        "sha256": sha, "direction_id":"fit", "assets_id":"assets", "seed":7,
+        "trial_budget":33, "max_children":1, "disk_budget_bytes":8589934592_u64,
+        "behavior_direction":{"prompt_sets":{"sycophancy":sha,"slop":sha,"response_length":sha}}
+    });
+    let (status, body) = t.request(
+        "POST",
+        "/api/scratch/missing/search_ablation",
+        Some(request.clone()),
+        "",
+    );
+    assert_eq!(status, 400, "{body}");
+    request["trial_budget"] = json!(6);
+    let (status, body) = t.request(
+        "POST",
+        "/api/scratch/missing/search_ablation",
+        Some(request.clone()),
+        "",
+    );
+    assert_eq!(status, 404, "{body}");
+    request["id"] = json!("00000000-0000-0000-0000-000000000001");
+    request["idempotency_key"] = json!("a5-test");
+    let reply = call(&t, "search_ablation", request);
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+}
+
 pub(super) fn call(t: &Fixture, name: &str, arguments: Value) -> Value {
     let (status, body) = t.request(
         "POST",

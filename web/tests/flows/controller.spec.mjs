@@ -28,7 +28,8 @@ test('opens an empty Library', async ({ page, controller }) => {
 
 test('registers a model and records exactly one request', async ({ page, controller }) => {
   await controller.open(page, 'library');
-  await expect(page.getByText('Fixture checkpoint', { exact: true })).toBeVisible();
+  const entries = page.getByRole('table');
+  await expect(entries.getByText('Fixture checkpoint', { exact: true })).toBeVisible();
   const model = { name: 'New sample', host: 'worker-a', kind: 'gguf', path: '/fixtures/new.gguf' };
   const form = page.getByRole('region', { name: 'Register an entry' });
   await form.getByRole('combobox', { name: 'Host', exact: true }).click();
@@ -36,7 +37,7 @@ test('registers a model and records exactly one request', async ({ page, control
   await form.getByRole('combobox', { name: 'Path on host' }).fill(model.path);
   await form.getByRole('combobox', { name: 'Name (optional)' }).fill(model.name);
   await form.getByRole('button', { name: 'Register', exact: true }).click();
-  await expect(page.getByText('New sample', { exact: true })).toBeVisible();
+  await expect(entries.getByText('New sample', { exact: true })).toBeVisible();
   expect(controller.requests('POST', '/api/models').map(({ body }) => body)).toEqual([model]);
 });
 
@@ -52,12 +53,13 @@ for (const status of [404, 500, 503]) {
 
 test('keeps the last Library during an outage and recovers', async ({ page, controller }) => {
   await controller.open(page);
-  await expect(page.getByText('Fixture checkpoint', { exact: true })).toBeVisible();
+  const checkpoint = page.getByRole('table').getByText('Fixture checkpoint', { exact: true });
+  await expect(checkpoint).toBeVisible();
   controller.load('controller-down');
   await page.evaluate(() => window.dispatchEvent(new Event('online')));
   await expect(page.getByRole('alert')).toContainText('The controller disconnected.');
   await expect(page.getByRole('alert')).toContainText('The controller is not reachable.');
-  await expect(page.getByText('Fixture checkpoint', { exact: true })).toBeVisible();
+  await expect(checkpoint).toBeVisible();
   controller.load('empty');
   await page.evaluate(() => window.dispatchEvent(new Event('online')));
   await expect(page.getByText('No entries yet.', { exact: false })).toBeVisible();

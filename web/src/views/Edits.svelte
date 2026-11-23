@@ -21,6 +21,10 @@
   import Badge from '../components/Badge.svelte';
   import JobLink from '../components/JobLink.svelte';
   import ApproveScratch from '../components/trace/ApproveScratch.svelte';
+  import TokenLossDiff from '../components/trace/TokenLossDiff.svelte';
+  import WeightHealth from '../components/spectra/WeightHealth.svelte';
+  import OpenCrosscoder from '../components/crosscoder/OpenCrosscoder.svelte';
+  import BehaviorChecks from '../components/abliteration/BehaviorChecks.svelte';
 
   const POLL_MS = 3000;
   const models = $derived(brewery.state?.models ?? []);
@@ -311,6 +315,9 @@
               {#if b.job_refs.length}
                 <p class="xs">Referenced jobs (not verified against this revision): {#each b.job_refs as j, i (j.job_id)}{i ? ', ' : ''}<JobLink id={j.job_id} label="{j.kind} ({j.role})" />{/each}</p>
               {/if}
+              {#if b.behavior_direction && b.revision_sha256 === selected.sha256}
+                <BehaviorChecks report={b.behavior_direction} />
+              {/if}
             {/if}
           </div>
 
@@ -329,6 +336,9 @@
               <button type="button" class="btn small" disabled={diffBusy !== ''} aria-busy={diffBusy === 'tensors'} onclick={() => runDiff('tensors')}>{diffBusy === 'tensors' ? 'Reading…' : 'Tensor diff'}</button>
               <button type="button" class="btn small" disabled={diffBusy !== '' || p.method === 'copy'} aria-busy={diffBusy === 'behavior'} onclick={() => runDiff('behavior')}>{diffBusy === 'behavior' ? 'Reading…' : 'Behavior diff'}</button>
             </div>
+            {#key selected.check_bundle?.id}
+              <TokenLossDiff parent={p.parent_id} child={selected.id} available={!!selected.check_bundle?.token_loss} />
+            {/key}
             {#if diffError}<p class="note bad small" role="alert">{diffError}</p>{/if}
             {#if tensorDiff}
               {#if !tensorRows.length}
@@ -382,11 +392,14 @@
               {/if}
             {/if}
           </div>
+          <OpenCrosscoder rev={selected.id} />
           {/if}
         </div>
       {/if}
     </section>
   </div>
+
+  {#if selected}<WeightHealth rev={selected} revisions={all.map((n) => n.rev)} />{/if}
 
   <section class="panel" aria-labelledby="ed-td-h">
     <header><h2 id="ed-td-h">Trace diff</h2></header>
@@ -528,6 +541,9 @@
   }
   .node:hover {
     background: var(--accent-soft);
+  }
+  .node:hover :global(.badge.muted) {
+    color: var(--text-2);
   }
   /* Border and bar only: status badges keep their contrast on the plain surface. */
   .node[aria-current='true'] {

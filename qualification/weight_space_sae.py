@@ -20,12 +20,11 @@ import numpy as np
 import torch
 from safetensors.torch import load_file, save_file
 
-from weight_space_acceptance import ARB, BASE, LANTERN as W0_PATH, PINS, QUALIFICATION, REPO, W0_LIBS, require, save, sha
+from weight_space_acceptance import ARB, BASE, LANTERN, PINS, QUALIFICATION, REPO, TRACE_LIBS, require, save, sha
 
 
 LAYER, ROLE = 16, "l_out"
-LANTERN = ARB / "pins/lanternfish-0ea30b3/lanternfish"
-LANTERN_SHA = PINS[W0_PATH]
+LANTERN_SHA = PINS[LANTERN]
 CORPUS = [
     ("alice", "lewis-carroll_alices-adventures-in-wonderland", "8da5cac1a4ec2c811322eff79daa5e11e851a813", "a006f6595337f1a3b35e46676352200514f1a50511125edda6bf898f83027486"),
     ("wells", "h-g-wells_the-time-machine", "fbd98543d4195ffdd8dbb90facb4309223bcb147", "271ade0cbef9469a3b6afac85e6b76d49f632398ff35dae08c7cf1f63ee268ee"),
@@ -230,7 +229,7 @@ def main():
         worker.mkdir(mode=0o700)
         save(run, "worker", {"root":str(worker), "engine":str(args.bins / "brewery-engine"),
             "source_roots":[str(BASE.parent)], "disk_reserve_bytes":0, "engine_env":{
-                "BREWERY_LANTERNFISH_TRACE":str(LANTERN), "BREWERY_LANTERNFISH_TRACE_LIB_DIR":str(W0_LIBS),
+                "BREWERY_LANTERNFISH_TRACE":str(LANTERN), "BREWERY_LANTERNFISH_TRACE_LIB_DIR":str(TRACE_LIBS),
                 "BREWERY_CPU_THREADS":"4"}})
         config = run / "worker.json"
         config.chmod(0o600)

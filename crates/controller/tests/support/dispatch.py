@@ -137,6 +137,24 @@ if action == "trace-read":
             "logit_lens": [{"position": 0, "layer": 0, "top": top[:spec["top_k"]]}],
             "model_logits": [{"position": 0, "top": top[:spec["top_k"]]}],
         }})
+    elif query["view"] == "routing_input":
+        env = prior["result"]["envelope"]
+        edited = bool(env["options"].get("interventions"))
+        if (query["layer"], query["start"], query["end"]) != (0, 0, 1):
+            out({"status": "missing"})
+        else:
+            out({"status": "ok", "data": {
+                "model_id": env["inputs"][0]["id"],
+                "model_sha256": ("b" if (root / "routing-digest-mismatch").exists() and edited
+                                 else "a") * 64,
+                "manifest_sha256": ("c" if edited else "d") * 64,
+                "lanternfish_commit": "5699379af18d6428a6589c996f516c07a91e1a86",
+                "tokens": [{"position": 0, "token_id": 11}],
+                "rows": [{"position": 0, "logits": [1., 0.], "ids": [0], "weights": [1.],
+                          "residual": [0. if edited else 1.], "top_token": 8 if edited else 7}],
+                "interventions": ([{"layer": 0, "role": "ffn_out", "position": 0, "expert": 0}]
+                                  if edited else []),
+            }})
     elif query["end"] is None:
         out({"status": "too_large"})
     else:
@@ -201,6 +219,64 @@ else:
     if envelope["kind"] == "trace" and (root / "trace-interventions").exists():
         result.update(kind="trace", schema_version=1, model_id=envelope["inputs"][0]["id"],
                       model_sha256="a" * 64, prompts=[{}])
+    if action == "start" and envelope["kind"] == "sensitivity":
+        options = envelope["options"]
+        result = dict(kind="sensitivity", schema_version=1, qualification="not release-qualified",
+                      model_id=envelope["inputs"][0]["id"], model_sha256=options["model_sha256"],
+                      revision_sha256="b" * 64 if (root / "sensitivity-wrong-revision").exists()
+                      else options.get("revision_sha256", options["model_sha256"]),
+                      backend=options.get("backend", "cpu"), corpus_sha256=options["corpus_sha256"],
+                      observation_count=options.get("observations", 16), observations_sha256="a" * 64,
+                      executable_sha256="a" * 64, manifest_sha256="a" * 64,
+                      tensors=[dict(name="blk.0.attn_q.weight", layer=0, shape=[2, 2], fisher=0.25)],
+                      layers=[dict(layer=0, elements=4, fisher=0.25)])
+    if action == "start" and envelope["kind"] == "circuit":
+        options = envelope["options"]
+        result = {key: options[key] for key in
+                  ("model_sha256", "clean_prompt", "corrupt_prompt", "target_id", "contrast_id")}
+        result.update(kind="circuit", schema_version=1, qualification="not release-qualified",
+                      backend="cpu", model_id=envelope["inputs"][0]["id"],
+                      clean_tokens=[1], corrupt_tokens=[2], clean_metric=10, corrupt_metric=0,
+                      sites=[
+                          dict(layer=0, position=0, role="attn_out", attribution=-4, patched_delta=-5),
+                          dict(layer=0, position=0, role="l_out", attribution=2, patched_delta=2),
+                      ],
+                      top_k=options["top_k"], sample_lower=options.get("sample_lower", 0),
+                      pearson_r=-1 if (root / "circuit-wrong-correlation").exists() else 1,
+                      spearman_rho=1,
+                      executable_sha256="a" * 64, manifest_sha256="a" * 64)
+    if envelope["kind"] == "trace" and (root / "crosscoder-trace").exists():
+        model = envelope["inputs"][0]
+        result.update(kind="trace", schema_version=1, model_id=model["id"],
+                      model_sha256=("a" if model["path"].endswith("parent.gguf") else "b") * 64,
+                      executable_sha256="0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f",
+                      prompts=[dict(manifest_sha256=hashlib.sha256(job_id.encode()).hexdigest())])
+    if action == "start" and envelope["kind"] == "quantization_damage":
+        options = envelope["options"]
+        base = dict(output_format="gguf", gguf_type=options["gguf_type"], tensor_types={})
+        profile = dict(format="gguf", name="Test damage map", preset=options["gguf_type"], overrides={})
+        result = dict(kind="quantization_damage", schema_version=1, qualification="not release-qualified",
+                      reference_id=envelope["inputs"][0]["id"], quantized_id=envelope["inputs"][1]["id"],
+                      reference_sha256=options["reference_sha256"], quantized_sha256=options["quantized_sha256"],
+                      corpus_sha256="9678f9afdc31b2a9be7fec2045997e2360693ee72b893287c0d539983bff4923",
+                      backend="cpu", executable_sha256="a" * 64, manifest_sha256="a" * 64,
+                      observations=[dict(reference_logit=12,quantized_logit=10,measured_drift=2,
+                                         predicted_recovery_sum=1,w5=dict(model_logits=[]))],
+                      tensors=[dict(name="blk.0.attn_q.weight",layer=0,mean_absolute_damage=1,
+                                    predicted_recovery=[1],measured_recovery=[2])], layers=[],
+                      recipe_proposal=dict(applied=(root/"damage-bad-receipt").exists(),
+                                           reference_sha256=options["reference_sha256"],
+                                           baseline_sha256=options["quantized_sha256"], payload_bytes_delta=0,
+                                           options=base, uniform_options=base,
+                                           profile=profile, uniform_profile=profile))
+        if options.get("objective") == "corpus_nll":
+            result.update(objective="corpus_nll", observations=[],
+                          corpus=dict(observation_count=222, line_count=16, reference_mean_nll=4.4,
+                                      predicted_nll_increase=1),
+                          tensors=[dict(name="blk.0.attn_q.weight", layer=0, mean_absolute_damage=1,
+                                        predicted_nll_increase=1, measured_recovery=None)])
+    if envelope["kind"] == "behavior_direction" and (root / "direction-result.json").exists():
+        result = json.loads((root / "direction-result.json").read_text())
     if action == "start" and envelope["kind"] == "hf_download":
         assert envelope["inputs"] == [] and "prompt" not in envelope
         options = envelope["options"]

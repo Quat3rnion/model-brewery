@@ -73,6 +73,10 @@ export const api = {
   // Only job detail includes the submission-time prompt_text.
   job: (id: string, signal?: AbortSignal) => request<JobDetail>('GET', `/api/jobs/${encodeURIComponent(id)}`, undefined, signal),
   addModel: (model: NewModel) => request<Model>('POST', '/api/models', model),
+  lineage: (id: string, candidates: string[], signal?: AbortSignal) => {
+    const query = new URLSearchParams(candidates.map((candidate, i) => [`candidate_${i + 1}`, candidate]));
+    return request<import('./lineage').LineageReport>('GET', `/api/models/${encodeURIComponent(id)}/lineage?${query}`, undefined, signal);
+  },
   removeModel: (id: string) => request<void>('DELETE', `/api/models/${encodeURIComponent(id)}`),
   addPrompt: (prompt: NewPrompt) => request<Prompt>('POST', '/api/prompts', prompt),
   updatePrompt: (id: string, prompt: NewPrompt) => request<Prompt>('PUT', `/api/prompts/${encodeURIComponent(id)}`, prompt),
@@ -96,11 +100,22 @@ export const api = {
   saveProfile: (body: unknown) => request<unknown>('POST', '/api/profiles', body),
   cancelJob: (id: string) => request<JobSummary>('POST', `/api/jobs/${encodeURIComponent(id)}/cancel`, {}),
   // Weight-space programming: trace slices, scratch revisions, diffs.
-  trace: (id: string, query: Record<string, string | number>, view: '' | 'tensor' | 'logit-lens' | 'model-logits' | 'features' = '', signal?: AbortSignal) =>
+  trace: (id: string, query: Record<string, string | number>, view: '' | 'tensor' | 'logit-lens' | 'model-logits' | 'features' | 'routing-atlas' = '', signal?: AbortSignal) =>
     request<unknown>('GET', `/api/jobs/${encodeURIComponent(id)}/trace${view ? `/${view}` : ''}?${new URLSearchParams(Object.entries(query).map(([k, v]) => [k, String(v)]))}`, undefined, signal),
   interventions: (signal?: AbortSignal) => request<unknown>('GET', '/api/interventions', undefined, signal),
   scratch: (signal?: AbortSignal) => request<unknown>('GET', '/api/scratch', undefined, signal),
-  diff: (kind: 'tensors' | 'traces' | 'behavior', query: string, signal?: AbortSignal) => request<unknown>('GET', `/api/diff/${kind}?${query}`, undefined, signal),
+  // Findings (X10): read only.
+  findings: (signal?: AbortSignal) => request<unknown>('GET', '/api/findings', undefined, signal),
+  finding: (id: string, signal?: AbortSignal) => request<unknown>('GET', `/api/findings/${encodeURIComponent(id)}`, undefined, signal),
+  crosscoder: (id: string, signal?: AbortSignal) => request<unknown>('GET', `/api/crosscoders/${encodeURIComponent(id)}`, undefined, signal),
+  diff: (kind: 'tensors' | 'traces' | 'behavior' | 'token-loss', query: string, signal?: AbortSignal) => request<unknown>('GET', `/api/diff/${kind}?${query}`, undefined, signal),
+  // Spectral weight health (X2). The controller answers 202 with the job ID.
+  weightSpectra: (body: import('./spectra').SpectraRequest, key: string) =>
+    request<{ id: string }>('POST', '/api/weight-spectra', body, undefined, { 'Idempotency-Key': key }),
+  scratchRevision: (id: string, signal?: AbortSignal) =>
+    request<import('./weightspace').ScratchRevision>('GET', `/api/scratch/${encodeURIComponent(id)}`, undefined, signal),
+  direction: (id: string, version: number, signal?: AbortSignal) =>
+    request<import('./abliteration').DirectionArtifact>('GET', `/api/directions/${encodeURIComponent(id)}/versions/${version}`, undefined, signal),
   // Built-in agent (W15). The provider API key has its own write-only calls in AgentProviderSettings.
   agentProvider: (signal?: AbortSignal) => request<unknown>('GET', '/api/settings/agent-provider', undefined, signal),
   saveAgentProvider: (body: unknown) => request<unknown>('PUT', '/api/settings/agent-provider', body),

@@ -91,6 +91,14 @@ describe('trace capture size', () => {
 });
 
 describe('buildTraceJob', () => {
+  it('queues a selected MoE expert ablation only for captured positions', () => {
+    const roles = ['l_out', 'ffn_moe_logits', 'ffn_moe_topk', 'ffn_moe_route_weights'] as const;
+    const ablation = { layer: 0, expert: 3, positions: '1' };
+    const result = buildTraceJob(form({ roles: [...roles], layers: '0', positions: '0-2', ablation }));
+    expect(result.blockers).toEqual([]);
+    expect(result.job?.options?.interventions).toEqual([{ layer: 0, role: 'ffn_out', positions: [1], op: 'zero_expert', expert: 3 }]);
+    expect(buildTraceJob(form({ roles: [...roles], layers: '0', positions: '0', ablation })).job).toBeNull();
+  });
   it('builds a trace job with one prompt as the prompt field', () => {
     const r = buildTraceJob(form({ byteCapMiB: 4 }));
     expect(r.blockers).toEqual([]);

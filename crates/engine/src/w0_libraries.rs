@@ -1,12 +1,12 @@
 use crate::integrity;
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use std::{
     env, fs,
     os::unix::fs::PermissionsExt,
     path::{Component, Path, PathBuf},
 };
 
-// Lanternfish 0ea30b3 and scratch-check-logits-v1 use the same CPU W0 build.
+// scratch-check-logits-v1 uses the original CPU W0 build.
 pub(crate) const PINS: &[(&str, &str)] = &[
     (
         "libllama.so.0",
@@ -31,7 +31,7 @@ pub(crate) fn stage(work: &Path, key: &str, label: &str, pins: &[(&str, &str)]) 
     stage_from(work, &configured, key, label, pins)
 }
 
-fn stage_from(
+pub(crate) fn stage_from(
     work: &Path,
     configured: &Path,
     key: &str,
@@ -110,10 +110,12 @@ mod tests {
         let staged = stage("valid").unwrap();
         assert_eq!(fs::read(staged.join(nested)).unwrap(), b"abc");
         fs::write(&member, b"def").unwrap();
-        assert!(stage("tampered")
-            .unwrap_err()
-            .to_string()
-            .contains("SHA-256 mismatch"));
+        assert!(
+            stage("tampered")
+                .unwrap_err()
+                .to_string()
+                .contains("SHA-256 mismatch")
+        );
 
         fs::remove_dir_all(source.join("rocblas")).unwrap();
         let elsewhere = root.join("rocblas/library");

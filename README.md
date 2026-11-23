@@ -20,15 +20,28 @@ Model Brewery is a work in progress. [Issues](https://github.com/Quat3rnion/mode
 
 Agents and operators can read, change and test model weights. All changes go to scratch revisions. A scratch revision is a private child copy of a SafeTensors model with a reversible delta and a provenance record. The source model does not change. Only an operator can approve a scratch revision for the Library, in the workbench. Results are not release-qualified.
 
-- **Trace.** Capture activations, attention, model logits and a logit lens per layer for one GGUF model or scratch revision. Each trace job has a byte limit and a retention limit. The worker runs a pinned, headless [Lanternfish](https://github.com/Quat3rnion/lanternfish) CLI on the CPU. See [CPU trace jobs](OPERATOR.md#cpu-trace-jobs).
-- **Steer and patch.** Add, replace, scale or remove activations during a trace, or copy activations from an earlier trace. Save interventions as versioned Library artifacts, and export steering vectors as llama.cpp control vectors. See [Trace interventions](OPERATOR.md#trace-interventions).
+- **Trace.** Capture activations, model logits and a logit lens per layer for GGUF or Qwen3.8 Flash Next v2 HGN. GGUF also supports attention capture and private scratch revisions. The worker uses a pinned CPU runtime. See [CPU trace jobs](OPERATOR.md#cpu-trace-jobs).
+- **MoE routing atlas.** Read expert load, entropy, co-activation and token clusters for Qwen2MoE and Qwen3MoE. Compare paired expert ablations without changing weights. See [MoE routing atlas](OPERATOR.md#moe-routing-atlas).
+- **Measure behavior directions.** Fit per-layer directions for slop, sycophancy, and response length on a Qwen2 GGUF. Read held-out separation scores and versioned vectors without changing weights. See [Behavior directions](OPERATOR.md#behavior-directions).
+- **Ablate a direction.** Edit residual-writing weights in a private scratch child with a reversible delta and a layer kernel. See [Native directional ablation](OPERATOR.md#native-directional-ablation).
+- **Search ablation settings.** Screen a fitted direction against a matched random control before making scratch children. See [Native ablation search](OPERATOR.md#native-ablation-search).
+- **Run pinned Heretic offline.** Use the local GPU queue to make a private SafeTensors scratch child or reproduce a verified community manifest. See [Heretic jobs](OPERATOR.md#heretic-jobs).
+- **Review abliteration results.** Inspect direction pins, native screens with matched controls, paired child checks, and Heretic trial journals. See [Abliteration workflow through MCP](OPERATOR.md#abliteration-workflow-through-mcp).
+- **Steer and patch.** Add, replace, scale or remove activations during a trace, or copy activations from an earlier trace. Save versioned Library interventions that project out or subtract a verified direction. Export fixed steering vectors, not projections, as llama.cpp control vectors. See [Trace interventions](OPERATOR.md#trace-interventions).
 - **Edit weights.** Set or add values in a tensor slice, apply a rank-one update, or orthogonalize a weight against a direction. See [Scratch weight revisions](OPERATOR.md#scratch-weight-revisions).
 - **Edit facts.** Use ROME, MEMIT or AlphaEdit on dense Llama and Qwen2 models, on the CPU or with a pinned CUDA or ROCm runtime. See [Locate and edit a fact](OPERATOR.md#locate-and-edit-a-fact).
 - **Merge models.** Use linear averages, task arithmetic, TIES, DARE-linear or DARE-TIES. See [Merge revisions](OPERATOR.md#merge-revisions).
 - **Prune.** Set weights to zero by magnitude, by MLP neuron, by attention head, or with a Wanda score. Plan REAP expert pruning for MoE models. Applying an expert plan to a scratch revision is not available yet.
+- **Measure spectral health.** Compare singular values, ranks, and power-law fits for scratch revisions and supported Library checkpoints. See [Spectral weight health](OPERATOR.md#spectral-weight-health).
+- **Check model lineage.** Compare Library weights to find a likely base and see evidence for an edit, fine-tune, pruning, or merge. See [Model lineage](OPERATOR.md#model-lineage).
 - **Use SAE features.** Train a TopK sparse autoencoder on the CPU or import a public one, read feature activations in a trace, and steer one feature. See [Sparse autoencoders](OPERATOR.md#sparse-autoencoders-saes).
+- **Measure tensor sensitivity.** Use empirical Fisher on the pinned W4 held-out corpus. Read tensor and layer scores in the Jobs heatmap or with MCP. See [Tensor sensitivity](OPERATOR.md#tensor-sensitivity).
+- **Find activation circuits.** Rank activation sites on a clean and corrupt prompt pair, then measure the top sites with independent W2 patches. Read the Jobs heatmap or use `find_circuit`. See [Activation attribution](OPERATOR.md#activation-attribution).
+- **Compare features across revisions.** Train a crosscoder on paired traces and inspect decoder changes and held-out reconstruction for each revision. See [Crosscoder model diff](OPERATOR.md#crosscoder-model-diff).
+- **Map quantization damage.** Rank tensor and layer effects on target logits or mean corpus loss. Check logit estimates with real swaps, then review the recipe proposal. See [Quantization damage map](OPERATOR.md#quantization-damage-map).
 - **Compile programs.** Compile RASP programs with Tracr or ALTA into small standalone models, and check their outputs. See [Compiled programs](OPERATOR.md#compiled-programs).
-- **Check and compare.** Before an agent can request publication, the worker checks tensor integrity, loads and runs the model, measures target, paraphrase and locality scores on pinned CounterFact and zsRE subsets, and measures held-out perplexity. Compare two revisions by tensors, by traces or by behavior. See [Checks before a publish request](OPERATOR.md#checks-before-a-publish-request) and [Compare revisions and traces](OPERATOR.md#compare-revisions-and-traces).
+- **Measure interpretability on known circuits.** Read benchmark scores for activation attribution, SAE features, and paired crosscoder features. See [Compiled-program benchmark](OPERATOR.md#compiled-program-benchmark).
+- **Check and compare.** Before an agent can request publication, the worker checks tensor integrity, loads and runs the model, and measures target, paraphrase, locality and perplexity scores. Optional [behavior direction checks](OPERATOR.md#behavior-direction-checks) measure held-out behavior, including over-refusal on reviewed benign prompts, and KL divergence from the parent. Compare two revisions by tensors, by traces or by behavior. See [Checks before a publish request](OPERATOR.md#checks-before-a-publish-request) and [Compare revisions and traces](OPERATOR.md#compare-revisions-and-traces).
 
 **MCP for agents.** The controller serves an MCP endpoint (Streamable HTTP) at `/mcp` on the workbench address. It gives agents tools to list and register models, trace, steer, edit, merge, prune, check, compare and request publication. MCP has no approve tool. MCP uses the same access checks as the workbench and has no separate token. See [MCP for weight-space work](OPERATOR.md#mcp-for-weight-space-work) for the client configuration and the access risk.
 
@@ -36,7 +49,10 @@ Agents and operators can read, change and test model weights. All changes go to 
 
 **Workbench views.** **Trace** shows layer-by-token heatmaps, the logit lens and attention. **Edits** shows the scratch revisions of each source model, their checks and diffs, and the approval action for the operator.
 
-Stage acceptance results on Qwen2.5-0.5B-Instruct: [Stage 1](qualification/weight_space_acceptance.md), [ROME, MEMIT and AlphaEdit](qualification/weight_space_stage2.md), [merges](qualification/weight_space_merge_acceptance.md), [SAE features](qualification/weight_space_sae.md) and the [CUDA edit runtime](qualification/lanternfish-w14b-cuda.md).
+- **Token loss diff.** See which heldout sentences and tokens account for a perplexity change. Read the ranked results in Edits or with `read_token_loss_diff`. See [Token loss diff](OPERATOR.md#token-loss-diff).
+- **Findings.** Record a hypothesis, link measured evidence, and replay the same experiments on another pinned revision. See [Findings](OPERATOR.md#findings).
+
+Stage acceptance results on Qwen2.5-0.5B-Instruct: [Stage 1](qualification/weight_space_acceptance.md), [ROME, MEMIT and AlphaEdit](qualification/weight_space_stage2.md), [merges](qualification/weight_space_merge_acceptance.md), [SAE features](qualification/weight_space_sae.md), [crosscoder diffs](qualification/weight_space_crosscoder.md), and the [CUDA edit runtime](qualification/lanternfish-w14b-cuda.md).
 
 ## Inside the workbench
 

@@ -62,12 +62,18 @@ const ROOT = uuid(20), CHILD = uuid(21), LATER = uuid(22);
 const baseList = [
   scratchRev(ROOT, uuid(9), 'scratch', 'copy', T0),
   scratchRev(CHILD, ROOT, 'publish_requested', 'direct', T0 + 10, {
-    check_bundle: { ...bundle(SHA), measured_job_id: uuid(42) },
+    check_bundle: { ...bundle(SHA), measured_job_id: uuid(42), token_loss: { sha256: SHA } },
     gguf: { sha256: SHA_P, revision_sha256: SHA, converter_version: 'fixture', bytes: 128, job_id: uuid(41) },
   }),
 ];
 const tensorDiff = { schema_version: 1, qualification: 'not release-qualified', a: ROOT, b: CHILD, a_sha256: SHA_P, b_sha256: SHA, tensors: [{ name: 'blk.3.ffn_down.weight', shape: [896, 4864], dtype: 'BF16', changed_elements: 2, bounds: { start: [0, 0], end: [1, 2] }, l2: 0.0223, linf: 0.02, relative_frobenius: 0.000013, low_rank: { sample_shape: [1, 2], singular_values: [0.0223], sample_rank: 1 } }] };
 const behaviorDiff = { schema_version: 1, qualification: 'not release-qualified', a: ROOT, b: CHILD, metrics: [{ name: 'counterfact_efficacy', parent: 0.1, child: 0.9, better: 'higher', threshold: 0, delta: 0.8, flag: 'improved' }, { name: 'perplexity', parent: 12.1, child: 12.6, better: 'lower', threshold: 0.2, delta: 0.5, flag: 'regressed' }] };
+const tokenLoss = (sentence) => {
+  const first = { index: 5, text: 'The old clock stopped at noon and did not run again until Tuesday.', logprob_gain: 4.84296, share_of_net_gain: 0.525, token_count: 2 };
+  const second = { ...first, index: 0, text: 'The small bell rang.', logprob_gain: -1, share_of_net_gain: -0.108 };
+  const tokens = [{ position: 0, id: 10, piece: sentence === 0 ? ' small' : ' old', parent_logprob: -7, child_logprob: -1.8, loss_delta: -5.2 }, { position: 1, id: 11, piece: ' clock', parent_logprob: -2, child_logprob: -2.357, loss_delta: 0.357 }];
+  return { schema_version: 1, qualification: 'not release-qualified', a: ROOT, b: CHILD, check_bundle_id: uuid(40), artifact_sha256: SHA, heldout_sha256: SHA, total_logprob_gain: 9.222, total_tokens: 222, sentences: [first, second], sentence: sentence ?? 5, start: 0, end: 2, tokens, top_tokens: tokens };
+};
 const traceDiff = { schema_version: 1, qualification: 'not release-qualified', a: uuid(2), b: uuid(1), prompt: 0, activations: [{ layer: 0, role: 'l_out', position: 1, shape: [4], missing_a: false, missing_b: false, l2: 0.5, linf: 0.3, cosine: 0.98 }], logit_lens: [{ layer: 1, position: 2, a: top(1), b: top(2), entered: [20], exited: [10], shared_count: 2, l2: 0.4, linf: 0.2, kl_a_to_b_shared: 0.01 }], model_logits: [] };
 
 let browser;
@@ -112,6 +118,7 @@ try {
         : p === '/api/scratch' ? (++scratchReads >= 3 && !list.some((x) => x.id === LATER) ? (list = [...list, scratchRev(LATER, CHILD, 'scratch', 'direct', T0 + 20)]) : list)
         : p === '/api/diff/tensors' ? tensorDiff
         : p === '/api/diff/behavior' ? behaviorDiff
+        : p === '/api/diff/token-loss' ? tokenLoss(q.has('sentence') ? Number(q.get('sentence')) : undefined)
         : p === '/api/diff/traces' ? traceDiff
         : null;
       if (json === null) {
@@ -224,6 +231,19 @@ try {
       // Live: a later poll returns a new child revision.
       await tree.getByText('New').waitFor({ timeout: 12000 });
       await shot('edits');
+    });
+
+    await step('token loss diff', async () => {
+      const detail = main.getByRole('region', { name: /Revision/ });
+      await detail.getByRole('button', { name: 'Token loss diff' }).click();
+      const loss = detail.getByRole('region', { name: 'Token loss diff' });
+      await loss.getByText('The old clock stopped at noon and did not run again until Tuesday.', { exact: true }).waitFor();
+      await loss.getByText('52.5% of net gain', { exact: true }).waitFor();
+      await loss.getByRole('table', { name: 'Top token contributors' }).getByText('-5.200', { exact: true }).waitFor();
+      await shot('token-loss');
+      await loss.getByLabel('Heldout sentence').selectOption('0');
+      await loss.getByText('The small bell rang.', { exact: true }).waitFor();
+      await loss.getByText('-10.8% of net gain', { exact: true }).waitFor();
     });
 
     await step('publish approval', async () => {

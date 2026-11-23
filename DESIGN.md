@@ -4,7 +4,7 @@ This guide records the current Model Brewery web interface. It is not a redesign
 
 ## Surface and routes
 
-`web/src/App.svelte` owns the shared header, section links, connection status, and active-job strip. The visible sections are Library, Jobs, Transfers, Compare, Trace, Edits, Convert, Evaluate, Benchmarks, Calibration, and Settings.
+`web/src/App.svelte` owns the shared header, section links, connection status, and active-job strip. The visible sections are Library, Jobs, Transfers, Compare, Trace, Edits, Abliteration, Agent, Findings, Convert, Evaluate, Benchmarks, Calibration, and Settings.
 
 Keep nested routes under their parent section. Profiles uses Convert in the header. Weight edits uses Library. Job details use Jobs. Infrastructure settings stay under Settings. `App.svelte` marks the parent link with `aria-current="page"`.
 
@@ -55,6 +55,18 @@ Keep workflow stages and result types distinct. `web/src/components/ConversionRu
 
 Preserve provenance in reports. Keep the host, target, model, job ID, hashes, protocol, and reported metrics near the result when the view provides them. Label endpoint benchmark results, GSM8K scores (including the full pinned split), scratch revisions, and scratch diffs as not release-qualified.
 
+Findings is read-only. Keep each detail route under `#/findings`. Show
+the experiment timeline, artifact links, verdict, and provenance for that
+version. Show the original and replay numbers side by side. Label differences
+in text; a difference does not determine the verdict.
+
+**Abliteration** is a read-only view of direction, native search and Heretic
+jobs. Select a run with `#/abliteration?job=<id>`. A direction plot marks the
+selected layer. The screen plot uses circles for fitted trials and squares for
+matched random controls. Tables give the numeric plot values and paired child
+results. Keep Heretic optimization scores separate from the held-out scores
+in **Edits**. Put configs and the reproduce journal in disclosures.
+
 Only the operator approves a scratch publish request. `web/src/components/trace/ApproveScratch.svelte` shows the exact SHA-256 and the check results in a confirmation dialog before it sends the approval. Do not present a requested option or a single score as proof.
 
 ## Accessibility and responsive layout
@@ -78,6 +90,8 @@ Pair status color with words and shapes. `web/src/components/Badge.svelte` gives
 At 760 px, the header stops being sticky and the section links wrap. Shared two- and three-column grids become one column. At 640 px, `stackable` tables use a block layout. Cells with `data-label` show their labels. Put wide tables in `.table-wrap`.
 
 Keep wide data views inside local scroll areas. `web/src/components/weights/HeatGrid.svelte` and `web/src/components/trace/MatrixHeat.svelte` use a scroll wrapper and keyboard grid semantics. `MatrixHeat.svelte` also gives the values as a table. Use `.break` for long paths, hashes, and IDs so they do not widen the page.
+
+In Jobs, the tensor sensitivity result uses a layer-by-tensor table as its heatmap. Keep the Fisher values as text in the cells, identify missing measurements with text, and show the element-weighted layer mean in a separate column. Shade measured cells relative to the largest value in that job. Keep the table in its own scroll area.
 
 ## Workbench flow tests
 

@@ -164,6 +164,47 @@ fn last_result(kind: &str, body: &Value, turn: usize) -> Value {
 }
 
 #[test]
+fn hosted_finding_records_the_session_not_the_supplied_client_label() {
+    let mut t = Test::new();
+    let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
+    let hash = sha(&fs::read(&source).unwrap());
+    t.launch();
+    let model = model(&t, &source);
+    let (base, rx) = mock();
+    assert_eq!(put(&t, SETTINGS, provider("openai", &base)).0, 200);
+    assert_eq!(put(&t, KEY, json!({"key":TOKEN})).0, 200);
+    let (status, session) = start(&t, &model, "notebook", "Record a hypothesis.");
+    assert_eq!(status, 201, "{session}");
+    next(&rx).reply(
+        "200 OK",
+        "",
+        use_tool(
+            "openai",
+            0,
+            "create_finding",
+            json!({
+                "hypothesis":"The baseline is stable.","model_id":model["id"],"model_sha256":hash,
+                "idempotency_key":"builtin-notebook","client_id":"must not override the session"
+            }),
+        ),
+    );
+    let followup = next(&rx);
+    let finding = last_result("openai", &followup.body, 0);
+    assert_eq!(
+        finding["provenance"]["agent"],
+        json!({"kind":"builtin","id":session["id"]})
+    );
+    followup.reply("200 OK", "", finish("openai", "Recorded the finding."));
+    assert_eq!(
+        terminal(
+            &t,
+            &format!("{SESSIONS}/{}", session["id"].as_str().unwrap())
+        )["status"],
+        "completed"
+    );
+}
+
+#[test]
 fn hosted_agent_reuses_mcp_scratch_workflow_without_approval() {
     fn system_prompt<'a>(kind: &str, body: &'a Value) -> &'a str {
         if kind == "anthropic" {
@@ -246,6 +287,14 @@ fn hosted_agent_reuses_mcp_scratch_workflow_without_approval() {
             "Model Brewery",
             "operator-only",
             "`run_checks`",
+            "`compute_direction`",
+            "`get_direction`",
+            "`ablate_direction`",
+            "`search_ablation`",
+            "`create_direction_intervention`",
+            "`run_heretic`",
+            "`reproduce_heretic`",
+            "behavior-direction prompt set digests",
             "`request_publish`",
             "not release-qualified",
         ] {

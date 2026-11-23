@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -7,10 +7,98 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
-fn trace(cwd: &Path, binary: &Path, model: &Path, sha: &str, multiple: bool) -> Output {
+#[test]
+fn trace_requires_the_executable_for_its_operations() {
+    let workspace = tempfile::tempdir().unwrap();
+    let root = workspace.path();
+    let model = root.join("fixture.gguf");
+    fs::write(&model, b"GGUF").unwrap();
+    let w0 = root.join("w0");
+    let projection = root.join("projection");
+    fs::write(&w0, b"fake W0").unwrap();
+    fs::write(&projection, b"fake projection").unwrap();
+    for (rule, required) in [
+        (None, "BREWERY_LANTERNFISH_TRACE"),
+        (Some(json!({"op":"zero"})), "BREWERY_LANTERNFISH_TRACE"),
+        (
+            Some(json!({"op":"scale","factor":0.5})),
+            "BREWERY_LANTERNFISH_TRACE",
+        ),
+        (
+            Some(json!({"op":"add","vector":[1]})),
+            "BREWERY_LANTERNFISH_TRACE",
+        ),
+        (
+            Some(json!({"op":"replace","vector":[1]})),
+            "BREWERY_LANTERNFISH_TRACE",
+        ),
+        (
+            Some(json!({"op":"project_out","vector":[1]})),
+            "BREWERY_LANTERNFISH_PROJECTION",
+        ),
+        (
+            Some(json!({"op":"subtract","vector":[1],"scale":0.5})),
+            "BREWERY_LANTERNFISH_PROJECTION",
+        ),
+    ] {
+        let rules = rule
+            .into_iter()
+            .map(|mut rule| {
+                rule["layer"] = json!(0);
+                rule["role"] = json!("l_out");
+                rule["positions"] = json!([0]);
+                rule
+            })
+            .collect::<Vec<_>>();
+        let job = json!({
+            "kind":"trace","inputs":[{"kind":"gguf","host":"test","path":model,
+                "id":"fixture","sha256":format!("{:x}", Sha256::digest(b"GGUF"))}],
+            "prompt":"fixture",
+            "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":0,
+                "byte_cap":65536,"retain_jobs":2,"interventions":rules}
+        });
+        let other = if required.ends_with("_TRACE") {
+            ("BREWERY_LANTERNFISH_PROJECTION", &projection)
+        } else {
+            ("BREWERY_LANTERNFISH_TRACE", &w0)
+        };
+        let mut engine = Command::new(env!("CARGO_BIN_EXE_brewery-engine"))
+            .current_dir(root)
+            .env_remove(required)
+            .env(other.0, other.1)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(engine.stdin.take().unwrap(), "{job}").unwrap();
+        let output = engine.wait_with_output().unwrap();
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success() && error.contains(required),
+            "{rules:?}: {error}"
+        );
+    }
+}
+
+fn trace(
+    cwd: &Path,
+    binary: &Path,
+    model: &Path,
+    sha: &str,
+    multiple: bool,
+    routing: bool,
+) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_brewery-engine"))
         .current_dir(cwd)
-        .env("BREWERY_LANTERNFISH_TRACE", binary)
+        .env(
+            if routing {
+                "BREWERY_LANTERNFISH_ROUTING"
+            } else {
+                "BREWERY_LANTERNFISH_TRACE"
+            },
+            binary,
+        )
         .env("BREWERY_CPU_THREADS", "2")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -23,6 +111,9 @@ fn trace(cwd: &Path, binary: &Path, model: &Path, sha: &str, multiple: bool) -> 
         "options":{"layers":[0],"roles":["l_out"],"positions":[0,1],"top_k":3,
             "byte_cap":65536,"retain_jobs":2}
     });
+    if routing {
+        job["options"]["roles"] = json!(["ffn_moe_topk"]);
+    }
     if multiple {
         job["options"]["prompts"] = json!(["The capital of France is", "The capital of Italy is"]);
         job["options"]["interventions"] =
@@ -45,20 +136,23 @@ fn trace_rejects_an_unpinned_executable_before_launch() {
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
     let model = root.join("demo.gguf");
     fs::write(&model, b"GGUF").unwrap();
-    let out = trace(
-        &root,
-        &fake,
-        &model,
-        &format!("{:x}", Sha256::digest(b"GGUF")),
-        false,
-    );
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("Lanternfish") && stderr.contains("SHA-256"),
-        "{stderr}"
-    );
-    assert!(!marker.exists());
+    for routing in [false, true] {
+        let out = trace(
+            &root,
+            &fake,
+            &model,
+            &format!("{:x}", Sha256::digest(b"GGUF")),
+            false,
+            routing,
+        );
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("Lanternfish") && stderr.contains("SHA-256"),
+            "{stderr}"
+        );
+        assert!(!marker.exists());
+    }
 }
 
 #[test]
@@ -77,6 +171,7 @@ fn trace_real_qwen_bf16() {
         Path::new(&std::env::var("BREWERY_TEST_TRACE_GGUF").unwrap()),
         "a33250ab73bbef0d876bf04e01517f5f43292dd8ede34e12d3a3a886e49f36f0",
         true,
+        false,
     );
     assert!(
         out.status.success(),

@@ -22,7 +22,7 @@ use std::{
 const MAX_PATCHES: usize = 8;
 // Bound the resolved job envelope before it crosses the worker RPC limit,
 // including when short source selectors expand to many vectors.
-const MAX_VALUES: usize = 1 << 18;
+pub(super) const MAX_VALUES: usize = 1 << 18;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,6 +65,18 @@ impl TracePlan {
             policy,
         )
         .map_err(|e| ApiError::bad(e.to_string()))?;
+        let model = &envelope.inputs[0];
+        if model.kind == trace::HGN_KIND
+            && (saved.is_some()
+                || !patches.is_empty()
+                || sae.is_some()
+                || steering.is_some()
+                || !request.interventions.is_empty())
+        {
+            return Err(ApiError::bad(
+                "HGN traces do not support interventions or SAE",
+            ));
+        }
         let mut rules = request.interventions;
         job.options
             .insert("byte_cap".into(), json!(request.capture.byte_cap));
@@ -79,7 +91,6 @@ impl TracePlan {
                 "Expected at most 8 patch selectors and 1 to 64 positions per selector",
             ));
         }
-        let model = &envelope.inputs[0];
         let mut digest = envelope.scratch_pins.get(&model.path).cloned();
         if let Some(saved) = saved {
             let saved = artifact(store, &saved.id, saved.version)?;
@@ -88,8 +99,13 @@ impl TracePlan {
                     "Intervention artifact is bound to a different model",
                 ));
             }
-            if digest.as_ref().is_some_and(|sha| sha != &saved.binding.model_sha256) {
-                return Err(ApiError::bad("Intervention artifact is bound to a different GGUF hash"));
+            if digest
+                .as_ref()
+                .is_some_and(|sha| sha != &saved.binding.model_sha256)
+            {
+                return Err(ApiError::bad(
+                    "Intervention artifact is bound to a different GGUF hash",
+                ));
             }
             digest = Some(saved.binding.model_sha256);
             rules.extend(saved.interventions);
@@ -321,13 +337,11 @@ fn set_rules(options: &mut Map<String, Value>, rules: Vec<Rule>) {
     }
 }
 
-fn value_count(rules: &[Rule]) -> usize {
+pub(super) fn value_count(rules: &[Rule]) -> usize {
     rules
         .iter()
-        .map(|rule| match &rule.op {
-            Operation::Add { vector } | Operation::Replace { vector } => vector.len(),
-            _ => 0,
-        })
+        .filter_map(|rule| rule.op.vector())
+        .map(<[f32]>::len)
         .sum()
 }
 

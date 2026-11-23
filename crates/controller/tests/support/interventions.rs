@@ -1,6 +1,110 @@
 use super::*;
 
 #[test]
+fn intervention_uses_a_verified_direction_and_exports_only_its_subtraction() {
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts":{"alpha":{"local":true,"capabilities":{
+            "trace":true,"behavior_direction":true
+        }}}})
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(app.path("trace-interventions"), "").unwrap();
+    app.launch();
+    let model = app.register("alpha", "gguf", "/models/steer.gguf");
+    let digest = "a".repeat(64);
+    fs::write(
+        app.path("direction-result.json"),
+        json!({
+            "kind":"behavior_direction","schema_version":2,"release_qualified":false,
+            "model_id":model,"model_sha256":digest,"behavior":"slop","position":null,
+            "contrast_sha256":brewery_worker::behavior_direction::Behavior::Slop.contrast_sha256(),
+            "lanternfish_commit":"0ea30b37729a136a76b8412e7ad1ec91bd7de9b5",
+            "executable_sha256":"0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f",
+            "fit":{"role":"l_out","train_pairs":12,"held_out_pairs":8,"selected_layer":1,
+                "layers":[{"layer":1,"norm":2.0,"unit_vector":[0.0,1.0],
+                    "held_out_margin":0.25,"held_out_cohens_d":0.5,"mean_residual_norm":1.0}]}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let direction = app.enqueue(json!({"kind":"behavior_direction","input_ids":[model],
+        "options":{"layers":[1],"behavior":"slop","model_sha256":digest}}));
+    app.await_job(&direction, |job| job["state"] == "succeeded");
+    let reference = json!({"direction_id":direction,"direction_version":2,"source_layer":1,
+        "layer":2,"role":"l_out","positions":[1],"op":"project_out"});
+    let mut body = json!({"name":"Remove slop","model_id":model,"model_sha256":digest,
+        "direction_rules":[reference]});
+    let saved = app.json("POST", "/api/interventions", Some(body.clone()), 201);
+    assert_eq!(saved["direction_rules"], body["direction_rules"]);
+    assert_eq!(
+        saved["interventions"],
+        json!([
+            {"layer":2,"role":"l_out","positions":[1],"op":"project_out","vector":[0.0,1.0]}
+        ])
+    );
+    let versions = format!("/api/interventions/{}/versions", id(&saved));
+    assert_eq!(app.json("GET", &format!("{versions}/1"), None, 200), saved);
+    body["idempotency_key"] = json!("mcp-direction");
+    let (_, mcp) = app.request(
+        "POST",
+        "/mcp",
+        Some(json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                "name":"create_direction_intervention","arguments":body
+            }
+        })),
+        "Accept: application/json, text/event-stream\r\n",
+    );
+    let mcp: Value = serde_json::from_str(&mcp).unwrap();
+    assert_eq!(mcp["result"]["isError"], false, "{mcp}");
+    assert_eq!(
+        mcp["result"]["structuredContent"]["direction_rules"],
+        body["direction_rules"]
+    );
+    body.as_object_mut().unwrap().remove("idempotency_key");
+    let projection = app.json("GET", &format!("{versions}/1/gguf"), None, 400);
+    assert!(projection["error"].as_str().unwrap().contains("projection"));
+    let trace = app.enqueue(
+        json!({"kind":"trace","input_ids":[model],"prompt":"one two",
+        "options":{"layers":[2],"roles":["l_out"],"positions":[1],"top_k":2,
+            "intervention_artifact":{"id":saved["id"],"version":1}}}),
+    );
+    let done = app.await_job(&trace, |job| job["state"] == "succeeded");
+    assert_eq!(
+        done["result"]["envelope"]["options"]["interventions"],
+        saved["interventions"]
+    );
+    assert_eq!(
+        done["result"]["envelope"]["options"]["expected_model_sha256"],
+        digest
+    );
+
+    let mut subtraction = reference;
+    subtraction["op"] = json!("subtract");
+    subtraction["scale"] = json!(0.25);
+    app.json(
+        "POST",
+        &versions,
+        Some(json!({"direction_rules":[subtraction]})),
+        201,
+    );
+    let (status, bytes) = app.bytes("GET", &format!("{versions}/2/gguf"));
+    assert_eq!(status, 200);
+    let data = &bytes[bytes.len() - 32..];
+    assert_eq!(f32::from_le_bytes(data[..4].try_into().unwrap()), 0.0);
+    assert_eq!(f32::from_le_bytes(data[4..8].try_into().unwrap()), -0.25);
+
+    body["model_sha256"] = json!("b".repeat(64));
+    app.json("POST", "/api/interventions", Some(body.clone()), 400);
+    body["model_sha256"] = json!(digest);
+    body["direction_rules"][0]["source_layer"] = json!(7);
+    app.json("POST", "/api/interventions", Some(body), 404);
+}
+
+#[test]
 fn intervention_versions_are_immutable_and_bound_to_a_library_model() {
     let mut app = Fixture::new();
     app.launch();

@@ -203,11 +203,14 @@ const KIND_TITLES: Record<string, string> = {
   baseline: 'GSM8K reference',
   benchmark: 'Benchmark run',
   weight_inspect: 'Weight inspect',
+  weight_spectra: 'Weight health',
   hf_download: 'Download from Hugging Face',
   weight_propose: 'Weight edit proposal',
   weight_tune: 'Weight tune proposal',
   weight_apply: 'Weight edit apply',
   trace: 'Activation trace',
+  sensitivity: 'Tensor sensitivity',
+  circuit: 'Activation attribution',
 };
 
 export function kindTitle(kind: string): string {

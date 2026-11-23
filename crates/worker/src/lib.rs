@@ -1,6 +1,10 @@
 use anyhow::{Context, Result, ensure};
+pub mod behavior_direction;
+pub mod circuit;
 pub mod compiled_program;
+pub mod damage;
 pub mod exl3_layer;
+pub mod heretic;
 pub mod hf_download;
 pub mod hgn_recipe;
 pub mod hy4;
@@ -8,9 +12,11 @@ pub mod locate_edit;
 pub mod operational;
 pub mod resources;
 pub mod scratch_eval;
+pub mod sensitivity;
 pub mod source_grants;
 pub mod trace;
 pub mod weight_source;
+pub mod weight_spectra;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -553,3 +559,4 @@ pub fn lock(p: &Path) -> Result<File> {
 pub fn available(p: &Path) -> Result<u64> {
     Ok(fs2::available_space(p)?)
 }
+pub mod ablation_search;

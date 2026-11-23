@@ -1,6 +1,8 @@
 //! Read-only pair reports. Open artifacts before a cache lookup.
 mod behavior;
 mod tensors;
+mod token_loss;
+pub(crate) use token_loss::{Slice as LossSlice, finding_loss};
 
 use crate::{
     App,
@@ -127,7 +129,7 @@ fn stamp(file: &File) -> Result<Stamp> {
 }
 
 impl Service {
-    fn acquire(&self) -> Result<OwnedSemaphorePermit> {
+    pub(crate) fn acquire(&self) -> Result<OwnedSemaphorePermit> {
         self.slot.clone().try_acquire_owned().map_err(|_| {
             ApiError(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -193,6 +195,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/diff/tensors", get(tensors))
         .route("/diff/traces", get(traces))
         .route("/diff/behavior", get(behavior))
+        .route("/diff/token-loss", get(token_loss::get_loss))
 }
 
 async fn tensors(State(app): State<Arc<App>>, query: Params<Pair>) -> Result<impl IntoResponse> {
@@ -311,7 +314,7 @@ async fn traces(State(app): State<Arc<App>>, query: Params<Traces>) -> Result<im
     Ok(response(bytes))
 }
 
-async fn trace_read(app: &App, job: &Job, slice: &trace::Slice) -> Result<Value> {
+pub(crate) async fn trace_read(app: &App, job: &Job, slice: &trace::Slice) -> Result<Value> {
     match app.dispatcher.trace_read(job, slice).await.map_err(|e| {
         eprintln!("Trace diff read failed for {}: {e}", job.id);
         ApiError(

@@ -1,6 +1,6 @@
 use crate::gguf::{number, read_string, scalar_width, skip};
-use anyhow::{bail, ensure, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, bail, ensure};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
@@ -55,7 +55,7 @@ const ROCMFPX_TYPES: &[(u64, &str, u64, u64)] = &[
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Namespace {
+pub(crate) enum Namespace {
     Stock,
     RocmFpx,
 }
@@ -85,7 +85,7 @@ impl Namespace {
             .map(|entry| entry.0)
     }
 
-    fn spec(self, id: u64) -> Result<&'static (u64, &'static str, u64, u64)> {
+    pub(crate) fn spec(self, id: u64) -> Result<&'static (u64, &'static str, u64, u64)> {
         self.types()
             .find(|entry| entry.0 == id)
             .with_context(|| format!("unsupported GGUF tensor type {id}"))
@@ -99,13 +99,14 @@ pub(super) fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-pub(super) struct Tensor {
-    pub(super) shape: Vec<u64>,
-    pub(super) ty: u64,
+pub(crate) struct Tensor {
+    pub(crate) shape: Vec<u64>,
+    pub(crate) ty: u64,
+    pub(crate) offset: u64,
 }
 
 impl Tensor {
-    pub(super) fn bytes(&self, ty: u64, namespace: Namespace) -> Result<u64> {
+    pub(crate) fn bytes(&self, ty: u64, namespace: Namespace) -> Result<u64> {
         let &(_, _, block, size) = namespace.spec(ty)?;
         ensure!(
             self.shape[0].is_multiple_of(block),
@@ -120,16 +121,17 @@ impl Tensor {
     }
 }
 
-pub(super) struct Model {
-    pub(super) architecture: String,
-    pub(super) tensors: BTreeMap<String, Tensor>,
+pub(crate) struct Model {
+    pub(crate) architecture: String,
+    pub(crate) tensors: BTreeMap<String, Tensor>,
     ftype: Option<u64>,
-    align: u64,
-    data: u64,
+    pub(crate) align: u64,
+    pub(crate) data: u64,
+    pub(crate) table: u64,
     namespace: Namespace,
 }
 
-fn align(value: u64, align: u64) -> Result<u64> {
+pub(crate) fn align(value: u64, align: u64) -> Result<u64> {
     Ok(value
         .checked_add(align - 1)
         .context("GGUF alignment overflow")?
@@ -137,7 +139,7 @@ fn align(value: u64, align: u64) -> Result<u64> {
 }
 
 impl Model {
-    pub(super) fn open(path: &Path, namespace: Namespace) -> Result<Self> {
+    pub(crate) fn open(path: &Path, namespace: Namespace) -> Result<Self> {
         let meta = crate::integrity::canonical(path)?;
         ensure!(meta.is_file(), "expected regular GGUF file");
         let mut r = BufReader::new(File::open(path)?);
@@ -210,6 +212,7 @@ impl Model {
         let architecture = architecture
             .filter(|name| valid_name(name))
             .context("missing/invalid GGUF architecture")?;
+        let table = r.stream_position()?;
         let mut spans = Vec::new();
         let mut tensors = BTreeMap::new();
         for _ in 0..nt {
@@ -228,7 +231,7 @@ impl Model {
             }
             let ty = number(&mut r, 4)?;
             let offset = number(&mut r, 8)?;
-            let tensor = Tensor { shape, ty };
+            let tensor = Tensor { shape, ty, offset };
             let end = offset
                 .checked_add(tensor.bytes(ty, namespace)?)
                 .context("GGUF tensor extent overflow")?;
@@ -275,6 +278,7 @@ impl Model {
             ftype,
             align: alignment,
             data,
+            table,
             namespace,
         })
     }
@@ -297,14 +301,15 @@ impl Model {
     }
 
     pub(super) fn summary(&self, types: &Types, target: Namespace) -> Value {
-        json!(self
-            .tensors
-            .iter()
-            .map(|(name, t)| json!({
-                "name":name,"shape":t.shape,"current_type":self.namespace.spec(t.ty).unwrap().1,
-                "planned_type":types.get(name).and_then(|id|target.spec(*id).ok()).map(|s|s.1)
-            }))
-            .collect::<Vec<_>>())
+        json!(
+            self.tensors
+                .iter()
+                .map(|(name, t)| json!({
+                    "name":name,"shape":t.shape,"current_type":self.namespace.spec(t.ty).unwrap().1,
+                    "planned_type":types.get(name).and_then(|id|target.spec(*id).ok()).map(|s|s.1)
+                }))
+                .collect::<Vec<_>>()
+        )
     }
 
     pub(super) fn parse_plan(

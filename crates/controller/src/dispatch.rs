@@ -64,6 +64,7 @@ impl Dispatcher {
                 } else {
                     let mut wire = serde_json::to_value(envelope)?;
                     wire.as_object_mut().unwrap().remove("scratch_pins");
+                    wire.as_object_mut().unwrap().remove("heretic_runs");
                     if !job.dispatch_resources.is_empty() {
                         wire["resources"] = serde_json::to_value(job.dispatch_resources)?;
                     }
@@ -71,17 +72,34 @@ impl Dispatcher {
                 }
             })
             .transpose()?;
-        self.invoke(action, job, envelope, payload, duration, RESULT_LIMIT).await
+        self.invoke(action, job, envelope, payload, duration, RESULT_LIMIT)
+            .await
     }
 
-    pub async fn trace_read(&self, job: &Job, slice: &brewery_worker::trace::Slice) -> Result<brewery_worker::trace::ReadReply, Error> {
-        self.invoke("trace-read", job, None, Some(serde_json::to_vec(slice)?),
-            SHORT_RPC, brewery_worker::trace::RESPONSE_CAP + 128).await
+    pub async fn trace_read(
+        &self,
+        job: &Job,
+        slice: &brewery_worker::trace::Slice,
+    ) -> Result<brewery_worker::trace::ReadReply, Error> {
+        self.invoke(
+            "trace-read",
+            job,
+            None,
+            Some(serde_json::to_vec(slice)?),
+            SHORT_RPC,
+            brewery_worker::trace::RESPONSE_CAP + 128,
+        )
+        .await
     }
 
     async fn invoke<T: serde::de::DeserializeOwned>(
-        &self, action: &str, job: &Job, envelope: Option<&Envelope>,
-        payload: Option<Vec<u8>>, duration: Duration, limit: usize,
+        &self,
+        action: &str,
+        job: &Job,
+        envelope: Option<&Envelope>,
+        payload: Option<Vec<u8>>,
+        duration: Duration,
+        limit: usize,
     ) -> Result<T, Error> {
         let backend = if job.host == backend_hf::ID {
             Some(
@@ -208,10 +226,14 @@ pub(crate) async fn read_limited(
 
 pub async fn run(app: Arc<App>, dispatch: Arc<Dispatcher>) -> Result<(), Error> {
     let mut jobs = JoinSet::new();
+    let mut searches = JoinSet::new();
     let recovered = {
         let mut store = app.store.lock().expect("store lock");
         let mut running = store.by_state(State::Running)?;
         for job in &mut running {
+            if job.kind == brewery_worker::ablation_search::JOB {
+                continue;
+            }
             if (job.host == backend_hf::ID
                 && dispatch
                     .backend
@@ -236,7 +258,9 @@ pub async fn run(app: Arc<App>, dispatch: Arc<Dispatcher>) -> Result<(), Error> 
             job.error = None;
             store.update(job, None)?;
         }
-        running.retain(|job| job.state == State::Running);
+        running.retain(|job| {
+            job.state == State::Running && job.kind != brewery_worker::ablation_search::JOB
+        });
         running
     };
     for job in recovered {
@@ -244,12 +268,19 @@ pub async fn run(app: Arc<App>, dispatch: Arc<Dispatcher>) -> Result<(), Error> 
         jobs.spawn(async move { drive(&app, &dispatch, job, true).await });
     }
     loop {
+        if searches.is_empty()
+            && let Some(job) = crate::scratch::ablation_search::allocate(&app)?
+        {
+            let app = app.clone();
+            searches.spawn(async move { crate::scratch::ablation_search::drive(app, job).await });
+        }
         for job in allocate(&app)? {
             let (app, dispatch) = (app.clone(), dispatch.clone());
             jobs.spawn(async move { drive(&app, &dispatch, job, false).await });
         }
         tokio::select! {
             Some(completed) = jobs.join_next() => completed??,
+            Some(completed) = searches.join_next() => completed??,
             () = sleep(dispatch.poll) => {},
         }
     }
@@ -259,7 +290,8 @@ fn allocate(app: &App) -> Result<Vec<Job>, Error> {
     let mut store = app.store.lock().expect("store lock");
     let hosts = app.effective_hosts()?;
     store.advance_conversions()?;
-    let active = store.by_state(State::Running)?;
+    let mut active = store.by_state(State::Running)?;
+    active.retain(|job| job.kind != brewery_worker::ablation_search::JOB);
     let mut busy = std::collections::BTreeMap::<String, std::collections::BTreeSet<u64>>::new();
     for job in &active {
         busy.entry(job.host.clone())
@@ -278,6 +310,9 @@ fn allocate(app: &App) -> Result<Vec<Job>, Error> {
     }
     let mut launch = Vec::new();
     for mut job in store.by_state(State::Queued)? {
+        if job.kind == brewery_worker::ablation_search::JOB {
+            continue;
+        }
         let envelope = store.envelope(&job.id)?;
         let eligible = candidates(&job, &envelope, &hosts);
         if eligible.is_empty()
@@ -370,8 +405,43 @@ fn allocate(app: &App) -> Result<Vec<Job>, Error> {
     Ok(launch)
 }
 
-async fn drive(app: &App, dispatch: &Dispatcher, job: Job, recovered: bool) -> Result<(), Error> {
+async fn drive(
+    app: &Arc<App>,
+    dispatch: &Dispatcher,
+    job: Job,
+    recovered: bool,
+) -> Result<(), Error> {
     let envelope = app.store.lock().expect("store lock").envelope(&job.id)?;
+    if job.kind == brewery_worker::weight_spectra::JOB {
+        let result = if recovered {
+            Err("Controller interrupted the spectral job; submit a new job".into())
+        } else {
+            crate::spectra::run(app, &job, envelope).await
+        };
+        let mut store = app.store.lock().expect("store lock");
+        let mut current = store.job(&job.id)?.ok_or("active job disappeared")?;
+        let report = match result {
+            _ if current.cancel_requested => {
+                current.state = State::Cancelled;
+                current.progress = "Spectral job cancelled".into();
+                None
+            }
+            Ok(result) => {
+                current.state = State::Succeeded;
+                current.progress = "Spectral analysis complete".into();
+                Some(result)
+            }
+            Err(error) => {
+                current.state = State::Failed;
+                current.progress = "Spectral analysis failed".into();
+                current.error = Some(bounded(&error.to_string(), 4096));
+                None
+            }
+        };
+        current.has_result = report.is_some();
+        store.update(&mut current, report)?;
+        return Ok(());
+    }
     let action = match job.kind.as_str() {
         "transfer" => "transfer",
         "transfer_preview" => "preview_transfer",

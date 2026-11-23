@@ -71,18 +71,49 @@ impl ScratchAccess {
             }
             scratch_eval::CHECKS
                 if job.prompt.is_none()
-                    && job.options.as_object().is_some_and(|v| v.is_empty())
+                    && scratch_eval::check_options(&job.options).is_ok()
                     && kinds().eq(scratch_eval::CHECK_INPUTS) =>
             {
                 &job.inputs[..]
             }
             trace::JOB if kinds().eq(["gguf"]) => &job.inputs[..],
+            crate::circuit::JOB
+                if job.prompt.is_none()
+                    && kinds().eq(["gguf"])
+                    && crate::circuit::Request::parse(&job.options).is_ok_and(|req| {
+                        self.paths.get(&job.inputs[0].path) == Some(&req.model_sha256)
+                    }) =>
+            {
+                &job.inputs[..]
+            }
+            sensitivity::JOB
+                if job.prompt.is_none()
+                    && job.options.get(sensitivity::REVISION_PIN).is_some()
+                    && sensitivity::Request::resolved(&job.options).is_ok()
+                    && kinds().eq(["gguf"]) =>
+            {
+                &job.inputs[..]
+            }
+            ablation_search::SCREEN
+                if job.prompt.is_none()
+                    && kinds().eq(["gguf"])
+                    && ablation_search::ScreenRequest::parse(&job.options).is_ok() =>
+            {
+                &job.inputs[..]
+            }
             locate_edit::JOB
                 if job.prompt.is_none()
                     && locate_edit::Request::parse(&job.options).is_ok()
                     && kinds().eq(locate_edit::INPUTS) =>
             {
                 &job.inputs[..]
+            }
+            kind if heretic::job(kind)
+                && job.prompt.is_none()
+                && (kinds().eq(["safetensors"]) || kinds().eq(["safetensors", "assets"]))
+                && heretic::Options::parse(kind, &job.options).is_ok() =>
+            {
+                &job.inputs[..1]
             }
             _ => return false,
         };
@@ -572,9 +603,12 @@ impl Worker {
             ensure!(
                 r.reply.state == "succeeded"
                     && r.action == "start"
-                    && r.job
-                        .as_ref()
-                        .is_none_or(|job| !scratch_eval::private_output(&job.kind))
+                    && r.job.as_ref().is_none_or(|job| !matches!(
+                        job.kind.as_str(),
+                        sensitivity::JOB | circuit::JOB | damage::JOB
+                    ) && !scratch_eval::private_output(
+                        &job.kind
+                    ))
                     && !r.inputs.values().any(scratch_eval::granted),
                 "job output is not published"
             );
@@ -884,6 +918,23 @@ impl Worker {
                     Reply::error("BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR must be an absolute path"),
                 );
             }
+            if job.kind == scratch_eval::CHECKS
+                && scratch_eval::check_options(&job.options)?.is_some()
+                && !self
+                    .cfg
+                    .engine_env
+                    .get(scratch_eval::CONTRAST_CACHE)
+                    .is_some_and(|p| Path::new(p).is_absolute())
+            {
+                return self.record_prepare(
+                    id,
+                    action,
+                    job,
+                    Reply::error(
+                        "BREWERY_CONTRAST_CACHE must be an absolute path for behavior checks",
+                    ),
+                );
+            }
             if job.kind == locate_edit::JOB {
                 let backend = locate_edit::Request::parse(&job.options)?.edit.backend;
                 let pin = backend.pin();
@@ -915,6 +966,26 @@ impl Worker {
                 if let Some(error) = error {
                     return self.record_prepare(id, action, job, Reply::error(error));
                 }
+            }
+            if heretic::job(&job.kind)
+                && (self.cfg.admission.is_none()
+                    || self
+                        .cfg
+                        .engine_env
+                        .get(locate_edit::GPU_GATE)
+                        .is_none_or(|v| v != "1")
+                    || self
+                        .cfg
+                        .engine_env
+                        .get(heretic::RUNTIME)
+                        .is_none_or(|p| !Path::new(p).is_absolute()))
+            {
+                return self.record_prepare(
+                    id,
+                    action,
+                    job,
+                    Reply::error("Heretic requires a pinned runtime and GPU admission"),
+                );
             }
         }
         if !job.resources.is_empty() {
@@ -992,35 +1063,143 @@ impl Worker {
                 Reply::error("This worker only runs Hugging Face download jobs"),
             );
         }
-        if job.kind == trace::JOB {
-            let allowed = action == "start"
+        if job.kind == behavior_direction::JOB
+            && !(action == "start"
+                && job.prompt.is_none()
                 && job.inputs.len() == 1
                 && job.inputs[0].kind == "gguf"
-                && self
-                    .cfg
+                && [trace::EXECUTABLE, trace::LIB_DIR, behavior_direction::CACHE]
+                    .iter()
+                    .all(|key| {
+                        self.cfg
+                            .engine_env
+                            .get(*key)
+                            .is_some_and(|p| Path::new(p).is_absolute())
+                    })
+                && behavior_direction::Request::parse(&job.options).is_ok())
+        {
+            return self.record_prepare(
+                id,
+                action,
+                job,
+                Reply::error("Invalid direction request or unavailable CPU trace runtime or cache"),
+            );
+        }
+        if job.kind == ablation_search::SCREEN
+            && ![
+                ablation_search::EXECUTABLE,
+                trace::PROJECTION_LIB_DIR,
+                behavior_direction::CACHE,
+            ]
+            .iter()
+            .all(|key| {
+                self.cfg
                     .engine_env
-                    .get(trace::EXECUTABLE)
+                    .get(*key)
                     .is_some_and(|p| Path::new(p).is_absolute())
-                && trace::Request::worker(&job.options, job.prompt.as_deref()).is_ok();
+            })
+        {
+            return self.record_prepare(
+                id,
+                action,
+                job,
+                Reply::error("Configure the pinned CPU ablation runtime and contrast cache"),
+            );
+        }
+        if job.kind == trace::JOB {
+            let absolute = |var| {
+                self.cfg
+                    .engine_env
+                    .get(var)
+                    .is_some_and(|p| Path::new(p).is_absolute())
+            };
+            let request = trace::Request::worker(&job.options, job.prompt.as_deref());
+            let allowed = action == "start"
+                && job.inputs.len() == 1
+                && request
+                    .as_ref()
+                    .is_ok_and(|request| match job.inputs[0].kind.as_str() {
+                        "gguf" => request.lanternfish_runtime().is_ok_and(|runtime| {
+                            let (executable, lib_dir, _, _) = runtime.pins();
+                            absolute(executable) && absolute(lib_dir)
+                        }),
+                        trace::HGN_KIND => {
+                            Path::new(&job.inputs[0].path)
+                                .extension()
+                                .is_some_and(|e| e == "hgn")
+                                && absolute(trace::HGN_PYTHON)
+                                && absolute(trace::HGN_ASSETS)
+                                && self
+                                    .cfg
+                                    .engine_env
+                                    .get(trace::HGN_PYTHON_SHA256)
+                                    .is_some_and(|s| is_digest(s))
+                                && request.interventions.is_empty()
+                        }
+                        _ => false,
+                    });
             if !allowed {
                 return self.record_prepare(
                     id,
                     action,
                     job,
-                    Reply::error("Invalid trace request or unavailable CPU Lanternfish"),
+                    Reply::error("Invalid trace request or unavailable pinned CPU trace runtime"),
                 );
             }
-            if !self
-                .cfg
-                .engine_env
-                .get(trace::LIB_DIR)
-                .is_some_and(|p| Path::new(p).is_absolute())
-            {
+        }
+        if job.kind == sensitivity::JOB {
+            let allowed = action == "start"
+                && job.prompt.is_none()
+                && job.inputs.len() == 1
+                && job.inputs[0].kind == "gguf"
+                && (job.options.get(sensitivity::REVISION_PIN).is_some() == access.is_some())
+                && sensitivity::Request::resolved(&job.options).is_ok_and(|(req, _)| {
+                    sensitivity::configured(
+                        &self.cfg.engine_env,
+                        req.backend,
+                        self.cfg.admission.as_deref(),
+                    )
+                });
+            if !allowed {
                 return self.record_prepare(
                     id,
                     action,
                     job,
-                    Reply::error("BREWERY_LANTERNFISH_TRACE_LIB_DIR must be an absolute path"),
+                    Reply::error("Invalid sensitivity request or unavailable pinned backend"),
+                );
+            }
+        }
+        if job.kind == circuit::JOB {
+            let allowed = action == "start"
+                && job.prompt.is_none()
+                && job.inputs.len() == 1
+                && job.inputs[0].kind == "gguf"
+                && circuit::Request::parse(&job.options).is_ok()
+                && sensitivity::configured(&self.cfg.engine_env, locate_edit::Backend::Cpu, None);
+            if !allowed {
+                return self.record_prepare(
+                    id,
+                    action,
+                    job,
+                    Reply::error("Invalid circuit request or unavailable pinned CPU runtime"),
+                );
+            }
+        }
+        if job.kind == damage::JOB {
+            let allowed = action == "start"
+                && job.prompt.is_none()
+                && access.is_none()
+                && job.inputs.len() == 2
+                && job.inputs.iter().all(|i| i.kind == "gguf")
+                && damage::Request::parse(&job.options).is_ok_and(|req| {
+                    damage::configured(&self.cfg.engine_env, &req, self.cfg.admission.as_deref())
+                });
+            if !allowed {
+                return self.record_prepare(
+                    id,
+                    action,
+                    job,
+                    Reply::error("Invalid damage map request or unavailable pinned backend"),
                 );
             }
         }
@@ -1441,6 +1620,13 @@ impl Worker {
             "backend weight jobs do not accept staged inputs"
         );
         let mut pinned = false;
+        ensure!(
+            !matches!(
+                job.kind.as_str(),
+                sensitivity::JOB | circuit::JOB | damage::JOB
+            ) || (provided.is_none() && input.host == original.host),
+            "sensitivity, circuit and damage map jobs require direct sources"
+        );
         let (bundle, cached) = if let Some(b) = provided {
             b.validate()?;
             ensure!(
@@ -1713,6 +1899,29 @@ impl Worker {
                 input.extra["sha256"].as_str().unwrap_or_default(),
             )?;
         }
+        if job.kind == sensitivity::JOB {
+            sensitivity::Request::resolved(&job.options)?
+                .0
+                .check_model(input.extra["sha256"].as_str().unwrap_or_default())?;
+        }
+        if job.kind == circuit::JOB {
+            circuit::Request::parse(&job.options)?
+                .check_model(input.extra["sha256"].as_str().unwrap_or_default())?;
+        }
+        if job.kind == damage::JOB {
+            let req = damage::Request::parse(&job.options)?;
+            ensure!(
+                req.hashes().get(index).copied() == input.extra["sha256"].as_str(),
+                "damage map source SHA-256 mismatch"
+            );
+        }
+        if job.kind == behavior_direction::JOB {
+            let request = behavior_direction::Request::parse(&job.options)?;
+            ensure!(
+                input.extra["sha256"] == request.model_sha256,
+                "direction model SHA-256 mismatch"
+            );
+        }
         input.extra.extend([
             ("bundle_sha256".into(), json!(bundle.digest)),
             ("bytes".into(), json!(bundle.bytes()?)),
@@ -1935,7 +2144,19 @@ impl Worker {
                 } else if job.kind == locate_edit::JOB {
                     locate_edit::Request::parse(&job.options)
                         .is_ok_and(|request| request.edit.backend.is_gpu())
-                } else if job.kind == trace::JOB || scratch_eval::private_output(&job.kind) {
+                } else if job.kind == sensitivity::JOB {
+                    sensitivity::Request::resolved(&job.options)
+                        .is_ok_and(|(request, _)| request.backend.is_gpu())
+                } else if job.kind == damage::JOB {
+                    damage::Request::parse(&job.options)
+                        .is_ok_and(|request| request.backend.is_gpu())
+                } else if heretic::job(&job.kind) {
+                    true
+                } else if matches!(
+                    job.kind.as_str(),
+                    trace::JOB | circuit::JOB | behavior_direction::JOB
+                ) || scratch_eval::private_output(&job.kind)
+                {
                     false
                 } else {
                     self.cfg.admission.is_some()

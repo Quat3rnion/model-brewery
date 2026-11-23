@@ -211,10 +211,10 @@ def main():
     parser.add_argument("--web-dist", type=Path, default=ARB / "w8-accept/web")
     parser.add_argument("--expert-only", action="store_true", help="exercise only the small MoE fixture")
     parser.add_argument("--dense-only", action="store_true", help="exercise only the dense masks")
-    parser.add_argument("--lanternfish", type=Path, default=ARB / "pins/lanternfish-0ea30b3/lanternfish",
-                        help="path to the exact W1 binary")
+    parser.add_argument("--lanternfish", type=Path, default=LANTERN,
+                        help="path to the pinned trace binary")
     parser.add_argument("--runtime-manifest", type=Path, default=ARB / "pins/lanternfish-0ea30b3.libs.sha256",
-                        help="SHA-256 manifest for the W1 and W4 CPU runtime libraries")
+                        help="SHA-256 manifest for the W4 CPU runtime libraries")
     args = parser.parse_args()
     args.root = args.root.resolve()
     require(ARB in args.root.parents and not args.root.exists(), "use a new root under /arboretum")

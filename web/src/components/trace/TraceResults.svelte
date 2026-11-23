@@ -6,10 +6,12 @@
   import { obj } from '../../lib/reports';
   import {
     ROLE_LABELS,
+    ROUTING_ROLES,
     attentionMatrix,
     fmt,
     lensGrid,
     normMatrix,
+    routingRole,
     type Matrix,
     type TopLogit,
     type TraceSummary,
@@ -17,6 +19,7 @@
     type TraceRole,
   } from '../../lib/weightspace';
   import MatrixHeat from './MatrixHeat.svelte';
+  import RoutingAtlas from './RoutingAtlas.svelte';
 
   let { jobId, result, hasSae = false }: { jobId: string; result: unknown; hasSae?: boolean } = $props();
 
@@ -42,7 +45,7 @@
 
   const tokenAt = $derived(new Map((summary?.tokens ?? []).map((t) => [t.position, t.token_id])));
   const posLabel = (p: number) => (tokenAt.has(p) ? `${p} (#${tokenAt.get(p)})` : String(p));
-  const plainRoles = $derived((summary?.spec.roles ?? []).filter((r) => r !== 'kq_soft_max') as TraceRole[]);
+  const plainRoles = $derived((summary?.spec.roles ?? []).filter((r) => r !== 'kq_soft_max' && !routingRole(r)) as TraceRole[]);
   const hasAttention = $derived(summary?.spec.roles.includes('kq_soft_max') ?? false);
 
   type FeatureRow = { position: number; top: { feature: number; activation: number }[] };
@@ -191,7 +194,11 @@
     <dl class="facts small">
       <div><dt>Model</dt><dd class="mono break">{summary.model_id}</dd></div>
       <div><dt>Model SHA-256</dt><dd class="mono" title={summary.model_sha256}>{shortHash(summary.model_sha256)}</dd></div>
-      <div><dt>Lanternfish</dt><dd class="mono" title={summary.lanternfish_commit}>{shortHash(summary.lanternfish_commit)}</dd></div>
+      {#if summary.runtime === 'hgn_cpu'}
+        <div><dt>HGN CPU</dt><dd class="mono" title={summary.runtime_sha256}>{shortHash(summary.runtime_sha256 ?? '')}</dd></div>
+      {:else}
+        <div><dt>Lanternfish</dt><dd class="mono" title={summary.lanternfish_commit}>{shortHash(summary.lanternfish_commit ?? '')}</dd></div>
+      {/if}
       <div><dt>Export</dt><dd class="num">{formatBytes(summary.bytes)}{#if summary.spec.byte_cap}{` of ${formatBytes(summary.spec.byte_cap)} cap`}{/if}</dd></div>
       <div><dt>Tokens</dt><dd class="num">{summary.tokens.length}</dd></div>
       <div><dt>Tensors</dt><dd class="num">{summary.tensor_count}{#if summary.missing_count}{` (${summary.missing_count} not captured)`}{/if}</dd></div>
@@ -199,6 +206,11 @@
     </dl>
     {#if summary.intervention_count}
       <p class="note info small">This trace ran with {summary.intervention_count} activation interventions. Values after an edited node show the edited run.</p>
+    {/if}
+    {#if ROUTING_ROLES.every((role) => summary?.spec.roles.includes(role)) && summary.spec.layers.length && summary.intervention_count === 0}
+      {#key summary.manifest_sha256}
+        <RoutingAtlas {jobId} {summary} />
+      {/key}
     {/if}
 
     {#if hasSae}

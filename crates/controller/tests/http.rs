@@ -15,8 +15,22 @@ mod interventions;
 #[path = "support/mcp.rs"]
 mod mcp;
 
+#[path = "support/crosscoder.rs"]
+mod crosscoder;
 #[path = "support/sae.rs"]
 mod sae;
+
+#[path = "support/sensitivity.rs"]
+mod sensitivity;
+
+#[path = "support/circuit.rs"]
+mod circuit;
+
+#[path = "support/findings.rs"]
+mod findings;
+
+#[path = "support/damage.rs"]
+mod damage;
 
 #[path = "support/weights.rs"]
 mod weights;
@@ -558,6 +572,29 @@ fn diff_traces_matches_prompts_and_tokens() {
     app.json("GET", &format!("{path}&start=0&end=1"), None, 422);
     fs::write(app.path("trace-pruned"), "").unwrap();
     app.json("GET", &path, None, 404);
+}
+
+#[test]
+fn trace_admits_hgn_library_input_but_not_hgn_interventions() {
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        r#"{"hosts":{"alpha":{"local":true,"capabilities":{"trace":true}}}}"#,
+    )
+    .unwrap();
+    app.launch();
+    let model = app.register("alpha", "hgn", "/models/checkpoint.hgn");
+    let mut body = json!({"kind":"trace","host":"alpha","input_ids":[model],"prompt":"one two",
+        "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":1,
+                   "interventions":[{"op":"zero","layer":0,"role":"l_out","positions":[0]}]}});
+    app.json("POST", "/api/jobs", Some(body.clone()), 400);
+    body["options"]
+        .as_object_mut()
+        .unwrap()
+        .remove("interventions");
+    let id = app.enqueue(body);
+    let job = app.await_job(&id, |job| job["state"] == "succeeded");
+    assert_eq!(job["result"]["envelope"]["inputs"][0]["kind"], "hgn");
 }
 
 #[test]

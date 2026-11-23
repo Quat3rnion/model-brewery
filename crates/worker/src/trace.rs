@@ -1,11 +1,11 @@
-//! Bounded Lanternfish CLI exports and the read-only trace wire format.
-use anyhow::{Context, Result, ensure};
+//! Bounded schema v1 exports and the read-only trace wire format.
+use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::Read,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
@@ -13,12 +13,28 @@ use std::{
 };
 
 pub mod diff;
+pub mod routing;
 
 pub const JOB: &str = "trace";
 pub const EXECUTABLE: &str = "BREWERY_LANTERNFISH_TRACE";
 pub const LIB_DIR: &str = "BREWERY_LANTERNFISH_TRACE_LIB_DIR";
 pub const COMMIT: &str = "0ea30b37729a136a76b8412e7ad1ec91bd7de9b5";
 pub const SHA256: &str = "0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f";
+pub const PROJECTION_EXECUTABLE: &str = "BREWERY_LANTERNFISH_PROJECTION";
+pub const PROJECTION_LIB_DIR: &str = "BREWERY_LANTERNFISH_PROJECTION_LIB_DIR";
+pub const PROJECTION_COMMIT: &str = "d8420857ed1ab2e29c527f1ffde09aeef19f36c4";
+pub const PROJECTION_SHA256: &str =
+    "3009f4b0c362ddc04d955e40efac9e1d88659b9a0bc393fdc8ea6da287bde010";
+pub const ROUTING_EXECUTABLE: &str = "BREWERY_LANTERNFISH_ROUTING";
+pub const ROUTING_LIB_DIR: &str = "BREWERY_LANTERNFISH_ROUTING_LIB_DIR";
+pub const ROUTING_COMMIT: &str = "5699379af18d6428a6589c996f516c07a91e1a86";
+pub const ROUTING_SHA256: &str = "fda55c709a0ef81920daae882147f7f066f506d27d73846785880c424c56a581";
+pub const HGN_KIND: &str = "hgn";
+pub const HGN_PYTHON: &str = "BREWERY_HGN_TRACE_PYTHON";
+pub const HGN_PYTHON_SHA256: &str = "BREWERY_HGN_TRACE_PYTHON_SHA256";
+pub const HGN_ASSETS: &str = "BREWERY_HGN_TRACE_ASSETS";
+pub const HGN_RUNTIME_SHA256: &str = include_str!("../../../tools/hgn_trace/runtime.sha256");
+pub const HGN_RUNTIME: &str = "hgn_cpu";
 pub const HARD_BYTE_CAP: u64 = 32 << 20;
 pub const RESPONSE_CAP: usize = 4 << 20;
 const MAX_POSITIONS: usize = 4096;
@@ -58,10 +74,26 @@ impl Policy {
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     LOut,
+    FinalNorm,
     AttnOut,
     FfnInp,
     FfnOut,
     KqSoftMax,
+    FfnMoeLogits,
+    FfnMoeTopk,
+    FfnMoeRouteWeights,
+}
+
+impl Role {
+    fn routing(self) -> bool {
+        matches!(
+            self,
+            Self::FfnMoeLogits | Self::FfnMoeTopk | Self::FfnMoeRouteWeights
+        )
+    }
+    pub fn is_read_only(self) -> bool {
+        matches!(self, Self::KqSoftMax | Self::FinalNorm)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +103,26 @@ pub struct Capture {
     positions: BTreeSet<usize>,
     top_k: usize,
     pub byte_cap: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    all_logits: bool,
+}
+
+impl Capture {
+    // Internal circuits use either activation-only or final-position logits-only
+    // exports. Unlike the public trace request, the latter reads the whole vocabulary.
+    pub fn circuit(layers: &[usize], roles: &[Role], positions: &[usize], top_k: usize) -> Self {
+        Self {
+            layers: layers.iter().copied().collect(),
+            roles: roles.iter().copied().collect(),
+            positions: positions.iter().copied().collect(),
+            top_k,
+            byte_cap: HARD_BYTE_CAP,
+            all_logits: false,
+        }
+    }
+}
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Deserialize)]
@@ -104,6 +156,21 @@ pub enum Operation {
     Scale { factor: f32 },
     Add { vector: Vec<f32> },
     Replace { vector: Vec<f32> },
+    ZeroExpert { expert: usize },
+    ProjectOut { vector: Vec<f32> },
+    Subtract { vector: Vec<f32>, scale: f32 },
+}
+
+impl Operation {
+    pub fn vector(&self) -> Option<&[f32]> {
+        match self {
+            Self::Add { vector }
+            | Self::Replace { vector }
+            | Self::ProjectOut { vector }
+            | Self::Subtract { vector, .. } => Some(vector),
+            _ => None,
+        }
+    }
 }
 
 impl Rule {
@@ -113,7 +180,8 @@ impl Rule {
         for rule in rules {
             ensure!(
                 rule.layer < 4096
-                    && rule.role != Role::KqSoftMax
+                    && !rule.role.is_read_only()
+                    && !rule.role.routing()
                     && !rule.positions.is_empty()
                     && rule
                         .positions
@@ -121,13 +189,29 @@ impl Rule {
                         .all(|&p| p < MAX_POSITIONS && edited.insert((rule.layer, rule.role, p))),
                 "invalid or overlapping trace intervention"
             );
-            match &rule.op {
-                Operation::Scale { factor } => ensure!(factor.is_finite(), "invalid trace factor"),
-                Operation::Add { vector } | Operation::Replace { vector } => ensure!(
+            if let Some(vector) = rule.op.vector() {
+                ensure!(
                     (1..=16384).contains(&vector.len()) && vector.iter().all(|v| v.is_finite()),
                     "invalid trace intervention vector"
+                );
+            }
+            match &rule.op {
+                Operation::Scale { factor } => ensure!(factor.is_finite(), "invalid trace factor"),
+                Operation::ProjectOut { vector } => ensure!(
+                    vector.iter().any(|&v| v != 0.0),
+                    "projection direction must be nonzero"
                 ),
-                Operation::Zero => {}
+                Operation::ZeroExpert { expert } => ensure!(
+                    rule.role == Role::FfnOut && *expert < 4096,
+                    "zero_expert requires ffn_out and an expert ID below 4096"
+                ),
+                Operation::Subtract { vector, scale } => ensure!(
+                    scale.is_finite()
+                        && *scale >= 0.0
+                        && vector.iter().all(|v| (v * scale).is_finite()),
+                    "invalid subtraction scale or scaled vector"
+                ),
+                _ => {}
             }
         }
         Ok(())
@@ -141,7 +225,63 @@ pub struct Request {
     pub retain_jobs: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LanternfishRuntime {
+    Base,
+    Projection,
+    Routing,
+}
+
+impl LanternfishRuntime {
+    pub fn pins(self) -> (&'static str, &'static str, &'static str, &'static str) {
+        match self {
+            Self::Base => (EXECUTABLE, LIB_DIR, SHA256, COMMIT),
+            Self::Projection => (
+                PROJECTION_EXECUTABLE,
+                PROJECTION_LIB_DIR,
+                PROJECTION_SHA256,
+                PROJECTION_COMMIT,
+            ),
+            Self::Routing => (
+                ROUTING_EXECUTABLE,
+                ROUTING_LIB_DIR,
+                ROUTING_SHA256,
+                ROUTING_COMMIT,
+            ),
+        }
+    }
+}
+
 impl Request {
+    pub fn lanternfish_runtime(&self) -> Result<LanternfishRuntime> {
+        let projection = self.interventions.iter().any(|rule| {
+            matches!(
+                rule.op,
+                Operation::ProjectOut { .. } | Operation::Subtract { .. }
+            )
+        });
+        let routing = self.routing();
+        ensure!(
+            !(projection && routing),
+            "cannot combine MoE routing and projection in one trace"
+        );
+        Ok(if projection {
+            LanternfishRuntime::Projection
+        } else if routing {
+            LanternfishRuntime::Routing
+        } else {
+            LanternfishRuntime::Base
+        })
+    }
+
+    fn routing(&self) -> bool {
+        self.capture.roles.iter().any(|r| r.routing())
+            || self
+                .interventions
+                .iter()
+                .any(|r| matches!(r.op, Operation::ZeroExpert { .. }))
+    }
+
     pub fn controller(options: &Value, prompt: Option<&str>, policy: Policy) -> Result<Self> {
         policy.check()?;
         let o: Options =
@@ -196,6 +336,7 @@ impl Request {
                 positions: o.positions,
                 top_k: o.top_k,
                 byte_cap,
+                all_logits: false,
             },
             interventions: o.interventions,
             retain_jobs: policy.retain_jobs,
@@ -245,10 +386,10 @@ pub fn check_model_revision(options: &Value, actual: &str) -> Result<()> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
-struct Key {
-    layer: usize,
-    role: Role,
-    position: usize,
+pub struct Key {
+    pub layer: usize,
+    pub role: Role,
+    pub position: usize,
 }
 
 #[derive(Deserialize)]
@@ -272,11 +413,18 @@ struct Manifest {
     tokens: Vec<Token>,
     tensors: Vec<Tensor>,
     missing: Vec<Key>,
-    interventions: Vec<Key>,
+    interventions: Vec<Applied>,
     model_logits: Vec<Logits>,
     logit_lens: Vec<Logits>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Applied {
+    #[serde(flatten)]
+    key: Key,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expert: Option<usize>,
+}
 #[derive(Deserialize, Serialize, PartialEq)]
 struct Token {
     position: usize,
@@ -343,6 +491,10 @@ fn manifest(dir: &Path, cap: u64) -> Result<(Manifest, Export)> {
 }
 
 pub fn verify(dir: &Path, spec: &Capture) -> Result<Export> {
+    Ok(inspect(dir, spec)?.1)
+}
+
+fn inspect(dir: &Path, spec: &Capture) -> Result<(Manifest, Export)> {
     let (m, mut export) = manifest(dir, spec.byte_cap)?;
     ensure!(
         &m.spec == spec
@@ -364,13 +516,25 @@ pub fn verify(dir: &Path, spec: &Capture) -> Result<Export> {
                 } else {
                     row.layer.is_none()
                 })
-                && seen_row_top(&row.top, spec.top_k)
+                && (if spec.all_logits {
+                    !lens
+                        && (2..=262144).contains(&row.top.len())
+                        && row
+                            .top
+                            .iter()
+                            .enumerate()
+                            .all(|(i, x)| x.token_id == i as i32 && x.logit.is_finite())
+                } else {
+                    seen_row_top(&row.top, spec.top_k)
+                })
         };
         ensure!(
             rows.iter()
                 .all(|row| valid(row) && seen.insert((row.layer, row.position)))
-                && (spec.top_k != 0 || rows.is_empty())
-                && (lens || spec.top_k == 0 || rows.len() == spec.positions.len()),
+                && (spec.top_k != 0 || spec.all_logits || rows.is_empty())
+                && (lens
+                    || (spec.top_k == 0 && !spec.all_logits)
+                    || rows.len() == spec.positions.len()),
             "invalid trace logits"
         );
     }
@@ -424,7 +588,282 @@ pub fn verify(dir: &Path, spec: &Capture) -> Result<Export> {
         );
     }
     ensure!(files.is_empty(), "missing trace payload");
-    Ok(export)
+    Ok((m, export))
+}
+
+pub struct CircuitTrace {
+    pub activations: BTreeMap<Key, Vec<f32>>,
+    pub metric: Option<f64>,
+}
+
+pub fn circuit_trace(
+    dir: &Path,
+    spec: &Capture,
+    tokens: &[i32],
+    width: usize,
+    targets: (i32, Option<i32>),
+    patch: Option<Key>,
+) -> Result<CircuitTrace> {
+    let (m, _) = inspect(dir, spec)?;
+    ensure!(
+        m.tokens
+            .iter()
+            .map(|t| t.token_id)
+            .eq(tokens.iter().copied())
+            && m.missing.is_empty()
+            && m.interventions
+                .iter()
+                .map(|applied| (applied.key, applied.expert))
+                .eq(patch.map(|key| (key, None)))
+            && m.logit_lens.is_empty(),
+        "circuit trace has missing rows, wrong tokens or wrong interventions"
+    );
+    let mut activations = BTreeMap::new();
+    for tensor in m.tensors {
+        ensure!(
+            tensor.shape == [width as u64],
+            "invalid circuit activation width"
+        );
+        let bytes = read_file(&dir.join(tensor.file), tensor.bytes)?;
+        ensure!(
+            format!("{:x}", Sha256::digest(&bytes)) == tensor.sha256,
+            "circuit activation SHA-256 mismatch"
+        );
+        let values: Vec<_> = bytes
+            .chunks_exact(4)
+            .map(|v| f32::from_le_bytes(v.try_into().expect("four bytes")))
+            .collect();
+        ensure!(
+            values.iter().all(|v| v.is_finite()),
+            "non-finite circuit activation"
+        );
+        activations.insert(tensor.key, values);
+    }
+    let metric = if spec.top_k == 0 {
+        None
+    } else {
+        let [row] = m.model_logits.as_slice() else {
+            anyhow::bail!("expected one circuit logit row");
+        };
+        let mut seen = vec![false; spec.top_k];
+        for s in &row.top {
+            ensure!(
+                seen.get_mut(s.token_id as usize)
+                    .is_some_and(|v| !std::mem::replace(v, true)),
+                "invalid circuit vocabulary logits"
+            );
+        }
+        let logit = |id| {
+            row.top
+                .iter()
+                .find(|s| s.token_id == id)
+                .map(|s| f64::from(s.logit))
+                .context("circuit objective token missing")
+        };
+        Some(logit(targets.0)? - targets.1.map(logit).transpose()?.unwrap_or(0.))
+    };
+    Ok(CircuitTrace {
+        activations,
+        metric,
+    })
+}
+
+/// Read a new local export for W5 before it is published as a trace job.
+pub fn verified_diff_input(dir: &Path, spec: &Capture) -> Result<Value> {
+    let export = verify(dir, spec)?;
+    let (m, seen) = manifest(dir, export.bytes)?;
+    ensure!(
+        seen.manifest_sha256 == export.manifest_sha256,
+        "trace manifest changed"
+    );
+    let slice = Slice {
+        view: View::DiffInput,
+        prompt: 0,
+        layer: None,
+        role: None,
+        start: None,
+        end: None,
+    };
+    match diff::input(dir, m, &slice)? {
+        ReadReply::Ok(value) => Ok(value),
+        _ => bail!("verified trace exceeds the W5 diff input cap"),
+    }
+}
+
+pub fn verify_interventions(dir: &Path, export: &Export, rules: &[Rule]) -> Result<()> {
+    let (m, fingerprint) = manifest(dir, export.bytes)?;
+    ensure!(
+        fingerprint.manifest_sha256 == export.manifest_sha256,
+        "trace manifest changed"
+    );
+    let mut expected = BTreeSet::new();
+    for rule in rules {
+        let expert = match rule.op {
+            Operation::ZeroExpert { expert } => Some(expert),
+            _ => None,
+        };
+        for &position in &rule.positions {
+            expected.insert((
+                Key {
+                    layer: rule.layer,
+                    role: rule.role,
+                    position,
+                },
+                expert,
+            ));
+        }
+    }
+    for applied in m.interventions {
+        ensure!(
+            expected.remove(&(applied.key, applied.expert)),
+            "unexpected trace intervention"
+        );
+    }
+    ensure!(expected.is_empty(), "missing trace intervention");
+    Ok(())
+}
+
+pub fn direction_probe() -> Capture {
+    Capture {
+        layers: BTreeSet::new(),
+        roles: BTreeSet::new(),
+        positions: BTreeSet::from([0]),
+        top_k: 0,
+        byte_cap: HARD_BYTE_CAP,
+        all_logits: false,
+    }
+}
+
+pub fn direction_capture(layers: &[usize], role: Role, position: usize) -> Capture {
+    Capture {
+        layers: layers.iter().copied().collect(),
+        roles: BTreeSet::from([role, Role::LOut]),
+        positions: BTreeSet::from([position]),
+        top_k: 0,
+        byte_cap: HARD_BYTE_CAP,
+        all_logits: false,
+    }
+}
+
+pub fn ablation_logits(position: usize) -> Capture {
+    Capture {
+        layers: BTreeSet::new(),
+        roles: BTreeSet::new(),
+        positions: BTreeSet::from([position]),
+        top_k: 0,
+        byte_cap: crate::ablation_search::EXPORT_CAP,
+        all_logits: true,
+    }
+}
+
+pub fn ablation_rows(
+    dir: &Path,
+    spec: &Capture,
+    verified: &Export,
+    rules: &[crate::weight_source::scratch::ablation::TraceRule],
+) -> Result<(Vec<i32>, Vec<f32>)> {
+    let (m, found) = manifest(dir, spec.byte_cap)?;
+    let expected: BTreeSet<_> = rules
+        .iter()
+        .flat_map(|rule| {
+            rule.positions.iter().map(|&position| Key {
+                layer: rule.layer,
+                role: rule.role,
+                position,
+            })
+        })
+        .collect();
+    ensure!(
+        found.manifest_sha256 == verified.manifest_sha256
+            && m.model["arch"] == "qwen2"
+            && m.interventions.len() == expected.len()
+            && m.interventions
+                .iter()
+                .all(|applied| applied.expert.is_none())
+            && m.interventions
+                .iter()
+                .map(|applied| applied.key)
+                .collect::<BTreeSet<_>>()
+                == expected,
+        "screen trace did not apply exactly the requested rules"
+    );
+    let logits = if spec.all_logits {
+        m.model_logits
+            .into_iter()
+            .next()
+            .context("missing screen logits")?
+            .top
+            .into_iter()
+            .map(|score| score.logit)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok((
+        m.tokens.into_iter().map(|token| token.token_id).collect(),
+        logits,
+    ))
+}
+
+/// Read the directions' rows and residual norms from a verified CPU trace. Keep token IDs in
+/// memory to cross-check the probe and the activation run.
+pub fn direction_rows(
+    dir: &Path,
+    spec: &Capture,
+    verified: &Export,
+    role: Role,
+) -> Result<(Vec<i32>, Vec<crate::behavior_direction::Observation>)> {
+    use crate::behavior_direction::{Observation, residual_norm};
+    let (m, check) = manifest(dir, spec.byte_cap)?;
+    ensure!(
+        check.manifest_sha256 == verified.manifest_sha256
+            && m.model["arch"] == "qwen2"
+            && m.interventions.is_empty()
+            && m.missing.is_empty(),
+        "direction needs complete, unedited Qwen2 trace rows"
+    );
+    let width = m.model["hidden"]
+        .as_u64()
+        .context("missing Qwen2 hidden width")?;
+    let mut tensors: std::collections::BTreeMap<_, _> = m
+        .tensors
+        .into_iter()
+        .map(|t| ((t.key.layer, t.key.role), t))
+        .collect();
+    let mut read = |layer, role| -> Result<Vec<f32>> {
+        let t = tensors
+            .remove(&(layer, role))
+            .context("missing direction tensor")?;
+        ensure!(
+            t.shape == [width] && (1..=16384).contains(&width),
+            "invalid direction tensor shape"
+        );
+        let data = read_file(&dir.join(t.file), t.bytes)?;
+        ensure!(
+            data.len() as u64 == t.bytes && format!("{:x}", Sha256::digest(&data)) == t.sha256,
+            "direction tensor size or SHA-256 mismatch"
+        );
+        Ok(data
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect())
+    };
+    let rows = spec
+        .layers
+        .iter()
+        .map(|&layer| {
+            let activation = read(layer, role)?;
+            if role == Role::LOut {
+                Ok(Observation::residual(activation))
+            } else {
+                Ok(Observation {
+                    activation,
+                    residual_norm: residual_norm(&read(layer, Role::LOut)?),
+                })
+            }
+        })
+        .collect::<Result<_>>()?;
+    Ok((m.tokens.into_iter().map(|t| t.token_id).collect(), rows))
 }
 
 fn seen_row_top(top: &[TopLogit], k: usize) -> bool {
@@ -443,6 +882,8 @@ pub enum View {
     ModelLogits,
     /// Internal: joined, bounded slice used by controller trace diffs.
     DiffInput,
+    /// Internal: validated rows for one routing atlas layer.
+    RoutingInput,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -477,6 +918,13 @@ impl Slice {
             }
             View::Tensor => self.layer.is_some() && self.role.is_some(),
             View::LogitLens | View::DiffInput => self.role.is_none(),
+            View::RoutingInput => {
+                self.layer.is_some()
+                    && self.role.is_none()
+                    && self.start.is_some()
+                    && self.end.is_some()
+                    && end - start <= routing::MAX_ROWS
+            }
             View::ModelLogits => self.layer.is_none() && self.role.is_none(),
         };
         ensure!(valid, "invalid query for trace view");
@@ -515,18 +963,26 @@ pub fn read(root: &Path, slice: &Slice, result: &Value) -> Result<ReadReply> {
         |p: usize| (slice.start.unwrap_or(0)..slice.end.unwrap_or(MAX_POSITIONS)).contains(&p);
     let data = match slice.view {
         View::DiffInput => return diff::input(&dir, m, slice),
+        View::RoutingInput => return routing::input(&dir, m, slice, result, &expected),
         View::Manifest => {
             let mut model = m.model;
             model
                 .as_object_mut()
                 .context("invalid trace model")?
                 .remove("path");
-            json!({"schema_version":1, "prompt":slice.prompt,"model":model,"model_id":result["model_id"],
-                "model_sha256":result["model_sha256"],"lanternfish_commit":COMMIT,
+            let mut summary = json!({"schema_version":1, "prompt":slice.prompt,"model":model,"model_id":result["model_id"],
+                "model_sha256":result["model_sha256"],
                 "bytes":expected.bytes,"manifest_sha256":expected.manifest_sha256,
                 "spec":m.spec,"tokens":m.tokens,"tensor_count":m.tensors.len(),
                 "missing_count":m.missing.len(),"intervention_count":m.interventions.len(),
-                "logit_lens_count":m.logit_lens.len(),"model_logits_count":m.model_logits.len()})
+                "logit_lens_count":m.logit_lens.len(),"model_logits_count":m.model_logits.len()});
+            if result["runtime"] == HGN_RUNTIME {
+                summary["runtime"] = json!(HGN_RUNTIME);
+                summary["runtime_sha256"] = result["runtime_sha256"].clone();
+            } else {
+                summary["lanternfish_commit"] = json!(COMMIT);
+            }
+            summary
         }
         View::ModelLogits | View::LogitLens => {
             let rows = match slice.view {

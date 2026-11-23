@@ -18,6 +18,7 @@ pub(super) struct Plan {
     keep: u16,
     calibration: String,
     held_out: String,
+    routing_evidence: Option<crate::routing_atlas::Evidence>,
 }
 
 #[derive(Deserialize)]
@@ -33,7 +34,7 @@ pub(super) async fn plan(
     Path(id): Path<String>,
     payload: Payload<Plan>,
 ) -> Result<Json<Value>> {
-    let body = read(payload)?;
+    let mut body = read(payload)?;
     if !brewery_worker::is_digest(&body.source_sha256)
         || !(1..=1024).contains(&body.keep)
         || [&body.calibration, &body.held_out]
@@ -48,6 +49,10 @@ pub(super) async fn plan(
     admit(&app, &model.host)?;
     let source = PathBuf::from(&model.path);
     require_source(&app, &model.host, &source)?;
+    let routing_evidence = match body.routing_evidence.take() {
+        Some(spec) => crate::routing_atlas::evidence(&app, spec, &id, &body.source_sha256).await?,
+        None => Value::Null,
+    };
     let slot = app.scratch_slots.clone().try_acquire_owned().map_err(|_| {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -161,6 +166,7 @@ pub(super) async fn plan(
         "plan": exact, "plan_sha256": plan_sha256,
         "planner_sha256": format!("{:x}", Sha256::digest(PLANNER)),
         "expert_usage_sha256": format!("{:x}", Sha256::digest(USAGE)),
+        "routing_evidence": routing_evidence,
         "qualification": "not release-qualified"
     })))
 }

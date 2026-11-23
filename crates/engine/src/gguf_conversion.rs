@@ -1,4 +1,4 @@
-mod inventory;
+pub(crate) mod inventory;
 mod layer_recipe;
 
 use crate::{
@@ -120,7 +120,13 @@ impl Tool {
         Self::pinned(work, VAR, SHA, "rocmfpx-quantize", "ROCmFPX quantizer")
     }
 
-    pub(crate) fn pinned(work: &Path, var: &str, sha: &str, name: &str, label: &str) -> Result<Self> {
+    pub(crate) fn pinned(
+        work: &Path,
+        var: &str,
+        sha: &str,
+        name: &str,
+        label: &str,
+    ) -> Result<Self> {
         let expected = env::var(sha).with_context(|| format!("{sha} is required"))?;
         ensure!(
             expected.len() == 64
@@ -133,9 +139,22 @@ impl Tool {
     }
 
     pub(crate) fn pinned_digest(
-        work: &Path, var: &str, expected: &str, name: &str, label: &str,
+        work: &Path,
+        var: &str,
+        expected: &str,
+        name: &str,
+        label: &str,
     ) -> Result<Self> {
-        let configured = Tool::open(var)?;
+        Self::stage_digest(work, Tool::open(var)?, expected, name, label)
+    }
+
+    pub(crate) fn stage_digest(
+        work: &Path,
+        configured: Self,
+        expected: &str,
+        name: &str,
+        label: &str,
+    ) -> Result<Self> {
         ensure!(configured.sha == expected, "{label} SHA-256 mismatch");
         // Run private verified bytes, not the mutable configured pathname.
         // The tool cannot depend on libraries relative to the configured executable.
@@ -175,6 +194,15 @@ impl Tool {
     }
 
     pub(crate) fn capture(&self, cmd: &mut Command, work: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
+        self.capture_for(cmd, work, Duration::from_secs(12 * 3600))
+    }
+
+    pub(crate) fn capture_for(
+        &self,
+        cmd: &mut Command,
+        work: &Path,
+        timeout: Duration,
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
         let mut out = tempfile::tempfile_in(work)?;
         let mut err = tempfile::tempfile_in(work)?;
         self.stamp.check(&self.path)?;
@@ -188,10 +216,7 @@ impl Tool {
             let sampled = out
                 .metadata()
                 .and_then(|o| err.metadata().map(|e| o.len().saturating_add(e.len())));
-            if sampled.is_err()
-                || sampled? > LOG_LIMIT
-                || started.elapsed() >= Duration::from_secs(12 * 3600)
-            {
+            if sampled.is_err() || sampled? > LOG_LIMIT || started.elapsed() >= timeout {
                 let _ = child.kill();
                 let _ = child.wait();
                 bail!("offline tool exceeded log or time limit");
@@ -228,7 +253,11 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let options: Options =
         serde_json::from_value(job.options.clone()).context("invalid GGUF options")?;
     let scratch_private = job.kind == brewery_worker::scratch_eval::GGUF;
-    let kind = if scratch_private { "convert" } else { &job.kind };
+    let kind = if scratch_private {
+        "convert"
+    } else {
+        &job.kind
+    };
     let namespace = match (
         options.encoder_family.as_deref(),
         options.encoder_revision.as_deref(),
@@ -391,7 +420,15 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             "HF source must be an indexed snapshot directory"
         );
         let exporter = Tool::open("BREWERY_GGUF_HF_EXPORTER")?;
-        let inspect = export(&exporter, work, threads, &source.path, assets, None, scratch_private)?;
+        let inspect = export(
+            &exporter,
+            work,
+            threads,
+            &source.path,
+            assets,
+            None,
+            scratch_private,
+        )?;
         let supported = inspect["export_supported"]
             .as_bool()
             .context("invalid HF GGUF inspection receipt")?;

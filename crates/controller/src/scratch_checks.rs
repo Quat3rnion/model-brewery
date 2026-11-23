@@ -1,10 +1,14 @@
 use super::*;
 use crate::{
     domain::{Envelope, Job, Model},
+    scratch_token_loss,
     web::{read_submission, replay},
 };
 use axum::response::{IntoResponse, Response};
-use brewery_worker::weight_source::{Header, LIMIT as HEADER_LIMIT};
+use brewery_worker::{
+    scratch_eval::{self, BehaviorConfig, BehaviorMetric as Metric, BehaviorReport},
+    weight_source::{Header, LIMIT as HEADER_LIMIT},
+};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -45,6 +49,8 @@ pub(super) struct Bundle {
     smoke: Check,
     behavior: Check,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    behavior_direction: Option<BehaviorReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     program_correctness: Option<Check>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     program_cases: Option<usize>,
@@ -54,9 +60,34 @@ pub(super) struct Bundle {
     measured_report: Option<OfflineReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     measured_job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token_loss: Option<scratch_token_loss::Reference>,
     #[serde(default)]
     job_refs: Vec<JobRef>,
     acknowledged_at_ms: Option<u64>,
+}
+
+impl Bundle {
+    pub(super) fn finding_receipt(&self) -> Option<(&str, Value)> {
+        let report = self.measured_report.as_ref()?;
+        Some((
+            self.measured_job_id.as_deref()?,
+            json!({
+                "check_bundle_id": self.id,
+                "artifact_sha256": self.token_loss.as_ref()?.sha256,
+                "runner_sha256": report.runner_sha256,
+                "fixture_sha256": report.fixture_sha256,
+                "parent_gguf_sha256": report.parent_gguf_sha256,
+                "revision_gguf_sha256": report.revision_gguf_sha256,
+                "revision_sha256": self.revision_sha256,
+                "heldout_sha256": scratch_token_loss::heldout_sha256(),
+            }),
+        ))
+    }
+
+    pub(super) fn token_loss(&self) -> Option<(&str, &scratch_token_loss::Reference)> {
+        Some((&self.id, self.token_loss.as_ref()?))
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -71,7 +102,9 @@ pub(super) enum Check {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Run {
-    sha256: String,
+    pub(super) sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) behavior_direction: Option<BehaviorConfig>,
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
@@ -111,15 +144,8 @@ struct OfflineReport {
     metrics: Vec<Metric>,
     parent_generation: String,
     child_generation: String,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Metric {
-    name: String,
-    parent: f64,
-    child: f64,
-    better: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    behavior_direction: Option<BehaviorReport>,
 }
 
 impl OfflineReport {
@@ -190,6 +216,11 @@ pub(super) async fn run(
     payload: Payload<Run>,
 ) -> Result<Response> {
     let request = read(payload)?;
+    if let Some(config) = &request.behavior_direction {
+        config
+            .validate()
+            .map_err(|e| ApiError::bad(e.to_string()))?;
+    }
     // Keep the existing scratch writer serialization for checks and edits.
     let slot = app.scratch_slots.clone().try_acquire_owned().map_err(|_| {
         ApiError(
@@ -207,7 +238,12 @@ pub(super) async fn run(
     .map_err(ApiError::storage)?
 }
 
-fn check(app: &App, id: String, request: Run, key: Option<&Submission<'_>>) -> Result<Response> {
+pub(super) fn check(
+    app: &App,
+    id: String,
+    request: Run,
+    key: Option<&Submission<'_>>,
+) -> Result<Response> {
     let (row, directory, parent) = {
         let store = app.store.lock().map_err(ApiError::storage)?;
         if let Some(key) = key
@@ -228,6 +264,9 @@ fn check(app: &App, id: String, request: Run, key: Option<&Submission<'_>>) -> R
         admit(app, &row.provenance.worker)?;
         let root = store.scratch_root();
         if row.is_compiled_program() {
+            if request.behavior_direction.is_some() {
+                return Err(ApiError::bad("behavior checks require a language model"));
+            }
             let directory = root.join(&id);
             drop(store);
             return program::check(app, row, &directory, key);
@@ -266,9 +305,13 @@ fn check(app: &App, id: String, request: Run, key: Option<&Submission<'_>>) -> R
         return Err(conflict("checks are already running for this revision"));
     }
     if let (Ok(()), Some(parent)) = (&integrity, parent)
-        && let Some((job, envelope)) = plan(&store, &row, parent)?
+        && let Some((job, envelope)) =
+            plan(&store, &row, parent, request.behavior_direction.as_ref())?
     {
         return jobs::enqueue(app, &mut store, job, envelope, key, StatusCode::ACCEPTED);
+    }
+    if request.behavior_direction.is_some() {
+        return Err(conflict(integrity.err().as_deref().unwrap_or(NO_GGUF)));
     }
     let failure = integrity.err();
     row.check_bundle = Some(bundle(&row, failure, None));
@@ -279,7 +322,12 @@ fn check(app: &App, id: String, request: Run, key: Option<&Submission<'_>>) -> R
     Ok((StatusCode::OK, Json(row)).into_response())
 }
 
-fn plan(store: &Store, row: &Revision, parent: Model) -> Result<Option<(Job, Envelope)>> {
+fn plan(
+    store: &Store,
+    row: &Revision,
+    parent: Model,
+    behavior: Option<&BehaviorConfig>,
+) -> Result<Option<(Job, Envelope)>> {
     if row.gguf.is_none() {
         return Ok(None);
     }
@@ -288,11 +336,29 @@ fn plan(store: &Store, row: &Revision, parent: Model) -> Result<Option<(Job, Env
         // A byte-identical root copy already has its parent's exact weights.
         (child_gguf.clone(), child_pin.clone())
     } else {
-        let Some(parent) = store
+        let scratch_parent = store
             .scratch(&parent.id)
             .map_err(ApiError::storage)?
-            .filter(|p| p.gguf.is_some() && p.sha256 == row.provenance.parent_sha256)
-        else {
+            .filter(|p| p.gguf.is_some() && p.sha256 == row.provenance.parent_sha256);
+        let library_copy = if scratch_parent.is_none() && row.provenance.heretic.is_some() {
+            // A Library source's GGUF is acceptable only from a verified
+            // byte-identical W3 copy converted through the private GGUF job.
+            store
+                .scratches()
+                .map_err(ApiError::storage)?
+                .into_iter()
+                .find(|p| {
+                    p.state != RevisionState::Discarded
+                        && p.gguf.is_some()
+                        && p.provenance.method == "copy"
+                        && p.provenance.parent_id == parent.id
+                        && p.provenance.worker == parent.host
+                        && p.sha256 == row.provenance.parent_sha256
+                })
+        } else {
+            None
+        };
+        let Some(parent) = scratch_parent.or(library_copy) else {
             return Ok(None);
         };
         jobs::trace_input(store, &parent.id)?
@@ -307,7 +373,7 @@ fn plan(store: &Store, row: &Revision, parent: Model) -> Result<Option<(Job, Env
     let (job, mut envelope) = jobs::private_job(
         jobs::CHECK,
         vec![parent_gguf, child_gguf, parent, child],
-        json!({}),
+        behavior.map_or_else(|| json!({}), |config| json!({"behavior_direction":config})),
     );
     envelope.scratch_pins = pins;
     Ok(Some((job, envelope)))
@@ -320,7 +386,13 @@ pub(super) fn finish(
     result: &Value,
     directory: &FsPath,
 ) -> std::result::Result<(Revision, Value), crate::Error> {
-    let measured: OfflineReport = serde_json::from_value(result.clone())?;
+    let mut result = result.clone();
+    let tokens = result
+        .as_object_mut()
+        .and_then(|report| report.remove("token_loss"))
+        .map(serde_json::from_value::<scratch_token_loss::Sentences>)
+        .transpose()?;
+    let mut measured: OfflineReport = serde_json::from_value(result)?;
     measured
         .validate(&row)
         .map_err(|_| "invalid scratch behavior protocol or measurements")?;
@@ -334,7 +406,21 @@ pub(super) fn finish(
             return Err("worker behavior result does not match the pinned inputs".into());
         }
     }
-    row.check_bundle = Some(bundle(&row, None, Some((job.id.clone(), measured))));
+    let config = scratch_eval::check_options(&json!(envelope.options))?;
+    let behavior = measured.behavior_direction.take();
+    scratch_eval::validate_behavior(behavior.as_ref(), config.as_ref())?;
+    let perplexity = measured.metrics.iter().find(|m| m.name == "perplexity");
+    let (parent, child) = perplexity
+        .map(|m| (m.parent, m.child))
+        .ok_or("missing perplexity result")?;
+    let mut bundle = bundle(&row, None, Some((job.id.clone(), measured)));
+    bundle.behavior_direction = behavior;
+    if let Some(tokens) = tokens {
+        bundle.token_loss = Some(scratch_token_loss::store(
+            directory, &tokens, parent, child,
+        )?);
+    }
+    row.check_bundle = Some(bundle);
     write_behavior(&row, directory)?;
     let safe_result = json!({"scratch_id":row.id, "check_bundle":row.check_bundle});
     Ok((row, safe_result))
@@ -370,11 +456,13 @@ fn bundle(
         integrity: failure.map_or(Check::Passed, |reason| Check::Failed { reason }),
         smoke: measured_status(),
         behavior: measured_status(),
+        behavior_direction: None,
         program_correctness: None,
         program_cases: None,
         offline_report: None,
         measured_report,
         measured_job_id,
+        token_loss: None,
         job_refs: Vec::new(),
         acknowledged_at_ms: None,
     }
@@ -408,7 +496,7 @@ fn write_behavior(row: &Revision, directory: &FsPath) -> std::result::Result<(),
         schema_version: u8,
         parent_id: &'a str,
         child_id: &'a str,
-        metrics: &'a [Metric],
+        metrics: Vec<&'a Metric>,
     }
     let behavior = Behavior {
         schema_version: 1,
@@ -416,9 +504,20 @@ fn write_behavior(row: &Revision, directory: &FsPath) -> std::result::Result<(),
         child_id: &row.id,
         metrics: row
             .check_bundle
-            .as_ref()
-            .and_then(|b| b.measured_report.as_ref())
-            .map_or(&[], |report| &report.metrics),
+            .iter()
+            .flat_map(|bundle| {
+                bundle
+                    .measured_report
+                    .iter()
+                    .flat_map(|report| &report.metrics)
+                    .chain(
+                        bundle
+                            .behavior_direction
+                            .iter()
+                            .flat_map(|report| &report.metrics),
+                    )
+            })
+            .collect(),
     };
     // Metrics have fixed keys and bounded numbers. Keep the projection below the W5 read limit.
     if serde_json::to_vec(&behavior)?.len() >= 256 * 1024 {

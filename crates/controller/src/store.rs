@@ -14,6 +14,8 @@ use std::{
 };
 
 pub(crate) mod agent;
+mod crosscoder;
+mod findings;
 mod interventions;
 mod sae;
 
@@ -62,11 +64,12 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(state, seq);
              DROP INDEX IF EXISTS one_active_job;
-              DROP INDEX IF EXISTS one_job_per_active_host;
+             DROP INDEX IF EXISTS one_job_per_active_host;
+             DROP INDEX IF EXISTS one_job_per_active_host_slot;
               CREATE UNIQUE INDEX IF NOT EXISTS one_job_per_active_host_slot
                 ON jobs(json_extract(body, '$.host'),
                         coalesce(json_extract(body, '$.host_slot'), 0))
-                WHERE state = 'running';
+                WHERE state = 'running' AND json_extract(body, '$.kind') <> 'search_ablation';
              CREATE TABLE IF NOT EXISTS events(
                seq INTEGER PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), body TEXT NOT NULL
              );
@@ -76,8 +79,10 @@ impl Store {
         idempotency::install(&conn)?;
         interventions::install(&conn)?;
         sae::install(&conn)?;
+        crosscoder::install(&conn)?;
         crate::dedupe::install(&conn)?;
         agent::install(&conn)?;
+        findings::install(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS profile_revisions(revision TEXT PRIMARY KEY, body TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS host_evaluation_profiles(
@@ -148,10 +153,12 @@ impl Store {
     pub fn scratch_has_jobs(&self, id: &str, kind: Option<&str>) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM jobs j WHERE j.state IN ('queued','running')
-             AND json_extract(j.body,'$.scratch_job') = 1
+             AND (json_extract(j.body,'$.scratch_job') = 1
+                  OR json_extract(j.body,'$.kind') = ?3
+                  OR json_extract(j.body,'$.kind') = 'search_ablation')
              AND (?2 IS NULL OR json_extract(j.body,'$.kind') = ?2)
              AND EXISTS(SELECT 1 FROM json_each(j.body,'$.input_ids') WHERE value = ?1))",
-            params![id, kind],
+            params![id, kind, brewery_worker::weight_spectra::JOB],
             |row| row.get(0),
         )?)
     }
@@ -977,6 +984,7 @@ impl Store {
         // One transaction: no reader can see a terminal success without its immutable result.
         let mut scratch = None;
         let mut scratch_guard = None;
+        let mut heretic_output = None;
         if job.scratch_job && job.state == State::Succeeded {
             let verified = if job.cancel_requested {
                 job.state = State::Cancelled;
@@ -986,6 +994,16 @@ impl Store {
                 crate::scratch::locate::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
                     .map(|(revision, safe_result, guard)| {
                         scratch_guard = Some(guard);
+                        Some((revision, safe_result))
+                    })
+            } else if brewery_worker::heretic::job(&job.kind) {
+                crate::scratch::heretic::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
+                    .map(|(revision, safe_result, guard)| {
+                        scratch_guard = Some(guard);
+                        heretic_output = result
+                            .as_ref()
+                            .and_then(|r| r["run_directory"].as_str())
+                            .map(str::to_owned);
                         Some((revision, safe_result))
                     })
             } else {
@@ -1010,6 +1028,58 @@ impl Store {
         }
         if job.scratch_job && matches!(job.state, State::Failed | State::Cancelled) {
             crate::scratch::jobs::clean_failed_conversion(self, job);
+        }
+        if job.state == State::Succeeded && job.kind == brewery_worker::damage::JOB {
+            use brewery_worker::damage;
+            let envelope = self.envelope(&job.id)?;
+            let check = (|| -> Result<()> {
+                let request = damage::Request::parse(&Value::Object(envelope.options))?;
+                let [a, b] = envelope.inputs.as_slice() else {
+                    return Err("missing damage map inputs".into());
+                };
+                Ok(damage::check_result(
+                    &request,
+                    result.as_ref().unwrap_or(&Value::Null),
+                    [&a.id, &b.id],
+                )?)
+            })();
+            if let Err(error) = check {
+                eprintln!(
+                    "Rejected quantization damage artifact for {}: {error}",
+                    job.id
+                );
+                job.state = State::Failed;
+                job.progress = "Quantization damage artifact was not accepted".into();
+                job.error = Some("Invalid quantization damage artifact".into());
+                job.has_result = false;
+                result = None;
+            }
+        }
+        if job.state == State::Succeeded && job.kind == brewery_worker::sensitivity::JOB {
+            let envelope = self.envelope(&job.id)?;
+            match crate::sensitivity::check(job, &envelope, result.take().unwrap_or(Value::Null)) {
+                Ok(receipt) => result = Some(serde_json::to_value(receipt)?),
+                Err(error) => {
+                    eprintln!("Rejected sensitivity artifact for {}: {error}", job.id);
+                    job.state = State::Failed;
+                    job.progress = "Sensitivity artifact was not accepted".into();
+                    job.error = Some("Invalid sensitivity artifact".into());
+                    job.has_result = false;
+                }
+            }
+        }
+        if job.state == State::Succeeded && job.kind == brewery_worker::circuit::JOB {
+            let envelope = self.envelope(&job.id)?;
+            match crate::circuit::check(&envelope, result.take().unwrap_or(Value::Null)) {
+                Ok(receipt) => result = Some(serde_json::to_value(receipt)?),
+                Err(error) => {
+                    eprintln!("Rejected circuit artifact for {}: {error}", job.id);
+                    job.state = State::Failed;
+                    job.progress = "Circuit artifact was not accepted".into();
+                    job.error = Some("Invalid circuit artifact".into());
+                    job.has_result = false;
+                }
+            }
         }
         if job.state == State::Succeeded && job.kind == brewery_worker::exl3_layer::JOB {
             let receipt = result.as_ref().unwrap_or(&Value::Null);
@@ -1155,6 +1225,9 @@ impl Store {
         tx.commit()?;
         if let Some(guard) = scratch_guard {
             guard.keep();
+        }
+        if let Some(path) = heretic_output {
+            let _ = std::fs::remove_dir_all(path);
         }
         Ok(())
     }

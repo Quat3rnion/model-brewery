@@ -16,17 +16,50 @@ const WAIT_MS_MAX: u64 = 5000;
 // Never select a route from a client-supplied URL, method or operation ID.
 const ROUTES: &[(&str, &str, &str)] = &[
     ("list_models", "get", "/api/models"),
+    ("lineage", "get", "/api/models/{id}/lineage"),
     ("register_model", "post", "/api/models"),
     ("list_scratch", "get", "/api/scratch"),
     ("get_scratch", "get", "/api/scratch/{id}"),
+    ("run_heretic", "post", "/api/scratch/heretic"),
+    (
+        "reproduce_heretic",
+        "post",
+        "/api/scratch/heretic_reproduce",
+    ),
     ("compile_program", "post", "/api/scratch/compile_program"),
     ("run_program", "post", "/api/scratch/{id}/run_program"),
+    ("interp_benchmark", "get", "/api/interp/benchmark"),
+    ("create_finding", "post", "/api/findings"),
+    ("list_findings", "get", "/api/findings"),
+    ("get_finding", "get", "/api/findings/{id}"),
+    ("add_evidence", "post", "/api/findings/{id}/evidence"),
+    ("replay_finding", "post", "/api/findings/{id}/replay"),
     ("start_trace", "post", "/api/jobs"),
+    ("compute_direction", "post", "/api/jobs"),
+    (
+        "get_direction",
+        "get",
+        "/api/directions/{id}/versions/{version}",
+    ),
     ("steer_feature", "post", "/api/jobs"),
+    ("tensor_sensitivity", "post", "/api/jobs"),
+    ("find_circuit", "post", "/api/jobs"),
+    ("quantization_damage_map", "post", "/api/jobs"),
+    (
+        "read_quantization_damage",
+        "get",
+        "/api/jobs/{id}/quantization-damage",
+    ),
     ("read_feature_trace", "get", "/api/jobs/{id}/trace/features"),
+    ("routing_atlas", "get", "/api/jobs/{id}/trace/routing-atlas"),
     ("get_job", "get", "/api/jobs/{id}"),
     ("list_interventions", "get", "/api/interventions"),
     ("create_intervention", "post", "/api/interventions"),
+    (
+        "create_direction_intervention",
+        "post",
+        "/api/interventions",
+    ),
     (
         "new_intervention_version",
         "post",
@@ -44,6 +77,16 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ),
     ("create_scratch", "post", "/api/scratch"),
     ("apply_edit", "post", "/api/scratch/{id}/edits"),
+    (
+        "ablate_direction",
+        "post",
+        "/api/scratch/{id}/ablate_direction",
+    ),
+    (
+        "search_ablation",
+        "post",
+        "/api/scratch/{id}/search_ablation",
+    ),
     ("merge_models", "post", "/api/scratch/merge"),
     ("rome_edit", "post", "/api/scratch/{id}/rome"),
     ("memit_edit", "post", "/api/scratch/{id}/memit"),
@@ -58,6 +101,9 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("diff_tensors", "get", "/api/diff/tensors"),
     ("diff_traces", "get", "/api/diff/traces"),
     ("diff_behavior", "get", "/api/diff/behavior"),
+    ("read_token_loss_diff", "get", "/api/diff/token-loss"),
+    ("weight_spectra", "post", "/api/weight-spectra"),
+    ("crosscoder_diff", "get", "/api/crosscoders/{id}"),
     (
         "request_publish",
         "post",
@@ -73,6 +119,7 @@ const TRACE_VIEWS: &[(&str, &str)] = &[
 ];
 
 struct Route {
+    fixed_kind: Option<&'static str>,
     path: &'static str,
     write: bool,
     path_params: Vec<String>,
@@ -94,31 +141,80 @@ impl Server {
         let routes: BTreeMap<_, _> = ROUTES
             .iter()
             .map(|&(name, method, path)| {
-                (
-                    name,
-                    Route::new(
-                        &contract,
-                        method,
-                        path,
-                        matches!(name, "start_trace" | "steer_feature"),
-                    ),
-                )
+                let mut route = Route::new(
+                    &contract,
+                    method,
+                    path,
+                    match name {
+                        "start_trace" | "steer_feature" => Some("trace"),
+                        "tensor_sensitivity" => Some("sensitivity"),
+                        "find_circuit" => Some("circuit"),
+                        "quantization_damage_map" => Some("quantization_damage"),
+                        "compute_direction" => Some(brewery_worker::behavior_direction::JOB),
+                        _ => None,
+                    },
+                );
+                if name == "create_direction_intervention" {
+                    route.schema["required"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!("direction_rules"));
+                    route.schema["properties"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("interventions");
+                    route.schema.as_object_mut().unwrap().remove("anyOf");
+                }
+                (name, route)
             })
             .collect();
         let trace_views: BTreeMap<_, _> = TRACE_VIEWS
             .iter()
-            .map(|&(view, path)| (view, Route::new(&contract, "get", path, false)))
+            .map(|&(view, path)| (view, Route::new(&contract, "get", path, None)))
             .collect();
         let mut tools = Vec::new();
         for (&name, route) in &routes {
             let mut schema = route.schema.clone();
             let description = match name {
                 "start_trace" => {
-                    "Queue a CPU trace. Enter one Library GGUF ID or one scratch revision ID with private GGUF in input_ids. Poll its ID with get_job."
+                    "Queue a CPU trace. Enter one Library GGUF or Qwen3.8 Flash Next v2 HGN ID, or one scratch revision ID with private GGUF in input_ids. HGN is limited to 512 tokens and does not support interventions. Poll its ID with get_job."
                 }
                 "steer_feature" => {
                     schema["properties"]["options"]["required"] = json!(["feature_steering"]);
                     "Queue a CPU trace with one SAE decoder direction. Set options.feature_steering. Poll its ID with get_job."
+                }
+                "tensor_sensitivity" => {
+                    "Queue empirical Fisher sensitivity on the pinned W4 held-out corpus for one GGUF or private scratch GGUF. Select layers or exact tensor names. Poll with get_job. Results are not release-qualified."
+                }
+                "find_circuit" => {
+                    "Queue a CPU sweep of activation sites for one pinned GGUF (Library or private scratch) and two equal-length prompts. Measure the top sites with independent activation patches. Poll with get_job. Cite the saved artifact at /api/jobs/{id}/circuit."
+                }
+                "quantization_damage_map" => {
+                    "Compare pinned Library BF16 and quantized GGUFs on the same worker. Choose target_logit for logit drift or corpus_nll for mean next-token loss on all W4 held-out lines. Read the damage map after the job finishes. The job does not apply its recipe proposal."
+                }
+                "compute_direction" => {
+                    "Queue CPU behavior directions for one pinned Library GGUF and an approved contrast set. Poll with get_job. Read version 2 with get_direction."
+                }
+                "get_direction" => {
+                    "Read an immutable direction artifact. Version 2 reports held-out Cohen's d and mean residual norm. Version 1 is only for older jobs."
+                }
+                "create_direction_intervention" => {
+                    "Save trace rules from a verified direction version. Project out its activation component or subtract a scaled unit vector. Pass the saved ID and version to start_trace."
+                }
+                "ablate_direction" => {
+                    "Apply one fitted direction to a private scratch child. Use the exact parent revision and a version 2 direction. Convert the child with convert_scratch_gguf and score it with run_checks."
+                }
+                "search_ablation" => {
+                    "Fit the direction on the exact private parent GGUF before searching. Use disjoint confirmation pins in behavior_direction.prompt_sets. Read get_job for the fitted and matched random screen results, then get_checks for the selected children."
+                }
+                "run_heretic" => {
+                    "Queue an offline Heretic GPU job on the original Library SafeTensors parent, not its scratch copy. Read get_job for scratch_id and get_scratch for the journal. Convert the byte-identical baseline and imported child with the same assets, then call run_checks."
+                }
+                "reproduce_heretic" => {
+                    "Import a verified community Heretic v4 manifest using a matching pinned Library SafeTensors download. A Brewery journal is not a v4 manifest. Read get_job for the scratch child and use run_checks after conversion."
+                }
+                "run_checks" => {
+                    "Check the exact scratch child. Convert the parent and child with identical assets for measured checks. To score slop, sycophancy, length and KL, pass behavior_direction.prompt_sets with the verified holdout digests; add benign_refusal only for over-refusal. Poll get_job if queued and read get_checks."
                 }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({
@@ -171,6 +267,15 @@ impl Server {
     }
 
     pub(crate) async fn call(&self, params: &Value) -> Result<Value, &'static str> {
+        self.call_as(params, crate::findings::Caller::ExternalMcp)
+            .await
+    }
+
+    pub(crate) async fn call_as(
+        &self,
+        params: &Value,
+        caller: crate::findings::Caller,
+    ) -> Result<Value, &'static str> {
         let name = params["name"].as_str().ok_or("tool name is required")?;
         let mut args = match params.get("arguments") {
             Some(value) => value
@@ -203,12 +308,26 @@ impl Server {
         {
             return Err("steer_feature requires options.feature_steering");
         }
-        let (path, key, allow_duplicate, body) =
-            route.request(args, matches!(name, "start_trace" | "steer_feature"))?;
+        if name == "create_direction_intervention"
+            && !args
+                .get("direction_rules")
+                .and_then(Value::as_array)
+                .is_some_and(|rules| !rules.is_empty())
+        {
+            return Err("create_direction_intervention requires nonempty direction_rules");
+        }
+        let (path, key, allow_duplicate, body) = route.request(args)?;
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
         let result = loop {
             let result = match self
-                .send(route, &path, key.as_deref(), allow_duplicate, body.clone())
+                .send(
+                    route,
+                    &path,
+                    key.as_deref(),
+                    allow_duplicate,
+                    body.clone(),
+                    caller.clone(),
+                )
                 .await
             {
                 Ok(result) => result,
@@ -226,6 +345,7 @@ impl Server {
             "list_models" => json!({"models":result}),
             "list_scratch" => json!({"revisions":result}),
             "list_interventions" => json!({"interventions":result}),
+            "list_findings" => json!({"findings":result}),
             _ => result,
         };
         Ok(content(data, false))
@@ -238,6 +358,7 @@ impl Server {
         key: Option<&str>,
         allow_duplicate: bool,
         body: Vec<u8>,
+        caller: crate::findings::Caller,
     ) -> Result<Value, Value> {
         let mut request = Request::builder()
             .method(if route.write {
@@ -245,7 +366,8 @@ impl Server {
             } else {
                 Method::GET
             })
-            .uri(path);
+            .uri(path)
+            .extension(caller);
         if route.write {
             request = request.header(header::CONTENT_TYPE, "application/json");
         }
@@ -289,15 +411,20 @@ impl Server {
 }
 
 impl Route {
-    fn new(contract: &Value, method: &str, path: &'static str, trace: bool) -> Self {
+    fn new(
+        contract: &Value,
+        method: &str,
+        path: &'static str,
+        fixed_kind: Option<&'static str>,
+    ) -> Self {
         let operation = &contract["paths"][path][method];
         let description = operation["summary"]
             .as_str()
             .expect("tool source operation")
             .into();
         let write = method == "post";
-        let mut schema = if trace {
-            trace_schema(contract)
+        let mut schema = if let Some(kind) = fixed_kind {
+            fixed_job_schema(contract, kind)
         } else if write {
             let body = resolve(contract, &operation["requestBody"]);
             resolve(contract, &body["content"]["application/json"]["schema"])
@@ -362,6 +489,7 @@ impl Route {
         schema["required"] = json!(required);
         schema["additionalProperties"] = json!(false);
         Self {
+            fixed_kind,
             write,
             path: path.strip_prefix("/api").unwrap(),
             path_params,
@@ -374,7 +502,6 @@ impl Route {
     fn request(
         &self,
         mut args: Map<String, Value>,
-        trace: bool,
     ) -> Result<(String, Option<String>, bool, Vec<u8>), &'static str> {
         if !args
             .keys()
@@ -407,6 +534,11 @@ impl Route {
         for name in &self.path_params {
             let value = args.remove(name).ok_or("missing path argument")?;
             let value = match name.as_str() {
+                "id" if self.schema["properties"][name]["format"] == "sha256" => value
+                    .as_str()
+                    .filter(|id| brewery_worker::is_digest(id))
+                    .ok_or("id must be a SHA-256 digest")?
+                    .to_owned(),
                 "id" => {
                     let id = value.as_str().ok_or("id must be a controller UUID")?;
                     uuid::Uuid::try_parse(id)
@@ -451,8 +583,8 @@ impl Route {
             }
         }
         let body = if self.write {
-            if trace {
-                args.insert("kind".into(), json!("trace"));
+            if let Some(kind) = self.fixed_kind {
+                args.insert("kind".into(), json!(kind));
             }
             serde_json::to_vec(&args).expect("serialize tool arguments")
         } else {
@@ -462,20 +594,33 @@ impl Route {
     }
 }
 
-fn trace_schema(contract: &Value) -> Value {
+fn fixed_job_schema(contract: &Value, kind: &str) -> Value {
     let base = &contract["components"]["schemas"];
-    let trace = &base["TraceJob"];
+    let job = &base[match kind {
+        "trace" => "TraceJob",
+        brewery_worker::behavior_direction::JOB => "BehaviorDirectionJob",
+        "sensitivity" => "SensitivityJob",
+        "circuit" => "CircuitJob",
+        "quantization_damage" => "QuantizationDamageJob",
+        _ => unreachable!("unmapped fixed job kind"),
+    }];
     let mut schema = base["JobRequestFields"].clone();
-    schema["required"] = trace["required"].clone();
-    schema["description"] = trace["description"].clone();
-    schema["oneOf"] = trace["oneOf"].clone();
+    schema["required"] = job["required"].clone();
+    schema["description"] = job["description"].clone();
+    if let Some(variants) = job.get("oneOf") {
+        schema["oneOf"] = variants.clone();
+    }
     let props = schema["properties"].as_object_mut().unwrap();
     props.remove("kind");
+    if kind != "trace" {
+        props.remove("prompt");
+        props.remove("prompt_id");
+    }
     props.insert(
         "host".into(),
         base["DefaultInputHost"]["properties"]["host"].clone(),
     );
-    for (name, rules) in object(&trace["properties"]) {
+    for (name, rules) in object(&job["properties"]) {
         if name != "kind" {
             match props.get_mut(name) {
                 Some(generic) => object_mut(generic).extend(object(rules).clone()),
@@ -486,7 +631,7 @@ fn trace_schema(contract: &Value) -> Value {
         }
     }
     // Replace the generic options schema, not a composite $ref with siblings.
-    props.insert("options".into(), trace["properties"]["options"].clone());
+    props.insert("options".into(), job["properties"]["options"].clone());
     resolve(contract, &schema)
 }
 

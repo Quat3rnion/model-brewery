@@ -34,6 +34,20 @@
         }
       }
     },
+    "/api/interp/benchmark": {
+      "get": {
+        "operationId": "getInterpBenchmark",
+        "summary": "Read the compiled-program interpretability benchmark",
+        "description": "Read the saved CPU scores against compiler ground truth. This operation does not run a model or train features.",
+        "responses": {
+          "200": {
+            "description": "Versioned CPU benchmark report, not release-qualified.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/InterpBenchmark"}}}
+          },
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
     "/api/state": {
       "get": {
         "operationId": "getState",
@@ -53,6 +67,57 @@
           "403": {"$ref": "#/components/responses/Forbidden"},
           "500": {"$ref": "#/components/responses/StorageError"}
         }
+      }
+    },
+    "/api/findings": {
+      "get": {
+        "operationId": "listFindings",
+        "summary": "List the 100 newest finding versions",
+        "responses": {"200":{"description":"Finding version summaries","content":{"application/json":{"schema":{"type":"array","items":{"$ref":"#/components/schemas/FindingSummary"}}}}}}
+      },
+      "post": {
+        "operationId": "createFinding",
+        "summary": "Record a hypothesis before running experiments",
+        "parameters": [{"$ref":"#/components/parameters/FindingKey"}],
+        "requestBody": {"required":true,"content":{"application/json":{"schema":{
+          "type":"object","additionalProperties":false,"required":["hypothesis","model_id","model_sha256"],
+          "properties":{"hypothesis":{"type":"string","minLength":1,"maxLength":4096},"model_id":{"type":"string","format":"uuid"},"model_sha256":{"$ref":"#/components/schemas/ScratchHash"},"client_id":{"$ref":"#/components/schemas/FindingClient"}}
+        }}}},
+        "responses": {"200":{"$ref":"#/components/responses/FindingVersion"},"201":{"$ref":"#/components/responses/FindingVersion"},"400":{"$ref":"#/components/responses/BadRequest"},"404":{"$ref":"#/components/responses/NotFound"},"409":{"$ref":"#/components/responses/ScratchConflict"}}
+      }
+    },
+    "/api/findings/{id}": {
+      "get": {
+        "operationId": "getFinding",
+        "summary": "Read one finding version and its experiment results",
+        "parameters": [{"$ref":"#/components/parameters/ResourceId"}],
+        "responses": {"200":{"$ref":"#/components/responses/FindingVersion"},"404":{"$ref":"#/components/responses/NotFound"}}
+      }
+    },
+    "/api/findings/{id}/evidence": {
+      "post": {
+        "operationId": "addFindingEvidence",
+        "summary": "Record verified evidence and/or an agent verdict in a new finding version",
+        "description": "Use the newest returned version ID for the next update. Supply a completed circuit, trace or sensitivity job, a token-loss report, or an imported crosscoder. Each key number comes from a distinct numeric JSON Pointer, such as /clean_metric or /total_logprob_gain.",
+        "parameters": [{"$ref":"#/components/parameters/ResourceId"},{"$ref":"#/components/parameters/FindingKey"}],
+        "requestBody": {"required":true,"content":{"application/json":{"schema":{
+          "type":"object","additionalProperties":false,
+          "properties":{"evidence":{"$ref":"#/components/schemas/FindingEvidence"},"verdict":{"$ref":"#/components/schemas/FindingVerdict"},"client_id":{"$ref":"#/components/schemas/FindingClient"}}
+        }}}},
+        "responses": {"200":{"$ref":"#/components/responses/FindingVersion"},"201":{"$ref":"#/components/responses/FindingVersion"},"400":{"$ref":"#/components/responses/BadRequest"},"404":{"$ref":"#/components/responses/NotFound"},"409":{"$ref":"#/components/responses/ScratchConflict"}}
+      }
+    },
+    "/api/findings/{id}/replay": {
+      "post": {
+        "operationId": "replayFinding",
+        "summary": "Rerun a finding on a different pinned revision and compare the recorded paths",
+        "description": "Poll getFinding with the returned version ID. The source version does not change. A scratch target must have a private GGUF. Token-loss replay repeats a direct edit or a dense prune that does not depend on a calibration trace, conversion with the same assets, and measured checks. The controller cannot replay imported crosscoders or traces with model-bound dependencies.",
+        "parameters": [{"$ref":"#/components/parameters/ResourceId"},{"$ref":"#/components/parameters/FindingKey"}],
+        "requestBody": {"required":true,"content":{"application/json":{"schema":{
+          "type":"object","additionalProperties":false,"required":["model_id","model_sha256"],
+          "properties":{"model_id":{"type":"string","format":"uuid"},"model_sha256":{"$ref":"#/components/schemas/ScratchHash"},"client_id":{"$ref":"#/components/schemas/FindingClient"}}
+        }}}},
+        "responses": {"200":{"$ref":"#/components/responses/FindingVersion"},"202":{"$ref":"#/components/responses/FindingVersion"},"400":{"$ref":"#/components/responses/BadRequest"},"404":{"$ref":"#/components/responses/NotFound"},"409":{"$ref":"#/components/responses/ScratchConflict"},"503":{"$ref":"#/components/responses/ScratchBusy"}}
       }
     },
     "/api/events": {
@@ -254,6 +319,67 @@
         }
       }
     },
+    "/api/models/{id}/lineage": {
+      "get": {
+        "operationId": "readLineage",
+        "summary": "Read likely Library model lineage from delta fingerprints. Select up to three local candidate IDs. Does not change records.",
+        "description": "Uses matching names, shapes and floating-point dtypes. Without explicit candidates, checks up to three other eligible local entries. A merge fit needs a base and two independent parent directions. Results are not release-qualified.",
+        "parameters": [
+          {"$ref": "#/components/parameters/ResourceId"},
+          {"in":"query","name":"candidate_1","description":"First candidate Library model ID.","schema":{"type":"string","format":"uuid"}},
+          {"in":"query","name":"candidate_2","description":"Second candidate Library model ID.","schema":{"type":"string","format":"uuid"}},
+          {"in":"query","name":"candidate_3","description":"Third candidate Library model ID.","schema":{"type":"string","format":"uuid"}}
+        ],
+        "responses": {
+          "200": {
+            "description": "Fingerprint and candidate evidence; most_likely is null when no unique match is found.",
+            "content": {"application/json": {"schema": {
+              "type":"object","required":["schema_version","qualification","target","most_likely","candidates"],
+              "properties":{
+                "schema_version":{"const":1},"qualification":{"const":"not release-qualified"},
+                "target":{"type":"object","required":["id","sha256","format"]},
+                "most_likely":{"type":["object","null"],"required":["base_id","kind","confidence"],"properties":{
+                  "base_id":{"$ref":"#/components/schemas/Id"},
+                  "kind":{"enum":["merge","pruning","rank_one_edit","low_rank_edit","sparse_edit","fine_tune"]},
+                  "confidence":{"type":"number","minimum":0,"maximum":1}
+                }},
+                "candidates":{"type":"array","maxItems":3,"items":{"type":"object","required":["id","status"],"properties":{
+                  "id":{"$ref":"#/components/schemas/Id"},
+                  "status":{"enum":["related","no_match","identical_weights","incompatible_inventory","unreadable_checkpoint"]},
+                  "checkpoint":{"type":"object"},"kind":{"type":["string","null"]},
+                  "confidence":{"type":"number"},"evidence":{"type":"object"}
+                }}}
+              }
+            }}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"description":"A Library source is not approved for local reads."},
+          "422": {"description":"The target cannot be analyzed or the read exceeds its limits."},
+          "429": {"description":"A lineage read is already in progress."},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/weight-spectra": {
+      "post": {
+        "operationId": "queueWeightSpectra",
+        "summary": "Queue spectral analysis of SafeTensors or supported GGUF weights",
+        "description": "Use an approved local Library ID or a scratch ID. A scratch input defaults to its parent for comparison. Use an explicit comparison ID for another revision or quantization level on the same host. Results are not release-qualified. Poll get_job with the returned ID.",
+        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WeightSpectraRequest"}}}},
+        "responses": {
+          "200": {"description": "The same submission was accepted before.", "content": {"application/json": {"schema": {"type":"object","required":["id"],"properties":{"id":{"$ref":"#/components/schemas/Id"}}}}}},
+          "202": {"description": "Spectral job queued.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"description": "The source is not approved, the local editor is unavailable, or the idempotency key conflicts.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
     "/api/diff/tensors": {
       "get": {
         "operationId": "diffTensors",
@@ -304,6 +430,29 @@
         "parameters": [{"$ref": "#/components/parameters/DiffA"}, {"$ref": "#/components/parameters/DiffB"}],
         "responses": {
           "200": {"description": "Behavior diff.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BehaviorDiffReport"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/DiffNotFound"},
+          "413": {"$ref": "#/components/responses/DiffTooLarge"},
+          "422": {"$ref": "#/components/responses/DiffInvalid"},
+          "429": {"$ref": "#/components/responses/DiffBusy"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/diff/token-loss": {
+      "get": {
+        "operationId": "diffTokenLoss",
+        "summary": "Read the heldout token loss diff for a scratch revision",
+        "description": "Reads the SHA-256 checked token scores in the latest check bundle for B. A must be its immediate parent. Sentences are ranked by absolute log-probability gain. The default slice shows the first ranked sentence. Positive log-probability gain means lower loss. Shares use the signed corpus net gain, so they can be negative or exceed 100%. A zero net gain gives null shares.",
+        "parameters": [
+          {"$ref": "#/components/parameters/DiffA"}, {"$ref": "#/components/parameters/DiffB"},
+          {"name": "sentence", "in": "query", "description": "Zero-based heldout sentence index.", "schema": {"type": "integer", "minimum": 0, "maximum": 15}},
+          {"name": "start", "in": "query", "description": "First predicted token position. Defaults to 0.", "schema": {"type": "integer", "minimum": 0, "maximum": 510}},
+          {"name": "end", "in": "query", "description": "Exclusive end position. Defaults to start plus 128 or the sentence end, whichever is smaller.", "schema": {"type": "integer", "minimum": 1, "maximum": 511}}
+        ],
+        "responses": {
+          "200": {"description": "Token loss diff and slice.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TokenLossDiffReport"}}}},
           "400": {"$ref": "#/components/responses/BadRequest"},
           "403": {"$ref": "#/components/responses/Forbidden"},
           "404": {"$ref": "#/components/responses/DiffNotFound"},
@@ -369,6 +518,59 @@
           "422": {"$ref": "#/components/responses/InvalidJsonData"},
           "500": {"$ref": "#/components/responses/StorageError"},
           "503": {"$ref": "#/components/responses/ScratchBusy"}
+        }
+      }
+    },
+    "/api/scratch/heretic": {
+      "post": {
+        "operationId": "runHeretic",
+        "summary": "Queue a pinned Heretic run that imports a private scratch child",
+        "description": "Use one Library SafeTensors file on an enabled local GPU lane. Select an operator-installed offline profile. Read the returned job with getJob, then convert and check the scratch child. This operation does not publish.",
+        "parameters": [{"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false,
+          "required": ["parent_id", "base_sha256", "profile", "trials", "trial_index", "seed"],
+          "properties": {
+            "parent_id": {"$ref": "#/components/schemas/Id"},
+            "base_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "profile": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+            "assets_id": {"$ref": "#/components/schemas/Id"},
+            "trials": {"type": "integer", "minimum": 1, "maximum": 64},
+            "trial_index": {"type": "integer", "minimum": 0, "maximum": 63},
+            "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+          }
+        }}}},
+        "responses": {
+          "200": {"description": "Previously accepted Heretic job", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "202": {"description": "Queued Heretic job", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"}
+        }
+      }
+    },
+    "/api/scratch/heretic_reproduce": {
+      "post": {
+        "operationId": "reproduceHeretic",
+        "summary": "Reproduce a community v4 Heretic manifest into a private scratch child",
+        "description": "The Library SafeTensors base must have a verified Hugging Face download receipt for the repository, base commit, and file SHA-256. The worker runs offline and verifies the exported weights against the manifest. This operation does not publish.",
+        "parameters": [{"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false,
+          "required": ["parent_id", "base_sha256", "manifest"],
+          "properties": {
+            "parent_id": {"$ref": "#/components/schemas/Id"},
+            "base_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "manifest": {"type": "object", "description": "Community Heretic v4 reproduce.json object; a URL or path is not accepted."},
+            "assets_id": {"$ref": "#/components/schemas/Id"}
+          }
+        }}}},
+        "responses": {
+          "200": {"description": "Previously accepted reproduction job", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "202": {"description": "Queued reproduction job", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"}
         }
       }
     },
@@ -464,6 +666,56 @@
         }
       }
     },
+    "/api/scratch/{id}/ablate_direction": {
+      "post": {
+        "operationId": "ablateScratchDirection",
+        "summary": "Ablate a fitted direction in a new scratch child",
+        "description": "Edit dense attention output and MLP down projections on the CPU. Use a pinned scratch parent and a version 2 behavior direction. The child is private and has a reversible delta. Embedding edits are not supported.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false,
+          "required": ["sha256", "direction", "first_layer", "last_layer", "kernel", "variant"],
+          "properties": {
+            "sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "direction": {"$ref": "#/components/schemas/AblationDirection"},
+            "first_layer": {"$ref": "#/components/schemas/TraceLayer"},
+            "last_layer": {"$ref": "#/components/schemas/TraceLayer"},
+            "kernel": {"$ref": "#/components/schemas/AblationKernel"},
+            "variant": {"$ref": "#/components/schemas/AblationVariant"},
+            "alpha": {"type": "number", "exclusiveMinimum": 0, "maximum": 4, "default": 1},
+            "include_embeddings": {"const": false, "default": false}
+          }
+        }}}},
+        "responses": {
+          "200": {"$ref": "#/components/responses/ScratchRow"},
+          "201": {"$ref": "#/components/responses/ScratchRow"},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "503": {"$ref": "#/components/responses/ScratchBusy"}
+        }
+      }
+    },
+    "/api/scratch/{id}/search_ablation": {
+      "post": {
+        "operationId": "searchAblation",
+        "summary": "Queue a bounded native ablation search",
+        "description": "Screen fitted slop or sycophancy directions on held-out prompts against matched random controls. Run A2 and W4 on selected Pareto scratch children. Read the receipt with GET /api/jobs/{id}. No child is published or approved.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AblationSearchRequest"}}}},
+        "responses": {
+          "200": {"description": "Job ID on a matching retry."},
+          "202": {"description": "Queued search job.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"}
+        }
+      }
+    },
     "/api/scratch/{id}/prune": {
       "post": {
         "operationId": "pruneScratch",
@@ -497,7 +749,12 @@
           "properties": {
             "source_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "keep": {"type": "integer", "minimum": 1, "maximum": 1024},
             "calibration": {"type": "string", "minLength": 1, "maxLength": 98304, "description": "Exact brewery.expert-activations.v1 JSON text for the calibration split. Byte limit: 96 KiB."},
-            "held_out": {"type": "string", "minLength": 1, "maxLength": 98304, "description": "Exact brewery.expert-activations.v1 JSON text for the held-out split. Byte limit: 96 KiB."}
+            "held_out": {"type": "string", "minLength": 1, "maxLength": 98304, "description": "Exact brewery.expert-activations.v1 JSON text for the held-out split. Byte limit: 96 KiB."},
+            "routing_evidence": {"type":"object","additionalProperties":false,"required":["job_id","layer","start","end"],
+              "description":"Optional routing atlas evidence for the exact source model and SHA-256. Does not replace REAP inputs.",
+              "properties":{"job_id":{"$ref":"#/components/schemas/Id"},"prompt":{"type":"integer","minimum":0,"maximum":3},
+                "layer":{"$ref":"#/components/schemas/TraceLayer"},"start":{"$ref":"#/components/schemas/TracePosition"},
+                "end":{"type":"integer","minimum":1,"maximum":4096}}}
           }
         }}}},
         "responses": {
@@ -506,7 +763,7 @@
             "properties": {"parent_id": {"$ref": "#/components/schemas/Id"}, "source_sha256": {"$ref": "#/components/schemas/ScratchHash"},
               "plan": {"type": "string", "maxLength": 131072}, "plan_sha256": {"$ref": "#/components/schemas/ScratchHash"},
               "planner_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "expert_usage_sha256": {"$ref": "#/components/schemas/ScratchHash"},
-              "qualification": {"const": "not release-qualified"}}
+               "qualification": {"const": "not release-qualified"}, "routing_evidence":{"type":["object","null"]}}
           }}}},
           "400": {"$ref": "#/components/responses/BadRequest"},
           "403": {"$ref": "#/components/responses/Forbidden"},
@@ -637,11 +894,12 @@
       "post": {
         "operationId": "runScratchChecks",
         "summary": "Check a scratch revision and save the results",
-        "description": "Checks the exact child and immediate parent SafeTensors files. With private GGUF files, the local worker loads both models, generates text and measures behavior on fixed datasets. Poll the returned job ID. Without both files, or if integrity fails, the controller saves an integrity-only bundle. For a compiled program, checks the pinned weights and config and runs all valid inputs on the local CPU runtime. Language-model behavior checks do not apply. Do not send measured values or job references.",
+        "description": "Checks the exact child and immediate parent SafeTensors files. With private GGUF files, the local worker loads both models, generates text and measures behavior on fixed datasets. Poll the returned job ID. Set behavior_direction to also score held-out chat prompts from the verified worker cache. An opt-in request requires both GGUF files and passing integrity checks. Without opt-in, if either GGUF is missing or integrity fails, the controller saves an integrity-only bundle. For a compiled program, checks pinned weights and config and runs all valid inputs on the local CPU runtime. Language-model behavior checks do not apply. Do not send measured values or job references.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {
           "type": "object", "additionalProperties": false, "required": ["sha256"], "properties": {
-            "sha256": {"$ref": "#/components/schemas/ScratchHash"}
+            "sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionConfig"}
           }
         }}}},
         "responses": {
@@ -850,6 +1108,24 @@
         }
       }
     },
+    "/api/directions/{id}/versions/{version}": {
+      "get": {
+        "operationId": "getDirection",
+        "summary": "Read an immutable behavior direction artifact",
+        "parameters": [
+          {"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/InterventionVersion"},
+          {"in":"query","name":"layer","schema":{"$ref":"#/components/schemas/TraceLayer"},"description":"Return one layer. Omit to return all layers."}
+        ],
+        "responses": {
+          "200": {"description": "The requested immutable version. New direction jobs write version 2; old jobs keep version 1. The artifact ID is the direction job ID.",
+            "content": {"application/json": {"schema": {"type":"object","required":["id","version","direction"],"properties":{
+              "id":{"$ref":"#/components/schemas/Id"},"version":{"enum":[1,2]},"direction":{"$ref":"#/components/schemas/BehaviorDirectionResult"}
+            }}}}},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
     "/api/jobs/{id}/trace": {
       "get": {
         "operationId": "getTraceManifest",
@@ -859,6 +1135,39 @@
           "200": {"description": "Verified export summary without worker paths.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TraceSummary"}}}},
           "400": {"$ref": "#/components/responses/BadRequest"}, "403": {"$ref": "#/components/responses/Forbidden"},
           "404": {"$ref": "#/components/responses/TraceNotFound"}, "413": {"$ref": "#/components/responses/TraceTooLarge"}, "502": {"$ref": "#/components/responses/TraceReadFailed"}
+        }
+      }
+    },
+    "/api/jobs/{id}/sensitivity": {
+      "get": {
+        "operationId": "getTensorSensitivity",
+        "summary": "Read the empirical Fisher sensitivity artifact for a finished job",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "responses": {
+          "200": {"description": "Verified Fisher scores for one model revision and corpus.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SensitivityArtifact"}}}},
+          "403": {"$ref": "#/components/responses/Forbidden"}, "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      }
+    },
+    "/api/jobs/{id}/circuit": {
+      "get": {
+        "operationId": "getCircuit",
+        "summary": "Read the circuit artifact for a successful job",
+        "parameters": [{"$ref":"#/components/parameters/ResourceId"}],
+        "responses": {
+          "200": {"description":"Signed attribution scores and measured patch deltas.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/CircuitArtifact"}}}},
+          "403": {"$ref":"#/components/responses/Forbidden"}, "404": {"$ref":"#/components/responses/NotFound"}
+        }
+      }
+    },
+    "/api/jobs/{id}/quantization-damage": {
+      "get": {
+        "operationId": "getQuantizationDamage",
+        "summary": "Read the quantization damage map and unapplied recipe proposal",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "responses": {
+          "200": {"description": "A versioned damage map and a recipe proposal for operator review.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/QuantizationDamageArtifact"}}}},
+          "403": {"$ref": "#/components/responses/Forbidden"}, "404": {"$ref": "#/components/responses/NotFound"}
         }
       }
     },
@@ -928,6 +1237,27 @@
         }
       }
     },
+    "/api/jobs/{id}/trace/routing-atlas": {
+      "get": {
+        "operationId": "getRoutingAtlas",
+        "summary": "Read MoE expert load, routing entropy, co-activation, and specialization",
+        "description": "Use a retained Qwen2MoE or Qwen3MoE trace with router logits, IDs, and weights. Select one layer and at most 128 contiguous captured positions. For an ablation comparison, select a paired zero_expert trace with the same model digest and tokens and capture l_out in both.",
+        "parameters": [
+          {"$ref":"#/components/parameters/ResourceId"}, {"$ref":"#/components/parameters/TracePrompt"},
+          {"name":"layer","in":"query","required":true,"schema":{"$ref":"#/components/schemas/TraceLayer"}},
+          {"name":"start","in":"query","required":true,"schema":{"$ref":"#/components/schemas/TracePosition"}},
+          {"name":"end","in":"query","required":true,"description":"Exclusive end position.","schema":{"type":"integer","minimum":1,"maximum":4096}},
+          {"name":"ablation_job_id","in":"query","schema":{"$ref":"#/components/schemas/Id"}}
+        ],
+        "responses": {
+          "200":{"description":"Routing statistics and provenance for the selected trace slice.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RoutingAtlas"}}}},
+          "400":{"$ref":"#/components/responses/BadRequest"}, "403":{"$ref":"#/components/responses/Forbidden"},
+          "404":{"$ref":"#/components/responses/TraceNotFound"}, "413":{"$ref":"#/components/responses/TraceTooLarge"},
+          "422":{"$ref":"#/components/responses/InvalidJsonData"}, "502":{"$ref":"#/components/responses/TraceReadFailed"},
+          "503":{"description":"Routing analysis is busy."}
+        }
+      }
+    },
     "/api/interventions": {
       "get": {
         "operationId": "listInterventions",
@@ -941,13 +1271,14 @@
       "post": {
         "operationId": "createIntervention",
         "summary": "Save the first version of an intervention artifact",
-        "description": "Specify a Library GGUF or scratch revision ID and the SHA-256 of its GGUF file. A trace rejects rules and patch sources for another model ID or GGUF hash.",
+        "description": "Specify a Library GGUF or scratch revision ID and the SHA-256 of its GGUF file. Save inline rules, references to verified directions for the same model, or both.",
         "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateIntervention"}}}},
         "responses": {
           "200": {"$ref": "#/components/responses/InterventionVersion"},
           "201": {"$ref": "#/components/responses/InterventionVersion"},
           "400": {"$ref": "#/components/responses/BadRequest"}, "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
           "409": {"$ref": "#/components/responses/CreateConflict"}, "413": {"$ref": "#/components/responses/PayloadTooLarge"},
           "415": {"$ref": "#/components/responses/UnsupportedMediaType"}, "422": {"$ref": "#/components/responses/InvalidJsonData"},
           "500": {"$ref": "#/components/responses/StorageError"}
@@ -986,7 +1317,7 @@
       "get": {
         "operationId": "exportInterventionGguf",
         "summary": "Download a llama.cpp control vector GGUF",
-        "description": "Export requires one add rule per l_out layer, a common vector width, and no layer 0. GGUF does not store trace positions. llama.cpp applies each vector to every token at that layer.",
+        "description": "Export requires one add or subtract rule per l_out layer, a common vector width, and no layer 0. A subtract rule exports the negative scaled vector. llama.cpp cannot express a projection. GGUF does not store trace positions. llama.cpp applies each vector to every token at that layer.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/InterventionVersion"}],
         "responses": {
           "200": {"description": "GGUF v3 controlvector file.", "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}},
@@ -1043,6 +1374,47 @@
         "responses":{
           "200":{"description":"Original F32 SafeTensors file.","content":{"application/octet-stream":{"schema":{"type":"string","format":"binary"}}}},
           "404":{"$ref":"#/components/responses/NotFound"}, "503":{"description":"Another SAE request is active. Retry later."}
+        }
+      }
+    },
+    "/api/crosscoders": {
+      "post": {
+        "operationId":"importCrosscoder","summary":"Import a paired TopK crosscoder",
+        "description":"Use a same-origin multipart request. The controller checks both revisions against W1 trace receipts and computes feature classifications from the decoder weights. An identical import returns the same immutable artifact.",
+        "requestBody":{"required":true,"content":{"multipart/form-data":{
+          "schema":{"type":"object","required":["metadata","weights"],"additionalProperties":false,"properties":{
+            "metadata":{"$ref":"#/components/schemas/CrosscoderMetadata"},
+            "weights":{"type":"string","format":"binary","description":"Finite F32 SafeTensors, at most 128 MiB."}
+          }},"encoding":{"metadata":{"contentType":"application/json"},"weights":{"contentType":"application/octet-stream"}}
+        }}},
+        "responses":{
+          "200":{"$ref":"#/components/responses/CrosscoderReport"},"201":{"$ref":"#/components/responses/CrosscoderReport"},
+          "400":{"$ref":"#/components/responses/BadRequest"},"403":{"$ref":"#/components/responses/Forbidden"},
+          "404":{"$ref":"#/components/responses/NotFound"},"408":{"description":"Upload timed out."},
+          "413":{"$ref":"#/components/responses/PayloadTooLarge"},"415":{"$ref":"#/components/responses/UnsupportedMediaType"},
+          "503":{"description":"Another crosscoder transfer is active. Retry later."}
+        }
+      }
+    },
+    "/api/crosscoders/{id}": {
+      "get": {
+        "operationId":"getCrosscoderDiff","summary":"Read the crosscoder diff for a pinned pair of revisions",
+        "description":"Read a saved report by its content ID. Compare parent and child decoder directions, feature norm ratios, and held-out reconstruction metrics. Does not start training.",
+        "parameters":[{"$ref":"#/components/parameters/CrosscoderId"}],
+        "responses":{
+          "200":{"$ref":"#/components/responses/CrosscoderReport"},"400":{"$ref":"#/components/responses/InvalidPath"},
+          "404":{"$ref":"#/components/responses/NotFound"}
+        }
+      }
+    },
+    "/api/crosscoders/{id}/safetensors": {
+      "get": {
+        "operationId":"exportCrosscoderWeights","summary":"Download the crosscoder SafeTensors file",
+        "parameters":[{"$ref":"#/components/parameters/CrosscoderId"}],
+        "responses":{
+          "200":{"description":"Original F32 SafeTensors file.","content":{"application/octet-stream":{"schema":{"type":"string","format":"binary"}}}},
+          "400":{"$ref":"#/components/responses/InvalidPath"},"404":{"$ref":"#/components/responses/NotFound"},
+          "503":{"description":"Another crosscoder transfer is active. Retry later."}
         }
       }
     },
@@ -1628,6 +2000,12 @@
       }}}}
     },
     "parameters": {
+      "FindingKey": {"name":"Idempotency-Key","in":"header","required":true,"description":"Reuse this key only to retry the same write. A retry returns the same finding version.","schema":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9._-]{1,128}$"}},
+      "CrosscoderId": {
+        "name":"id","in":"path","required":true,
+        "schema":{"type":"string","format":"sha256","pattern":"^[a-f0-9]{64}$"},
+        "description":"Content ID from the crosscoder import response."
+      },
       "ScratchKey": {
         "name": "Idempotency-Key", "in": "header",
         "description": "Optional key for this scratch operation. A retry of the same target ID and typed body returns 200 and the current record, without a second state change. Reuse for a different target or body returns 409.",
@@ -1664,6 +2042,8 @@
       }
     },
     "responses": {
+      "FindingVersion": {"description":"Finding version; only a running replay can progress to ready or failed.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Finding"}}}},
+      "CrosscoderReport": {"description":"Immutable experimental crosscoder report.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/CrosscoderReport"}}}},
       "AgentProviderStatus": {"description": "Provider settings and key status. Does not contain a key or file path.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AgentProviderStatus"}}}},
       "AgentSessionDetail": {"description": "Saved session and transcript.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AgentSession"}}}},
       "AgentBusy": {"description": "An agent or tool is active, a provider key is needed, or an Idempotency-Key was used for a different request.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
@@ -1697,6 +2077,155 @@
       "HfTokenStorageUnavailable": {"description": "The private token file cannot be safely changed.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
     },
     "schemas": {
+      "FindingClient": {"type":"string","minLength":1,"maxLength":128,"description":"Required for an external MCP or REST client. This label is self-reported. The controller records the session ID automatically for the built-in agent."},
+      "FindingVerdict": {"type":"object","additionalProperties":false,"required":["status","reasoning"],"properties":{
+        "status":{"enum":["supported","refuted","inconclusive"]},"reasoning":{"type":"string","minLength":1,"maxLength":4096}
+      }},
+      "FindingEvidence": {"oneOf":[
+        {"type":"object","additionalProperties":false,"required":["kind","job_id","paths"],"properties":{"kind":{"const":"job"},"job_id":{"type":"string","format":"uuid"},"paths":{"$ref":"#/components/schemas/FindingPaths"}}},
+        {"type":"object","additionalProperties":false,"required":["kind","a","b","paths"],"properties":{"kind":{"const":"token_loss"},"a":{"type":"string","format":"uuid"},"b":{"type":"string","format":"uuid"},"sentence":{"type":"integer","minimum":0},"start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":1},"paths":{"$ref":"#/components/schemas/FindingPaths"}}},
+        {"type":"object","additionalProperties":false,"required":["kind","artifact_id","paths"],"properties":{"kind":{"const":"crosscoder"},"artifact_id":{"$ref":"#/components/schemas/ScratchHash"},"paths":{"$ref":"#/components/schemas/FindingPaths"}}}
+      ]},
+      "FindingPaths": {"type":"array","minItems":1,"maxItems":16,"uniqueItems":true,"items":{"type":"string","maxLength":256,"pattern":"^/"}},
+      "FindingSummary": {"type":"object","required":["id","version","hypothesis","parent_id","replay_of","created_at_ms","state","model","verdict"],"properties":{
+        "id":{"type":"string","format":"uuid"},"version":{"type":"integer","minimum":1},"hypothesis":{"type":"string"},"parent_id":{"type":["string","null"]},"replay_of":{"type":["string","null"]},
+        "created_at_ms":{"type":"integer"},"state":{"enum":["ready","running","failed"]},"error":{"type":"string"},
+        "model":{"type":"object","required":["id","sha256"],"properties":{"id":{"type":"string","format":"uuid"},"sha256":{"$ref":"#/components/schemas/ScratchHash"}}},
+        "verdict":{"$ref":"#/components/schemas/FindingVerdict"}
+      }},
+      "Finding": {"allOf":[{"$ref":"#/components/schemas/FindingSummary"},{"type":"object","required":["schema_version","qualification","provenance","experiments","comparison"],"properties":{
+        "schema_version":{"const":1},"qualification":{"const":"not release-qualified"},
+        "provenance":{"type":"object","required":["agent","tool_version"],"properties":{
+          "agent":{"type":"object","required":["kind","id"],"properties":{"kind":{"enum":["external_mcp","external_rest","builtin"]},"id":{"type":"string"}}},"tool_version":{"type":"string"}
+        }},
+        "experiments":{"type":"array","maxItems":12,"items":{"type":"object","required":["spec","artifact","metrics"],"properties":{
+          "spec":{"type":"object","required":["kind"],"properties":{"kind":{"enum":["job","token_loss","crosscoder"]},"request":{"type":"object"},"tool":{"type":"string"},"arguments":{"type":"object"},"preparation":{"type":"object"}}},
+          "artifact":{"type":"object","required":["id","sha256","api_url","view_url","pins"],"properties":{"id":{"type":"string"},"job_id":{"type":"string","format":"uuid"},"sha256":{"$ref":"#/components/schemas/ScratchHash"},"api_url":{"type":"string"},"view_url":{"type":"string"},"pins":{"type":"object"}}},
+          "metrics":{"type":"array","items":{"type":"object","required":["path","value"],"properties":{"path":{"type":"string"},"value":{"type":"number"}}}}
+        }}},
+        "comparison":{"type":"array","items":{"type":"object","required":["experiment","path","original","replay"],"properties":{
+          "experiment":{"type":"integer","minimum":1},"path":{"type":"string"},"original":{"type":"number"},"replay":{"type":"number"}
+        }}}
+      }}]},
+      "InterpBenchmark": {
+        "type":"object","required":["schema_version","qualification","backend","models","methods"],
+        "properties":{
+          "schema_version":{"const":1},
+          "qualification":{"const":"not release-qualified"},
+          "backend":{"const":"cpu"},
+          "models":{"type":"array","items":{"type":"object"}},
+          "methods":{
+            "type":"object","required":["x5","w11","x6"],
+            "properties":{
+              "x5":{"type":"array","items":{"$ref":"#/components/schemas/InterpBenchmarkCircuitRow"},"description":"Attribution and exact activation patching rows."},
+              "w11":{"type":"array","items":{"type":"object"},"description":"SAE reconstruction and best feature cosine for each compiler operation."},
+              "x6":{"type":"array","items":{"type":"object"},"description":"Paired crosscoder reconstruction and best feature cosine for each compiler operation."}
+            }
+          }
+        }
+      },
+      "InterpBenchmarkCircuitRow": {
+        "type":"object",
+        "required":["program","method","evaluation","top_k","precision","recall","roc_auc","ranking"],
+        "properties":{
+          "program":{"type":"string"},
+          "method":{"enum":["attribution_patching","activation_patching"]},
+          "evaluation":{"enum":["ranking","recall_only"]},
+          "top_k":{"type":"integer","minimum":1},
+          "precision":{"type":["number","null"],"minimum":0,"maximum":1,"description":"Fractional precision at K; null when there are no negative sites."},
+          "recall":{"type":"number","minimum":0,"maximum":1,"description":"Fractional recall at K."},
+          "roc_auc":{"type":["number","null"],"minimum":0,"maximum":1,"description":"Ties receive half credit; null when there are no negative sites."},
+          "ranking":{"type":"array","items":{"type":"object"}},
+          "zero_attribution_sites_with_patch_effect":{"type":"array","items":{"type":"object"},"description":"True sites with a zero gradient attribution score and nonzero measured patch delta."}
+        }
+      },
+      "CrosscoderBinding": {
+        "type":"object","required":["id","sha256"],"additionalProperties":false,
+        "properties":{"id":{"type":"string","format":"uuid"},"sha256":{"$ref":"#/components/schemas/Sha256"}}
+      },
+      "CrosscoderMetrics": {
+        "type":"object","required":["mse","explained_variance","l0","dead_features"],"additionalProperties":false,
+        "properties":{
+          "mse":{"type":"number","minimum":0},
+          "explained_variance":{"type":"number","maximum":1},
+          "l0":{"type":"number","minimum":0},
+          "dead_features":{"type":"integer","minimum":0}
+        }
+      },
+      "CrosscoderMetadata": {
+        "allOf":[{"$ref":"#/components/schemas/CrosscoderInputs"}],"unevaluatedProperties":false
+      },
+      "CrosscoderInputs": {
+        "type":"object",
+        "required":["schema_version","parent","child","layer","role","pairs","width","k","scale","seen","metrics","training"],
+        "properties":{
+          "schema_version":{"const":1},
+          "parent":{"$ref":"#/components/schemas/CrosscoderBinding"},
+          "child":{"$ref":"#/components/schemas/CrosscoderBinding"},
+          "layer":{"type":"integer","minimum":0,"maximum":4095},
+          "role":{"enum":["l_out","attn_out","ffn_inp","ffn_out"]},
+          "pairs":{"type":"array","minItems":2,"maxItems":64,"items":{
+            "type":"object","additionalProperties":false,"required":["parent_job_id","child_job_id","split"],
+            "properties":{
+              "parent_job_id":{"type":"string","format":"uuid"},
+              "child_job_id":{"type":"string","format":"uuid"},
+              "split":{"enum":["train","heldout"]}
+            }
+          }},
+          "width":{"type":"integer","minimum":1,"maximum":4096},
+          "k":{"type":"integer","minimum":1,"maximum":4096},
+          "scale":{"type":"number","exclusiveMinimum":0},
+          "seen":{"type":"array","minItems":1,"maxItems":4096,"items":{"type":"boolean"}},
+          "metrics":{"type":"object","additionalProperties":false,"required":["parent","child"],"properties":{
+            "parent":{"$ref":"#/components/schemas/CrosscoderMetrics"},
+            "child":{"$ref":"#/components/schemas/CrosscoderMetrics"}
+          }},
+          "training":{"type":"object","additionalProperties":false,
+            "required":["torch","steps","difference_weight","train_rows","heldout_rows","dataset_sha256"],
+            "properties":{
+              "torch":{"const":"2.7.1+cpu"},"steps":{"type":"integer","minimum":1,"maximum":10000},
+              "difference_weight":{"type":"number","minimum":1,"maximum":100},
+              "train_rows":{"type":"integer","minimum":2,"maximum":16384},
+              "heldout_rows":{"type":"integer","minimum":2,"maximum":16384},
+              "dataset_sha256":{"$ref":"#/components/schemas/Sha256"}
+            }
+          }
+        }
+      },
+      "CrosscoderReport": {
+        "allOf":[{"$ref":"#/components/schemas/CrosscoderInputs"},{
+          "type":"object",
+          "required":["id","version","method","qualification","weights_bytes","weights_sha256","executable_sha256","manifests","scratch_revision_sha256","unique_norm_ratio","changed_cosine_below","features"],
+          "properties":{
+            "id":{"$ref":"#/components/schemas/Sha256"},"version":{"const":1},"method":{"const":"paired-cpu-top-k"},
+            "qualification":{"const":"not release-qualified"},"weights_bytes":{"type":"integer","minimum":1},
+            "weights_sha256":{"$ref":"#/components/schemas/Sha256"},"executable_sha256":{"$ref":"#/components/schemas/Sha256"},
+            "scratch_revision_sha256":{"type":"object","required":["parent","child"],
+              "properties":{
+                "parent":{"oneOf":[{"$ref":"#/components/schemas/Sha256"},{"type":"null"}]},
+                "child":{"oneOf":[{"$ref":"#/components/schemas/Sha256"},{"type":"null"}]}
+              }
+            },
+            "manifests":{"type":"array","items":{"type":"object","required":["parent","child"],
+              "properties":{
+                "parent":{"type":"array","items":{"$ref":"#/components/schemas/Sha256"}},
+                "child":{"type":"array","items":{"$ref":"#/components/schemas/Sha256"}}
+              }
+            }},
+            "unique_norm_ratio":{"const":0.10},"changed_cosine_below":{"const":0.995},
+            "features":{"type":"array","items":{
+              "type":"object","required":["feature","classification","child_norm_ratio","decoder_cosine","parent_norm","child_norm"],
+              "properties":{
+                "feature":{"type":"integer","minimum":0},
+                "classification":{"enum":["parent_unique","child_unique","changed","shared","dead"]},
+                "child_norm_ratio":{"type":["number","null"],"minimum":0,"maximum":1},
+                "decoder_cosine":{"type":["number","null"],"minimum":-1,"maximum":1},
+                "parent_norm":{"type":"number","minimum":0},"child_norm":{"type":"number","minimum":0}
+              }
+            }}
+          }
+        }]
+      },
       "DiffId": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
       "DiffPairReport": {
         "type": "object", "required": ["schema_version", "qualification", "a", "b"],
@@ -1920,14 +2449,35 @@
           "schema": {"const": "brewery.scratch-provenance.v1"}, "parent_id": {"$ref": "#/components/schemas/Id"},
           "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "revision_id": {"$ref": "#/components/schemas/Id"},
           "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "worker": {"type": "string"},
-          "method": {"enum": ["copy", "direct", "compile_program", "linear", "task_arithmetic", "ties", "dare_linear", "dare_ties", "rome", "memit", "alphaedit", "prune"]},
+          "method": {"enum": ["copy", "direct", "compile_program", "linear", "task_arithmetic", "ties", "dare_linear", "dare_ties", "rome", "memit", "alphaedit", "prune", "ablate_direction", "heretic", "heretic_reproduce"]},
           "locate_edit": {"type": "object", "description": "Edit request, covariance digest, runtime library digests and optimization losses. CUDA receipts include backend and device in the nested provenance object."},
+          "heretic": {"type": "object", "description": "Brewery Heretic journal: base and export digests, input and effective config, seed, selected trial index, optional scalar trial scores, offline prompt and asset digests, and runtime and lock digests.",
+            "properties": {
+              "trials": {"type": "array", "maxItems": 64, "description": "Completed Heretic study trials on its optimization data, not Brewery held-out checks.",
+                "items": {"type": "object", "required": ["index", "scores"], "properties": {
+                  "index": {"type": "integer", "minimum": 1, "maximum": 64},
+                  "scores": {"type": "array", "maxItems": 16, "items": {"type": "object", "required": ["name", "value", "baseline"], "properties": {
+                    "name": {"type": "string", "maxLength": 80}, "value": {"type": "number"}, "baseline": {"type": "number"}
+                  }}}
+                }}
+              }
+            }
+          },
           "operations": {"type": "array", "items": {"$ref": "#/components/schemas/ScratchOperation"}},
           "merge": {"type": "object", "required": ["algorithm", "inputs"], "properties": {
             "algorithm": {"$ref": "#/components/schemas/ScratchMergeAlgorithm"},
             "inputs": {"$ref": "#/components/schemas/ScratchMergeInputs"}
           }},
           "pruning": {"$ref": "#/components/schemas/DensePruning"},
+          "ablation": {"type": "object", "required": ["direction", "source_gguf_sha256", "first_layer", "last_layer", "kernel", "variant"], "properties": {
+            "direction": {"$ref": "#/components/schemas/AblationDirection"},
+            "source_gguf_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "first_layer": {"$ref": "#/components/schemas/TraceLayer"},
+            "last_layer": {"$ref": "#/components/schemas/TraceLayer"},
+            "kernel": {"$ref": "#/components/schemas/AblationKernel"},
+            "variant": {"$ref": "#/components/schemas/AblationVariant"},
+            "alpha": {"type": "number", "exclusiveMinimum": 0, "maximum": 4, "default": 1}
+          }},
           "pruning_trace": {"type": "object", "required": ["gguf_sha256", "manifest_sha256", "lanternfish_sha256"], "properties": {
             "gguf_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "manifest_sha256": {"$ref": "#/components/schemas/ScratchHash"},
             "lanternfish_sha256": {"$ref": "#/components/schemas/ScratchHash"}
@@ -1940,10 +2490,43 @@
             "properties": {
               "program": {"enum": ["sort", "histogram", "reverse", "frac_prevs", "alta_parity_relative", "alta_parity_absolute"]},
               "config_sha256": {"$ref": "#/components/schemas/ScratchHash"},
-              "runner_sha256": {"$ref": "#/components/schemas/ScratchHash"}
+              "runner_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+              "ground_truth_sha256": {"$ref": "#/components/schemas/ScratchHash"}
             }
           },
           "tool": {"type": "string"}, "tool_version": {"type": "string"}, "runtime_version": {"type": "string"}, "created_at_ms": {"type": "integer"}
+        }
+      },
+      "AblationDirection": {
+        "type": "object", "additionalProperties": false, "required": ["id", "version", "layer"],
+        "properties": {
+          "id": {"$ref": "#/components/schemas/Id"},
+          "version": {"type": "integer", "const": 2},
+          "layer": {"$ref": "#/components/schemas/TraceLayer"}
+        }
+      },
+      "AblationKernel": {
+        "type": "object", "additionalProperties": false, "required": ["shape", "peak", "width", "min_weight"],
+        "properties": {
+          "shape": {"enum": ["flat", "gaussian", "triangle"]},
+          "peak": {"$ref": "#/components/schemas/TraceLayer"},
+          "width": {"type": "number", "exclusiveMinimum": 0, "maximum": 4096},
+          "min_weight": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      },
+      "AblationVariant": {"enum": ["plain", "projected", "norm_preserving"]},
+      "AblationSearchRequest": {
+        "type": "object", "additionalProperties": false,
+        "required": ["sha256", "direction_id", "assets_id", "seed", "trial_budget", "max_children", "disk_budget_bytes", "behavior_direction"],
+        "properties": {
+          "sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "direction_id": {"type": "string", "minLength": 1},
+          "assets_id": {"type": "string", "minLength": 1},
+          "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+          "trial_budget": {"type": "integer", "minimum": 3, "maximum": 32},
+          "max_children": {"type": "integer", "minimum": 1, "maximum": 3},
+          "disk_budget_bytes": {"type": "integer", "minimum": 67108864, "maximum": 68719476736},
+          "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionConfig"}
         }
       },
       "ScratchRevision": {
@@ -2001,6 +2584,128 @@
           "child_generation": {"type": "string", "minLength": 1, "maxLength": 4096}
         }
       },
+      "TokenLossDiffToken": {
+        "type": "object",
+        "required": ["position", "id", "piece", "parent_logprob", "child_logprob", "loss_delta"],
+        "properties": {
+          "position": {"type": "integer", "minimum": 0, "maximum": 510, "description": "Position in the predicted suffix, not the prompt."},
+          "id": {"type": "integer", "minimum": 0},
+          "piece": {"type": "string", "description": "Decoded token piece. Invalid UTF-8 bytes use replacement characters."},
+          "parent_logprob": {"type": "number", "maximum": 0},
+          "child_logprob": {"type": "number", "maximum": 0},
+          "loss_delta": {"type": "number", "description": "Child loss minus parent loss, in natural log units."}
+        }
+      },
+      "TokenLossDiffReport": {
+        "type": "object",
+        "required": ["schema_version", "qualification", "a", "b", "check_bundle_id", "artifact_sha256", "heldout_sha256", "total_tokens", "total_logprob_gain", "sentences", "sentence", "start", "end", "tokens", "top_tokens"],
+        "properties": {
+          "schema_version": {"const": 1}, "qualification": {"const": "not release-qualified"},
+          "a": {"$ref": "#/components/schemas/Id"}, "b": {"$ref": "#/components/schemas/Id"},
+          "check_bundle_id": {"$ref": "#/components/schemas/Id"},
+          "artifact_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "heldout_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "total_tokens": {"type": "integer", "minimum": 1},
+          "total_logprob_gain": {"type": "number"},
+          "sentences": {"type": "array", "maxItems": 16, "items": {
+            "type": "object", "required": ["index", "text", "token_count", "logprob_gain", "share_of_net_gain"],
+            "properties": {
+              "index": {"type": "integer", "minimum": 0, "maximum": 15}, "text": {"type": "string"},
+              "token_count": {"type": "integer", "minimum": 1, "maximum": 511},
+              "logprob_gain": {"type": "number"}, "share_of_net_gain": {"type": ["number", "null"]}
+            }
+          }},
+          "sentence": {"type": "integer", "minimum": 0, "maximum": 15},
+          "start": {"type": "integer", "minimum": 0, "maximum": 510},
+          "end": {"type": "integer", "minimum": 1, "maximum": 511},
+          "tokens": {"type": "array", "maxItems": 128, "items": {"$ref": "#/components/schemas/TokenLossDiffToken"}},
+          "top_tokens": {"type": "array", "maxItems": 8, "items": {"$ref": "#/components/schemas/TokenLossDiffToken"}, "description": "Tokens from the selected sentence, ranked by absolute loss change. The rank does not depend on the slice."}
+        }
+      },
+      "BehaviorDirectionConfig": {
+        "type": "object", "additionalProperties": false, "required": ["prompt_sets"],
+        "properties": {
+          "prompt_sets": {"type": "object", "additionalProperties": false,
+            "description": "SHA-256 of each normalized prompt set in the operator's local contrast cache. The optional benign_refusal set measures over-refusal on reviewed benign prompts only.",
+            "required": ["slop", "sycophancy", "response_length"],
+            "properties": {
+              "slop": {"$ref": "#/components/schemas/ScratchHash"},
+              "sycophancy": {"$ref": "#/components/schemas/ScratchHash"},
+              "response_length": {"$ref": "#/components/schemas/ScratchHash"},
+              "benign_refusal": {"const": "0a3af7d442e3043a713ccb050c4291abf360614f4164cac16e1535d46ea5d35e"}
+            }
+          },
+          "refusal_prefixes": {
+            "description": "Replace the default refusal prefixes. Requires the benign_refusal set.",
+            "type": "array", "maxItems": 32, "items": {
+              "type": "string", "minLength": 1, "maxLength": 160, "x-brewery-max-utf8-bytes": 160
+            }
+          }
+        }
+      },
+      "PairedBehaviorOutcomes": {
+        "type": "array", "minItems": 1, "maxItems": 32,
+        "items": {"type": "object", "additionalProperties": false, "required": ["parent", "child"],
+          "properties": {"parent": {"type": "boolean"}, "child": {"type": "boolean"}}
+        }
+      },
+      "BehaviorDirectionReport": {
+        "type": "object", "additionalProperties": false,
+        "required": ["schema", "config", "max_new_tokens", "max_continuation_tokens", "cpu_threads", "counts", "kl_prompts", "kl_continuation_positions", "metrics", "samples"],
+        "properties": {
+          "schema": {"const": "brewery.behavior-direction.v1"},
+          "config": {"$ref": "#/components/schemas/BehaviorDirectionConfig"},
+          "max_new_tokens": {"const": 64},
+          "max_continuation_tokens": {"const": 4},
+          "cpu_threads": {"type": "integer", "minimum": 1, "maximum": 16},
+          "counts": {
+            "type": "object", "propertyNames": {"enum": ["slop", "sycophancy", "response_length", "benign_refusal"]},
+            "properties": {"benign_refusal": {"const": 16}},
+            "additionalProperties": {"type": "integer", "minimum": 1, "maximum": 32},
+            "required": ["slop", "sycophancy", "response_length"]
+          },
+          "kl_prompts": {"type": "integer", "minimum": 1, "maximum": 32},
+          "kl_continuation_positions": {"type": "integer", "minimum": 0, "maximum": 128},
+          "metrics": {
+            "type": "array", "minItems": 5, "maxItems": 6, "items": {
+              "type": "object", "additionalProperties": false, "required": ["name", "parent", "child", "better"],
+              "properties": {
+                "name": {"enum": ["benign_refusal_rate", "slop_marker_rate", "sycophancy_agreement_rate", "response_length_tokens", "kl_first_token_nats", "kl_continuation_nats"]},
+                "parent": {"type": "number", "minimum": 0},
+                "child": {"type": "number", "minimum": 0},
+                "better": {"enum": ["lower", "neither"]}
+              }
+            }
+          },
+          "paired_outcomes": {
+            "description": "Paired flags in pinned holdout order, without replies.",
+            "type": "object", "additionalProperties": false, "required": ["slop", "sycophancy"],
+            "properties": {
+              "slop": {"$ref": "#/components/schemas/PairedBehaviorOutcomes"},
+              "sycophancy": {"$ref": "#/components/schemas/PairedBehaviorOutcomes"}
+            }
+          },
+          "benign_refusal_flags": {
+            "description": "Present when benign_refusal is enabled. Flags follow the pinned cache row order. No replies are saved.",
+            "type": "array", "minItems": 16, "maxItems": 16,
+            "items": {
+              "type": "object", "additionalProperties": false, "required": ["parent", "child"],
+              "properties": {"parent": {"type": "boolean"}, "child": {"type": "boolean"}}
+            }
+          },
+          "samples": {
+            "type": "object", "propertyNames": {"enum": ["slop", "sycophancy", "response_length"]},
+            "required": ["slop", "sycophancy", "response_length"],
+            "additionalProperties": {
+              "type": "object", "additionalProperties": false, "required": ["parent", "child"],
+              "properties": {
+                "parent": {"type": "string", "maxLength": 160, "x-brewery-max-utf8-bytes": 160},
+                "child": {"type": "string", "maxLength": 160, "x-brewery-max-utf8-bytes": 160}
+              }
+            }
+          }
+        }
+      },
       "ScratchCheckBundle": {
         "type": "object",
         "required": ["schema", "id", "revision_sha256", "parent_sha256", "created_at_ms", "qualification", "integrity", "smoke", "behavior", "job_refs", "acknowledged_at_ms"],
@@ -2013,11 +2718,13 @@
           "integrity": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "smoke": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "behavior": {"$ref": "#/components/schemas/ScratchCheckStatus"},
+          "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionReport"},
           "program_correctness": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "program_cases": {"type": "integer", "minimum": 0, "maximum": 340},
           "offline_report": {"$ref": "#/components/schemas/ScratchOfflineReport"},
           "measured_report": {"$ref": "#/components/schemas/ScratchOfflineReport"},
           "measured_job_id": {"$ref": "#/components/schemas/Id"},
+          "token_loss": {"type": "object", "required": ["sha256"], "properties": {"sha256": {"$ref": "#/components/schemas/ScratchHash"}}},
           "acknowledged_at_ms": {"type": ["integer", "null"], "minimum": 0},
           "job_refs": {"type": "array", "maxItems": 8, "items": {"type": "object", "required": ["job_id", "role", "kind", "verified_revision"],
             "properties": {
@@ -2110,7 +2817,7 @@
           "truncated": {"type": "boolean"}
         }
       },
-      "JobKind": {"type": "string", "enum": ["compare", "trace", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer"]},
+      "JobKind": {"type": "string", "enum": ["compare", "trace", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer", "sensitivity", "circuit", "quantization_damage", "behavior_direction"]},
       "JobState": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled"]},
       "CapabilityMap": {
         "type": "object", "description": "Map from each known job kind to its availability.",
@@ -2212,7 +2919,7 @@
         "type": "object",
         "required": ["id", "kind", "host", "pool_slot", "state", "progress", "input_ids", "options", "cancel_requested", "has_result", "created_at", "updated_at"],
         "properties": {
-          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf","scratch_checks","scratch_locate_edit"]}]},
+          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf", "scratch_checks", "scratch_locate_edit", "weight_spectra", "search_ablation", "screen_ablation", "heretic", "heretic_reproduce"]}]},
           "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}], "description": "Concrete worker ID, or auto before assignment of a pool conversion."},
           "requested_host": {"const": "auto", "description": "Present if auto conversion routing was requested."},
           "pool_slot": {"type": "boolean"}, "state": {"$ref": "#/components/schemas/JobState"}, "progress": {"type": "string"},
@@ -2227,7 +2934,10 @@
               {"$ref": "#/components/schemas/CacheCleanupOptions"}, {"$ref": "#/components/schemas/EmptyOptions"},
               {"$ref": "#/components/schemas/GgufLayerRecipeOptions"},
               {"$ref": "#/components/schemas/Exl3LayerOptions"},
-              {"$ref": "#/components/schemas/HgnLayerRecipeOptions"}
+              {"type": "object", "required": ["kind", "base_sha256"], "properties": {"kind": {"enum": ["heretic", "heretic_reproduce"]}, "base_sha256": {"$ref": "#/components/schemas/ScratchHash"}}},
+              {"$ref": "#/components/schemas/HgnLayerRecipeOptions"},
+              {"$ref": "#/components/schemas/AblationSearchRequest"},
+              {"$ref": "#/components/schemas/WeightSpectraFilter"}
             ]
           },
           "prompt_id": {"$ref": "#/components/schemas/Id"},
@@ -2281,7 +2991,10 @@
           {"$ref": "#/components/schemas/HfDownloadJob"},
           {"$ref": "#/components/schemas/WeightInspectJob"}, {"$ref": "#/components/schemas/WeightProposeJob"},
           {"$ref": "#/components/schemas/WeightTuneJob"}, {"$ref": "#/components/schemas/WeightApplyJob"},
-          {"$ref": "#/components/schemas/Exl3LayerJob"}, {"$ref": "#/components/schemas/TraceJob"}
+          {"$ref": "#/components/schemas/Exl3LayerJob"}, {"$ref": "#/components/schemas/TraceJob"},
+          {"$ref": "#/components/schemas/SensitivityJob"}, {"$ref": "#/components/schemas/CircuitJob"},
+          {"$ref": "#/components/schemas/QuantizationDamageJob"},
+          {"$ref": "#/components/schemas/BehaviorDirectionJob"}
         ],
         "discriminator": {
           "propertyName": "kind",
@@ -2293,7 +3006,10 @@
             "hf_download": "#/components/schemas/HfDownloadJob",
             "weight_inspect": "#/components/schemas/WeightInspectJob", "weight_propose": "#/components/schemas/WeightProposeJob",
             "weight_tune": "#/components/schemas/WeightTuneJob", "weight_apply": "#/components/schemas/WeightApplyJob",
-            "exl3_layer": "#/components/schemas/Exl3LayerJob", "trace": "#/components/schemas/TraceJob"
+            "exl3_layer": "#/components/schemas/Exl3LayerJob", "trace": "#/components/schemas/TraceJob",
+            "sensitivity": "#/components/schemas/SensitivityJob", "circuit": "#/components/schemas/CircuitJob",
+            "quantization_damage": "#/components/schemas/QuantizationDamageJob",
+            "behavior_direction": "#/components/schemas/BehaviorDirectionJob"
           }
         }
       },
@@ -2324,7 +3040,33 @@
       "RequiredHost": {"required": ["host"], "properties": {"host": {"$ref": "#/components/schemas/HostId"}}},
       "TraceLayer": {"type":"integer","minimum":0,"maximum":4095},
       "TracePosition": {"type":"integer","minimum":0,"maximum":4095},
-      "TraceRole": {"type":"string","enum":["l_out","attn_out","ffn_inp","ffn_out","kq_soft_max"]},
+      "TraceRole": {"type":"string","enum":["l_out","final_norm","attn_out","ffn_inp","ffn_out","kq_soft_max","ffn_moe_logits","ffn_moe_topk","ffn_moe_route_weights"],"description":"HGN l_out has stream and hidden axes. HGN final_norm is the final normalized mix, available at the last layer only."},
+      "RoutingAtlas": {
+        "type":"object",
+        "required":["schema_version","job_id","model_id","model_sha256","manifest_sha256","prompt","layer","start","end","positions","expert_count","experts_per_token","mean_entropy_nats","experts","coactivation","ablation"],
+        "properties":{
+          "schema_version":{"const":1},"job_id":{"$ref":"#/components/schemas/Id"},"model_id":{"$ref":"#/components/schemas/Id"},
+          "model_sha256":{"$ref":"#/components/schemas/ScratchHash"},"manifest_sha256":{"$ref":"#/components/schemas/ScratchHash"},
+          "prompt":{"type":"integer"},"layer":{"$ref":"#/components/schemas/TraceLayer"},"start":{"type":"integer"},"end":{"type":"integer"},
+          "positions":{"type":"integer"},"expert_count":{"type":"integer"},"experts_per_token":{"type":"integer"},
+          "mean_entropy_nats":{"type":"number","description":"Mean entropy of the full router softmax before top-k selection."},
+          "experts":{"type":"array","items":{"type":"object","properties":{
+            "expert":{"type":"integer"},"selected":{"type":"integer"},"load":{"type":"number"},"mean_selected_weight":{"type":["number","null"]},
+            "token_clusters":{"type":"array","items":{"$ref":"#/components/schemas/RoutingCluster"}},
+            "context_clusters":{"type":"array","items":{"$ref":"#/components/schemas/RoutingCluster"}}
+          }}},
+          "coactivation":{"type":"array","items":{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"},"count":{"type":"integer"}}}},
+          "ablation":{"type":["object","null"],"properties":{"expert":{"type":"integer"},"rows":{"type":"array","items":{"type":"object","properties":{
+            "position":{"type":"integer"},"selected":{"type":"boolean"},"residual_l2":{"type":"number"},"top_token_changed":{"type":["boolean","null"]}
+          }}}}},
+          "lanternfish_commit":{"type":"string"},"ablation_job_id":{"type":["string","null"]},"ablation_manifest_sha256":{"type":["string","null"]},
+          "qualification":{"const":"not release-qualified"}
+        }
+      },
+      "RoutingCluster": {"type":"object","properties":{
+        "token_id":{"type":"integer"},"previous_token_id":{"type":["integer","null"]},"selected":{"type":"integer"},
+        "observations":{"type":"integer"},"selection_rate":{"type":"number"}
+      }},
       "TraceCapture": {
         "type":"object", "required":["layers","roles","positions","top_k"],
         "properties":{
@@ -2336,12 +3078,12 @@
         }
       },
       "TraceJob": {
-        "description":"Run a CPU trace of one Library GGUF or one scratch revision with private GGUF on its own opted-in worker. Supply exactly one of prompt, prompt_id, or options.prompts. Token positions include special tokens. There is no generation.",
+        "description":"Run a CPU trace of a Library GGUF or Qwen3.8 Flash Next v2 HGN checkpoint, or a scratch revision with private GGUF, on its own opted-in worker. Supply exactly one of prompt, prompt_id, or options.prompts. HGN uses at most 512 raw prompt tokens and does not support interventions or SAE. There is no generation.",
         "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"}],
         "required":["input_ids","options"],
         "properties":{
           "kind":{"const":"trace"},
-          "input_ids":{"description":"The Library GGUF ID or scratch revision ID.","minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
+          "input_ids":{"description":"The Library GGUF or HGN ID, or the scratch revision ID.","minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf","hgn"]]},
           "prompt":{"maxLength":16384,"x-brewery-max-utf8-bytes":16384},
           "options":{"$ref":"#/components/schemas/TraceOptions"}
         },
@@ -2349,6 +3091,169 @@
           {"allOf":[{"$ref":"#/components/schemas/OnePrompt"}],"properties":{"options":{"not":{"required":["prompts"]}}}},
           {"allOf":[{"$ref":"#/components/schemas/NoPrompt"}],"properties":{"options":{"required":["prompts"]}}}
         ]
+      },
+      "QuantizationDamageJob": {
+        "description":"Attribute quantization damage to tensors on the pinned W4 held-out corpus. Use two single-file Library GGUFs from the same revision on one opted-in worker.",
+        "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"},{"$ref":"#/components/schemas/NoPrompt"}],
+        "required":["input_ids","options"],
+        "properties":{
+          "kind":{"const":"quantization_damage"},
+          "input_ids":{"description":"Reference first, quantized second.","minItems":2,"maxItems":2,"uniqueItems":true,"x-brewery-input-kinds":[["gguf","gguf"]]},
+          "options":{"$ref":"#/components/schemas/QuantizationDamageOptions"}
+        }
+      },
+      "QuantizationDamageOptions": {
+        "type":"object","additionalProperties":false,"required":["reference_sha256","quantized_sha256","gguf_type"],
+        "properties":{
+          "reference_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "quantized_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "gguf_type":{"const":"Q4_K_M","description":"Base for the GGUF tensor-type override proposal."},
+          "backend":{"type":"string","enum":["cpu","cuda","rocm"],"default":"cpu"},
+          "objective":{"type":"string","enum":["target_logit","corpus_nll"],"default":"target_logit","description":"Compare one target logit per selected line, or attribute the mean teacher-forced next-token loss over the full corpus."},
+          "observations":{"type":"integer","minimum":1,"maximum":4,"default":1,"description":"Number of prompt lines for target_logit. Omit for corpus_nll."},
+          "swaps":{"type":"integer","minimum":1,"maximum":5,"default":3,"description":"Maximum recipe type exchanges. Only target_logit also measures this many single-tensor swaps."},
+          "tensors":{"type":"array","maxItems":512,"uniqueItems":true,"items":{"type":"string","maxLength":63,"pattern":"^[A-Za-z0-9_.-]+$"},"description":"Optional exact tensor names. An empty selection measures all quantized tensors."}
+        },
+        "if":{"required":["objective"],"properties":{"objective":{"const":"corpus_nll"}}},
+        "then":{"not":{"required":["observations"]}}
+      },
+      "QuantizationDamageArtifact": {
+        "type":"object",
+        "required":["kind","schema_version","reference_id","quantized_id","tensors","layers","observations","recipe_proposal"],
+        "properties":{
+          "kind":{"const":"quantization_damage"},"schema_version":{"const":1},"qualification":{"const":"not release-qualified"},
+          "objective":{"enum":["target_logit","corpus_nll"],"default":"target_logit"},
+          "reference_id":{"$ref":"#/components/schemas/Id"},"quantized_id":{"$ref":"#/components/schemas/Id"},
+          "reference_sha256":{"$ref":"#/components/schemas/Sha256"},"quantized_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "observations":{"type":"array","items":{"type":"object","description":"Signed reference minus quantized logit and the W5 comparison for each prompt. Empty for corpus_nll."}},
+          "corpus":{"type":"object","description":"Only for corpus_nll.","required":["line_count","observation_count","reference_mean_nll","predicted_nll_increase"],"properties":{
+            "line_count":{"const":16},"observation_count":{"type":"integer","minimum":1},
+            "reference_mean_nll":{"type":"number","minimum":0},"predicted_nll_increase":{"type":"number","description":"Sum of the selected first-order tensor contributions to the loss increase."}
+          }},
+          "tensors":{"type":"array","items":{"type":"object","description":"Tensor ranking by absolute damage. For corpus_nll, predicted_nll_increase is the signed dot product of the mean NLL gradient and (dequantized minus reference) weights. Only target_logit measures single-tensor recoveries."}},
+          "layers":{"type":"array","items":{"type":"object","description":"Layer ranking by the magnitude of its signed tensor contributions."}},
+          "recipe_proposal":{"type":"object","required":["applied","options","profile","uniform_profile"],"properties":{
+            "applied":{"const":false},"options":{"type":"object","description":"Resolved GGUF engine options for the proposal."},
+            "profile":{"$ref":"#/components/schemas/NewGgufProfile"},"uniform_profile":{"$ref":"#/components/schemas/NewGgufProfile"}
+          }}
+        }
+      },
+      "SensitivityJob": {
+        "description":"Measure empirical Fisher sensitivity on a single-file dense Qwen2 or Llama F32/BF16 Library GGUF or private scratch GGUF. Use its source worker. No prompt, GPU fallback, or model edits.",
+        "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"},{"$ref":"#/components/schemas/NoPrompt"}],
+        "required":["input_ids","options"],
+        "properties":{
+          "kind":{"const":"sensitivity"},
+          "input_ids":{"description":"One Library GGUF ID or scratch revision ID.","minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
+          "options":{"$ref":"#/components/schemas/SensitivityOptions"}
+        }
+      },
+      "SensitivityOptions": {
+        "type":"object","additionalProperties":false,"required":["model_sha256","corpus_sha256"],
+        "oneOf":[{"required":["layers"]},{"required":["tensors"]}],
+        "properties":{
+          "model_sha256":{"$ref":"#/components/schemas/Sha256","description":"SHA-256 of the exact GGUF file, including for a private scratch revision."},
+          "corpus_sha256":{"const":"9678f9afdc31b2a9be7fec2045997e2360693ee72b893287c0d539983bff4923","description":"W4 held-out text corpus SHA-256."},
+          "backend":{"type":"string","enum":["cpu","cuda","rocm"],"default":"cpu"},
+          "observations":{"type":"integer","minimum":1,"maximum":64,"default":16,"description":"Number of next-token observations in corpus order. The resolved selection must fit 256 gradient calls and 2 GiB of total gradient data."},
+          "layers":{"type":"array","minItems":1,"maxItems":16,"uniqueItems":true,"items":{"$ref":"#/components/schemas/TraceLayer"},"description":"Measure all two-dimensional weights in these layers."},
+          "tensors":{"type":"array","minItems":1,"maxItems":32,"uniqueItems":true,"items":{"type":"string","maxLength":63,"pattern":"^[A-Za-z0-9_.-]+$"}}
+        }
+      },
+      "SensitivityArtifact": {
+        "type":"object", "additionalProperties":false,
+        "required":["schema_version","kind","qualification","model_id","model_sha256","revision_sha256","corpus_sha256","backend","observation_count","observations_sha256","manifest_sha256","executable_sha256","tensors","layers"],
+        "properties":{
+          "schema_version":{"const":1},"kind":{"const":"sensitivity"},"qualification":{"const":"not release-qualified"},
+          "model_id":{"$ref":"#/components/schemas/Id"},"model_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "revision_sha256":{"$ref":"#/components/schemas/Sha256","description":"SafeTensors revision SHA-256 for scratch; GGUF SHA-256 for Library."},
+          "corpus_sha256":{"$ref":"#/components/schemas/Sha256"},"observations_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "backend":{"enum":["cpu","cuda","rocm"]},"observation_count":{"type":"integer","minimum":1,"maximum":64},
+          "manifest_sha256":{"$ref":"#/components/schemas/Sha256"},"executable_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "tensors":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","required":["name","layer","shape","fisher"],
+            "properties":{"name":{"type":"string"},"layer":{"type":["integer","null"]},"shape":{"description":"GGML storage order, innermost dimension first.","type":"array","items":{"type":"integer","minimum":1}},"fisher":{"type":"number","minimum":0}}}},
+          "layers":{"type":"array","items":{"type":"object","required":["layer","elements","fisher"],"properties":{"layer":{"type":"integer"},"elements":{"type":"integer","minimum":1},"fisher":{"type":"number","minimum":0,"description":"Mean over the selected tensor elements in this layer."}}}}
+        }
+      },
+      "CircuitJob": {
+        "description":"Measure activation attribution and independent W2 patches for two equal-length raw prompts. Use a single-file dense Qwen2 or Llama F32/BF16 GGUF on its opted-in CPU worker.",
+        "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"},{"$ref":"#/components/schemas/NoPrompt"}],
+        "required":["input_ids","options"],
+        "properties":{
+          "kind":{"const":"circuit"},
+          "input_ids":{"description":"One Library GGUF ID or one scratch revision ID with private GGUF.","minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
+          "options":{"$ref":"#/components/schemas/CircuitOptions"}
+        }
+      },
+      "CircuitRole": {"type":"string","enum":["l_out","attn_out","ffn_out"]},
+      "CircuitToken": {"type":"integer","minimum":0,"maximum":2147483647},
+      "CircuitPosition": {"type":"integer","minimum":0,"maximum":127},
+      "CircuitOptions": {
+        "type":"object","additionalProperties":false,
+        "description":"Use distinct prompts with 1 to 128 tokens each. The site count times the number of objective tokens must not exceed 256.",
+        "required":["model_sha256","clean_prompt","corrupt_prompt","target_id","layers","positions","roles","top_k"],
+        "properties":{
+          "model_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "clean_prompt":{"type":"string","minLength":1,"maxLength":4096,"x-brewery-max-utf8-bytes":4096},
+          "corrupt_prompt":{"type":"string","minLength":1,"maxLength":4096,"x-brewery-max-utf8-bytes":4096},
+          "target_id":{"$ref":"#/components/schemas/CircuitToken","description":"Token whose raw next-token logit defines the objective."},
+          "contrast_id":{"anyOf":[{"$ref":"#/components/schemas/CircuitToken"},{"type":"null"}],"description":"Optional distinct token whose logit is subtracted from the target logit."},
+          "layers":{"type":"array","minItems":1,"maxItems":128,"uniqueItems":true,"items":{"$ref":"#/components/schemas/TraceLayer"}},
+          "positions":{"type":"array","minItems":1,"maxItems":128,"uniqueItems":true,"items":{"$ref":"#/components/schemas/CircuitPosition"}},
+          "roles":{"type":"array","minItems":1,"maxItems":3,"uniqueItems":true,"items":{"$ref":"#/components/schemas/CircuitRole"}},
+          "top_k":{"type":"integer","minimum":1,"maximum":32,"description":"Number of top sites to patch, ranked by absolute attribution. Together with sample_lower this cannot exceed the site count or 32."},
+          "sample_lower":{"type":"integer","minimum":0,"maximum":31,"default":0,"description":"Number of additional lower-ranked sites to sample without replacement with a fixed seed."}
+        }
+      },
+      "CircuitArtifact": {
+        "type":"object","additionalProperties":false,
+        "required":["schema_version","kind","qualification","model_id","model_sha256","backend","clean_prompt","corrupt_prompt","clean_tokens","corrupt_tokens","target_id","contrast_id","clean_metric","corrupt_metric","sites","top_k","sample_lower","pearson_r","spearman_rho","manifest_sha256","executable_sha256"],
+        "properties":{
+          "schema_version":{"const":1},"kind":{"const":"circuit"},"qualification":{"const":"not release-qualified"},
+          "model_id":{"$ref":"#/components/schemas/Id"},"model_sha256":{"$ref":"#/components/schemas/Sha256"},"backend":{"const":"cpu"},
+          "clean_prompt":{"type":"string"},"corrupt_prompt":{"type":"string"},
+          "clean_tokens":{"type":"array","minItems":1,"maxItems":128,"items":{"$ref":"#/components/schemas/CircuitToken"}},
+          "corrupt_tokens":{"type":"array","minItems":1,"maxItems":128,"items":{"$ref":"#/components/schemas/CircuitToken"}},
+          "target_id":{"$ref":"#/components/schemas/CircuitToken"},
+          "contrast_id":{"anyOf":[{"$ref":"#/components/schemas/CircuitToken"},{"type":"null"}]},
+          "clean_metric":{"type":"number"},"corrupt_metric":{"type":"number"},
+          "pearson_r":{"type":["number","null"],"minimum":-1,"maximum":1,"description":"Signed Pearson r across measured sites only. Null if fewer than two measurements or either variable is constant."},
+          "spearman_rho":{"type":["number","null"],"minimum":-1,"maximum":1,"description":"Signed Spearman rank correlation across measured sites only. Ties use mean ranks. Null if fewer than two measurements or either variable is constant."},
+          "top_k":{"type":"integer","minimum":1,"maximum":32},
+          "sample_lower":{"type":"integer","minimum":0,"maximum":31},
+          "manifest_sha256":{"$ref":"#/components/schemas/Sha256"},"executable_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "sites":{"type":"array","minItems":1,"maxItems":256,"description":"Ranked by absolute attribution. Ties use ascending layer, role order (l_out, attn_out, ffn_out), then ascending position.","items":{
+            "type":"object","additionalProperties":false,"required":["layer","position","role","attribution","patched_delta"],
+            "properties":{
+              "layer":{"$ref":"#/components/schemas/TraceLayer"},"position":{"$ref":"#/components/schemas/CircuitPosition"},
+              "role":{"$ref":"#/components/schemas/CircuitRole"},
+              "attribution":{"type":"number","description":"Dot product of clean minus corrupt activation and the corrupt objective gradient."},
+              "patched_delta":{"type":["number","null"],"description":"Patched corrupt metric minus unpatched corrupt metric; null if not measured."}
+            }
+          }}
+        }
+      },
+      "DirectionBehavior": {"type":"string","enum":["slop","sycophancy","response_length"]},
+      "DirectionRole": {"type":"string","enum":["l_out","attn_out","ffn_out"],"default":"l_out"},
+      "BehaviorDirectionOptions": {
+        "type":"object","required":["behavior","model_sha256","layers"],"additionalProperties":false,
+        "properties":{
+          "behavior":{"$ref":"#/components/schemas/DirectionBehavior"},
+          "model_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "layers":{"type":"array","description":"Layers in increasing order.","minItems":1,"maxItems":64,"uniqueItems":true,"items":{"$ref":"#/components/schemas/TraceLayer"}},
+          "role":{"$ref":"#/components/schemas/DirectionRole"},
+          "position":{"anyOf":[{"$ref":"#/components/schemas/TracePosition"},{"type":"null"}],"description":"Zero-based position including special tokens. Omit or use null for the last user instruction token."}
+        }
+      },
+      "BehaviorDirectionJob": {
+        "description":"Fit per-layer behavior directions from an approved contrast set. Run on one opted-in CPU worker with the Library Qwen2 GGUF.",
+        "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"},{"$ref":"#/components/schemas/NoPrompt"}],
+        "required":["input_ids","options"],
+        "properties":{
+          "kind":{"const":"behavior_direction"},
+          "input_ids":{"minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
+          "options":{"$ref":"#/components/schemas/BehaviorDirectionOptions"}
+        }
       },
       "TraceOptions": {
         "type":"object",
@@ -2431,13 +3336,17 @@
         "properties":{
           "layer":{"$ref":"#/components/schemas/TraceLayer"}, "role":{"enum":["l_out","attn_out","ffn_inp","ffn_out"]},
           "positions":{"type":"array","minItems":1,"items":{"$ref":"#/components/schemas/TracePosition"}},
-          "op":{"enum":["zero","scale","add","replace"]}, "factor":{"type":"number"},
+          "op":{"enum":["zero","scale","add","replace","zero_expert","project_out","subtract"]}, "factor":{"type":"number"},
+          "expert":{"type":"integer","minimum":0,"maximum":4095},
+          "scale":{"type":"number","minimum":0},
           "vector":{"type":"array","minItems":1,"maxItems":16384,"items":{"type":"number"}}
         },
         "oneOf":[
-          {"properties":{"op":{"const":"zero"}}, "not":{"anyOf":[{"required":["factor"]},{"required":["vector"]}]}},
-          {"properties":{"op":{"const":"scale"}},"required":["factor"],"not":{"required":["vector"]}},
-          {"properties":{"op":{"enum":["add","replace"]}},"required":["vector"],"not":{"required":["factor"]}}
+          {"properties":{"op":{"const":"zero"}, "factor":false, "vector":false, "scale":false, "expert":false}},
+          {"properties":{"op":{"const":"scale"}, "vector":false, "scale":false, "expert":false},"required":["factor"]},
+          {"properties":{"op":{"enum":["add","replace","project_out"]}, "factor":false, "scale":false, "expert":false},"required":["vector"]},
+          {"properties":{"op":{"const":"subtract"}, "factor":false, "expert":false},"required":["vector","scale"]},
+          {"properties":{"op":{"const":"zero_expert"}, "role":{"const":"ffn_out"}, "factor":false, "vector":false, "scale":false},"required":["expert"]}
         ]
       },
       "InterventionRef": {
@@ -2458,17 +3367,42 @@
       "InterventionRules": {
         "type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/components/schemas/TraceIntervention"}
       },
+      "DirectionInterventionRules": {
+        "description": "Resolve each nonzero unit vector from a successful direction job for the same model ID and GGUF hash. Targets must not overlap with other rules.",
+        "type": "array", "minItems": 1, "maxItems": 8,
+        "items": {
+          "type":"object","additionalProperties":false,
+          "required":["direction_id","direction_version","source_layer","layer","role","positions","op"],
+          "properties":{
+            "direction_id":{"$ref":"#/components/schemas/Id"}, "direction_version":{"type":"integer","enum":[1,2]},
+            "source_layer":{"$ref":"#/components/schemas/TraceLayer"},
+            "layer":{"$ref":"#/components/schemas/TraceLayer"}, "role":{"enum":["l_out","attn_out","ffn_inp","ffn_out"]},
+            "positions":{"type":"array","minItems":1,"items":{"$ref":"#/components/schemas/TracePosition"}},
+            "op":{"enum":["project_out","subtract"]}, "scale":{"type":"number","minimum":0}
+          },
+          "oneOf":[
+            {"properties":{"op":{"const":"project_out"}, "scale":false}},
+            {"properties":{"op":{"const":"subtract"}},"required":["scale"]}
+          ]
+        }
+      },
       "CreateIntervention": {
-        "type": "object", "additionalProperties": false, "required": ["name", "model_id", "model_sha256", "interventions"],
+        "type": "object", "additionalProperties": false, "required": ["name", "model_id", "model_sha256"],
+        "anyOf":[{"required":["interventions"]},{"required":["direction_rules"]}],
         "properties": {
           "name": {"type": "string", "minLength": 1, "maxLength": 160, "description": "At most 160 UTF-8 bytes after trimming."},
           "model_id": {"$ref": "#/components/schemas/Id"}, "model_sha256": {"$ref": "#/components/schemas/Sha256"},
-          "interventions": {"$ref": "#/components/schemas/InterventionRules"}
+          "interventions": {"$ref": "#/components/schemas/InterventionRules"},
+          "direction_rules": {"$ref": "#/components/schemas/DirectionInterventionRules"}
         }
       },
       "NewInterventionVersion": {
-        "type": "object", "additionalProperties": false, "required": ["interventions"],
-        "properties": {"interventions": {"$ref": "#/components/schemas/InterventionRules"}}
+        "type": "object", "additionalProperties": false,
+        "anyOf":[{"required":["interventions"]},{"required":["direction_rules"]}],
+        "properties": {
+          "interventions": {"$ref": "#/components/schemas/InterventionRules"},
+          "direction_rules": {"$ref": "#/components/schemas/DirectionInterventionRules"}
+        }
       },
       "InterventionSummary": {
         "type": "object", "required": ["id", "name", "model_id", "model_sha256", "latest_version"],
@@ -2484,7 +3418,8 @@
           "id": {"$ref": "#/components/schemas/Id"}, "version": {"type": "integer", "minimum": 1, "maximum": 4294967295},
           "name": {"type": "string"}, "model_id": {"$ref": "#/components/schemas/Id"},
           "model_sha256": {"$ref": "#/components/schemas/Sha256"}, "created_at_ms": {"type": "integer", "minimum": 0},
-          "model_hint": {"type": "string"}, "interventions": {"$ref": "#/components/schemas/InterventionRules"}
+          "model_hint": {"type": "string"}, "interventions": {"$ref": "#/components/schemas/InterventionRules"},
+          "direction_rules": {"$ref": "#/components/schemas/DirectionInterventionRules"}
         }
       },
       "TraceExport": {
@@ -2494,11 +3429,13 @@
       "TraceSummary": {
         "type":"object",
         "allOf":[{"$ref":"#/components/schemas/TraceExport"}],
-        "required":["schema_version","prompt","model","model_id","model_sha256","lanternfish_commit","spec","tokens","tensor_count","missing_count","intervention_count","logit_lens_count","model_logits_count"],
+        "required":["schema_version","prompt","model","model_id","model_sha256","spec","tokens","tensor_count","missing_count","intervention_count","logit_lens_count","model_logits_count"],
+        "oneOf":[{"required":["lanternfish_commit"]},{"required":["runtime","runtime_sha256"]}],
         "properties":{
           "schema_version":{"const":1},"prompt":{"type":"integer"},"model":{"type":"object"},
           "model_id":{"$ref":"#/components/schemas/Id"},"model_sha256":{"$ref":"#/components/schemas/Sha256"},
-          "lanternfish_commit":{"type":"string"},"spec":{"$ref":"#/components/schemas/TraceCapture"},
+          "lanternfish_commit":{"type":"string"},"runtime":{"const":"hgn_cpu"},
+          "runtime_sha256":{"$ref":"#/components/schemas/Sha256"},"spec":{"$ref":"#/components/schemas/TraceCapture"},
           "tokens":{"type":"array","items":{"type":"object","required":["position","token_id"],"properties":{"position":{"$ref":"#/components/schemas/TracePosition"},"token_id":{"type":"integer"}}}},
           "tensor_count":{"type":"integer"},"missing_count":{"type":"integer"},"intervention_count":{"type":"integer"},
           "logit_lens_count":{"type":"integer"},"model_logits_count":{"type":"integer"}
@@ -3520,6 +4457,73 @@
         "then": {"properties": {"artifact": {"properties": {"kind": {"enum": ["gguf", "safetensors"]}}}}},
         "else": {"properties": {"artifact": {"properties": {"kind": {"const": "hf"}}}}}
       },
+      "WeightSpectraFilter": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "layer": {"type":["integer","null"],"minimum":0,"maximum":4095},
+          "tensor": {"type":["string","null"],"minLength":1,"maxLength":95,"description":"Use an exact SafeTensors or GGUF tensor name."}
+        }
+      },
+      "WeightSpectraRequest": {
+        "type": "object", "additionalProperties": false, "required": ["id"],
+        "properties": {
+          "id": {"$ref": "#/components/schemas/Id"},
+          "compare_id": {"$ref": "#/components/schemas/Id"},
+          "representation": {"enum":["safetensors","gguf"]},
+          "compare_representation": {"enum":["safetensors","gguf"]},
+          "layer": {"type":"integer","minimum":0,"maximum":4095},
+          "tensor": {"type":"string","minLength":1,"maxLength":95,"description":"Use an exact SafeTensors or GGUF tensor name."}
+        }
+      },
+      "WeightSpectraInput": {
+        "type":"object", "required":["id","sha256","format"],
+        "properties":{
+          "id":{"$ref":"#/components/schemas/Id"},
+          "sha256":{"$ref":"#/components/schemas/Sha256"},
+          "format":{"enum":["safetensors","gguf"]},
+          "shards":{"type":"array","items":{"type":"array","minItems":2,"maxItems":2,"prefixItems":[{"type":"string"},{"$ref":"#/components/schemas/Sha256"}]}}
+        }
+      },
+      "WeightSpectraMeasurement": {
+        "type":"object","required":["dtype","shape"],
+        "properties":{
+          "dtype":{"type":"string"},
+          "shape":{"type":"array","items":{"type":"integer","minimum":0}},
+          "reason":{"enum":["unsupported_dtype","not_a_matrix_or_vector","shape_outside_compute_limits"]},
+          "method":{"enum":["exact","randomized_top_32"]},
+          "singular_values":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"number","minimum":0}},
+          "effective_rank":{"type":"number","minimum":0},
+          "stable_rank":{"type":"number","minimum":0},
+          "captured_energy_fraction":{"type":["number","null"],"minimum":0,"maximum":1},
+          "alpha":{"type":["number","null"]},
+          "alpha_tail_count":{"type":["integer","null"],"minimum":8},
+          "alpha_xmin":{"type":["number","null"],"minimum":0},
+          "alpha_ks":{"type":["number","null"],"minimum":0,"maximum":1}
+        }
+      },
+      "WeightSpectraResult": {
+        "type":"object","required":["kind","schema_version","qualification","source","reference","tensors"],
+        "properties":{
+          "kind":{"const":"weight_spectra"},
+          "schema_version":{"const":1},
+          "qualification":{"const":"not release-qualified"},
+          "source":{"$ref":"#/components/schemas/WeightSpectraInput"},
+          "reference":{"anyOf":[{"$ref":"#/components/schemas/WeightSpectraInput"},{"type":"null"}]},
+          "tensors":{"type":"array","maxItems":512,"items":{
+            "type":"object","required":["name","layer","source","reference","delta","status"],
+            "properties":{
+              "name":{"type":"string"},
+              "layer":{"type":["integer","null"]},
+              "source":{"anyOf":[{"$ref":"#/components/schemas/WeightSpectraMeasurement"},{"type":"null"}]},
+              "reference":{"anyOf":[{"$ref":"#/components/schemas/WeightSpectraMeasurement"},{"type":"null"}]},
+              "status":{"enum":["measured","compared","shape_mismatch","missing","unsupported"]},
+              "delta":{"type":["object","null"],"description":"Source minus reference when both tensor shapes match and both measurements exist.","properties":{
+                "sigma_max":{"type":"number"},"effective_rank":{"type":"number"},"stable_rank":{"type":"number"},"alpha":{"type":["number","null"]}
+              }}
+            }
+          }}
+        }
+      },
       "JobResult": {
         "description": "Worker result. Weight apply and Hugging Face download check output identity and register a Library model only on verified success. A job result is not a release verdict.",
         "oneOf": [
@@ -3534,21 +4538,85 @@
           {"$ref": "#/components/schemas/HfDownloadResult"},
           {"$ref": "#/components/schemas/Exl3LayerResult"},
           {"$ref": "#/components/schemas/TraceResult"},
+          {"$ref": "#/components/schemas/WeightSpectraResult"},
+          {"$ref": "#/components/schemas/QuantizationDamageArtifact"},
+          {"$ref": "#/components/schemas/BehaviorDirectionResult"},
+          {"$ref": "#/components/schemas/AblationSearchResult"},
           {"type": "object", "not": {"anyOf": [
             {"$ref": "#/components/schemas/CompareResult"}, {"$ref": "#/components/schemas/ConversionResult"},
             {"$ref": "#/components/schemas/GenerateResult"}, {"$ref": "#/components/schemas/Gsm8kResult"},
             {"$ref": "#/components/schemas/BenchmarkResult"}, {"$ref": "#/components/schemas/TransferResult"},
              {"$ref": "#/components/schemas/CacheCleanupResult"}, {"$ref": "#/components/schemas/WeightApplyResult"},
-             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace"]}}}
+             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace", "weight_spectra", "quantization_damage"]}}}
           ]}}
         ]
       },
       "ByteCount": {"type": "integer", "minimum": 0},
+      "AblationSearchResult": {
+        "type": "object",
+        "required": ["schema_version", "kind", "release_qualified", "backend", "screen", "children", "finding"],
+        "properties": {
+          "schema_version": {"const": 1},
+          "kind": {"const": "search_ablation"},
+          "release_qualified": {"const": false},
+          "backend": {"const": "cpu"},
+          "parent_safetensors_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "screen_job_id": {"$ref": "#/components/schemas/Id"},
+          "screen": {
+            "type": "object", "required": ["marker", "parent_hits", "trials", "pareto", "selected"],
+            "properties": {
+              "marker": {"type": "string"},
+              "parent_hits": {"type": "integer", "minimum": 0},
+              "trials": {"type": "array", "maxItems": 32, "items": {"type": "object"}},
+              "pareto": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+              "selected": {"type": "array", "maxItems": 3, "items": {"type": "integer", "minimum": 0}}
+            }
+          },
+          "children": {"type": "array", "maxItems": 3, "items": {
+            "type": "object", "required": ["id", "n", "exact_mcnemar_p", "holm_adjusted_p", "w4_passed"],
+            "properties": {
+              "id": {"$ref": "#/components/schemas/Id"},
+              "n": {"const": 32},
+              "exact_mcnemar_p": {"type": "number", "minimum": 0, "maximum": 1},
+              "holm_adjusted_p": {"type": "number", "minimum": 0, "maximum": 1},
+              "w4_passed": {"type": "boolean"}
+            }
+          }},
+          "finding": {"enum": ["stock_screen_marker_not_observed", "no_screen_setting_outperformed_matched_random_control",
+            "screen_effect_not_on_pareto_front", "screen_effect_not_confirmed_by_weight_edit", "screen_effect_confirmed_by_weight_edit"]}
+        }
+      },
+      "BehaviorDirectionResult": {
+        "type":"object","required":["kind","schema_version","release_qualified","model_id","model_sha256","position","behavior","contrast_sha256","lanternfish_commit","executable_sha256","fit"],
+        "if":{"properties":{"schema_version":{"const":2}}},
+        "then":{"properties":{"fit":{"properties":{"layers":{"items":{"required":["held_out_cohens_d","mean_residual_norm"]}}}}}},
+        "properties":{
+          "kind":{"const":"behavior_direction"},"schema_version":{"enum":[1,2]},"release_qualified":{"const":false},
+          "model_id":{"$ref":"#/components/schemas/Id"},"model_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "position":{"type":["integer","null"]},"behavior":{"$ref":"#/components/schemas/DirectionBehavior"},
+          "contrast_sha256":{"$ref":"#/components/schemas/Sha256"},"lanternfish_commit":{"type":"string"},
+          "executable_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "fit":{"type":"object","required":["role","train_pairs","held_out_pairs","selected_layer","layers"],"properties":{
+            "role":{"$ref":"#/components/schemas/DirectionRole"},"train_pairs":{"const":12},"held_out_pairs":{"const":8},
+            "selected_layer":{"type":["integer","null"],"description":"Layer with the highest positive held-out Cohen's d in version 2, or the highest positive raw margin in version 1. Null if none qualifies."},"layers":{"type":"array","items":{"type":"object",
+              "required":["layer","norm","unit_vector","held_out_margin"],"properties":{
+                "layer":{"$ref":"#/components/schemas/TraceLayer"},"norm":{"type":"number","minimum":0},
+                "unit_vector":{"type":["array","null"],"items":{"type":"number"}},"held_out_margin":{"type":["number","null"]},
+                "held_out_cohens_d":{"type":["number","null"],"description":"Raw margin divided by the pooled within-class sample standard deviation of held-out projections. Null if undefined."},
+                "mean_residual_norm":{"type":"number","minimum":0,"description":"Mean L2 norm of l_out over both classes of held-out prompts, at the captured token."},
+                "negative_mean":{"type":"array","minItems":1,"maxItems":16384,"items":{"type":"number"},"description":"Mean negative-class activation over training prompts. Required for projected ablation; older artifacts omit it."}
+              }}}
+          }}
+        }
+      },
       "TraceResult": {
-        "type":"object","required":["kind","schema_version","model_id","model_sha256","lanternfish_commit","executable_sha256","bytes","prompts"],
+        "type":"object","required":["kind","schema_version","model_id","model_sha256","executable_sha256","bytes","prompts"],
+        "oneOf":[{"required":["lanternfish_commit"]},{"required":["runtime","runtime_sha256","assets_sha256"]}],
         "properties":{
           "kind":{"const":"trace"},"schema_version":{"const":1},"model_id":{"$ref":"#/components/schemas/Id"},
           "model_sha256":{"$ref":"#/components/schemas/Sha256"},"lanternfish_commit":{"type":"string"},
+          "runtime":{"const":"hgn_cpu"},"runtime_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "assets_sha256":{"type":"object","required":["sidecar","config","tokenizer"],"additionalProperties":{"$ref":"#/components/schemas/Sha256"}},
           "executable_sha256":{"$ref":"#/components/schemas/Sha256"},"bytes":{"$ref":"#/components/schemas/ByteCount"},
           "prompts":{"type":"array","minItems":1,"maxItems":4,"items":{"$ref":"#/components/schemas/TraceExport"}}
         }

@@ -22,7 +22,7 @@ fn fixture(t: &Test, values: &[f32]) -> std::path::PathBuf {
     fs::write(
         t.root.path().join("dispatch.json"),
         json!({"hosts":{"existing":{"local":true,"config":config,
-          "capabilities":{"benchmark":true,"trace":true},
+          "capabilities":{"benchmark":true,"trace":true,"sensitivity":true},
           "benchmark_targets":[{"id":"cpu","label":"CPU"}],
           "benchmarks":[{"id":"gsm8k","label":"GSM8K"}]}}})
         .to_string(),
@@ -71,6 +71,151 @@ fn sha(bytes: &[u8]) -> String {
 }
 
 #[test]
+fn lineage_returns_same_evidence_via_mcp_without_writing_records() {
+    let mut t = Test::new();
+    let base_path = fixture(&t, &[3., 1., -2., 2., 1., 4.]);
+    let edited = base_path.with_file_name("edited.safetensors");
+    let mut bytes = fs::read(&base_path).unwrap();
+    let offset = bytes.len() - 4;
+    bytes[offset..].copy_from_slice(&4.125_f32.to_le_bytes());
+    fs::write(&edited, bytes).unwrap();
+    t.launch();
+    let register = |path| {
+        let (status, body) = t.request(
+            "/api/models",
+            "",
+            Some(json!({"host":"existing","kind":"safetensors","path":path})),
+        );
+        assert_eq!(status, 201, "{body}");
+        body
+    };
+    let base = register(base_path);
+    let target = register(edited);
+    let records = || {
+        let state = t.request("/api/state", "", None).1;
+        let ids = state["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].clone())
+            .collect::<Vec<_>>();
+        (ids, state["jobs"].clone(), state["event_cursor"].clone())
+    };
+    let before = records();
+    let route = format!("/api/models/{}/lineage", target["id"].as_str().unwrap());
+    let (status, answer) = t.request(&route, "", None);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["most_likely"]["base_id"], base["id"], "{answer}");
+    assert_eq!(answer["most_likely"]["kind"], "rank_one_edit", "{answer}");
+    let (_, mcp) = t.request(
+        "/mcp",
+        "Accept: application/json, text/event-stream\r\n",
+        Some(json!({
+            "jsonrpc":"2.0", "id":1, "method":"tools/call", "params": {
+                "name":"lineage", "arguments":{"id":target["id"],"candidate_1":base["id"]}
+            }
+        })),
+    );
+    assert_eq!(mcp["result"]["structuredContent"], answer, "{mcp}");
+    assert_eq!(before, records());
+    let (status, _) = t.request(&format!("{route}?candidate_1=bad"), "", None);
+    assert_eq!(status, 400);
+    let (status, _) = t.request(
+        &format!(
+            "{route}?candidate_1={0}&candidate_2={0}",
+            base["id"].as_str().unwrap()
+        ),
+        "",
+        None,
+    );
+    assert_eq!(status, 400);
+}
+
+#[test]
+fn weight_spectra_queues_parent_comparison_and_replays_through_mcp() {
+    let mut t = Test::new();
+    let source = fixture(&t, &[3., 1., -2., 2., 1., 4.]);
+    let hash = sha(&fs::read(&source).unwrap());
+    t.launch();
+    let (status, model) = t.request(
+        "/api/models",
+        "",
+        Some(json!({"host":"existing","kind":"safetensors","path":source})),
+    );
+    assert_eq!(status, 201, "{model}");
+    assert_eq!(
+        t.admin(Some(json!({
+            "action":"set_weight_editor","worker":"existing","revision":0,"enabled":true
+        })))
+        .0,
+        200
+    );
+    let (status, scratch) = t.request(
+        "/api/scratch",
+        "",
+        Some(json!({
+            "parent_id":model["id"], "parent_sha256":hash
+        })),
+    );
+    assert_eq!(status, 201, "{scratch}");
+    let (status, job) = t.request(
+        "/api/weight-spectra",
+        "Idempotency-Key: spectra-test\r\n",
+        Some(json!({"id":scratch["id"],"tensor":"w"})),
+    );
+    assert_eq!(status, 202, "{job}");
+    let (_, replay) = t.request("/mcp", "Accept: application/json, text/event-stream\r\n", Some(json!({
+        "jsonrpc":"2.0", "id":1, "method":"tools/call", "params": {
+            "name":"weight_spectra", "arguments":{"id":scratch["id"],"tensor":"w","idempotency_key":"spectra-test"}
+        }
+    })));
+    assert_eq!(
+        replay["result"]["structuredContent"]["id"], job["id"],
+        "{replay}"
+    );
+    let route = format!("/api/jobs/{}", job["id"].as_str().unwrap());
+    for _ in 0..100 {
+        let (_, detail) = t.request(&route, "", None);
+        match detail["state"].as_str().unwrap() {
+            "running" | "queued" => std::thread::sleep(std::time::Duration::from_millis(50)),
+            "succeeded" => {
+                let result = &detail["result"];
+                assert_eq!(result["source"]["id"], scratch["id"]);
+                assert_eq!(result["reference"]["id"], model["id"]);
+                assert_eq!(result["source"]["sha256"], hash);
+                assert_eq!(result["reference"]["sha256"], hash);
+                assert_eq!(result["tensors"][0]["delta"]["stable_rank"], 0.0);
+                return;
+            }
+            _ => panic!("{detail}"),
+        }
+    }
+    panic!("spectral job did not finish");
+}
+
+#[test]
+fn heretic_cannot_queue_without_a_local_gpu_lane() {
+    let mut t = Test::new();
+    let path = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
+    t.launch();
+    let (status, model) = t.request(
+        "/api/models",
+        "Idempotency-Key: heretic-fixture\r\n",
+        Some(json!({"name":"fixture","host":"existing","kind":"safetensors","path":path})),
+    );
+    assert_eq!(status, 201, "{model}");
+    let (status, response) = t.request(
+        "/api/scratch/heretic",
+        "Idempotency-Key: heretic-run\r\n",
+        Some(
+            json!({"parent_id":model["id"],"base_sha256":sha(&fs::read(&path).unwrap()),
+                    "profile":"noslop","trials":2,"trial_index":0,"seed":12}),
+        ),
+    );
+    assert_eq!(status, 409, "{response}");
+}
+
+#[test]
 fn mcp_compiled_root_checks_and_approval_boundary() {
     let mut t = Test::new();
     fixture(&t, &[1., 2., 3., 4., 5., 6.]);
@@ -81,12 +226,15 @@ action = sys.argv[1]
 directory = pathlib.Path(sys.argv[3 if action == "compile" else 2])
 weights = directory / "model.safetensors"
 config = directory / "config.json"
+truth = directory / "ground-truth.v1.json"
 if action == "compile":
     header = b'{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}'
     weights.write_bytes(struct.pack("<Q", len(header)) + header + struct.pack("<f", 1))
     config.write_text('{"schema":"brewery.compiled-program.v1","program":"sort","compiler_commit":"9ce2b8c82b6ba10e62e86cf6f390e7536d4fd2cd","architecture":"tracr","runtime":"mock"}')
+    truth.write_text('{"schema_version":1}')
     print(json.dumps({"sha256": hashlib.sha256(weights.read_bytes()).hexdigest(),
-        "config_sha256": hashlib.sha256(config.read_bytes()).hexdigest()}))
+        "config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+        "ground_truth_sha256": hashlib.sha256(truth.read_bytes()).hexdigest()}))
 elif action == "run":
     print(json.dumps([0, 1, 2, 2]))
 elif action == "check":
@@ -135,6 +283,10 @@ elif action == "check":
     );
     assert_eq!(row["kind"], "compiled_program");
     assert_eq!(row["provenance"]["method"], "compile_program");
+    assert_eq!(
+        row["provenance"]["compiled_program"]["ground_truth_sha256"],
+        sha(br#"{"schema_version":1}"#),
+    );
     assert_eq!(ok("compile_program", compile)["id"], row["id"]);
     assert!(
         ok("list_models", json!({}))["models"]
@@ -173,6 +325,16 @@ elif action == "check":
         .path()
         .join("state/scratch")
         .join(id.as_str().unwrap());
+    fs::write(directory.join("ground-truth.v1.json"), "{}").unwrap();
+    assert_eq!(
+        call("run_program", run.clone())["structuredContent"]["status"],
+        409
+    );
+    fs::write(
+        directory.join("ground-truth.v1.json"),
+        r#"{"schema_version":1}"#,
+    )
+    .unwrap();
     fs::write(directory.join("config.json"), "{}").unwrap();
     assert_eq!(call("run_program", run)["structuredContent"]["status"], 409);
     let failed = checks("check-tampered-sort");
@@ -415,6 +577,96 @@ fn mcp_expert_apply_cannot_publish_or_make_a_partial_scratch() {
     );
 }
 
+#[test]
+fn plan_experts_binds_routing_evidence_without_changing_the_map() {
+    let mut t = Test::new();
+    let input = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
+    let source = input.with_extension("gguf");
+    fs::rename(&input, &source).unwrap();
+    let digest = sha(&fs::read(&source).unwrap());
+    let script = t.root.path().join("dispatch");
+    let before = fs::read_to_string(&script).unwrap();
+    let route = r#"
+  trace-read)
+    python3 -c 'import json,sys
+req=json.load(sys.stdin)
+assert req["view"]=="routing_input"
+receipt=json.load(open(sys.argv[1]))["result"]
+print(json.dumps(dict(status="ok",data=dict(
+  model_id=receipt["model_id"],model_sha256=sys.argv[2],
+  lanternfish_commit="5699379af18d6428a6589c996f516c07a91e1a86",
+  manifest_sha256="a"*64,tokens=[dict(position=0,token_id=1)],interventions=[],
+  rows=[dict(position=0,logits=[0,1],ids=[1],weights=[1])]))))' "${0%/*}/$3.result" __DIGEST__
+    ;;
+"#;
+    fs::write(
+        script,
+        before.replace(
+            "  start)",
+            &(route.replace("__DIGEST__", &digest) + "  start)"),
+        ),
+    )
+    .unwrap();
+    t.launch();
+    assert_eq!(
+        t.admin(Some(
+            json!({"action":"set_weight_editor","worker":"existing",
+        "revision":0,"enabled":true})
+        ))
+        .0,
+        200
+    );
+    let (status, model) = t.request(
+        "/api/models",
+        "",
+        Some(json!({
+            "host":"existing","kind":"gguf","path":source
+        })),
+    );
+    assert_eq!(status, 201, "{model}");
+    let mcp = |name, arguments| {
+        let (status, reply) = t.request("/mcp", "Accept: application/json, text/event-stream\r\n",
+            Some(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}})));
+        assert_eq!(status, 200, "{reply}");
+        reply["result"]["structuredContent"].clone()
+    };
+    let job = mcp(
+        "start_trace",
+        json!({
+            "idempotency_key":"atlas-reap-trace","input_ids":[model["id"]],"prompt":"one",
+            "options":{"layers":[0],"positions":[0],"top_k":0,
+                "roles":["ffn_moe_logits","ffn_moe_topk","ffn_moe_route_weights"]}
+        }),
+    );
+    assert_eq!(
+        mcp("get_job", json!({"id":job["id"],"wait_ms":5000}))["state"],
+        "succeeded"
+    );
+    let split = |split, first, last| {
+        json!({
+            "schema":"brewery.expert-activations.v1","source_sha256":digest,
+            "observer_sha256":"c".repeat(64),"split":split,"n_layers":1,"routed_layers":[0],
+            "n_experts":2,"top_k":1,"samples":[{"tokens":[first,last],"positions":[
+                {"0":[{"expert":0,"applied_gate":1.,"output_l2":1.}]},
+                {"0":[{"expert":1,"applied_gate":1.,"output_l2":2.}]}
+            ]}]
+        })
+        .to_string()
+    };
+    let mut args = json!({"id":model["id"],"source_sha256":digest,"keep":1,
+        "calibration":split("calibration",1,2),"held_out":split("held-out",3,4)});
+    let baseline = mcp("plan_experts", args.clone());
+    assert!(baseline["plan"].is_string(), "{baseline}");
+    args["routing_evidence"] = json!({"job_id":job["id"],"layer":0,"start":0,"end":1});
+    let linked = mcp("plan_experts", args.clone());
+    assert_eq!(linked["routing_evidence"]["job_id"], job["id"], "{linked}");
+    assert_eq!(linked["routing_evidence"]["experts"][1]["load"], 1.);
+    assert_eq!(linked["plan"], baseline["plan"]);
+    assert_eq!(linked["plan_sha256"], baseline["plan_sha256"]);
+    args["source_sha256"] = json!("b".repeat(64));
+    assert_eq!(mcp("plan_experts", args)["status"], 422);
+}
+
 fn mock_scratch_worker(t: &Test) {
     let mock = t.root.path().join("editor-DISPATCH");
     fs::write(
@@ -447,6 +699,14 @@ for name in schema["metrics"]["items"]["properties"]["name"]["enum"]:
 result=dict(schema="brewery.scratch-behavior.v1",qualification="not release-qualified",
     fixture_sha256={k:v["const"] for k,v in schema["fixture_sha256"]["properties"].items()},
     runner_sha256="c"*64,metrics=metrics,parent_generation="Before",child_generation="After")
+if (root/"with-token-loss").exists():
+    import math
+    result["token_loss"] = [
+        [dict(id=1,piece_hex="206f6c64",parent_logprob=-4,child_logprob=-4+gain),
+         dict(id=2,piece_hex="20636c6f636b",parent_logprob=-2,child_logprob=-2)]
+        for gain in [0]*5+[2,-1]+[0]*9
+    ]
+    metrics[-1].update(parent=math.exp(3),child=math.exp(95/32))
 result.update(zip(["parent_gguf_sha256","revision_gguf_sha256","parent_sha256","revision_sha256"],
                   map(pins.__getitem__,paths),strict=True))
 if (root/"reject-check-receipt").exists(): result["revision_gguf_sha256"]="0"*64
@@ -464,6 +724,26 @@ assert grant == {"job_id":sys.argv[2],"paths":{model["path"]:sha}}
 assert job["options"]["expected_model_sha256"] == sha
 print(json.dumps({"state":"succeeded","progress":"done","result":{"kind":"trace","schema_version":1,"model_id":model["id"],"model_sha256":sha}}))' "$BREWERY_DISPATCH_CONFIG" "$3" > "$dir/result"
         printf '%s\n' '{"state":"running","progress":"mock scratch trace"}'
+        exit
+    fi
+    if echo "$body" | grep -q '"kind":"sensitivity"'; then
+        printf '%s' "$body" | python3 -c 'import hashlib,json,pathlib,sys
+job=json.load(sys.stdin); model=job["inputs"][0]; options=job["options"]
+cfg=json.load(open(sys.argv[1]))["hosts"][model["host"]]["config"]
+grant=json.load(open(cfg))["scratch_access"]
+gguf=pathlib.Path(model["path"])
+sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+assert grant == {"job_id":sys.argv[2],"paths":{str(gguf):sha(gguf)}}
+assert options["revision_sha256"] == sha(gguf.with_name("model.safetensors"))
+assert options["model_sha256"] == sha(gguf)
+result=dict(kind="sensitivity",schema_version=1,qualification="not release-qualified",backend="cpu",
+    model_id=model["id"],model_sha256=sha(gguf),revision_sha256=options["revision_sha256"],
+    corpus_sha256=options["corpus_sha256"],observation_count=1,observations_sha256="a"*64,
+    executable_sha256="b"*64,manifest_sha256="c"*64,
+    tensors=[dict(name="blk.0.attn_q.weight",layer=0,shape=[2,2],fisher=0.25)],
+    layers=[dict(layer=0,elements=4,fisher=0.25)])
+print(json.dumps(dict(state="succeeded",progress="done",result=result)))' "$BREWERY_DISPATCH_CONFIG" "$3" > "$dir/result"
+        printf '%s\n' '{"state":"running","progress":"mock scratch sensitivity"}'
         exit
     fi
     echo "$body" | grep -q '"kind":"scratch_gguf"'
@@ -588,6 +868,30 @@ fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
     let (_, revision) = t.request(&path, "", None);
     assert_eq!(revision["gguf"]["revision_sha256"], scratch["sha256"]);
     assert_eq!(revision["gguf"]["sha256"], sha(b"GGUFmock"));
+    let mut fisher = json!({"kind":"sensitivity","input_ids":[id],"options":{
+        "model_sha256":revision["sha256"],
+        "corpus_sha256":brewery_worker::sensitivity::CORPUS_SHA256,
+        "tensors":["blk.0.attn_q.weight"],"observations":1,
+    }});
+    assert_eq!(t.request("/api/jobs", "", Some(fisher.clone())).0, 400);
+    fisher["options"]["model_sha256"] = revision["gguf"]["sha256"].clone();
+    let (status, sensitivity) = t.request("/api/jobs", "", Some(fisher));
+    assert_eq!(status, 201, "{sensitivity}");
+    let artifact_url = format!(
+        "/api/jobs/{}/sensitivity",
+        sensitivity["id"].as_str().unwrap()
+    );
+    loop {
+        let (status, artifact) = t.request(&artifact_url, "", None);
+        if status == 200 {
+            assert_eq!(artifact["model_sha256"], revision["gguf"]["sha256"]);
+            assert_eq!(artifact["revision_sha256"], revision["sha256"]);
+            assert!(!artifact.to_string().contains(".gguf"));
+            break;
+        }
+        assert!(Instant::now() < until, "{artifact}");
+        sleep(Duration::from_millis(25));
+    }
     let locate = |backend| {
         t.request(
             &format!("{path}/rome"),
@@ -742,6 +1046,7 @@ fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
         sleep(Duration::from_millis(25));
     }
     let checks = format!("{path}/checks");
+    fs::write(t.root.path().join("with-token-loss"), "").unwrap();
     let (status, check_job) = t.request(&checks, "", Some(json!({"sha256":scratch["sha256"]})));
     assert_eq!(status, 202, "{check_job}");
     loop {
@@ -787,6 +1092,83 @@ fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
         panic!("measured behavior diff")
     };
     assert_eq!(diff["metrics"].as_array().unwrap().len(), 17);
+    assert_eq!(bundle["token_loss"]["sha256"].as_str().unwrap().len(), 64);
+    assert!(bundle["measured_report"].get("token_loss").is_none());
+    let loss_route = format!(
+        "/api/diff/token-loss?a={}&b={id}&sentence=5&start=1&end=2",
+        parent["id"].as_str().unwrap(),
+    );
+    let (200, loss) = t.request(&loss_route, "", None) else {
+        panic!("token loss slice");
+    };
+    assert_eq!(loss["total_logprob_gain"].as_f64(), Some(1.));
+    assert_eq!(loss["sentences"][0]["index"], 5);
+    assert_eq!(loss["sentences"][0]["share_of_net_gain"].as_f64(), Some(2.));
+    assert_eq!(loss["top_tokens"][0]["position"], 0);
+    assert_eq!(loss["top_tokens"][0]["parent_logprob"].as_f64(), Some(-4.));
+    assert_eq!(loss["top_tokens"][0]["child_logprob"].as_f64(), Some(-2.));
+    assert_eq!(loss["tokens"].as_array().unwrap().len(), 1);
+    assert_eq!(loss["tokens"][0]["position"], 1);
+    assert_eq!(loss["tokens"][0]["piece"], " clock");
+    let (201, finding) = t.request(
+        "/api/findings",
+        "Idempotency-Key: token-loss-root\r\n",
+        Some(json!({
+            "hypothesis":"The edit improves heldout loss.","client_id":"mock REST",
+            "model_id":parent["id"],"model_sha256":digest
+        })),
+    ) else {
+        panic!("finding creation")
+    };
+    let evidence = format!("/api/findings/{}/evidence", finding["id"].as_str().unwrap());
+    let evidence_body = json!({"client_id":"mock REST","evidence":{
+        "kind":"token_loss","a":parent["id"],"b":id,"sentence":5,"start":1,"end":2,
+        "paths":["/total_logprob_gain","/tokens/0/loss_delta"]
+    }});
+    let (201, enriched) = t.request(
+        &evidence,
+        "Idempotency-Key: token-loss-evidence\r\n",
+        Some(evidence_body.clone()),
+    ) else {
+        panic!("finding evidence")
+    };
+    let captured = &enriched["experiments"][0];
+    assert_eq!(captured["artifact"]["api_url"], loss_route);
+    assert_eq!(captured["artifact"]["id"], bundle["id"]);
+    assert_eq!(captured["artifact"]["job_id"], check_job["id"]);
+    assert_eq!(
+        captured["artifact"]["sha256"],
+        bundle["token_loss"]["sha256"]
+    );
+    assert_eq!(
+        captured["metrics"][0],
+        json!({"path":"/total_logprob_gain","value":1.0})
+    );
+    assert_eq!(captured["spec"]["arguments"]["sentence"], 5);
+    assert_eq!(
+        t.request(&loss_route.replace("end=2", "end=1"), "", None).0,
+        400
+    );
+    assert_eq!(
+        t.request(&loss_route.replace("end=2", "end=3"), "", None).0,
+        400
+    );
+    let artifact = private.with_file_name("token-loss.v1.json");
+    assert_eq!(
+        bundle["token_loss"]["sha256"],
+        sha(&fs::read(&artifact).unwrap())
+    );
+    fs::write(artifact, "{}").unwrap();
+    assert_eq!(t.request(&loss_route, "", None).0, 422);
+    assert_eq!(
+        t.request(
+            &evidence,
+            "Idempotency-Key: token-loss-corrupt\r\n",
+            Some(evidence_body)
+        )
+        .0,
+        422
+    );
     assert_eq!(
         t.request(
             &checks,
@@ -866,21 +1248,33 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
     assert_eq!(
         names,
         [
+            "ablate_direction",
+            "add_evidence",
             "alphaedit_edit",
             "apply_edit",
             "compile_program",
+            "compute_direction",
             "convert_scratch_gguf",
+            "create_direction_intervention",
+            "create_finding",
             "create_intervention",
             "create_scratch",
+            "crosscoder_diff",
             "diff_behavior",
             "diff_tensors",
             "diff_traces",
             "discard_scratch",
             "export_control_vector",
+            "find_circuit",
             "get_checks",
+            "get_direction",
+            "get_finding",
             "get_intervention",
             "get_job",
             "get_scratch",
+            "interp_benchmark",
+            "lineage",
+            "list_findings",
             "list_interventions",
             "list_models",
             "list_scratch",
@@ -890,20 +1284,86 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "plan_experts",
             "prune_experts",
             "prune_model",
+            "quantization_damage_map",
             "read_feature_trace",
+            "read_quantization_damage",
+            "read_token_loss_diff",
             "read_trace",
             "register_model",
+            "replay_finding",
+            "reproduce_heretic",
             "request_publish",
             "rome_edit",
+            "routing_atlas",
             "run_checks",
+            "run_heretic",
             "run_program",
+            "search_ablation",
             "start_trace",
             "steer_feature",
+            "tensor_sensitivity",
+            "weight_spectra",
         ]
     );
     for tool in listed {
         let schema = &tool["inputSchema"];
+        if tool["name"] == "quantization_damage_map" {
+            let options = &schema["properties"]["options"];
+            assert_eq!(
+                options["properties"]["objective"]["enum"],
+                json!(["target_logit", "corpus_nll"])
+            );
+            assert_eq!(
+                options["properties"]["objective"]["default"],
+                "target_logit"
+            );
+            assert_eq!(options["then"]["not"]["required"], json!(["observations"]));
+        }
         assert_eq!(schema["type"], "object", "{tool}");
+        if tool["name"] == "lineage" {
+            assert_eq!(tool["annotations"]["readOnlyHint"], true);
+            assert_eq!(schema["required"], json!(["id"]));
+        }
+        if tool["name"] == "ablate_direction" {
+            assert_eq!(
+                schema["properties"]["direction"]["properties"]["version"]["const"],
+                2
+            );
+            assert_eq!(
+                schema["properties"]["variant"]["enum"],
+                json!(["plain", "projected", "norm_preserving"])
+            );
+        }
+        if tool["name"] == "create_direction_intervention" {
+            assert_eq!(schema["properties"]["direction_rules"]["maxItems"], 8);
+            assert!(schema["properties"].get("interventions").is_none());
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("direction_rules"))
+            );
+        }
+        if tool["name"] == "run_checks" {
+            let behavior = &schema["properties"]["behavior_direction"];
+            assert_eq!(behavior["required"], json!(["prompt_sets"]));
+            assert_eq!(
+                behavior["properties"]["prompt_sets"]["required"],
+                json!(["slop", "sycophancy", "response_length"])
+            );
+            let sets = &behavior["properties"]["prompt_sets"]["properties"];
+            assert_eq!(
+                sets["benign_refusal"]["const"],
+                "0a3af7d442e3043a713ccb050c4291abf360614f4164cac16e1535d46ea5d35e"
+            );
+            assert!(sets.get("refusal").is_none());
+            assert!(
+                !schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("behavior_direction"))
+            );
+        }
         if matches!(
             tool["name"].as_str(),
             Some("rome_edit" | "memit_edit" | "alphaedit_edit")
@@ -918,7 +1378,17 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
                     .contains(&json!("backend"))
             );
         }
-        if matches!(tool["name"].as_str(), Some("start_trace" | "steer_feature")) {
+        if matches!(
+            tool["name"].as_str(),
+            Some(
+                "start_trace"
+                    | "compute_direction"
+                    | "steer_feature"
+                    | "tensor_sensitivity"
+                    | "find_circuit"
+                    | "quantization_damage_map"
+            )
+        ) {
             let flag = &schema["properties"]["allow_duplicate"];
             assert_eq!(flag["type"], "boolean");
             assert_eq!(flag["default"], false);
@@ -991,6 +1461,25 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
     );
     let scratch = ok("create_scratch", create.clone());
     assert_eq!(ok("create_scratch", create.clone()), scratch);
+    let mut ablation = json!({
+        "id": scratch["id"], "sha256": scratch["sha256"], "idempotency_key": "ablate-rejected",
+        "direction": {"id": parent["id"], "version": 2, "layer": 0},
+        "first_layer": 0, "last_layer": 0, "variant": "plain",
+        "kernel": {"shape": "flat", "peak": 0, "width": 1, "min_weight": 0},
+        "include_embeddings": true,
+    });
+    let rejected = call("ablate_direction", ablation.clone());
+    assert_eq!(
+        rejected["result"]["structuredContent"]["status"], 400,
+        "{rejected}"
+    );
+    ablation["include_embeddings"] = json!(false);
+    let missing = call("ablate_direction", ablation);
+    assert_eq!(
+        missing["result"]["structuredContent"]["status"], 404,
+        "{missing}"
+    );
+    assert_eq!(ok("list_scratch", json!({}))["revisions"], json!([scratch]));
     create["parent_sha256"] = json!("0".repeat(64));
     assert_eq!(
         call("create_scratch", create)["result"]["structuredContent"]["status"],
@@ -1029,6 +1518,16 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
         "apply_edit",
         json!({"id":scratch["id"],"idempotency_key":"mcp-edit",
         "operations":[{"op":"add","tensor":"w","origin":[0,1],"shape":[1,1],"values":[6.]}]}),
+    );
+    let opted_in = call(
+        "run_checks",
+        json!({"id":edit["id"],"idempotency_key":"mcp-behavior-check","sha256":edit["sha256"],
+               "behavior_direction":{"prompt_sets":{"slop":"a".repeat(64),
+                   "response_length":"b".repeat(64), "sycophancy":"c".repeat(64)}}}),
+    );
+    assert_eq!(
+        opted_in["result"]["structuredContent"]["status"], 409,
+        "{opted_in}"
     );
     let check = ok(
         "run_checks",
@@ -1487,6 +1986,16 @@ fn scratch_edits_keep_parents_and_require_separate_publish_approval() {
             .iter()
             .any(|m| m["id"] == approved["library_model_id"] && m["kind"] == "safetensors")
     );
+    let (status, lineage) = t.request(
+        &format!(
+            "/api/models/{}/lineage",
+            approved["library_model_id"].as_str().unwrap()
+        ),
+        "",
+        None,
+    );
+    assert_eq!(status, 200, "{lineage}");
+    assert_eq!(lineage["target"]["sha256"], approved["sha256"]);
 
     let (_, leaf) = t.request(
         path,
