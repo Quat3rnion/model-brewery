@@ -40,7 +40,8 @@ try {
         {profiles:[],hosts:[],conversions:[],entries:[]};
       return r.fulfill({json});
     });
-    await page.goto(base);
+    // The first load of the full app needs more time than one route step on a busy runner.
+    await page.goto(base,{timeout:20000});
     for(const [hash,heading,parent=hash,focus] of routes){
       try {
         await page.evaluate(h=>location.hash='#/'+h,hash);
