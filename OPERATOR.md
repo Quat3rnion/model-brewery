@@ -330,8 +330,9 @@ It does not change the model or qualify a release.
    `d8420857ed1ab2e29c527f1ffde09aeef19f36c4`. Check its SHA-256:
    `3009f4b0c362ddc04d955e40efac9e1d88659b9a0bc393fdc8ea6da287bde010`.
    The engine rejects other binaries.
-2. Install the matching CPU libraries from llama.cpp `184f653` with
-   Lanternfish patches `0001` and `0002`. Put the four files below in an
+2. Install the matching CPU libraries from llama.cpp `184f653`. Apply the
+   patches with `patches/apply-llama.sh` from the pinned Lanternfish commit.
+   Put the four files below in an
    operator-controlled release directory. The engine copies and checks each
    file in the private job directory. It sets `LD_LIBRARY_PATH` to those
    copies. It does not need the build directory in the binary's RUNPATH.
