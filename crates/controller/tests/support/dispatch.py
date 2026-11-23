@@ -76,6 +76,20 @@ if action == "trace-read":
     assert prior and prior["state"] == "succeeded"
     if (root / "trace-pruned").exists():
         out({"status": "missing"})
+    elif (root / "trace-interventions").exists():
+        import base64
+        import struct
+        assert query["view"] == "tensor" and query["prompt"] == 0
+        rows = []
+        for pos, val in enumerate([1.0, -2.0]):
+            if query["start"] <= pos < query["end"]:
+                data = struct.pack("<f", val)
+                rows.append(dict(position=pos, shape=[1], sha256=hashlib.sha256(data).hexdigest(),
+                                 data_base64=base64.b64encode(data).decode(), node="l_out-0"))
+        if (root / "trace-corrupt").exists() and rows:
+            rows[0]["data_base64"] = "AAAAAA=="
+        out(dict(status="ok", data=dict(dtype="f32_le", rows=rows, missing_positions=[],
+                                        layer=query["layer"], role=query["role"], prompt=0)))
     elif query["view"] == "manifest":
         out({"status": "ok", "data": {"schema_version": 1}})
     elif query["end"] is None:
@@ -139,6 +153,9 @@ else:
         print("test interrupted launch", file=sys.stderr)
         sys.exit(1)
     result = {"action": action, "host": host, "envelope": envelope}
+    if envelope["kind"] == "trace" and (root / "trace-interventions").exists():
+        result.update(kind="trace", schema_version=1, model_id=envelope["inputs"][0]["id"],
+                      model_sha256="a" * 64, prompts=[{}])
     if action == "start" and envelope["kind"] == "hf_download":
         assert envelope["inputs"] == [] and "prompt" not in envelope
         options = envelope["options"]

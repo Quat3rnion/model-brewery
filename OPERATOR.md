@@ -371,8 +371,7 @@ Layers and token positions start at zero. The CLI does not use a chat
 template or generate tokens. It accepts at most 4096 prompt tokens. An
 optional `byte_cap` can override the default within the configured maximum.
 Set `full_dump: true` to pass larger explicit selections. This flag does not
-select more data or raise the cap. Optional `interventions` are inline
-Lanternfish rules. Save the request to repeat the run.
+select more data or raise the cap. Save the request to repeat the run.
 
 Use job events to follow progress. After success, use
 `GET /api/jobs/{id}/trace` for the summary. Use `/tensor` for F32 rows,
@@ -381,6 +380,77 @@ four routes take the optional zero-based `prompt` index. Slice routes use
 the half-open token position range `start` and `end`. Tensor reads also
 require `layer` and `role`; logit lens reads can filter by `layer`. Narrow
 the range if a response exceeds 4 MiB (HTTP 413).
+
+### Trace interventions
+
+Use `options.interventions` for inline rules. Each rule specifies a `layer`,
+`role`, and list of `positions`. Use `op: "add"` with a `vector` to add a
+steering direction, `op: "replace"` with a `vector` to set the row,
+`op: "scale"` with a `factor` to scale the row, or `op: "zero"` to set the
+row to zero. The runtime applies rules before later nodes use the row.
+Trace capture records the new values. Valid roles are `l_out`, `attn_out`,
+`ffn_inp`, and `ffn_out`. A rule can target a row outside the capture
+selection. Positions refer to the raw token sequence, not words.
+
+To copy rows, set `options.activation_patches`. Each entry has
+`source_job_id`, optional `source_prompt` (default `0`), `layer`, `role`,
+and `positions`. For example:
+
+```json
+[{"source_job_id":"<trace-job-id>","source_prompt":0,"layer":1,"role":"l_out","positions":[0,1]}]
+```
+
+The controller reads the selected rows from a successful trace before it
+queues the job. The source trace must still have the rows. Each source row
+must be a verified, finite F32 vector. The controller copies each row to the
+same layer, role, and position in every target prompt. It does not align
+different token sequences. The source and target must have the same Library
+model ID and GGUF SHA-256. The worker checks the target file before the run.
+
+You can combine inline rules, one saved artifact version, and up to eight
+patch selectors. Do not target a row more than once. The combined limit
+is 64 rules, with one rule per copied row, and 262144 vector values.
+For HTTP 413 on a patch source read, split the selected positions into
+smaller ranges. If retention removed a row, run the source trace again.
+
+### Library intervention artifacts
+
+Use `POST /api/interventions` to save an artifact. Give it a name, the
+Library GGUF `model_id`, the SHA-256 of that file, and the inline rules:
+
+```json
+{
+  "name":"Residual direction",
+  "model_id":"<library-model-id>",
+  "model_sha256":"<64 lowercase hex digits>",
+  "interventions":[{"layer":1,"role":"l_out","positions":[0],"op":"add","vector":[0.25,-0.5]}]
+}
+```
+
+Use one vector value per hidden dimension. The two values above show the
+format only. `GET /api/interventions` lists the artifact IDs and latest
+versions. `GET /api/interventions/{id}/versions/{version}` reads the rules
+for one version. To save new rules, send `{"interventions":[...]}` to
+`POST /api/interventions/{id}/versions`. Versions start at 1. A new version
+does not change an earlier version or its model binding. Use an
+`Idempotency-Key` to retry a write without creating another version.
+
+In a trace request, set `options.intervention_artifact` to
+`{"id":"<artifact-id>","version":1}`. The controller rejects a different
+model ID. If the registered file has a different SHA-256, the worker
+rejects it before it runs Lanternfish. A saved artifact does not change
+model weights or qualify the model for release.
+
+Use `GET /api/interventions/{id}/versions/{version}/gguf` to download a
+GGUF v3 control vector. Pass the file to llama.cpp with `--control-vector`.
+Export requires one `add` rule per `l_out` layer and the same vector width
+for all layers. It does not support layer 0, which the llama.cpp adapter
+does not use. For layer `N`, the F32 tensor name is `direction.N`. The file
+has `general.architecture: "controlvector"`, `controlvector.model_hint`
+with the Library model name, and `controlvector.layer_count` with the
+number of tensors. GGUF does not store token positions or enforce the
+Brewery model binding. Use the bound model. llama.cpp applies the
+direction to all tokens at that layer.
 
 ## Operator paths and environment
 

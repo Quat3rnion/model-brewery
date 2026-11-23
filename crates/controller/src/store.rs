@@ -13,6 +13,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod interventions;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 pub struct Store {
@@ -64,6 +66,7 @@ impl Store {
         )?;
         crate::feed::install(&conn)?;
         idempotency::install(&conn)?;
+        interventions::install(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS profile_revisions(revision TEXT PRIMARY KEY, body TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS host_evaluation_profiles(

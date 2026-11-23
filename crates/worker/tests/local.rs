@@ -168,6 +168,20 @@ print(json.dumps(dict(kind="trace",schema_version=1,model_id=src["id"],model_sha
     })));
     submit("trace-old", "test");
     t.wait("trace-old", "succeeded");
+    let wrong_revision = t.dispatch("start", "trace-wrong-revision", Some(&json!({
+        "kind":"trace","inputs":[{"host":"b","path":src,"kind":"gguf","id":"v1"}],
+        "prompt":"test","options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":1,
+            "byte_cap":65536,"retain_jobs":1,"expected_model_sha256":"0".repeat(64)}
+    })));
+    assert_eq!(wrong_revision["state"], "failed");
+    assert!(
+        wrong_revision["error"]
+            .as_str()
+            .unwrap()
+            .contains("model SHA-256 mismatch"),
+        "{wrong_revision}"
+    );
+    assert!(!t.root.join("b/jobs/trace-wrong-revision/work").exists());
     let summary = t.dispatch("trace-read", "trace-old", Some(&json!({"view":"manifest"})));
     assert_eq!(summary["data"]["tensor_count"], 1);
     assert!(summary["data"]["model"].get("path").is_none());

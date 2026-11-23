@@ -9,6 +9,9 @@ mod hf_tokens;
 #[path = "support/infra_hosts.rs"]
 mod infra_hosts;
 
+#[path = "support/interventions.rs"]
+mod interventions;
+
 #[path = "support/weights.rs"]
 mod weights;
 
@@ -154,6 +157,18 @@ impl Fixture {
         (
             head.split_whitespace().nth(1).unwrap().parse().unwrap(),
             body.to_owned(),
+        )
+    }
+
+    fn bytes(&self, method: &str, path: &str) -> (u16, Vec<u8>) {
+        let mut conn = self.open_request(method, path, None, "");
+        let mut data = Vec::new();
+        conn.read_to_end(&mut data).unwrap();
+        let split = data.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = std::str::from_utf8(&data[..split]).unwrap();
+        (
+            head.split_whitespace().nth(1).unwrap().parse().unwrap(),
+            data.split_off(split + 4),
         )
     }
 
