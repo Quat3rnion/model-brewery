@@ -1,0 +1,696 @@
+{
+  "qualification": "not release-qualified",
+  "check_mode": "cuda_acceptance",
+  "backends": [
+    "cpu",
+    "cuda"
+  ],
+  "binary": "/arboretum/pins/lanternfish-w14b-3b59809/lanternfish",
+  "binary_sha256": "816a74eaf076648c97e7d86950a57a3da6b22dbc7940285b955edb15e9c0c959",
+  "threads": 6,
+  "model": "/arboretum/w14b/qwen-f32.gguf",
+  "model_sha256": "8df5d93dbefb5f73ce905c6e464aaa312756fab7a8a85ee1f7dae15cec36bfde",
+  "inherited_cuda_precision": {
+    "NVIDIA_TF32_OVERRIDE": "1",
+    "GGML_CUDA_CUBLAS_COMPUTE_TYPE": "f16"
+  },
+  "tolerance": {
+    "pointwise_diagnostic_atol": 1e-05,
+    "pointwise_diagnostic_rtol": 0.002,
+    "gradient_relative_linf": 0.001,
+    "fp64_absolute": 1e-05,
+    "loss_absolute": 5e-05,
+    "finite_difference_absolute": 0.0003,
+    "finite_difference_step": 0.003
+  },
+  "qwen_prompt": "Apple A5 was created by",
+  "qwen_target_token": 5085,
+  "gradients": {
+    "tiny-0": {
+      "cpu": {
+        "loss": 5.946096420288086,
+        "tensor_sha256": "6bf5c0c1d245971b2a669447de2a99c17078ac4157001627397141a8c8900ea4",
+        "provenance": {
+          "backend": "cpu",
+          "device": "CPU"
+        }
+      },
+      "cuda": {
+        "loss": 5.946096420288086,
+        "tensor_sha256": "d7b3d930c398c127d1e7394dba7682b7eda2aaac7242af87713567192f561a60",
+        "provenance": {
+          "backend": "cuda",
+          "device": "CUDA0"
+        },
+        "placement": {
+          "backward": {
+            "graphs": 1,
+            "compute_ops": 95,
+            "cpu_compute_ops": 0
+          }
+        }
+      },
+      "prompt": "abc",
+      "target_token": 6,
+      "held_out": false,
+      "parity": {
+        "elements": 2048,
+        "max_absolute_error": 1.1920928955078125e-07,
+        "relative_linf_error": 8.819838374256832e-07,
+        "max_tolerance_ratio": 0.0041407800428548015,
+        "cpu_loss": 5.946096420288086,
+        "cuda_loss": 5.946096420288086,
+        "absolute_loss_error": 0.0,
+        "pointwise_passed": true,
+        "relative_linf_passed": true,
+        "loss_passed": true
+      }
+    },
+    "tiny-1": {
+      "cpu": {
+        "loss": 5.946096420288086,
+        "tensor_sha256": "4f291c507c5683730ba5b03a6307ba5ce0212142554cc401abecfa19c2c7c5ba",
+        "provenance": {
+          "backend": "cpu",
+          "device": "CPU"
+        }
+      },
+      "cuda": {
+        "loss": 5.946096420288086,
+        "tensor_sha256": "2add2f7a0385b676a43a1c43d2f9a831a27d43fd55c12211513659d6210d4c02",
+        "provenance": {
+          "backend": "cuda",
+          "device": "CUDA0"
+        },
+        "placement": {
+          "backward": {
+            "graphs": 1,
+            "compute_ops": 61,
+            "cpu_compute_ops": 0
+          }
+        }
+      },
+      "prompt": "abc",
+      "target_token": 6,
+      "held_out": false,
+      "parity": {
+        "elements": 2048,
+        "max_absolute_error": 4.237517714500427e-08,
+        "relative_linf_error": 5.8974109717766764e-06,
+        "max_tolerance_ratio": 0.0034030660041641622,
+        "cpu_loss": 5.946096420288086,
+        "cuda_loss": 5.946096420288086,
+        "absolute_loss_error": 0.0,
+        "pointwise_passed": true,
+        "relative_linf_passed": true,
+        "loss_passed": true
+      }
+    },
+    "qwen-0": {
+      "cpu": {
+        "loss": 4.487611770629883,
+        "tensor_sha256": "8716203447fa0f12f715c5dba075247ba1f069573a3e9b50ecb038390af5aab3",
+        "provenance": {
+          "backend": "cpu",
+          "device": "CPU"
+        }
+      },
+      "cuda": {
+        "loss": 4.4876017570495605,
+        "tensor_sha256": "a1e27048ae4dc4e9b39feb7f44f3d46ffff2eebc292f30471fc18a6d07b7f7f9",
+        "provenance": {
+          "backend": "cuda",
+          "device": "CUDA0"
+        },
+        "placement": {
+          "backward": {
+            "graphs": 1,
+            "compute_ops": 1326,
+            "cpu_compute_ops": 0
+          }
+        }
+      },
+      "prompt": "Apple A5 was created by",
+      "target_token": 5085,
+      "held_out": false,
+      "parity": {
+        "elements": 4358144,
+        "max_absolute_error": 0.00030684471130371094,
+        "relative_linf_error": 6.196057708935687e-05,
+        "max_tolerance_ratio": 13.862777132161884,
+        "cpu_loss": 4.487611770629883,
+        "cuda_loss": 4.4876017570495605,
+        "absolute_loss_error": 1.0013580322265625e-05,
+        "pointwise_passed": false,
+        "relative_linf_passed": true,
+        "loss_passed": true
+      }
+    },
+    "qwen-12": {
+      "cpu": {
+        "loss": 4.487611770629883,
+        "tensor_sha256": "257991ee9c2a6e00d03d4c78f5bd3e3af970a53cffc395496b6e0f50d9b11a01",
+        "provenance": {
+          "backend": "cpu",
+          "device": "CPU"
+        }
+      },
+      "cuda": {
+        "loss": 4.4876017570495605,
+        "tensor_sha256": "d3adbbf7b78a429d80119e80629d4ce94d8207b1b57dcbe0a126512de6776bf2",
+        "provenance": {
+          "backend": "cuda",
+          "device": "CUDA0"
+        },
+        "placement": {
+          "backward": {
+            "graphs": 1,
+            "compute_ops": 942,
+            "cpu_compute_ops": 0
+          }
+        }
+      },
+      "prompt": "Apple A5 was created by",
+      "target_token": 5085,
+      "held_out": false,
+      "parity": {
+        "elements": 4358144,
+        "max_absolute_error": 0.0001556873321533203,
+        "relative_linf_error": 0.0001731641566371892,
+        "max_tolerance_ratio": 3.5915925189085147,
+        "cpu_loss": 4.487611770629883,
+        "cuda_loss": 4.4876017570495605,
+        "absolute_loss_error": 1.0013580322265625e-05,
+        "pointwise_passed": false,
+        "relative_linf_passed": true,
+        "loss_passed": true
+      }
+    },
+    "qwen-23": {
+      "cpu": {
+        "loss": 4.487611770629883,
+        "tensor_sha256": "1d53e10fb5e602083c6c1a0fc91770841964111b56c5c644a7963067daabd814",
+        "provenance": {
+          "backend": "cpu",
+          "device": "CPU"
+        }
+      },
+      "cuda": {
+        "loss": 4.4876017570495605,
+        "tensor_sha256": "a68baf2f802cca0ee6e7effee2ceb758f1ad1063c2569714d5c1638c03375163",
+        "provenance": {
+          "backend": "cuda",
+          "device": "CUDA0"
+        },
+        "placement": {
+          "backward": {
+            "graphs": 1,
+            "compute_ops": 588,
+            "cpu_compute_ops": 0
+          }
+        }
+      },
+      "prompt": "Apple A5 was created by",
+      "target_token": 5085,
+      "held_out": false,
+      "parity": {
+        "elements": 4358144,
+        "max_absolute_error": 0.0017390251159667969,
+        "relative_linf_error": 0.00040917214277067323,
+        "max_tolerance_ratio": 2.519206435517356,
+        "cpu_loss": 4.487611770629883,
+        "cuda_loss": 4.4876017570495605,
+        "absolute_loss_error": 1.0013580322265625e-05,
+        "pointwise_passed": false,
+        "relative_linf_passed": true,
+        "loss_passed": true
+      }
+    },
+    "paris-0": {
+      "cpu": {
+        "loss": 1.196766972541809,
+        "tensor_sha256": "30ca44fa42c7113b35d17d25f024e3247718050ff03632f0a0e4560998cc994d",
+        "provenance": {
+          "backend": "cpu",
+          "device": "CPU"
+        }
+      },
+      "cuda": {
+        "loss": 1.1967494487762451,
+        "tensor_sha256": "4c75de5702087a0b1425b73dcb580b61b786bba77bfa1676eda977c4574bcfc0",
+        "provenance": {
+          "backend": "cuda",
+          "device": "CUDA0"
+        },
+        "placement": {
+          "backward": {
+            "graphs": 1,
+            "compute_ops": 1326,
+            "cpu_compute_ops": 0
+          }
+        }
+      },
+      "prompt": "The capital of France is",
+      "target_token": 12095,
+      "held_out": true,
+      "parity": {
+        "elements": 4358144,
+        "max_absolute_error": 8.767843246459961e-05,
+        "relative_linf_error": 3.171967654986523e-05,
+        "max_tolerance_ratio": 3.135943484510554,
+        "cpu_loss": 1.196766972541809,
+        "cuda_loss": 1.1967494487762451,
+        "absolute_loss_error": 1.7523765563964844e-05,
+        "pointwise_passed": false,
+        "relative_linf_passed": true,
+        "loss_passed": true
+      }
+    },
+    "paris-12": {
+      "cpu": {
+        "loss": 1.196766972541809,
+        "tensor_sha256": "676cf3eab02be0b8687a96b6e63fc4f4fe6da42b07e6a5a1c09ba73687b37681",
+        "provenance": {
+          "backend": "cpu",
+          "device": "CPU"
+        }
+      },
+      "cuda": {
+        "loss": 1.1967494487762451,
+        "tensor_sha256": "a706b9f66036aa1437afa8782320ba3753c71cb4e0dbeef425f95782a832a544",
+        "provenance": {
+          "backend": "cuda",
+          "device": "CUDA0"
+        },
+        "placement": {
+          "backward": {
+            "graphs": 1,
+            "compute_ops": 942,
+            "cpu_compute_ops": 0
+          }
+        }
+      },
+      "prompt": "The capital of France is",
+      "target_token": 12095,
+      "held_out": true,
+      "parity": {
+        "elements": 4358144,
+        "max_absolute_error": 2.378225326538086e-05,
+        "relative_linf_error": 6.470694887761824e-05,
+        "max_tolerance_ratio": 1.3157426652504776,
+        "cpu_loss": 1.196766972541809,
+        "cuda_loss": 1.1967494487762451,
+        "absolute_loss_error": 1.7523765563964844e-05,
+        "pointwise_passed": false,
+        "relative_linf_passed": true,
+        "loss_passed": true
+      }
+    },
+    "paris-23": {
+      "cpu": {
+        "loss": 1.196766972541809,
+        "tensor_sha256": "bce863285fd7dc012ac0c44c52c689782e485cd4e033568f85693c24fd1abbfc",
+        "provenance": {
+          "backend": "cpu",
+          "device": "CPU"
+        }
+      },
+      "cuda": {
+        "loss": 1.1967494487762451,
+        "tensor_sha256": "324d1fa2bfd2f6ee82ed19483f0147b411c5bfda09f176208338e9b97118c0de",
+        "provenance": {
+          "backend": "cuda",
+          "device": "CUDA0"
+        },
+        "placement": {
+          "backward": {
+            "graphs": 1,
+            "compute_ops": 588,
+            "cpu_compute_ops": 0
+          }
+        }
+      },
+      "prompt": "The capital of France is",
+      "target_token": 12095,
+      "held_out": true,
+      "parity": {
+        "elements": 4358144,
+        "max_absolute_error": 0.0014138221740722656,
+        "relative_linf_error": 0.0003017576134260053,
+        "max_tolerance_ratio": 2.4037214804396223,
+        "cpu_loss": 1.196766972541809,
+        "cuda_loss": 1.1967494487762451,
+        "absolute_loss_error": 1.7523765563964844e-05,
+        "pointwise_passed": false,
+        "relative_linf_passed": true,
+        "loss_passed": true
+      }
+    },
+    "zero-0": {
+      "cpu": {
+        "loss": 4.8632025718688965,
+        "tensor_sha256": "0b5d5b67dcac77d61fb49f5b16500b9fdc138bed02f9c279acad289d9f7826e4",
+        "provenance": {
+          "backend": "cpu",
+          "device": "CPU"
+        }
+      },
+      "cuda": {
+        "loss": 4.86319637298584,
+        "tensor_sha256": "40010c46cec188f9d22316d2aab4b93e9f401e57197efdf72ecdcb209ba60ab4",
+        "provenance": {
+          "backend": "cuda",
+          "device": "CUDA0"
+        },
+        "placement": {
+          "backward": {
+            "graphs": 1,
+            "compute_ops": 1326,
+            "cpu_compute_ops": 0
+          }
+        }
+      },
+      "prompt": "Water freezes at",
+      "target_token": 7168,
+      "held_out": true,
+      "parity": {
+        "elements": 4358144,
+        "max_absolute_error": 0.00019527971744537354,
+        "relative_linf_error": 6.972106466752442e-05,
+        "max_tolerance_ratio": 9.320913470800718,
+        "cpu_loss": 4.8632025718688965,
+        "cuda_loss": 4.86319637298584,
+        "absolute_loss_error": 6.198883056640625e-06,
+        "pointwise_passed": false,
+        "relative_linf_passed": true,
+        "loss_passed": true
+      }
+    },
+    "zero-12": {
+      "cpu": {
+        "loss": 4.8632025718688965,
+        "tensor_sha256": "92a0c81daf1fa25fe305aa0a40042a77efaab1a404a68d28060fefe4b825dd28",
+        "provenance": {
+          "backend": "cpu",
+          "device": "CPU"
+        }
+      },
+      "cuda": {
+        "loss": 4.86319637298584,
+        "tensor_sha256": "52c36332d6f7d6c61cf40990b28d7c60c4cc8ffc567620a38a9cb32e5eb437ea",
+        "provenance": {
+          "backend": "cuda",
+          "device": "CUDA0"
+        },
+        "placement": {
+          "backward": {
+            "graphs": 1,
+            "compute_ops": 942,
+            "cpu_compute_ops": 0
+          }
+        }
+      },
+      "prompt": "Water freezes at",
+      "target_token": 7168,
+      "held_out": true,
+      "parity": {
+        "elements": 4358144,
+        "max_absolute_error": 4.2945146560668945e-05,
+        "relative_linf_error": 6.315885622598616e-05,
+        "max_tolerance_ratio": 2.4617909019760598,
+        "cpu_loss": 4.8632025718688965,
+        "cuda_loss": 4.86319637298584,
+        "absolute_loss_error": 6.198883056640625e-06,
+        "pointwise_passed": false,
+        "relative_linf_passed": true,
+        "loss_passed": true
+      }
+    },
+    "zero-23": {
+      "cpu": {
+        "loss": 4.8632025718688965,
+        "tensor_sha256": "7ccd9d8dbfa1c591233d909eb1dc5e4593d948562ec735e89975cfcf891d7565",
+        "provenance": {
+          "backend": "cpu",
+          "device": "CPU"
+        }
+      },
+      "cuda": {
+        "loss": 4.86319637298584,
+        "tensor_sha256": "fd0c5e9b118c19067e7f9ea05b69502f89a71bfc2ba528d163aa411a6d7c1a98",
+        "provenance": {
+          "backend": "cuda",
+          "device": "CUDA0"
+        },
+        "placement": {
+          "backward": {
+            "graphs": 1,
+            "compute_ops": 588,
+            "cpu_compute_ops": 0
+          }
+        }
+      },
+      "prompt": "Water freezes at",
+      "target_token": 7168,
+      "held_out": true,
+      "parity": {
+        "elements": 4358144,
+        "max_absolute_error": 0.0017766952514648438,
+        "relative_linf_error": 0.00013674087984939272,
+        "max_tolerance_ratio": 1.3774228937457536,
+        "cpu_loss": 4.8632025718688965,
+        "cuda_loss": 4.86319637298584,
+        "absolute_loss_error": 6.198883056640625e-06,
+        "pointwise_passed": false,
+        "relative_linf_passed": true,
+        "loss_passed": true
+      }
+    }
+  },
+  "finite_differences": {
+    "tiny-0": [
+      {
+        "backend": "cpu",
+        "index": 628,
+        "analytical": -0.12656302750110626,
+        "centered_difference": -0.12652649112758022,
+        "absolute_derivative_error": 3.6536373526047106e-05,
+        "absolute_loss_error": 4.881441562076816e-08,
+        "passed": true
+      },
+      {
+        "backend": "cuda",
+        "index": 628,
+        "analytical": -0.12656310200691223,
+        "centered_difference": -0.12652649112758022,
+        "absolute_derivative_error": 3.6610879332016344e-05,
+        "absolute_loss_error": 4.881441562076816e-08,
+        "passed": true
+      },
+      {
+        "backend": "cpu",
+        "index": 1076,
+        "analytical": 0.1351604014635086,
+        "centered_difference": 0.1351597500110676,
+        "absolute_derivative_error": 6.514524410194955e-07,
+        "absolute_loss_error": 4.881441562076816e-08,
+        "passed": true
+      },
+      {
+        "backend": "cuda",
+        "index": 1076,
+        "analytical": 0.13516049087047577,
+        "centered_difference": 0.1351597500110676,
+        "absolute_derivative_error": 7.408594081825814e-07,
+        "absolute_loss_error": 4.881441562076816e-08,
+        "passed": true
+      }
+    ],
+    "tiny-1": [
+      {
+        "backend": "cpu",
+        "index": 632,
+        "analytical": -0.006397909484803677,
+        "centered_difference": -0.0064071598234368326,
+        "absolute_derivative_error": 9.250338633155948e-06,
+        "absolute_loss_error": 4.881441562076816e-08,
+        "passed": true
+      },
+      {
+        "backend": "cuda",
+        "index": 632,
+        "analytical": -0.006397928576916456,
+        "centered_difference": -0.0064071598234368326,
+        "absolute_derivative_error": 9.23124652037633e-06,
+        "absolute_loss_error": 4.881441562076816e-08,
+        "passed": true
+      },
+      {
+        "backend": "cpu",
+        "index": 1336,
+        "analytical": -0.007185386493802071,
+        "centered_difference": -0.007204264339607154,
+        "absolute_derivative_error": 1.8877845805083567e-05,
+        "absolute_loss_error": 4.881441562076816e-08,
+        "passed": true
+      },
+      {
+        "backend": "cuda",
+        "index": 1336,
+        "analytical": -0.0071854074485599995,
+        "centered_difference": -0.007204264339607154,
+        "absolute_derivative_error": 1.8856891047154718e-05,
+        "absolute_loss_error": 4.881441562076816e-08,
+        "passed": true
+      }
+    ]
+  },
+  "rome": {
+    "cpu": {
+      "warmup": {
+        "seconds": 6.575785693989019,
+        "provenance": {
+          "backend": "cpu",
+          "device": "CPU"
+        },
+        "nll_before": 5.8123040199279785,
+        "nll_after": 0.046022072434425354,
+        "output_sha256": "5ed7a5382df9936581ad9d7f2afef71c738e24d63578b8e1a55e6f2b70d60846",
+        "passed": true
+      },
+      "measured": [
+        {
+          "seconds": 6.626051813989761,
+          "provenance": {
+            "backend": "cpu",
+            "device": "CPU"
+          },
+          "nll_before": 5.8123040199279785,
+          "nll_after": 0.046022072434425354,
+          "output_sha256": "5ed7a5382df9936581ad9d7f2afef71c738e24d63578b8e1a55e6f2b70d60846",
+          "passed": true
+        },
+        {
+          "seconds": 7.126880151001387,
+          "provenance": {
+            "backend": "cpu",
+            "device": "CPU"
+          },
+          "nll_before": 5.8123040199279785,
+          "nll_after": 0.046022072434425354,
+          "output_sha256": "5ed7a5382df9936581ad9d7f2afef71c738e24d63578b8e1a55e6f2b70d60846",
+          "passed": true
+        },
+        {
+          "seconds": 6.626067644989234,
+          "provenance": {
+            "backend": "cpu",
+            "device": "CPU"
+          },
+          "nll_before": 5.8123040199279785,
+          "nll_after": 0.046022072434425354,
+          "output_sha256": "5ed7a5382df9936581ad9d7f2afef71c738e24d63578b8e1a55e6f2b70d60846",
+          "passed": true
+        }
+      ],
+      "median_seconds": 6.626067644989234,
+      "min_seconds": 6.626051813989761,
+      "max_seconds": 7.126880151001387
+    },
+    "cuda": {
+      "warmup": {
+        "seconds": 2.5171399470127653,
+        "provenance": {
+          "backend": "cuda",
+          "device": "CUDA0"
+        },
+        "nll_before": 5.812289237976074,
+        "nll_after": 0.046005286276340485,
+        "output_sha256": "c3f3b47bb9ec4147a3e4cd318764f9ef494820bf656127d75949d45a87f7237b",
+        "passed": true
+      },
+      "measured": [
+        {
+          "seconds": 2.16665919899242,
+          "provenance": {
+            "backend": "cuda",
+            "device": "CUDA0"
+          },
+          "nll_before": 5.812289237976074,
+          "nll_after": 0.046005286276340485,
+          "output_sha256": "c3f3b47bb9ec4147a3e4cd318764f9ef494820bf656127d75949d45a87f7237b",
+          "passed": true
+        },
+        {
+          "seconds": 2.7674011740018614,
+          "provenance": {
+            "backend": "cuda",
+            "device": "CUDA0"
+          },
+          "nll_before": 5.812289237976074,
+          "nll_after": 0.046005286276340485,
+          "output_sha256": "c3f3b47bb9ec4147a3e4cd318764f9ef494820bf656127d75949d45a87f7237b",
+          "passed": true
+        },
+        {
+          "seconds": 2.166543871993781,
+          "provenance": {
+            "backend": "cuda",
+            "device": "CUDA0"
+          },
+          "nll_before": 5.812289237976074,
+          "nll_after": 0.046005286276340485,
+          "output_sha256": "c3f3b47bb9ec4147a3e4cd318764f9ef494820bf656127d75949d45a87f7237b",
+          "passed": true
+        }
+      ],
+      "median_seconds": 2.16665919899242,
+      "min_seconds": 2.166543871993781,
+      "max_seconds": 2.7674011740018614
+    },
+    "cpu_over_cuda_speedup": 3.0581956073528365,
+    "placement_run": {
+      "provenance": {
+        "backend": "cuda",
+        "device": "CUDA0"
+      },
+      "nll_before": 5.812289237976074,
+      "nll_after": 0.046005286276340485,
+      "output_sha256": "c3f3b47bb9ec4147a3e4cd318764f9ef494820bf656127d75949d45a87f7237b",
+      "passed": true,
+      "placement": {
+        "forward": {
+          "graphs": 20,
+          "compute_ops": 12120,
+          "cpu_compute_ops": 0
+        },
+        "backward": {
+          "graphs": 44,
+          "compute_ops": 41712,
+          "cpu_compute_ops": 0
+        }
+      }
+    }
+  },
+  "passed": true,
+  "fp64_oracle": {
+    "path": "/arboretum/w14b/oracle-strict.json",
+    "sha256": "caf1508dcdcbe5c060e058a88f6759796c188f1e7861a7d0bcd281e6fd328a0e",
+    "passed": true,
+    "binary_sha256": "816a74eaf076648c97e7d86950a57a3da6b22dbc7940285b955edb15e9c0c959",
+    "model_sha256": "8df5d93dbefb5f73ce905c6e464aaa312756fab7a8a85ee1f7dae15cec36bfde",
+    "gradient_sha256": {
+      "cpu": "1d53e10fb5e602083c6c1a0fc91770841964111b56c5c644a7963067daabd814",
+      "cuda": "a68baf2f802cca0ee6e7effee2ceb758f1ad1063c2569714d5c1638c03375163"
+    },
+    "cases": [
+      {
+        "operand_set": "qwen-layer-23.out_proj",
+        "cpu_max_abs_error": 8.075236537835942e-06,
+        "cuda_max_abs_error": 7.355689795457421e-07,
+        "passed": true
+      }
+    ]
+  },
+  "tiny_model_sha256": "28d2a07f1eefba839275b4a44f2eb1436e4e1bdfe3155f571a358ce3a4c29354"
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "operand_set": "qwen-layer-23.out_proj",
+      "cpu_max_abs_error": 8.075236537835942e-06,
+      "cuda_max_abs_error": 7.355689795457421e-07
+    }
+  ],
+  "model_sha256": "8df5d93dbefb5f73ce905c6e464aaa312756fab7a8a85ee1f7dae15cec36bfde",
+  "binary_sha256": "816a74eaf076648c97e7d86950a57a3da6b22dbc7940285b955edb15e9c0c959",
+  "libraries": {
+    "libllama.so.0": "7c42ebe0f25be95472dc4a13f1dffa351c5b12281935baa205bc3d02d89dad0c",
+    "libggml-base.so.0": "c9b00aa527999534c80b90c8459d00d7975c6a9f844409e1753d25b1844bd773",
+    "libggml.so.0": "e18423ed800f5ab61ae3e88c5bffcb26d49207dcf977ee888ee77f7c13e694ec",
+    "libggml-cpu.so.0": "db9e2e0c9a18e2ef1b66e1629dc38ed33b29eec1b9bc9ffbc001b2efe50f24ae",
+    "libggml-cuda.so.0": "b9a2c9c43421da2ad63cc9b9172ff6c06532b8665ece3296ee8cc2d04772326b"
+  },
+  "instrumented_libllama_sha256": "0792b873e55eae0b5273a059c15b50f67b742b68af4e8130eefdb0dae7ba6f5a",
+  "witness_source_sha256": "4daa3f893c01920e180d81bcc350babc76a9c7f5d707ec8bacc8ae5fb305748c",
+  "weight": "token_embd.weight",
+  "target_token": 5085,
+  "prompt": "Apple A5 was created by",
+  "formula": "sum_i float64(g_logits[i]) * float64(weight[i,hidden]); batches of 1024 rows; max_abs over 896 hidden coordinates",
+  "gradient_sha256": {
+    "cpu": "1d53e10fb5e602083c6c1a0fc91770841964111b56c5c644a7963067daabd814",
+    "cuda": "a68baf2f802cca0ee6e7effee2ceb758f1ad1063c2569714d5c1638c03375163"
+  },
+  "operands": {
+    "cpu": {
+      "g_logits_sha256": "2fc09160a725669abd7b34b104d0cd8ff25c80f3fb49000bf08da777861abff1",
+      "g_hidden_sha256": "44904c4681032511fd53f61e8a0946ec2319f7789511902685890654488e0215",
+      "fp64_sha256": "b537ffbe836cf366a5b1dbb985aea6129e7a18d461b4d6ffe84a983719b78107"
+    },
+    "cuda": {
+      "g_logits_sha256": "e86a685b04060c164e9c3c0c5dbb55a5fb5b3c86cd9904be35cb6a03eddf9914",
+      "g_hidden_sha256": "49b8f14b51540c49523e06dc583227d58e85f768550618903357d147ddba61a1",
+      "fp64_sha256": "6c26e91340ec3e44c0430b6aba0b33b7505412d9e8c7a3529b1d2c71b66d7695"
+    }
+  }
+}
