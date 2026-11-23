@@ -196,7 +196,9 @@ def preserve_failure(run, evidence):
         if job["state"] != "failed":
             continue
         for name in ("engine-stderr.log", "scratch-checks.log"):
-            for log in (run / "worker" / "jobs" / job["id"]).rglob(name):
+            logs = list((run / "worker" / "jobs" / job["id"]).rglob(name))
+            logs.extend((run / "state" / "local-edit" / "local" / "worker" / "jobs" / job["id"]).rglob(name))
+            for log in logs:
                 with log.open("rb") as stream:
                     stream.seek(max(0, log.stat().st_size - 64 * 1024))
                     (evidence / f"{receipt.stem}-{name}").write_bytes(stream.read(64 * 1024))
@@ -209,7 +211,8 @@ def main():
     parser.add_argument("--web-dist", type=Path, default=ARB / "w8-accept/web")
     parser.add_argument("--expert-only", action="store_true", help="exercise only the small MoE fixture")
     parser.add_argument("--dense-only", action="store_true", help="exercise only the dense masks")
-    parser.add_argument("--lanternfish", type=Path, default=LANTERN, help="alternate path to the exact W1 binary")
+    parser.add_argument("--lanternfish", type=Path, default=ARB / "pins/lanternfish-0ea30b3/lanternfish",
+                        help="path to the exact W1 binary")
     parser.add_argument("--runtime-manifest", type=Path, default=ARB / "pins/lanternfish-0ea30b3.libs.sha256",
                         help="SHA-256 manifest for the W1 and W4 CPU runtime libraries")
     args = parser.parse_args()
