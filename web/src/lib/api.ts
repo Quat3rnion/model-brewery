@@ -101,6 +101,14 @@ export const api = {
   interventions: (signal?: AbortSignal) => request<unknown>('GET', '/api/interventions', undefined, signal),
   scratch: (signal?: AbortSignal) => request<unknown>('GET', '/api/scratch', undefined, signal),
   diff: (kind: 'tensors' | 'traces' | 'behavior', query: string, signal?: AbortSignal) => request<unknown>('GET', `/api/diff/${kind}?${query}`, undefined, signal),
+  // Built-in agent (W15). The provider API key has its own write-only calls in AgentProviderSettings.
+  agentProvider: (signal?: AbortSignal) => request<unknown>('GET', '/api/settings/agent-provider', undefined, signal),
+  saveAgentProvider: (body: unknown) => request<unknown>('PUT', '/api/settings/agent-provider', body),
+  agentSessions: (signal?: AbortSignal) => request<unknown>('GET', '/api/agent/sessions', undefined, signal),
+  agentSession: (id: string, signal?: AbortSignal) => request<unknown>('GET', `/api/agent/sessions/${encodeURIComponent(id)}`, undefined, signal),
+  startAgentSession: (body: { goal: string; model_id: string }, key: string) =>
+    request<unknown>('POST', '/api/agent/sessions', body, undefined, { 'Idempotency-Key': key }),
+  cancelAgentSession: (id: string) => request<unknown>('POST', `/api/agent/sessions/${encodeURIComponent(id)}/cancel`, {}),
   // Operator only. The agent MCP interface has no route to this action.
   approveScratch: (id: string, sha256: string, key: string) =>
     request<unknown>('POST', `/api/admin/scratch/${encodeURIComponent(id)}/approve`, { sha256 }, undefined, { 'Idempotency-Key': key }),

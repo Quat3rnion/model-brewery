@@ -63,6 +63,8 @@ export async function startController(assets) {
       case 'GET /api/profiles/gguf-catalog': return json(gguf);
       case 'GET /api/settings': return json({ hosts: data.settings });
       case 'GET /api/settings/hf-tokens': return json({ hosts: [] });
+      case 'GET /api/settings/agent-provider': return json({ provider: null, key_configured: false });
+      case 'GET /api/agent/sessions': return json([]);
       case 'GET /api/admin/state':
         return json({ workers: [], audit: [], unavailable: {}, hosts: data.hosts.map((host) => {
           const jobs = Object.keys(host.capabilities).filter((kind) => host.capabilities[kind]);

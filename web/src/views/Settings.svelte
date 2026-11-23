@@ -2,6 +2,7 @@
   import { SvelteMap } from 'svelte/reactivity';
   import Infrastructure from '../components/Infrastructure.svelte';
   import HfTokenSettings from '../components/HfTokenSettings.svelte';
+  import AgentProviderSettings from '../components/AgentProviderSettings.svelte';
   import Blockers from '../components/Blockers.svelte';
   import FieldError from '../components/FieldError.svelte';
   import { api, ApiError, errorText } from '../lib/api';
@@ -396,6 +397,7 @@
   <Infrastructure hostId={selectedId} selectHost={select} {confirmRefresh} {trackDraft} {focusRequest} settingsLoaded={loaded}
     clearFocus={() => focusRequest = ''} refreshReadiness={load} />
   <HfTokenSettings confirmRefresh={() => confirmRefresh(true)} onDirty={(dirty) => trackDraft('token', '', dirty)} />
+  <AgentProviderSettings confirmRefresh={() => confirmRefresh()} onDirty={(dirty) => trackDraft('agent-provider', '', dirty)} />
 </div>
 
 <style>
