@@ -582,7 +582,7 @@ impl Worker {
                     && r.action == "start"
                     && r.job
                         .as_ref()
-                        .is_none_or(|job| job.kind != sensitivity::JOB && !scratch_eval::private_output(&job.kind))
+                        .is_none_or(|job| !matches!(job.kind.as_str(), sensitivity::JOB | damage::JOB) && !scratch_eval::private_output(&job.kind))
                     && !r.inputs.values().any(scratch_eval::granted),
                 "job output is not published"
             );
@@ -1048,6 +1048,16 @@ impl Worker {
                 );
             }
         }
+        if job.kind == damage::JOB {
+            let allowed = action == "start" && job.prompt.is_none() && access.is_none()
+                && job.inputs.len() == 2 && job.inputs.iter().all(|i| i.kind == "gguf")
+                && damage::Request::parse(&job.options).is_ok_and(|req| {
+                    damage::configured(&self.cfg.engine_env, &req, self.cfg.admission.as_deref())
+                });
+            if !allowed {
+                return self.record_prepare(id, action, job, Reply::error("Invalid damage map request or unavailable pinned backend"));
+            }
+        }
         if job.options["output_format"] == hgn_recipe::FORMAT {
             if self.cfg.pinned_publication.is_some()
                 || self
@@ -1466,8 +1476,8 @@ impl Worker {
         );
         let mut pinned = false;
         ensure!(
-            job.kind != sensitivity::JOB || (provided.is_none() && input.host == original.host),
-            "sensitivity requires a direct source"
+            !matches!(job.kind.as_str(), sensitivity::JOB | damage::JOB) || (provided.is_none() && input.host == original.host),
+            "sensitivity and damage maps require direct sources"
         );
         let (bundle, cached) = if let Some(b) = provided {
             b.validate()?;
@@ -1745,6 +1755,11 @@ impl Worker {
             sensitivity::Request::resolved(&job.options)?.0
                 .check_model(input.extra["sha256"].as_str().unwrap_or_default())?;
         }
+        if job.kind == damage::JOB {
+            let req = damage::Request::parse(&job.options)?;
+            ensure!(req.hashes().get(index).copied() == input.extra["sha256"].as_str(),
+                "damage map source SHA-256 mismatch");
+        }
         input.extra.extend([
             ("bundle_sha256".into(), json!(bundle.digest)),
             ("bytes".into(), json!(bundle.bytes()?)),
@@ -1969,6 +1984,8 @@ impl Worker {
                         .is_ok_and(|request| request.edit.backend.is_gpu())
                 } else if job.kind == sensitivity::JOB {
                     sensitivity::Request::resolved(&job.options).is_ok_and(|(request, _)| request.backend.is_gpu())
+                } else if job.kind == damage::JOB {
+                    damage::Request::parse(&job.options).is_ok_and(|request| request.backend.is_gpu())
                 } else if job.kind == trace::JOB || scratch_eval::private_output(&job.kind) {
                     false
                 } else {

@@ -9,6 +9,7 @@ pub mod operational;
 pub mod resources;
 pub mod scratch_eval;
 pub mod sensitivity;
+pub mod damage;
 pub mod source_grants;
 pub mod trace;
 pub mod weight_source;

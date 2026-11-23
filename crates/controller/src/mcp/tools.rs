@@ -24,6 +24,8 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("start_trace", "post", "/api/jobs"),
     ("steer_feature", "post", "/api/jobs"),
     ("tensor_sensitivity", "post", "/api/jobs"),
+    ("quantization_damage_map", "post", "/api/jobs"),
+    ("read_quantization_damage", "get", "/api/jobs/{id}/quantization-damage"),
     ("read_feature_trace", "get", "/api/jobs/{id}/trace/features"),
     ("get_job", "get", "/api/jobs/{id}"),
     ("list_interventions", "get", "/api/interventions"),
@@ -105,6 +107,7 @@ impl Server {
                         match name {
                             "start_trace" | "steer_feature" => Some("trace"),
                             "tensor_sensitivity" => Some("sensitivity"),
+                            "quantization_damage_map" => Some("quantization_damage"),
                             _ => None,
                         },
                     ),
@@ -128,6 +131,9 @@ impl Server {
                 }
                 "tensor_sensitivity" => {
                     "Queue empirical Fisher sensitivity on the pinned W4 held-out corpus for one GGUF or private scratch GGUF. Select layers or exact tensor names. Poll with get_job. Results are not release-qualified."
+                }
+                "quantization_damage_map" => {
+                    "Compare pinned Library BF16 and quantized GGUFs on the same worker. Read the damage map after the job finishes. The job does not apply its recipe proposal."
                 }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({
@@ -474,7 +480,12 @@ impl Route {
 
 fn fixed_job_schema(contract: &Value, kind: &str) -> Value {
     let base = &contract["components"]["schemas"];
-    let job = &base[if kind == "trace" { "TraceJob" } else { "SensitivityJob" }];
+    let job = &base[match kind {
+        "trace" => "TraceJob",
+        "sensitivity" => "SensitivityJob",
+        "quantization_damage" => "QuantizationDamageJob",
+        _ => unreachable!("unknown fixed job kind"),
+    }];
     let mut schema = base["JobRequestFields"].clone();
     schema["required"] = job["required"].clone();
     schema["description"] = job["description"].clone();
@@ -483,7 +494,7 @@ fn fixed_job_schema(contract: &Value, kind: &str) -> Value {
     }
     let props = schema["properties"].as_object_mut().unwrap();
     props.remove("kind");
-    if kind == "sensitivity" {
+    if kind != "trace" {
         props.remove("prompt");
         props.remove("prompt_id");
     }

@@ -931,7 +931,9 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "plan_experts",
             "prune_experts",
             "prune_model",
+            "quantization_damage_map",
             "read_feature_trace",
+            "read_quantization_damage",
             "read_trace",
             "register_model",
             "request_publish",
@@ -960,7 +962,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
                     .contains(&json!("backend"))
             );
         }
-        if matches!(tool["name"].as_str(), Some("start_trace" | "steer_feature" | "tensor_sensitivity")) {
+        if matches!(tool["name"].as_str(), Some("start_trace" | "steer_feature" | "tensor_sensitivity" | "quantization_damage_map")) {
             let flag = &schema["properties"]["allow_duplicate"];
             assert_eq!(flag["type"], "boolean");
             assert_eq!(flag["default"], false);

@@ -162,7 +162,7 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
         }
         Ok(value)
     });
-    if (matches!(job.kind.as_str(), trace::JOB | sensitivity::JOB) || scratch_eval::private_output(&job.kind))
+    if (matches!(job.kind.as_str(), trace::JOB | sensitivity::JOB | damage::JOB) || scratch_eval::private_output(&job.kind))
         && created_work
         && (r.cancel || result.is_err())
         && let Err(error) =
@@ -361,6 +361,19 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .saturating_add(model_bytes.saturating_mul(2)),
         )?;
         Some(req.backend)
+    } else if job.kind == damage::JOB {
+        let req = damage::Request::parse(&job.options)?;
+        ensure!(damage::configured(&w.cfg.engine_env, &req, w.cfg.admission.as_deref()), "pinned damage map backend is unavailable");
+        let [a,b] = job.inputs.as_slice() else { bail!("missing damage map sources") };
+        let size = |input: &Input| -> Result<u64> { Ok(weight_source::open_regular(&input.path)?.metadata()?.len()) };
+        let (a,b) = (size(a)?, size(b)?);
+        ensure!([a,b].into_iter().all(|size| size <= damage::MAX_MODEL_BYTES), "damage map input exceeds disk budget");
+        // At most one expanded head and one gradient (or one swap file).
+        let scratch = (a * 2 + damage::MAX_GRADIENT_BYTES * 2)
+            .max(b + damage::MAX_GRADIENT_BYTES / 2)
+            + (128 << 20) + req.backend.runtime_stage_reserve();
+        resources::disk_check(&w.cfg.root, w.disk_floor(job.resources.disk_reserve_bytes).saturating_add(scratch))?;
+        Some(req.backend)
     } else {
         None
     };
@@ -476,7 +489,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 scratch_eval::CACHE,
             ],
             locate_edit::JOB => &[],
-            sensitivity::JOB => &[sensitivity::PIN, sensitivity::MANIFEST_SHA, locate_edit::GPU_GATE],
+            sensitivity::JOB | damage::JOB => &[sensitivity::PIN, sensitivity::MANIFEST_SHA, locate_edit::GPU_GATE],
             _ => &[trace::EXECUTABLE, trace::LIB_DIR],
         };
         command.env_clear().envs(
@@ -817,6 +830,15 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             "sensitivity artifact runtime SHA-256 does not match worker pin"
         );
         return Ok(serde_json::to_value(artifact)?);
+    }
+    if job.kind == damage::JOB {
+        let request = damage::Request::parse(&job.options)?;
+        let [a,b] = job.inputs.as_slice() else { bail!("missing damage map sources") };
+        let ids = [a.extra["id"].as_str().context("missing reference ID")?, b.extra["id"].as_str().context("missing quantized ID")?];
+        damage::check_result(&request, &value, ids)?;
+        ensure!(w.cfg.engine_env.get(sensitivity::MANIFEST_SHA).map(String::as_str)
+            == value["manifest_sha256"].as_str(), "damage artifact runtime SHA-256 does not match worker pin");
+        return Ok(value);
     }
     if w.cfg.hy4_plan.as_ref().is_some_and(|p| p.encode.is_some()) {
         let artifact = &value["artifact"];

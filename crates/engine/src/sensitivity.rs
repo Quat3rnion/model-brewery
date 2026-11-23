@@ -33,18 +33,18 @@ const MAX_CONTEXT: usize = 128;
 const TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 const JOB_TIMEOUT: Duration = Duration::from_secs(1800);
 
-fn digest(bytes: &[u8]) -> String {
+pub(crate) fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-struct Pin {
+pub(crate) struct Pin {
     root: PathBuf,
-    sha: String,
+    pub(crate) sha: String,
     members: BTreeMap<String, String>,
 }
 
 impl Pin {
-    fn load() -> Result<Self> {
+    pub(crate) fn load() -> Result<Self> {
         let root =
             PathBuf::from(env::var_os(wire::PIN).context("missing sensitivity runtime pin")?);
         ensure!(
@@ -82,7 +82,7 @@ impl Pin {
         })
     }
 
-    fn stage(&self, backend: Backend, work: &Path) -> Result<(Tool, PathBuf)> {
+    pub(crate) fn stage(&self, backend: Backend, work: &Path) -> Result<(Tool, PathBuf)> {
         let work = work.join(backend.key());
         fs::create_dir(&work)?;
         let binary = "lanternfish";
@@ -254,7 +254,7 @@ fn selection(model: &Path, req: &Request) -> Result<Vec<Tensor>> {
     Ok(out)
 }
 
-fn matches_device(backend: Backend, device: &str) -> bool {
+pub(crate) fn matches_device(backend: Backend, device: &str) -> bool {
     let prefix = match backend {
         Backend::Cpu => return device == "CPU",
         Backend::Cuda => "CUDA",

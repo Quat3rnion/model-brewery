@@ -199,6 +199,7 @@ pub(super) fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let tensors = compiled.tensors()?;
     let estimated = tensors.values().try_fold(0u64, |total, tensor| {
         let t = super::inventory::Tensor {
+            offset: 0,
             shape: tensor.shape.clone(),
             ty: tensor.ggml_type,
         };

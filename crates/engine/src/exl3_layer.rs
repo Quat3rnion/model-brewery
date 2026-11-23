@@ -44,7 +44,7 @@ impl<'a> Safetensors<'a> {
     }
 }
 
-fn half(bits: u16) -> f64 {
+pub(crate) fn half(bits: u16) -> f64 {
     let exponent = (bits >> 10) & 31;
     let fraction = bits & 1023;
     let magnitude = match exponent {

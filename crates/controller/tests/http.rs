@@ -21,6 +21,9 @@ mod sae;
 #[path = "support/sensitivity.rs"]
 mod sensitivity;
 
+#[path = "support/damage.rs"]
+mod damage;
+
 #[path = "support/weights.rs"]
 mod weights;
 

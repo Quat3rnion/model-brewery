@@ -453,6 +453,49 @@ These values describe the selected observations only. They are
 
 ## Compare revisions and traces
 
+### Quantization damage map
+
+Enable `quantization_damage` in the worker's controller capabilities. Use the
+same pinned Lanternfish configuration as for [tensor sensitivity](#tensor-sensitivity).
+Register two single-file Library GGUFs from the same revision on that worker:
+the dense BF16 or F32 reference first, then the quantized model. The job checks
+their hashes, tensor names, and shapes. It does not prove that the two files
+come from the same revision.
+
+Submit `POST /api/jobs` with `kind: "quantization_damage"`, the two `input_ids`,
+and `options` with `reference_sha256`, `quantized_sha256`, and
+`gguf_type: "Q4_K_M"`. Do not supply a prompt. The job uses the first
+`observations` lines of the pinned W4 held-out corpus (1 to 4, default 1).
+By default it measures all quantized tensors. To reduce run time, set
+`tensors` to exact GGUF names. Set `swaps` to 1 to 5 (default 3). CPU runs
+both traces and swaps. With an admitted GPU, set `backend` to `cuda` or `rocm`
+to run only the gradients on that backend.
+
+Read `GET /api/jobs/{id}/quantization-damage` after success. With MCP, use
+`quantization_damage_map` and `read_quantization_damage`. The artifact includes
+W5 top-100 logit diffs. Each target is the highest-logit reference token at
+the last prompt position. The job fails if a compared top-100 trace does not
+contain that token. Positive drift means the reference logit is higher.
+The job computes a first-order estimate of recovery: the F32 reference
+gradient times (reference weight minus dequantized weight). If the quantizer
+made a separate output head from tied embeddings, the gradient model uses
+two copies of the reference weights for independent gradients. The job also
+measures the change after it replaces each top-ranked tensor, one at a time,
+in a temporary copy of the quantized GGUF. Predictions can differ from these
+measurements. The job does not edit either input.
+
+Review `recipe_proposal.layer_pairs`. Each pair exchanges tensor types between
+equal-shaped matrices to preserve payload size. The proposal has no effect
+until an operator saves `recipe_proposal.profile` with `POST /api/profiles`
+and submits a separate `POST /api/conversions` with `format: "gguf"`, the
+reference model ID, and the saved `profile_revision`. Use `uniform_profile`
+to reproduce the unmodified Q4_K_M tensor assignments without implicit
+row-width fallback. Both conversions use the same floating source and keep
+its tensor inventory, including any tied output head. Compare actual sizes
+and run W4 checks on both converted models before deciding whether to use
+the proposal.
+These results are **not release-qualified**.
+
 Use these `GET` routes with `a=<baseline ID>&b=<comparison ID>`.
 The routes do not change the inputs. A diff does not qualify a release.
 

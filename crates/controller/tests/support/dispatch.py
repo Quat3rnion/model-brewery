@@ -212,6 +212,24 @@ else:
                       executable_sha256="a" * 64, manifest_sha256="a" * 64,
                       tensors=[dict(name="blk.0.attn_q.weight", layer=0, shape=[2, 2], fisher=0.25)],
                       layers=[dict(layer=0, elements=4, fisher=0.25)])
+    if action == "start" and envelope["kind"] == "quantization_damage":
+        options = envelope["options"]
+        base = dict(output_format="gguf", gguf_type=options["gguf_type"], tensor_types={})
+        profile = dict(format="gguf", name="Test damage map", preset=options["gguf_type"], overrides={})
+        result = dict(kind="quantization_damage", schema_version=1, qualification="not release-qualified",
+                      reference_id=envelope["inputs"][0]["id"], quantized_id=envelope["inputs"][1]["id"],
+                      reference_sha256=options["reference_sha256"], quantized_sha256=options["quantized_sha256"],
+                      corpus_sha256="9678f9afdc31b2a9be7fec2045997e2360693ee72b893287c0d539983bff4923",
+                      backend="cpu", executable_sha256="a" * 64, manifest_sha256="a" * 64,
+                      observations=[dict(reference_logit=12,quantized_logit=10,measured_drift=2,
+                                         predicted_recovery_sum=1,w5=dict(model_logits=[]))],
+                      tensors=[dict(name="blk.0.attn_q.weight",layer=0,mean_absolute_damage=1,
+                                    predicted_recovery=[1],measured_recovery=[2])], layers=[],
+                      recipe_proposal=dict(applied=(root/"damage-bad-receipt").exists(),
+                                           reference_sha256=options["reference_sha256"],
+                                           baseline_sha256=options["quantized_sha256"], payload_bytes_delta=0,
+                                           options=base, uniform_options=base,
+                                           profile=profile, uniform_profile=profile))
     if action == "start" and envelope["kind"] == "hf_download":
         assert envelope["inputs"] == [] and "prompt" not in envelope
         options = envelope["options"]

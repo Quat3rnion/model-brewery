@@ -85,7 +85,7 @@ impl Namespace {
             .map(|entry| entry.0)
     }
 
-    fn spec(self, id: u64) -> Result<&'static (u64, &'static str, u64, u64)> {
+    pub(crate) fn spec(self, id: u64) -> Result<&'static (u64, &'static str, u64, u64)> {
         self.types()
             .find(|entry| entry.0 == id)
             .with_context(|| format!("unsupported GGUF tensor type {id}"))
@@ -102,10 +102,11 @@ pub(super) fn valid_name(name: &str) -> bool {
 pub(crate) struct Tensor {
     pub(crate) shape: Vec<u64>,
     pub(crate) ty: u64,
+    pub(crate) offset: u64,
 }
 
 impl Tensor {
-    pub(super) fn bytes(&self, ty: u64, namespace: Namespace) -> Result<u64> {
+    pub(crate) fn bytes(&self, ty: u64, namespace: Namespace) -> Result<u64> {
         let &(_, _, block, size) = namespace.spec(ty)?;
         ensure!(
             self.shape[0].is_multiple_of(block),
@@ -124,12 +125,13 @@ pub(crate) struct Model {
     pub(crate) architecture: String,
     pub(crate) tensors: BTreeMap<String, Tensor>,
     ftype: Option<u64>,
-    align: u64,
-    data: u64,
+    pub(crate) align: u64,
+    pub(crate) data: u64,
+    pub(crate) table: u64,
     namespace: Namespace,
 }
 
-fn align(value: u64, align: u64) -> Result<u64> {
+pub(crate) fn align(value: u64, align: u64) -> Result<u64> {
     Ok(value
         .checked_add(align - 1)
         .context("GGUF alignment overflow")?
@@ -210,6 +212,7 @@ impl Model {
         let architecture = architecture
             .filter(|name| valid_name(name))
             .context("missing/invalid GGUF architecture")?;
+        let table = r.stream_position()?;
         let mut spans = Vec::new();
         let mut tensors = BTreeMap::new();
         for _ in 0..nt {
@@ -228,7 +231,7 @@ impl Model {
             }
             let ty = number(&mut r, 4)?;
             let offset = number(&mut r, 8)?;
-            let tensor = Tensor { shape, ty };
+            let tensor = Tensor { shape, ty, offset };
             let end = offset
                 .checked_add(tensor.bytes(ty, namespace)?)
                 .context("GGUF tensor extent overflow")?;
@@ -275,6 +278,7 @@ impl Model {
             ftype,
             align: alignment,
             data,
+            table,
             namespace,
         })
     }
