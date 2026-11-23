@@ -210,7 +210,7 @@ impl Runtime<'_> {
 pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let req = Request::parse(&job.options)?;
     let [input] = job.inputs.as_slice() else {
-        anyhow::bail!("circuit needs exactly one Library GGUF");
+        anyhow::bail!("circuit needs exactly one GGUF");
     };
     ensure!(
         job.prompt.is_none() && input.kind == "gguf",

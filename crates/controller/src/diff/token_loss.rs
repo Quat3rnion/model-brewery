@@ -3,14 +3,17 @@ use crate::scratch_token_loss::{self as artifact, Score};
 
 const PAGE: usize = 128;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Slice {
-    a: String,
-    b: String,
-    sentence: Option<usize>,
-    start: Option<usize>,
-    end: Option<usize>,
+pub(crate) struct Slice {
+    pub a: String,
+    pub b: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sentence: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -65,20 +68,26 @@ pub(super) async fn get_loss(
     State(app): State<Arc<App>>,
     query: Params<Slice>,
 ) -> Result<impl IntoResponse> {
-    let q = parameters(query)?;
+    Ok(response(read_loss(app, parameters(query)?).await?))
+}
+
+pub(crate) async fn finding_loss(app: Arc<App>, query: Slice) -> Result<Value> {
+    serde_json::from_slice(&read_loss(app, query).await?).map_err(ApiError::storage)
+}
+
+async fn read_loss(app: Arc<App>, q: Slice) -> Result<Bytes> {
     let pair = Pair {
         a: q.a.clone(),
         b: q.b.clone(),
     };
     pair.check()?;
     let permit = app.diffs.acquire()?;
-    let bytes = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let _permit = permit;
         run(&app, pair, q)
     })
     .await
-    .map_err(ApiError::storage)??;
-    Ok(response(bytes))
+    .map_err(ApiError::storage)?
 }
 
 fn run(app: &App, pair: Pair, q: Slice) -> Result<Bytes> {

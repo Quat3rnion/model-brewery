@@ -667,7 +667,7 @@ async fn run(
             }
             calls += 1;
             let input = json!({"name":call.name,"arguments":call.arguments});
-            let pending = mcp.call(&input);
+            let pending = mcp.call_as(&input, crate::findings::Caller::Builtin(id.to_owned()));
             tokio::pin!(pending);
             let reply = tokio::select! {
                 biased;

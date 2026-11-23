@@ -45,6 +45,7 @@ Agents and operators can read, change and test model weights. All changes go to 
 **Workbench views.** **Trace** shows layer-by-token heatmaps, the logit lens and attention. **Edits** shows the scratch revisions of each source model, their checks and diffs, and the approval action for the operator.
 
 - **Token loss diff.** See which heldout sentences and tokens account for a perplexity change. Read the ranked results in Edits or with `read_token_loss_diff`. See [Token loss diff](OPERATOR.md#token-loss-diff).
+- **Findings.** Record a hypothesis, link measured evidence, and replay the same experiments on another pinned revision. See [Findings](OPERATOR.md#findings).
 
 Stage acceptance results on Qwen2.5-0.5B-Instruct: [Stage 1](qualification/weight_space_acceptance.md), [ROME, MEMIT and AlphaEdit](qualification/weight_space_stage2.md), [merges](qualification/weight_space_merge_acceptance.md), [SAE features](qualification/weight_space_sae.md), [crosscoder diffs](qualification/weight_space_crosscoder.md), and the [CUDA edit runtime](qualification/lanternfish-w14b-cuda.md).
 

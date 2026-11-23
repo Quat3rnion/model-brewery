@@ -1,4 +1,4 @@
-export type View = 'library' | 'queue' | 'transfers' | 'compare' | 'convert' | 'evaluate' | 'benchmarks' | 'calibration' | 'settings' | 'profiles' | 'weights' | 'trace' | 'edits' | 'crosscoder' | 'agent' | 'job' | 'not-found';
+export type View = 'library' | 'queue' | 'transfers' | 'compare' | 'convert' | 'evaluate' | 'benchmarks' | 'calibration' | 'settings' | 'profiles' | 'weights' | 'trace' | 'edits' | 'crosscoder' | 'agent' | 'findings' | 'job' | 'not-found';
 
 export const VIEWS: { id: Exclude<View, 'job' | 'not-found'>; label: string }[] = [
   { id: 'library', label: 'Library' },
@@ -8,6 +8,7 @@ export const VIEWS: { id: Exclude<View, 'job' | 'not-found'>; label: string }[] 
   { id: 'trace', label: 'Trace' },
   { id: 'edits', label: 'Edits' },
   { id: 'agent', label: 'Agent' },
+  { id: 'findings', label: 'Findings' },
   { id: 'convert', label: 'Convert' },
   { id: 'evaluate', label: 'Evaluate' },
   { id: 'benchmarks', label: 'Benchmarks' },
@@ -36,6 +37,7 @@ export function parse(hash: string): { view: View; jobId: string | null } {
   }
   if (path === 'profiles' || path === 'weights') return { view: path, jobId: null };
   if (path === 'edits/crosscoder') return { view: 'crosscoder', jobId: null };
+  if (/^findings\/[^/]+$/.test(path)) return { view: 'findings', jobId: null };
   const found = VIEWS.find((v) => v.id === path);
   return { view: found?.id ?? (path ? 'not-found' : 'library'), jobId: null };
 }

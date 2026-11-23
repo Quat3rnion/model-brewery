@@ -491,8 +491,9 @@ These values describe the selected observations only. They are
 ## Activation attribution
 
 Use `find_circuit` to locate activation sites that can change a next-token
-logit or logit margin. Use one dense Qwen2 or Llama F32 or BF16 Library
-GGUF on its source worker. Enable `"circuit": true` in the controller
+logit or logit margin. Use one dense Qwen2 or Llama F32 or BF16 GGUF
+on its source worker. For a scratch revision, convert it to private GGUF first.
+Enable `"circuit": true` in the controller
 capabilities and configure the [Lanternfish runtime pin](#tensor-sensitivity).
 The job uses `lib/cpu` only. BF16 can need a temporary F32 copy of the
 model. The job does not change or publish model weights.
@@ -2181,6 +2182,47 @@ selected sentence. The share divides the sentence's gain by the signed
 net gain over the heldout split. It can be negative or greater than 100%.
 If the net gain is zero, the share is null. The result is not
 release-qualified.
+
+#### Findings
+
+In the workbench, open **Findings** to read the hypothesis, experiment
+timeline, verdict, and links to the evidence. Each write creates a new
+version. Use the returned version ID for the next write. A finished
+version does not change. The list shows the 100 newest versions.
+
+1. Use `create_finding` (`POST /api/findings`) before the experiments.
+   Enter `hypothesis`, `model_id`, and `model_sha256`. For a scratch
+   model, enter its revision hash, not its private GGUF hash.
+2. After a job succeeds, use `add_evidence`
+   (`POST /api/findings/{id}/evidence`). For circuit, trace, or sensitivity,
+   set `evidence` to `{"kind":"job","job_id":"…","paths":["/clean_metric"]}`
+   and select paths from the job result. For token loss, use
+   `{"kind":"token_loss","a":"…","b":"…","paths":["/total_logprob_gain"]}`.
+   Match the original `sentence`, `start`, and `end` arguments if used.
+   For an imported crosscoder, use `kind: crosscoder` and `artifact_id`.
+   The controller reads the artifact and extracts the numbers. Supply a
+   JSON Pointer to each number. Do not submit numbers as evidence.
+3. Use `add_evidence` with `verdict` to record `supported`, `refuted`, or
+   `inconclusive` and give the reasoning. You can send `evidence` and
+   `verdict` in the same call. A new experiment without a verdict resets
+   the verdict to inconclusive.
+4. Use `replay_finding` (`POST /api/findings/{id}/replay`) with the ID and
+   SHA-256 of a different model. For a scratch target, convert it first.
+   Use `get_finding` (`GET /api/findings/{id}`) to poll the new version.
+   When it is ready, compare the recorded numbers side by side. Check the
+   runtime and fixture pins before you give the replay a verdict.
+
+For REST, send `Idempotency-Key` with each write. For MCP, send
+`idempotency_key`. Use the same key and arguments only for a retry.
+External clients supply `client_id`. This label is self-reported.
+The built-in agent records its session ID automatically.
+
+Token-loss replay repeats a direct edit or a prune without a calibration
+trace. It uses the same conversion assets and runs measured checks on the
+new child. Use **Edits** to inspect or discard that child. Imported
+crosscoders and traces with model-bound dependencies can be evidence
+but cannot be replayed by the controller. Only one replay runs at a time.
+Findings and replays are not release-qualified.
 
 #### Compiled programs
 

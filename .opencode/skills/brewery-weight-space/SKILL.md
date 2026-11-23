@@ -1,6 +1,6 @@
 ---
 name: brewery-weight-space
-description: Run Model Brewery weight-space experiments through MCP or REST. Use for CPU traces, activation attribution, interventions, SAE features, crosscoders, Fisher tensor sensitivity, scratch edits, fact edits, merges, pruning, compiled programs, interpretability benchmark scores, checks, diffs, or publish requests.
+description: Run Model Brewery weight-space experiments through MCP or REST. Use for CPU traces, activation attribution, interventions, SAE features, crosscoders, Fisher tensor sensitivity, scratch edits, fact edits, merges, pruning, compiled programs, interpretability benchmark scores, checks, diffs, findings, replay, or publish requests.
 ---
 
 # Weight-space experiments
@@ -22,7 +22,9 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
 
 1. Find the input with `list_models` or add it with `register_model`. Confirm
    the worker capability and pin the input ID and SHA-256.
-2. Capture the baseline with `start_trace` and read it with `read_trace`.
+2. Record the hypothesis with `create_finding` before running an experiment.
+   Pin the model revision ID and SHA-256. Then capture the baseline with
+   `start_trace` and read it with `read_trace`.
    For a SafeTensors input, use `create_scratch` and `convert_scratch_gguf`
    first. Save the trace ID, prompts, and capture settings.
 3. Use `list_scratch` to find the pinned scratch parent. Select a method below
@@ -36,7 +38,12 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
    parent `a` and child `b`. Use `sentence`, `start`, and `end` to limit the
    read. Report the signed share of net log-probability gain and the check
    bundle ID.
-6. If the user asks, use `request_publish` for the exact child hash. If smoke
+6. Use `add_evidence` to select numeric paths in the finished artifacts and
+   record a verdict with your reasoning. Use `get_finding` to verify the
+   saved version. See [Findings](../../../OPERATOR.md#findings) to replay an
+   experiment on another pinned revision. Compare the same paths and check
+   the runtime pins before giving the replay a verdict.
+7. If the user asks, use `request_publish` for the exact child hash. If smoke
    or behavior did not pass, disclose that and acknowledge the current bundle
    only after review. Integrity failure blocks the request. A request leaves
    the Library unchanged. Report the IDs, measured results, and blockers as
@@ -48,7 +55,7 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
 | --- | --- |
 | Change known weights | `apply_edit` for slices, low-rank updates, or projection removal. See [Scratch weight revisions](../../../OPERATOR.md#scratch-weight-revisions). |
 | Measure Fisher sensitivity | Use `tensor_sensitivity` with one pinned GGUF, the W4 held-out corpus SHA-256, and a small tensor or layer selection. Read `get_job` and record the revision, corpus, backend, and observation count. This job does not edit weights. See [Tensor sensitivity](../../../OPERATOR.md#tensor-sensitivity). |
-| Find activation circuits | Use `find_circuit` with one pinned Library GGUF, equal-length clean and corrupt prompts, and a small site selection. Read `get_job`. Cite `/api/jobs/{id}/circuit` and distinguish signed attribution from measured patch deltas. Report Pearson `r` and Spearman `rho` only for the patched sites. See [Activation attribution](../../../OPERATOR.md#activation-attribution). |
+| Find activation circuits | Use `find_circuit` with one pinned Library or private scratch GGUF, equal-length clean and corrupt prompts, and a small site selection. Read `get_job`. Cite `/api/jobs/{id}/circuit` and distinguish signed attribution from measured patch deltas. Report Pearson `r` and Spearman `rho` only for the patched sites. See [Activation attribution](../../../OPERATOR.md#activation-attribution). |
 | Map quantization damage | Use `quantization_damage_map` with two pinned GGUFs from the same revision. Read `read_quantization_damage`; compare the gradient estimates with the measured swaps. Report the recipe as a proposal, not an applied edit. See [Quantization damage map](../../../OPERATOR.md#quantization-damage-map). |
 | Change model facts | `rome_edit` for one fact at one layer; `memit_edit` for batches across layers; `alphaedit_edit` to project away from sampled preserved keys. Start with a private BF16 parent GGUF. See [Locate and edit a fact](../../../OPERATOR.md#locate-and-edit-a-fact). |
 | Combine pinned revisions | `merge_models` on compatible layouts. See [Merge revisions](../../../OPERATOR.md#merge-revisions). |

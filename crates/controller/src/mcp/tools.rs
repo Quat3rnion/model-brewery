@@ -23,6 +23,11 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("compile_program", "post", "/api/scratch/compile_program"),
     ("run_program", "post", "/api/scratch/{id}/run_program"),
     ("interp_benchmark", "get", "/api/interp/benchmark"),
+    ("create_finding", "post", "/api/findings"),
+    ("list_findings", "get", "/api/findings"),
+    ("get_finding", "get", "/api/findings/{id}"),
+    ("add_evidence", "post", "/api/findings/{id}/evidence"),
+    ("replay_finding", "post", "/api/findings/{id}/replay"),
     ("start_trace", "post", "/api/jobs"),
     ("steer_feature", "post", "/api/jobs"),
     ("tensor_sensitivity", "post", "/api/jobs"),
@@ -145,7 +150,7 @@ impl Server {
                     "Queue empirical Fisher sensitivity on the pinned W4 held-out corpus for one GGUF or private scratch GGUF. Select layers or exact tensor names. Poll with get_job. Results are not release-qualified."
                 }
                 "find_circuit" => {
-                    "Queue a CPU sweep of activation sites for one pinned Library GGUF and two equal-length prompts. Measure the top sites with independent activation patches. Poll with get_job. Cite the saved artifact at /api/jobs/{id}/circuit."
+                    "Queue a CPU sweep of activation sites for one pinned GGUF (Library or private scratch) and two equal-length prompts. Measure the top sites with independent activation patches. Poll with get_job. Cite the saved artifact at /api/jobs/{id}/circuit."
                 }
                 "quantization_damage_map" => {
                     "Compare pinned Library BF16 and quantized GGUFs on the same worker. Read the damage map after the job finishes. The job does not apply its recipe proposal."
@@ -201,6 +206,15 @@ impl Server {
     }
 
     pub(crate) async fn call(&self, params: &Value) -> Result<Value, &'static str> {
+        self.call_as(params, crate::findings::Caller::ExternalMcp)
+            .await
+    }
+
+    pub(crate) async fn call_as(
+        &self,
+        params: &Value,
+        caller: crate::findings::Caller,
+    ) -> Result<Value, &'static str> {
         let name = params["name"].as_str().ok_or("tool name is required")?;
         let mut args = match params.get("arguments") {
             Some(value) => value
@@ -237,7 +251,14 @@ impl Server {
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
         let result = loop {
             let result = match self
-                .send(route, &path, key.as_deref(), allow_duplicate, body.clone())
+                .send(
+                    route,
+                    &path,
+                    key.as_deref(),
+                    allow_duplicate,
+                    body.clone(),
+                    caller.clone(),
+                )
                 .await
             {
                 Ok(result) => result,
@@ -255,6 +276,7 @@ impl Server {
             "list_models" => json!({"models":result}),
             "list_scratch" => json!({"revisions":result}),
             "list_interventions" => json!({"interventions":result}),
+            "list_findings" => json!({"findings":result}),
             _ => result,
         };
         Ok(content(data, false))
@@ -267,6 +289,7 @@ impl Server {
         key: Option<&str>,
         allow_duplicate: bool,
         body: Vec<u8>,
+        caller: crate::findings::Caller,
     ) -> Result<Value, Value> {
         let mut request = Request::builder()
             .method(if route.write {
@@ -274,7 +297,8 @@ impl Server {
             } else {
                 Method::GET
             })
-            .uri(path);
+            .uri(path)
+            .extension(caller);
         if route.write {
             request = request.header(header::CONTENT_TYPE, "application/json");
         }

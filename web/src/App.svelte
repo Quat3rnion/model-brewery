@@ -22,6 +22,7 @@
   import Edits from './views/Edits.svelte';
   import Crosscoder from './views/Crosscoder.svelte';
   import Agent from './views/Agent.svelte';
+  import Findings from './views/Findings.svelte';
 
   onMount(() => {
     brewery.start();
@@ -147,6 +148,7 @@
     {:else if route.view === 'edits'}<Edits />
     {:else if route.view === 'crosscoder'}<Crosscoder />
     {:else if route.view === 'agent'}<Agent />
+    {:else if route.view === 'findings'}<Findings />
     {:else}
       <div class="stack">
         <h1 tabindex="-1">Not found</h1>

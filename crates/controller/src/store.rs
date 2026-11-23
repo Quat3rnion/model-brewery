@@ -15,6 +15,7 @@ use std::{
 
 pub(crate) mod agent;
 mod crosscoder;
+mod findings;
 mod interventions;
 mod sae;
 
@@ -80,6 +81,7 @@ impl Store {
         crosscoder::install(&conn)?;
         crate::dedupe::install(&conn)?;
         agent::install(&conn)?;
+        findings::install(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS profile_revisions(revision TEXT PRIMARY KEY, body TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS host_evaluation_profiles(

@@ -127,6 +127,7 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
         .merge(crate::interventions::router())
         .merge(crate::sae::router())
         .merge(crate::crosscoder::router())
+        .merge(crate::findings::router())
         .merge(crate::scratch::router())
         .merge(crate::diff::router())
         .merge(crate::spectra::router())
@@ -655,7 +656,7 @@ async fn delete_prompt(State(app): State<Shared>, Path(id): Path<String>) -> Res
     }
 }
 
-async fn add_job(
+pub(crate) async fn add_job(
     State(app): State<Shared>,
     headers: HeaderMap,
     payload: std::result::Result<Json<NewJob>, JsonRejection>,
@@ -740,11 +741,21 @@ fn prepare_job(app: &App, store: &Store, request: NewJob) -> Result<(Job, Envelo
         .map(|id| {
             let model = if let Some(model) = store.model(id).map_err(ApiError::storage)? {
                 model
-            } else if matches!(request.kind.as_str(), trace::JOB | sensitivity::JOB)
-                && request.input_ids.len() == 1
+            } else if matches!(
+                request.kind.as_str(),
+                trace::JOB | sensitivity::JOB | brewery_worker::circuit::JOB
+            ) && request.input_ids.len() == 1
                 && store.scratch(id).map_err(ApiError::storage)?.is_some()
             {
                 let (model, sha) = crate::scratch::jobs::trace_input(store, id)?;
+                if request.kind == brewery_worker::circuit::JOB
+                    && request.options.get("model_sha256").and_then(Value::as_str)
+                        != Some(sha.as_str())
+                {
+                    return Err(ApiError::bad(
+                        "circuit SHA-256 does not match the private GGUF",
+                    ));
+                }
                 scratch_pins.insert(model.path.clone(), sha);
                 if request.kind == sensitivity::JOB {
                     sensitivity_revision = store
@@ -898,8 +909,10 @@ fn enqueue_job(
     mut envelope: Envelope,
     submission: Option<&Submission<'_>>,
 ) -> Result<Response> {
-    let job = if matches!(job.kind.as_str(), trace::JOB | sensitivity::JOB)
-        && !envelope.scratch_pins.is_empty()
+    let job = if matches!(
+        job.kind.as_str(),
+        trace::JOB | sensitivity::JOB | brewery_worker::circuit::JOB
+    ) && !envelope.scratch_pins.is_empty()
     {
         crate::scratch::jobs::prepare_enqueue(app, job, &envelope)?
     } else {

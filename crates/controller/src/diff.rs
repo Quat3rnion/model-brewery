@@ -2,6 +2,7 @@
 mod behavior;
 mod tensors;
 mod token_loss;
+pub(crate) use token_loss::{Slice as LossSlice, finding_loss};
 
 use crate::{
     App,

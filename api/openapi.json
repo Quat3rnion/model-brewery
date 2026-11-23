@@ -69,6 +69,57 @@
         }
       }
     },
+    "/api/findings": {
+      "get": {
+        "operationId": "listFindings",
+        "summary": "List the 100 newest finding versions",
+        "responses": {"200":{"description":"Finding version summaries","content":{"application/json":{"schema":{"type":"array","items":{"$ref":"#/components/schemas/FindingSummary"}}}}}}
+      },
+      "post": {
+        "operationId": "createFinding",
+        "summary": "Record a hypothesis before running experiments",
+        "parameters": [{"$ref":"#/components/parameters/FindingKey"}],
+        "requestBody": {"required":true,"content":{"application/json":{"schema":{
+          "type":"object","additionalProperties":false,"required":["hypothesis","model_id","model_sha256"],
+          "properties":{"hypothesis":{"type":"string","minLength":1,"maxLength":4096},"model_id":{"type":"string","format":"uuid"},"model_sha256":{"$ref":"#/components/schemas/ScratchHash"},"client_id":{"$ref":"#/components/schemas/FindingClient"}}
+        }}}},
+        "responses": {"200":{"$ref":"#/components/responses/FindingVersion"},"201":{"$ref":"#/components/responses/FindingVersion"},"400":{"$ref":"#/components/responses/BadRequest"},"404":{"$ref":"#/components/responses/NotFound"},"409":{"$ref":"#/components/responses/ScratchConflict"}}
+      }
+    },
+    "/api/findings/{id}": {
+      "get": {
+        "operationId": "getFinding",
+        "summary": "Read one finding version and its experiment results",
+        "parameters": [{"$ref":"#/components/parameters/ResourceId"}],
+        "responses": {"200":{"$ref":"#/components/responses/FindingVersion"},"404":{"$ref":"#/components/responses/NotFound"}}
+      }
+    },
+    "/api/findings/{id}/evidence": {
+      "post": {
+        "operationId": "addFindingEvidence",
+        "summary": "Record verified evidence and/or an agent verdict in a new finding version",
+        "description": "Use the newest returned version ID for the next update. Supply a completed circuit, trace or sensitivity job, a token-loss report, or an imported crosscoder. Each key number comes from a distinct numeric JSON Pointer, such as /clean_metric or /total_logprob_gain.",
+        "parameters": [{"$ref":"#/components/parameters/ResourceId"},{"$ref":"#/components/parameters/FindingKey"}],
+        "requestBody": {"required":true,"content":{"application/json":{"schema":{
+          "type":"object","additionalProperties":false,
+          "properties":{"evidence":{"$ref":"#/components/schemas/FindingEvidence"},"verdict":{"$ref":"#/components/schemas/FindingVerdict"},"client_id":{"$ref":"#/components/schemas/FindingClient"}}
+        }}}},
+        "responses": {"200":{"$ref":"#/components/responses/FindingVersion"},"201":{"$ref":"#/components/responses/FindingVersion"},"400":{"$ref":"#/components/responses/BadRequest"},"404":{"$ref":"#/components/responses/NotFound"},"409":{"$ref":"#/components/responses/ScratchConflict"}}
+      }
+    },
+    "/api/findings/{id}/replay": {
+      "post": {
+        "operationId": "replayFinding",
+        "summary": "Rerun a finding on a different pinned revision and compare the recorded paths",
+        "description": "Poll getFinding with the returned version ID. The source version does not change. A scratch target must have a private GGUF. Token-loss replay repeats a direct edit or a dense prune that does not depend on a calibration trace, conversion with the same assets, and measured checks. The controller cannot replay imported crosscoders or traces with model-bound dependencies.",
+        "parameters": [{"$ref":"#/components/parameters/ResourceId"},{"$ref":"#/components/parameters/FindingKey"}],
+        "requestBody": {"required":true,"content":{"application/json":{"schema":{
+          "type":"object","additionalProperties":false,"required":["model_id","model_sha256"],
+          "properties":{"model_id":{"type":"string","format":"uuid"},"model_sha256":{"$ref":"#/components/schemas/ScratchHash"},"client_id":{"$ref":"#/components/schemas/FindingClient"}}
+        }}}},
+        "responses": {"200":{"$ref":"#/components/responses/FindingVersion"},"202":{"$ref":"#/components/responses/FindingVersion"},"400":{"$ref":"#/components/responses/BadRequest"},"404":{"$ref":"#/components/responses/NotFound"},"409":{"$ref":"#/components/responses/ScratchConflict"},"503":{"$ref":"#/components/responses/ScratchBusy"}}
+      }
+    },
     "/api/events": {
       "get": {
         "operationId": "streamEvents",
@@ -1826,6 +1877,7 @@
       }}}}
     },
     "parameters": {
+      "FindingKey": {"name":"Idempotency-Key","in":"header","required":true,"description":"Reuse this key only to retry the same write. A retry returns the same finding version.","schema":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9._-]{1,128}$"}},
       "CrosscoderId": {
         "name":"id","in":"path","required":true,
         "schema":{"type":"string","format":"sha256","pattern":"^[a-f0-9]{64}$"},
@@ -1867,6 +1919,7 @@
       }
     },
     "responses": {
+      "FindingVersion": {"description":"Finding version; only a running replay can progress to ready or failed.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Finding"}}}},
       "CrosscoderReport": {"description":"Immutable experimental crosscoder report.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/CrosscoderReport"}}}},
       "AgentProviderStatus": {"description": "Provider settings and key status. Does not contain a key or file path.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AgentProviderStatus"}}}},
       "AgentSessionDetail": {"description": "Saved session and transcript.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AgentSession"}}}},
@@ -1901,6 +1954,36 @@
       "HfTokenStorageUnavailable": {"description": "The private token file cannot be safely changed.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
     },
     "schemas": {
+      "FindingClient": {"type":"string","minLength":1,"maxLength":128,"description":"Required for an external MCP or REST client. This label is self-reported. The controller records the session ID automatically for the built-in agent."},
+      "FindingVerdict": {"type":"object","additionalProperties":false,"required":["status","reasoning"],"properties":{
+        "status":{"enum":["supported","refuted","inconclusive"]},"reasoning":{"type":"string","minLength":1,"maxLength":4096}
+      }},
+      "FindingEvidence": {"oneOf":[
+        {"type":"object","additionalProperties":false,"required":["kind","job_id","paths"],"properties":{"kind":{"const":"job"},"job_id":{"type":"string","format":"uuid"},"paths":{"$ref":"#/components/schemas/FindingPaths"}}},
+        {"type":"object","additionalProperties":false,"required":["kind","a","b","paths"],"properties":{"kind":{"const":"token_loss"},"a":{"type":"string","format":"uuid"},"b":{"type":"string","format":"uuid"},"sentence":{"type":"integer","minimum":0},"start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":1},"paths":{"$ref":"#/components/schemas/FindingPaths"}}},
+        {"type":"object","additionalProperties":false,"required":["kind","artifact_id","paths"],"properties":{"kind":{"const":"crosscoder"},"artifact_id":{"$ref":"#/components/schemas/ScratchHash"},"paths":{"$ref":"#/components/schemas/FindingPaths"}}}
+      ]},
+      "FindingPaths": {"type":"array","minItems":1,"maxItems":16,"uniqueItems":true,"items":{"type":"string","maxLength":256,"pattern":"^/"}},
+      "FindingSummary": {"type":"object","required":["id","version","hypothesis","parent_id","replay_of","created_at_ms","state","model","verdict"],"properties":{
+        "id":{"type":"string","format":"uuid"},"version":{"type":"integer","minimum":1},"hypothesis":{"type":"string"},"parent_id":{"type":["string","null"]},"replay_of":{"type":["string","null"]},
+        "created_at_ms":{"type":"integer"},"state":{"enum":["ready","running","failed"]},"error":{"type":"string"},
+        "model":{"type":"object","required":["id","sha256"],"properties":{"id":{"type":"string","format":"uuid"},"sha256":{"$ref":"#/components/schemas/ScratchHash"}}},
+        "verdict":{"$ref":"#/components/schemas/FindingVerdict"}
+      }},
+      "Finding": {"allOf":[{"$ref":"#/components/schemas/FindingSummary"},{"type":"object","required":["schema_version","qualification","provenance","experiments","comparison"],"properties":{
+        "schema_version":{"const":1},"qualification":{"const":"not release-qualified"},
+        "provenance":{"type":"object","required":["agent","tool_version"],"properties":{
+          "agent":{"type":"object","required":["kind","id"],"properties":{"kind":{"enum":["external_mcp","external_rest","builtin"]},"id":{"type":"string"}}},"tool_version":{"type":"string"}
+        }},
+        "experiments":{"type":"array","maxItems":12,"items":{"type":"object","required":["spec","artifact","metrics"],"properties":{
+          "spec":{"type":"object","required":["kind"],"properties":{"kind":{"enum":["job","token_loss","crosscoder"]},"request":{"type":"object"},"tool":{"type":"string"},"arguments":{"type":"object"},"preparation":{"type":"object"}}},
+          "artifact":{"type":"object","required":["id","sha256","api_url","view_url","pins"],"properties":{"id":{"type":"string"},"job_id":{"type":"string","format":"uuid"},"sha256":{"$ref":"#/components/schemas/ScratchHash"},"api_url":{"type":"string"},"view_url":{"type":"string"},"pins":{"type":"object"}}},
+          "metrics":{"type":"array","items":{"type":"object","required":["path","value"],"properties":{"path":{"type":"string"},"value":{"type":"number"}}}}
+        }}},
+        "comparison":{"type":"array","items":{"type":"object","required":["experiment","path","original","replay"],"properties":{
+          "experiment":{"type":"integer","minimum":1},"path":{"type":"string"},"original":{"type":"number"},"replay":{"type":"number"}
+        }}}
+      }}]},
       "InterpBenchmark": {
         "type":"object","required":["schema_version","qualification","backend","models","methods"],
         "properties":{
@@ -2820,12 +2903,12 @@
         }
       },
       "CircuitJob": {
-        "description":"Measure activation attribution and independent W2 patches for two equal-length raw prompts. Use a single-file dense Qwen2 or Llama F32/BF16 Library GGUF on its opted-in CPU worker.",
+        "description":"Measure activation attribution and independent W2 patches for two equal-length raw prompts. Use a single-file dense Qwen2 or Llama F32/BF16 GGUF on its opted-in CPU worker.",
         "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"},{"$ref":"#/components/schemas/NoPrompt"}],
         "required":["input_ids","options"],
         "properties":{
           "kind":{"const":"circuit"},
-          "input_ids":{"description":"One Library GGUF ID.","minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
+          "input_ids":{"description":"One Library GGUF ID or one scratch revision ID with private GGUF.","minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
           "options":{"$ref":"#/components/schemas/CircuitOptions"}
         }
       },

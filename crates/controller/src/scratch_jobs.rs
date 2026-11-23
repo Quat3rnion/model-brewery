@@ -18,7 +18,7 @@ pub(crate) struct PrivateGguf {
     pub(crate) sha256: String,
     pub(crate) converter_version: String,
     bytes: u64,
-    job_id: String,
+    pub(crate) job_id: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -199,6 +199,15 @@ pub(crate) fn finish(
     if job.kind == brewery_worker::sensitivity::JOB {
         if result["revision_sha256"].as_str() != Some(&row.sha256) {
             return Err("sensitivity artifact does not match the current scratch revision".into());
+        }
+        return Ok(None);
+    }
+    if job.kind == brewery_worker::circuit::JOB {
+        let model = &envelope.inputs[0];
+        if result["model_sha256"].as_str()
+            != envelope.scratch_pins.get(&model.path).map(String::as_str)
+        {
+            return Err("scratch circuit result does not match the pinned GGUF".into());
         }
         return Ok(None);
     }

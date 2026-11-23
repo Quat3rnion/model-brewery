@@ -77,6 +77,15 @@ impl ScratchAccess {
                 &job.inputs[..]
             }
             trace::JOB if kinds().eq(["gguf"]) => &job.inputs[..],
+            crate::circuit::JOB
+                if job.prompt.is_none()
+                    && kinds().eq(["gguf"])
+                    && crate::circuit::Request::parse(&job.options).is_ok_and(|req| {
+                        self.paths.get(&job.inputs[0].path) == Some(&req.model_sha256)
+                    }) =>
+            {
+                &job.inputs[..]
+            }
             sensitivity::JOB
                 if job.prompt.is_none()
                     && job.options.get(sensitivity::REVISION_PIN).is_some()
@@ -1065,7 +1074,6 @@ impl Worker {
         }
         if job.kind == circuit::JOB {
             let allowed = action == "start"
-                && access.is_none()
                 && job.prompt.is_none()
                 && job.inputs.len() == 1
                 && job.inputs[0].kind == "gguf"

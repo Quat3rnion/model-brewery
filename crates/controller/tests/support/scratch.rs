@@ -1088,6 +1088,41 @@ fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
     assert_eq!(loss["tokens"].as_array().unwrap().len(), 1);
     assert_eq!(loss["tokens"][0]["position"], 1);
     assert_eq!(loss["tokens"][0]["piece"], " clock");
+    let (201, finding) = t.request(
+        "/api/findings",
+        "Idempotency-Key: token-loss-root\r\n",
+        Some(json!({
+            "hypothesis":"The edit improves heldout loss.","client_id":"mock REST",
+            "model_id":parent["id"],"model_sha256":digest
+        })),
+    ) else {
+        panic!("finding creation")
+    };
+    let evidence = format!("/api/findings/{}/evidence", finding["id"].as_str().unwrap());
+    let evidence_body = json!({"client_id":"mock REST","evidence":{
+        "kind":"token_loss","a":parent["id"],"b":id,"sentence":5,"start":1,"end":2,
+        "paths":["/total_logprob_gain","/tokens/0/loss_delta"]
+    }});
+    let (201, enriched) = t.request(
+        &evidence,
+        "Idempotency-Key: token-loss-evidence\r\n",
+        Some(evidence_body.clone()),
+    ) else {
+        panic!("finding evidence")
+    };
+    let captured = &enriched["experiments"][0];
+    assert_eq!(captured["artifact"]["api_url"], loss_route);
+    assert_eq!(captured["artifact"]["id"], bundle["id"]);
+    assert_eq!(captured["artifact"]["job_id"], check_job["id"]);
+    assert_eq!(
+        captured["artifact"]["sha256"],
+        bundle["token_loss"]["sha256"]
+    );
+    assert_eq!(
+        captured["metrics"][0],
+        json!({"path":"/total_logprob_gain","value":1.0})
+    );
+    assert_eq!(captured["spec"]["arguments"]["sentence"], 5);
     assert_eq!(
         t.request(&loss_route.replace("end=2", "end=1"), "", None).0,
         400
@@ -1103,6 +1138,15 @@ fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
     );
     fs::write(artifact, "{}").unwrap();
     assert_eq!(t.request(&loss_route, "", None).0, 422);
+    assert_eq!(
+        t.request(
+            &evidence,
+            "Idempotency-Key: token-loss-corrupt\r\n",
+            Some(evidence_body)
+        )
+        .0,
+        422
+    );
     assert_eq!(
         t.request(
             &checks,
@@ -1182,10 +1226,12 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
     assert_eq!(
         names,
         [
+            "add_evidence",
             "alphaedit_edit",
             "apply_edit",
             "compile_program",
             "convert_scratch_gguf",
+            "create_finding",
             "create_intervention",
             "create_scratch",
             "crosscoder_diff",
@@ -1196,11 +1242,13 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "export_control_vector",
             "find_circuit",
             "get_checks",
+            "get_finding",
             "get_intervention",
             "get_job",
             "get_scratch",
             "interp_benchmark",
             "lineage",
+            "list_findings",
             "list_interventions",
             "list_models",
             "list_scratch",
@@ -1216,6 +1264,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "read_token_loss_diff",
             "read_trace",
             "register_model",
+            "replay_finding",
             "request_publish",
             "rome_edit",
             "routing_atlas",

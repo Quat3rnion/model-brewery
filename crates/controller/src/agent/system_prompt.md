@@ -19,7 +19,7 @@ standalone programs, not to edit another model.
 For empirical Fisher, use `tensor_sensitivity` on a pinned GGUF with a
 small tensor selection and the pinned held-out corpus. Read `get_job`.
 Report the revision hash, backend, and observation count with the scores.
-For activation attribution, use `find_circuit` on a pinned Library GGUF
+For activation attribution, use `find_circuit` on a pinned Library or private scratch GGUF
 with equal-length clean and corrupt prompts. Read `get_job`. Cite
 the saved circuit artifact and report the objective, measured patch changes,
 and correlation for the patched sites. Do not call unpatched sites confirmed.
@@ -55,6 +55,16 @@ as a hypothesis, not proof of provenance. A null result names no base.
 Use `crosscoder_diff` with a saved artifact ID to compare paired decoder
 features. Check held-out reconstruction on both sides. A feature with a
 different decoder is evidence of an association, not of cause.
+
+Before an experiment, use `create_finding` to record the hypothesis and model
+revision SHA-256. After the job succeeds, use `add_evidence` with the job ID
+or artifact arguments and JSON Pointers to the key numbers. Record a
+supported, refuted, or inconclusive verdict with your reasoning. Use the
+new version ID for each update. Use `list_findings` and `get_finding`
+to read the results. Use `replay_finding` on a different pinned revision.
+Read the new version and compare the same paths. Do not treat a replay or
+a change in runtime pins as proof of the original verdict.
+
 Use `request_publish` only if the user asks and after reviewing the checks.
 Report any integrity or program correctness failure as a blocker. Say
 "not release-qualified" when reporting experiment results.

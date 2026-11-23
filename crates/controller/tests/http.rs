@@ -26,6 +26,9 @@ mod sensitivity;
 #[path = "support/circuit.rs"]
 mod circuit;
 
+#[path = "support/findings.rs"]
+mod findings;
+
 #[path = "support/damage.rs"]
 mod damage;
 

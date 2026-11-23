@@ -12,6 +12,7 @@ mod dispatch;
 mod domain;
 mod eligibility;
 mod feed;
+mod findings;
 mod gguf;
 mod hf_download;
 mod hf_tokens;

@@ -83,6 +83,10 @@ pub struct Revision {
 }
 
 impl Revision {
+    pub(crate) fn finding_checks(&self) -> Option<(&str, serde_json::Value)> {
+        self.check_bundle.as_ref()?.finding_receipt()
+    }
+
     pub(crate) fn token_loss(&self) -> Option<(&str, &crate::scratch_token_loss::Reference)> {
         self.check_bundle.as_ref()?.token_loss()
     }
@@ -117,6 +121,21 @@ pub struct Provenance {
     created_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compiled_program: Option<program::Recipe>,
+}
+
+impl Provenance {
+    pub(crate) fn finding_edit(&self) -> (String, serde_json::Value) {
+        if let Some(pruning) = &self.pruning {
+            ("prune".into(), serde_json::json!({"pruning":pruning}))
+        } else if !self.operations.is_empty() && self.method == "direct" {
+            (
+                "edits".into(),
+                serde_json::json!({"operations":self.operations}),
+            )
+        } else {
+            (self.method.clone(), serde_json::Value::Null)
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]

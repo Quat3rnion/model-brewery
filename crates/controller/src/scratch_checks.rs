@@ -63,6 +63,23 @@ pub(super) struct Bundle {
 }
 
 impl Bundle {
+    pub(super) fn finding_receipt(&self) -> Option<(&str, Value)> {
+        let report = self.measured_report.as_ref()?;
+        Some((
+            self.measured_job_id.as_deref()?,
+            json!({
+                "check_bundle_id": self.id,
+                "artifact_sha256": self.token_loss.as_ref()?.sha256,
+                "runner_sha256": report.runner_sha256,
+                "fixture_sha256": report.fixture_sha256,
+                "parent_gguf_sha256": report.parent_gguf_sha256,
+                "revision_gguf_sha256": report.revision_gguf_sha256,
+                "revision_sha256": self.revision_sha256,
+                "heldout_sha256": scratch_token_loss::heldout_sha256(),
+            }),
+        ))
+    }
+
     pub(super) fn token_loss(&self) -> Option<(&str, &scratch_token_loss::Reference)> {
         Some((&self.id, self.token_loss.as_ref()?))
     }
