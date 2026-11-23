@@ -1854,6 +1854,57 @@ pinned dataset files in a local cache. Set these keys in the worker's
 The worker does not download data during a check. Restart the controller
 after a change to the local worker's runtime configuration.
 
+### Heretic jobs
+
+Heretic 2.1.0 (upstream commit `4f89482c0d63f2552a582215939910f9f45a3e5f`,
+AGPL-3.0-or-later) runs as a separate program. Brewery does not vendor its
+code. On a Linux x86-64 CUDA worker, make a private mode-700 runtime directory
+with at least 20 GiB free. Install `uv`, Python 3.12 and Bubblewrap. Run
+`bash tools/heretic/setup.sh PRIVATE_RUNTIME_DIR`. The installer uses a
+hash-pinned uv lock and checks the four upstream TOML files. After setup,
+`--offline` verifies or restores from the local uv cache. No job installs
+packages or accesses the network.
+
+Set `engine_env.BREWERY_HERETIC_RUNTIME` to the absolute runtime directory in
+the local worker config. Enable the local SafeTensors editor. Set
+`BREWERY_ALLOW_GPU_LOAD` to `1` in `engine_env` and set `admission` to the
+local GPU queue wrapper. The wrapper must acquire the shared GPU before it
+runs the engine, accept `--wait -- COMMAND`, and preserve the working
+directory, environment and standard streams. Do not use a no-op wrapper.
+
+The worker installs the upstream profiles `noslop`, `nosyco`, `terse`, and
+`default`. A preset does not authorize its datasets. Supply only reviewed
+offline prompt lists: place newline-delimited UTF-8 prompts in
+`prompts/<sha256>.txt`. Use `prompts/index.json` to map a dataset label to
+`{"sha256":"<digest>"}`. An operator TOML in `configs/` can instead set
+`brewery_sha256` next to `dataset`. Use explicit prompt tables for the built-in
+scorers and modifier. Do not supply plugin code. Do not use unlicensed upstream
+datasets. For a short `noslop` run, use an operator copy of that preset with
+pinned Dolly creative-writing prompts and a smaller response budget.
+
+Send `POST /api/scratch/heretic` or call `run_heretic`. Set `parent_id`,
+`base_sha256`, `profile` (TOML name without its extension), `trials` (1 to 64),
+`trial_index` (zero-based on Heretic's sorted Pareto front), and `seed`.
+Use one standalone SafeTensors file with its model configuration and tokenizer
+in the same approved directory, or pass a Library `assets_id` from the same
+worker. The worker saves merged weights locally. It
+does not upload, chat or run Heretic's benchmarks.
+
+Send `POST /api/scratch/heretic_reproduce` or call `reproduce_heretic` with
+`parent_id`, `base_sha256` and the community v4 `manifest` object. The base must
+have a verified Brewery Hugging Face single-file download receipt for the
+same repository, commit and SafeTensors SHA-256. Supply its reviewed prompt
+files locally. An environment or export hash mismatch fails the job.
+
+Read the job result to get `scratch_id`. Scratch provenance includes the
+Brewery journal with the exact config, seed, trial index, versions, hashes and
+base identity. The W3 delta restores the original parent. To measure the
+change, make a byte-identical scratch copy of the Library parent. Convert that
+copy and the Heretic child to private GGUF with the same assets. Run W4 checks
+on the child with the A2 prompt-set pins. Read the checks and compare them with
+the parent before you request publication. These results are not
+release-qualified.
+
 ### Behavior direction checks
 
 Set `BREWERY_CONTRAST_CACHE` to an absolute path in the worker's `engine_env`.

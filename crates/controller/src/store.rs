@@ -977,6 +977,7 @@ impl Store {
         // One transaction: no reader can see a terminal success without its immutable result.
         let mut scratch = None;
         let mut scratch_guard = None;
+        let mut heretic_output = None;
         if job.scratch_job && job.state == State::Succeeded {
             let verified = if job.cancel_requested {
                 job.state = State::Cancelled;
@@ -986,6 +987,16 @@ impl Store {
                 crate::scratch::locate::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
                     .map(|(revision, safe_result, guard)| {
                         scratch_guard = Some(guard);
+                        Some((revision, safe_result))
+                    })
+            } else if brewery_worker::heretic::job(&job.kind) {
+                crate::scratch::heretic::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
+                    .map(|(revision, safe_result, guard)| {
+                        scratch_guard = Some(guard);
+                        heretic_output = result
+                            .as_ref()
+                            .and_then(|r| r["run_directory"].as_str())
+                            .map(str::to_owned);
                         Some((revision, safe_result))
                     })
             } else {
@@ -1155,6 +1166,9 @@ impl Store {
         tx.commit()?;
         if let Some(guard) = scratch_guard {
             guard.keep();
+        }
+        if let Some(path) = heretic_output {
+            let _ = std::fs::remove_dir_all(path);
         }
         Ok(())
     }

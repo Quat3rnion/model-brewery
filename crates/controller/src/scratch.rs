@@ -35,6 +35,8 @@ const PROVENANCE: &str = "provenance.json";
 mod checks;
 #[path = "scratch_experts.rs"]
 mod experts;
+#[path = "scratch_heretic.rs"]
+pub(crate) mod heretic;
 #[path = "scratch_jobs.rs"]
 pub(crate) mod jobs;
 #[path = "scratch_locate.rs"]
@@ -110,6 +112,8 @@ pub struct Provenance {
     runtime_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     locate_edit: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    heretic: Option<serde_json::Value>,
     created_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compiled_program: Option<program::Recipe>,
@@ -150,6 +154,8 @@ pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/scratch", get(list).post(create))
         .route("/scratch/merge", post(merge::run))
+        .route("/scratch/heretic", post(heretic::run))
+        .route("/scratch/heretic_reproduce", post(heretic::reproduce))
         .route("/scratch/compile_program", post(program::compile))
         .route("/scratch/{id}/run_program", post(program::run))
         .route("/scratch/{id}", get(get_revision))
@@ -576,6 +582,7 @@ fn build_with_pruning(
             std::env::consts::OS
         ),
         locate_edit: None,
+        heretic: None,
         created_at_ms: now(),
         compiled_program: None,
     };

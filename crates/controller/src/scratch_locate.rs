@@ -198,6 +198,7 @@ pub(crate) fn finish(
         tool_version: pin.commit.into(),
         runtime_version: format!("{}-ggml-backward-f32; sha256:{}", backend.key(), pin.sha256),
         locate_edit: Some(locate),
+        heretic: None,
         created_at_ms: now(),
         compiled_program: None,
     };

@@ -305,11 +305,29 @@ fn plan(
         // A byte-identical root copy already has its parent's exact weights.
         (child_gguf.clone(), child_pin.clone())
     } else {
-        let Some(parent) = store
+        let scratch_parent = store
             .scratch(&parent.id)
             .map_err(ApiError::storage)?
-            .filter(|p| p.gguf.is_some() && p.sha256 == row.provenance.parent_sha256)
-        else {
+            .filter(|p| p.gguf.is_some() && p.sha256 == row.provenance.parent_sha256);
+        let library_copy = if scratch_parent.is_none() && row.provenance.heretic.is_some() {
+            // A Library source's GGUF is acceptable only from a verified
+            // byte-identical W3 copy converted through the private GGUF job.
+            store
+                .scratches()
+                .map_err(ApiError::storage)?
+                .into_iter()
+                .find(|p| {
+                    p.state != RevisionState::Discarded
+                        && p.gguf.is_some()
+                        && p.provenance.method == "copy"
+                        && p.provenance.parent_id == parent.id
+                        && p.provenance.worker == parent.host
+                        && p.sha256 == row.provenance.parent_sha256
+                })
+        } else {
+            None
+        };
+        let Some(parent) = scratch_parent.or(library_copy) else {
             return Ok(None);
         };
         jobs::trace_input(store, &parent.id)?

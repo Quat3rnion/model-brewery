@@ -197,6 +197,7 @@ fn build(app: &App, request: Compile, key: Option<&Submission<'_>>) -> Mutation 
             config.runtime,
         ),
         locate_edit: None,
+        heretic: None,
         created_at_ms: now(),
         compiled_program: Some(recipe),
     };

@@ -22,12 +22,18 @@ directions on a pinned Qwen2 GGUF. Use `get_direction` to read version 2 by
 job ID. Specify a layer for a smaller response. Report Cohen's d
 as a probe result, not as evidence of a change in generated behavior.
 
+Use `run_heretic` only for a Library SafeTensors parent with an installed
+offline profile and a local GPU queue. Use `reproduce_heretic` only with a
+verified matching Hugging Face base download and a community v4 manifest.
+Read the job with `get_job`. Convert a byte-identical scratch copy of the
+Library parent for the baseline and use the same conversion assets for the child.
+
 For a weight change, convert the child to private GGUF with the same assets.
 Trace it with the same prompts and capture settings as the parent. Always
 call `run_checks` and read `get_checks` on the child. Compare weights, traces,
 and measured behavior with `diff_tensors`, `diff_traces`, and `diff_behavior`
 as applicable. For behavior-direction checks, pass the operator's pinned
-`behavior_direction.prompt_sets` to `run_checks` and reuse those pins for
+behavior prompt sets to `run_checks` and reuse those pins for
 each comparison. Do not infer harmful-set refusal rates from synthetic
 fixtures. For compiled programs, use program correctness checks instead
 of the GGUF loop. Report failed or missing checks and regressions, including

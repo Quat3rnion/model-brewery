@@ -71,6 +71,26 @@ fn sha(bytes: &[u8]) -> String {
 }
 
 #[test]
+fn heretic_cannot_queue_without_a_local_gpu_lane() {
+    let mut t = Test::new();
+    let path = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
+    t.launch();
+    let (status, model) = t.request(
+        "/api/models",
+        "Idempotency-Key: heretic-fixture\r\n",
+        Some(json!({"name":"fixture","host":"existing","kind":"safetensors","path":path})),
+    );
+    assert_eq!(status, 201, "{model}");
+    let (status, response) = t.request(
+        "/api/scratch/heretic",
+        "Idempotency-Key: heretic-run\r\n",
+        Some(json!({"parent_id":model["id"],"base_sha256":sha(&fs::read(&path).unwrap()),
+                    "profile":"noslop","trials":2,"trial_index":0,"seed":12})),
+    );
+    assert_eq!(status, 409, "{response}");
+}
+
+#[test]
 fn mcp_compiled_root_checks_and_approval_boundary() {
     let mut t = Test::new();
     fixture(&t, &[1., 2., 3., 4., 5., 6.]);
@@ -895,9 +915,11 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "read_feature_trace",
             "read_trace",
             "register_model",
+            "reproduce_heretic",
             "request_publish",
             "rome_edit",
             "run_checks",
+            "run_heretic",
             "run_program",
             "start_trace",
             "steer_feature",

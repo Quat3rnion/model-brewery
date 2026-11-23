@@ -543,9 +543,10 @@ async fn add_model(
             "private credential storage cannot enter the Library",
         ));
     }
-    if store
-        .is_private_editor_path(path)
-        .map_err(ApiError::storage)?
+    if app.local_edit.private_heretic_path(path)
+        || store
+            .is_private_editor_path(path)
+            .map_err(ApiError::storage)?
     {
         return Err(ApiError::bad(
             "private scratch job output cannot enter the Library",

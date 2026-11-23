@@ -278,6 +278,7 @@ impl Lanes {
                 scratch_eval::RUNNER_LIB_DIR,
                 scratch_eval::CACHE,
                 scratch_eval::CONTRAST_CACHE,
+                brewery_worker::heretic::RUNTIME,
                 trace::EXECUTABLE,
                 trace::LIB_DIR,
                 locate_edit::EXECUTABLE,
@@ -353,6 +354,20 @@ impl Lanes {
         self.lanes.get(id)
     }
 
+    pub fn private_heretic_path(&self, path: &Path) -> bool {
+        let canonical = path.canonicalize().ok();
+        self.lanes
+            .values()
+            .filter_map(Lane::heretic_runs)
+            .any(|root| {
+                path.starts_with(&root)
+                    || root.starts_with(path)
+                    || canonical
+                        .as_ref()
+                        .is_some_and(|p| p.starts_with(&root) || root.starts_with(p))
+            })
+    }
+
     pub fn unavailable_reason(&self, id: &str) -> &'static str {
         if id == crate::backend_hf::ID {
             return "The backend download worker could not verify its editor package.";
@@ -364,6 +379,23 @@ impl Lanes {
 }
 
 impl Lane {
+    pub fn heretic_runs(&self) -> Option<PathBuf> {
+        let root = Path::new(
+            self.scratch_env
+                .get(brewery_worker::heretic::RUNTIME)?
+                .as_str()?,
+        );
+        if !root.is_absolute() {
+            return None;
+        }
+        let root = root.canonicalize().ok()?;
+        (root.join("identity.json").is_file()
+            && root.join("venv/bin/heretic").is_file()
+            && root.join("run.py").is_file()
+            && root.join("runs").is_dir())
+        .then(|| root.join("runs"))
+    }
+
     pub fn locate_edit_configured(&self, backend: Backend) -> bool {
         let pin = backend.pin();
         let env = if backend.is_gpu() {
