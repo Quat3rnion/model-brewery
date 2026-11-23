@@ -108,12 +108,12 @@ impl Store {
         let lanes = self.scratch.with_file_name("local-edit");
         let candidate = |path: &Path| -> Result<bool> {
             // Do not admit an enclosing directory as an HF or bundle source.
-            if lanes.starts_with(path) {
+            let Ok(relative) = path.strip_prefix(&lanes) else {
+                return Ok(lanes.starts_with(path));
+            };
+            if relative.components().count() <= 3 {
                 return Ok(true);
             }
-            let Ok(relative) = path.strip_prefix(&lanes) else {
-                return Ok(false);
-            };
             let mut parts = relative.iter();
             parts.next(); // worker host
             if parts.next().and_then(|p| p.to_str()) != Some("worker")
@@ -122,7 +122,7 @@ impl Store {
                 return Ok(false);
             }
             let Some(id) = parts.next().and_then(|p| p.to_str()) else {
-                return Ok(false);
+                return Ok(true);
             };
             Ok(self.job(id)?.is_some_and(|job| job.scratch_job))
         };

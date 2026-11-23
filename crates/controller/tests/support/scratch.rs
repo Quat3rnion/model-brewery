@@ -268,6 +268,14 @@ esac
         .join("work/converted.gguf");
     assert!(!staged.exists());
     assert_eq!(register("gguf", &staged).0, 400);
+    assert_eq!(
+        register(
+            "hf",
+            &t.root.path().join("state/local-edit/existing/worker/jobs")
+        )
+        .0,
+        400
+    );
     for kind in ["convert", "evaluate"] {
         assert_eq!(
             t.request(
