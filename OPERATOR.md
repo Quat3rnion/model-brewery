@@ -2109,7 +2109,7 @@ operator approval before publication.
    manifest with a verified matching base. Read `scratch_id` from `get_job`
    and inspect the child with `get_scratch`. The Brewery journal is
    provenance; it is not the community v4 input. Reinstall the pinned
-   launcher with `tools/heretic/setup.sh PRIVATE_RUNTIME_DIR --offline`
+   launcher with `bash tools/heretic/setup.sh PRIVATE_RUNTIME_DIR --offline`
    when you upgrade to the launcher that records per-trial scores.
 5. Convert each child with the same assets as the baseline if needed.
    Use `run_checks` with the exact child hash and

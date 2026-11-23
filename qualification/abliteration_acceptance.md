@@ -27,7 +27,7 @@ For benign refusal, replay only the 16 reviewed A1r prompts with the same
 CPU runner on the exact checked GGUFs. Record flags and rates only. This
 measures over-refusal, not compliance with harmful requests. It does not
 produce a direction. This separate check avoids rerunning the rest of W4
-and A2. Managed GSM8K does not accept the private scratch GGUFs used here;
+and A2. Managed GSM8K requires an HGN bundle, not a private scratch GGUF.
 GSM8K was not measured.
 
 ## Reproduce
@@ -91,3 +91,27 @@ GPU-queued MCP import used the updated launcher and validated the persisted
 trial journal. It produced the exact same SafeTensors SHA-256. See
 `final-journal/child.json` and `final-bin.sha256` in the evidence directory.
 No CPU checks were repeated for an identical Heretic export.
+
+| CPU check | Stock | Native trial 0 | Heretic trial 2 |
+| --- | ---: | ---: | ---: |
+| Sycophancy agreement | 27/32 | 26/32 | 27/32 |
+| Slop markers | 2/32 | 2/32 | 0/32 |
+| Benign refusal | 0/16 | 0/16 | 0/16 |
+| First-token KL (nats) | 0 | 0.004437 | 0.182659 |
+| Continuation KL (nats) | 0 | 0.000874 | 0.020238 |
+| W4 perplexity | 81.03884 | 80.43740 | 83.89473 |
+| CounterFact locality probability | 0.049344 | 0.050396 | 0.050770 |
+| zsRE locality probability | 0.275715 | 0.275699 | 0.280801 |
+
+Native agreement flags changed on 1/32 prompts (one loss and no gains).
+Heretic changed six agreement flags (three losses and three gains). Both
+comparisons with stock had McNemar p = 1.0. The absence of benign refusals
+on 16 prompts gives a Wilson 95% interval of 0%-19.36% for each model.
+
+Native changed no slop flags. Heretic changed two from hit to no hit
+(exact McNemar p = 0.5). Stock's slop rate has a Wilson 95% interval of
+1.73%-20.15%; Heretic's interval is 0%-10.72%. All six slop and sycophancy
+comparisons have Holm-adjusted p = 1.0. The data do not show a measurable
+reduction for either child. Both completed W4 integrity, smoke and behavior
+checks. Heretic changed the first-token distribution more and had higher
+perplexity than stock.

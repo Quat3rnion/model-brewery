@@ -1,6 +1,6 @@
 ---
 name: brewery-weight-space
-description: Run Model Brewery weight-space experiments through MCP or REST. Use for CPU traces, interventions, SAE features, scratch edits, fact edits, merges, pruning, compiled programs, checks, diffs, or publish requests.
+description: Run Model Brewery weight-space experiments through MCP or REST. Use for CPU traces, interventions, behavior directions, abliteration, Heretic, SAE features, scratch edits, fact edits, merges, pruning, compiled programs, checks, diffs, or publish requests.
 ---
 
 # Weight-space experiments
