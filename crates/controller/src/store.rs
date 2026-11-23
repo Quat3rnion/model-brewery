@@ -1,6 +1,7 @@
 use crate::conversion::{self, Conversion};
 use crate::domain::{Envelope, Event, Job, Model, NewModel, Prompt, State, now};
 use crate::idempotency::{self, Replay, Submission};
+use crate::scratch::{Revision, RevisionState};
 use brewery_worker::hgn_recipe;
 use brewery_worker::operational::Settings;
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
@@ -9,7 +10,7 @@ use serde_json::{Value, json};
 use std::{
     fs::{File, OpenOptions},
     os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -17,6 +18,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 pub struct Store {
     conn: Connection,
     _lock: File,
+    scratch: PathBuf,
 }
 
 impl Store {
@@ -75,7 +77,106 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS conversions_active ON conversions(state);",
         )?;
-        Ok(Self { conn, _lock: lock })
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS scratch_revisions(
+                id TEXT PRIMARY KEY, parent_id TEXT NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS scratch_parent ON scratch_revisions(parent_id, state);",
+        )?;
+        Ok(Self {
+            conn,
+            _lock: lock,
+            scratch: directory.canonicalize()?.join("scratch"),
+        })
+    }
+
+    pub fn scratch_root(&self) -> &Path {
+        &self.scratch
+    }
+
+    pub fn is_scratch_path(&self, path: &Path) -> bool {
+        path.starts_with(&self.scratch)
+            || path
+                .canonicalize()
+                .is_ok_and(|path| path.starts_with(&self.scratch))
+    }
+
+    pub fn scratch(&self, id: &str) -> Result<Option<Revision>> {
+        read_one(
+            &self.conn,
+            "SELECT body FROM scratch_revisions WHERE id=?",
+            id,
+        )
+    }
+
+    pub fn scratches(&self) -> Result<Vec<Revision>> {
+        read_list(
+            &self.conn,
+            "SELECT body FROM scratch_revisions WHERE state <> 'discarded' ORDER BY rowid",
+            [],
+        )
+    }
+
+    pub fn scratch_count(&self) -> Result<u32> {
+        Ok(self.conn.query_row(
+            "SELECT count(*) FROM scratch_revisions WHERE state <> 'discarded'",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn has_scratch_children(&self, id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM scratch_revisions WHERE parent_id=? AND state <> 'discarded')",
+            [id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn insert_scratch(
+        &mut self,
+        row: &Revision,
+        submission: Option<&Submission<'_>>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO scratch_revisions(id,parent_id,state,body) VALUES(?,?,?,?)",
+            params![
+                row.id,
+                row.provenance.parent_id,
+                row.state.key(),
+                encode(row)?
+            ],
+        )?;
+        idempotency::record(&tx, submission, &row.id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn update_scratch(
+        &mut self,
+        row: &Revision,
+        old: RevisionState,
+        library: Option<&Model>,
+        submission: Option<&Submission<'_>>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        if tx.execute(
+            "UPDATE scratch_revisions SET state=?, body=? WHERE id=? AND state=?",
+            params![row.state.key(), encode(row)?, row.id, old.key()],
+        )? != 1
+        {
+            return Err("scratch state changed before commit".into());
+        }
+        if let Some(model) = library {
+            tx.execute(
+                "INSERT INTO models(id, body) VALUES (?, ?)",
+                params![model.id, encode(model)?],
+            )?;
+        }
+        idempotency::record(&tx, submission, &row.id)?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn feed_cursor(&self) -> rusqlite::Result<i64> {

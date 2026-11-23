@@ -159,7 +159,7 @@
       "post": {
         "operationId": "createModel",
         "summary": "Register a worker-side model or input artifact",
-        "description": "Registers metadata only. This does not upload bytes or verify file existence. The controller accepts bf16-checkpoint as an alias and stores the kind as hf.",
+        "description": "Registers metadata only. This does not upload bytes or verify file existence. The controller accepts bf16-checkpoint as an alias and stores the kind as hf. Scratch artifacts require the separate approveScratch action.",
         "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
         "requestBody": {
           "required": true,
@@ -200,6 +200,118 @@
           "403": {"$ref": "#/components/responses/Forbidden"},
           "404": {"$ref": "#/components/responses/NotFound"},
           "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/scratch": {
+      "get": {
+        "operationId": "listScratch",
+        "summary": "List scratch revisions with provenance",
+        "responses": {
+          "200": {"description": "Scratch revisions that are not discarded.", "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/ScratchRevision"}}}}},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      },
+      "post": {
+        "operationId": "createScratch",
+        "summary": "Copy a pinned revision into scratch",
+        "description": "Use a standalone SafeTensors Library ID or a scratch ID on an enabled local SafeTensors editor. This does not change the parent.",
+        "parameters": [{"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false, "required": ["parent_id", "parent_sha256"],
+          "properties": {"parent_id": {"$ref": "#/components/schemas/Id"}, "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"}}
+        }}}},
+        "responses": {
+          "200": {"$ref": "#/components/responses/ScratchRow"},
+          "201": {"$ref": "#/components/responses/ScratchRow"},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "503": {"$ref": "#/components/responses/ScratchBusy"}
+        }
+      }
+    },
+    "/api/scratch/{id}/edits": {
+      "post": {
+        "operationId": "editScratch",
+        "summary": "Apply one or more edits in a new scratch child",
+        "description": "Apply the operations in order. The parent scratch revision stays unchanged. An edit of an approved revision still makes an unapproved child.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "x-brewery-max-body-bytes": 262144, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false, "required": ["operations"],
+          "properties": {"operations": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/components/schemas/ScratchOperation"}}}
+        }}}},
+        "responses": {
+          "200": {"$ref": "#/components/responses/ScratchRow"},
+          "201": {"$ref": "#/components/responses/ScratchRow"},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "503": {"$ref": "#/components/responses/ScratchBusy"}
+        }
+      }
+    },
+    "/api/scratch/{id}/delta": {
+      "get": {
+        "operationId": "getScratchDelta",
+        "summary": "Read the reversible delta summary",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "responses": {
+          "200": {"description": "Hashes and counts, not raw delta bytes.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ScratchDelta"}}}},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      }
+    },
+    "/api/scratch/{id}/discard": {
+      "post": {
+        "operationId": "discardScratch",
+        "summary": "Discard an unapproved scratch revision that has no children",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false}}}},
+        "responses": {
+          "200": {"$ref": "#/components/responses/ScratchRow"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "503": {"$ref": "#/components/responses/ScratchBusy"}
+        }
+      }
+    },
+    "/api/scratch/{id}/publish-request": {
+      "post": {
+        "operationId": "requestScratchPublish",
+        "summary": "Request publication of an exact scratch hash",
+        "description": "Changes the state to publish_requested. This does not register a Library model.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"$ref": "#/components/requestBodies/ScratchReview"},
+        "responses": {
+          "200": {"$ref": "#/components/responses/ScratchRow"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "503": {"$ref": "#/components/responses/ScratchBusy"}
+        }
+      }
+    },
+    "/api/admin/scratch/{id}/approve": {
+      "post": {
+        "operationId": "approveScratch",
+        "summary": "Operator only: approve a pending scratch publication",
+        "description": "Use the same trust boundary as Settings. Do not expose this action to the agent MCP interface. A trusted LAN or tailnet client with workbench access can call it directly. Approval registers one normal SafeTensors Library model. It does not qualify or deploy the model.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"$ref": "#/components/requestBodies/ScratchReview"},
+        "responses": {
+          "200": {"$ref": "#/components/responses/ScratchRow"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "503": {"$ref": "#/components/responses/ScratchBusy"}
         }
       }
     },
@@ -750,7 +862,18 @@
     }
   },
   "components": {
+    "requestBodies": {
+      "ScratchReview": {"required": true, "content": {"application/json": {"schema": {
+        "type": "object", "additionalProperties": false, "required": ["sha256"],
+        "properties": {"sha256": {"$ref": "#/components/schemas/ScratchHash"}}
+      }}}}
+    },
     "parameters": {
+      "ScratchKey": {
+        "name": "Idempotency-Key", "in": "header",
+        "description": "Optional key for this scratch operation. A retry of the same target ID and typed body returns 200 and the current record, without a second state change. Reuse for a different target or body returns 409.",
+        "schema": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]{1,128}$"}
+      },
       "ResourceId": {
         "name": "id", "in": "path", "required": true, "schema": {"type": "string"},
         "description": "ID returned by the controller.", "example": "ed205d69-459b-4088-b750-8cdaec2a9bf7"
@@ -764,6 +887,9 @@
       }
     },
     "responses": {
+      "ScratchRow": {"description": "The current scratch revision record.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ScratchRevision"}}}},
+      "ScratchConflict": {"description": "The key, admission, hash, disk space, capacity, or state does not permit the change.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "ScratchBusy": {"description": "Another scratch write is in progress. Retry with the same key.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "BadRequest": {"description": "Malformed JSON, invalid header or cursor, or a request that fails controller validation.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "Forbidden": {"description": "The loopback Host, Origin, or Fetch Metadata guard rejected this request.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}, "example": {"error": "host or origin is not allowed"}}}},
       "NotFound": {"description": "No record has the given ID.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
@@ -780,6 +906,55 @@
       "HfTokenStorageUnavailable": {"description": "The private token file cannot be safely changed.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
     },
     "schemas": {
+      "ScratchHash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+      "ScratchOperation": {
+        "oneOf": [
+          {"type": "object", "additionalProperties": false, "required": ["op", "tensor", "origin", "shape", "values"], "properties": {
+            "op": {"enum": ["set", "add"]}, "tensor": {"type": "string"}, "origin": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+            "shape": {"type": "array", "items": {"type": "integer", "minimum": 1}}, "values": {"type": "array", "items": {"type": "number"}}
+          }},
+          {"type": "object", "additionalProperties": false, "required": ["op", "tensor", "u", "v", "scale"], "properties": {
+            "op": {"const": "low_rank"}, "tensor": {"type": "string"}, "u": {"type": "array", "items": {"type": "number"}},
+            "v": {"type": "array", "items": {"type": "number"}}, "scale": {"type": "number"}
+          }},
+          {"type": "object", "additionalProperties": false, "required": ["op", "tensor", "axis", "direction"], "properties": {
+            "op": {"const": "orthogonalize"}, "tensor": {"type": "string"}, "axis": {"enum": ["rows", "columns"]},
+            "direction": {"type": "array", "items": {"type": "number"}}
+          }}
+        ]
+      },
+      "ScratchDelta": {
+        "type": "object", "required": ["schema", "parent_sha256", "revision_sha256", "changed_tensors", "changed_bytes", "delta_bytes", "delta_sha256"],
+        "properties": {
+          "schema": {"const": "brewery.weight-delta.v1"}, "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "changed_tensors": {"type": "integer", "minimum": 0},
+          "changed_bytes": {"type": "integer", "minimum": 0}, "delta_bytes": {"type": "integer", "minimum": 0},
+          "delta_sha256": {"$ref": "#/components/schemas/ScratchHash"}
+        }
+      },
+      "ScratchProvenance": {
+        "type": "object", "required": ["schema", "parent_id", "parent_sha256", "revision_id", "revision_sha256", "worker", "method", "operations", "tensors", "tool", "tool_version", "runtime_version", "created_at_ms"],
+        "properties": {
+          "schema": {"const": "brewery.scratch-provenance.v1"}, "parent_id": {"$ref": "#/components/schemas/Id"},
+          "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "revision_id": {"$ref": "#/components/schemas/Id"},
+          "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "worker": {"type": "string"}, "method": {"enum": ["copy", "direct"]},
+          "operations": {"type": "array", "items": {"$ref": "#/components/schemas/ScratchOperation"}},
+          "tensors": {"type": "array", "items": {"type": "object", "required": ["name", "shape", "dtype"], "properties": {
+            "name": {"type": "string"}, "shape": {"type": "array", "items": {"type": "integer"}}, "dtype": {"enum": ["F32", "F16", "BF16"]}
+          }}},
+          "tool": {"type": "string"}, "tool_version": {"type": "string"}, "runtime_version": {"type": "string"}, "created_at_ms": {"type": "integer"}
+        }
+      },
+      "ScratchRevision": {
+        "type": "object", "required": ["id", "kind", "state", "sha256", "qualification", "library_model_id", "provenance", "delta"],
+        "properties": {
+          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"const": "scratch"},
+          "state": {"enum": ["scratch", "publish_requested", "approved", "discarded"]},
+          "sha256": {"$ref": "#/components/schemas/ScratchHash"}, "qualification": {"const": "not release-qualified"},
+          "library_model_id": {"anyOf": [{"$ref": "#/components/schemas/Id"}, {"type": "null"}]},
+          "provenance": {"$ref": "#/components/schemas/ScratchProvenance"}, "delta": {"$ref": "#/components/schemas/ScratchDelta"}
+        }
+      },
       "DiscoveryDocument": {
         "type": "object", "required": ["openapi", "info", "servers", "paths", "components"],
         "properties": {

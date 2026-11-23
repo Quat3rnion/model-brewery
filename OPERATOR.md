@@ -1163,6 +1163,93 @@ Other routes: `GET /api/jobs/{id}`, `POST /api/jobs/{id}/cancel`,
 `POST /api/conversions/{id}/cancel`, and `DELETE /api/models/{id}`. Errors
 use `{"error": "..."}`.
 
+### Scratch weight revisions
+
+Enable the local CPU weight editor for the worker that owns the source.
+Register a standalone `.safetensors` file in an approved model directory.
+Use its Library ID and SHA-256 to create a scratch revision. You can also
+use the ID and SHA-256 of a scratch revision as the parent. Each edit makes
+a new child. To roll back, select the parent ID in `provenance.parent_id`.
+Do not delete the Library entry if you need to select that parent later.
+
+| Method and path | JSON request | Result |
+| --- | --- | --- |
+| `POST /api/scratch` | `{"parent_id":"<id>","parent_sha256":"<hash>"}` | New scratch record with an empty delta (`201`). |
+| `POST /api/scratch/{id}/edits` | `{"operations":[...]}` | New scratch child of `{id}` (`201`). |
+| `GET /api/scratch` | None | List of scratch records with provenance (`200`). |
+| `GET /api/scratch/{id}/delta` | None | Parent and child hashes, delta hash and size, and counts of changed tensors and bytes (`200`). |
+| `POST /api/scratch/{id}/discard` | `{}` | Record with state `discarded` (`200`). The controller removes the files and omits the record from the list. Discard unapproved children before their parent. You cannot discard an approved revision. |
+| `POST /api/scratch/{id}/publish-request` | `{"sha256":"<hash>"}` | Record with state `publish_requested` (`200`). The Library does not change. |
+| `POST /api/admin/scratch/{id}/approve` | `{"sha256":"<hash>"}` | Record with state `approved` and `library_model_id` (`200`). |
+
+Send an `Idempotency-Key` with each POST. If the response does not arrive,
+send the same request with the same key. A matching retry returns the current
+record with status `200`; a different body or target with the same key returns
+`409`. The controller runs one scratch write at a time. On `503`, wait and
+retry with the same key.
+
+Send operations in order. `set` and `add` use zero-based `origin` and `shape`
+for a rectangular slice. Give exactly one value per cell in row-major order.
+`low_rank` adds the outer product of `u` and `v`, multiplied by `scale`, to a
+matrix. For `orthogonalize`, use `rows`
+to remove the projection from each row, or `columns` to remove it from each
+column. Give a nonzero `direction` with one value per element of a row or
+column, respectively. The result rounds to the stored dtype after each
+operation. The editor rejects non-finite results and batches with no stored
+change. For example:
+
+```json
+{"operations":[
+  {"op":"set","tensor":"w","origin":[0,1],"shape":[1,2],"values":[8,9]},
+  {"op":"add","tensor":"w","origin":[1,0],"shape":[1,2],"values":[1,2]},
+  {"op":"low_rank","tensor":"w","u":[2,1],"v":[3,0,2],"scale":0.5},
+  {"op":"orthogonalize","tensor":"w","axis":"rows","direction":[1,0,0]}
+]}
+```
+
+The source limit is 4 GiB. One request can edit up to 32 MiB of tensors
+in up to 32 operations. Editable dtypes are F32, F16 and BF16. The controller
+keeps at most 64 scratch revisions that are not discarded. It copies the full
+file for each child and checks the local editor's disk reserve. Indexed HF
+directories and SSH workers are not supported by this API.
+
+**Operator only:** Approve a pending request only after you review the
+selected revision and its SHA-256. Do not expose the approval endpoint in
+agent tools. The endpoint uses the same network and origin checks as Settings.
+The controller has no separate operator identity. A trusted client with
+direct workbench access on loopback, LAN, or tailnet can call this endpoint
+without using the UI. This is an accepted risk. Give direct access only to
+trusted clients.
+
+Approval checks the selected file hash and registers one normal SafeTensors
+Library model. The result is **not release-qualified**. Approval does not
+deploy the model or change release checks. Normal worker source-access rules
+still apply to the approved file. An unapproved scratch ID is not a
+conversion source. Use the existing conversion workflow after approval if
+the worker can read the file and supports the source and target formats.
+
+#### Scratch files
+
+The controller stores these files in its private
+`BREWERY_DATA/scratch/{id}/` directory:
+
+- `model.safetensors`: Full child checkpoint, with the original header and
+  all unedited bytes.
+- `provenance.json`: `brewery.scratch-provenance.v1`. It contains the parent
+  and child IDs and SHA-256 hashes, worker ID, timestamp, tool and runtime
+  versions, method (`copy` or `direct`), ordered operations with parameters,
+  and the name, shape and dtype of each tensor in those operations.
+- `delta.bin`: Reversible XOR delta (`brewery.weight-delta.v1`). It starts
+  with ASCII `BWDELTA1`, then two 64-byte lowercase ASCII SHA-256 hashes
+  (parent first), the full file size (`u64`), and a record count (`u32`).
+  Each record contains an absolute file offset (`u64`), a nonzero byte
+  count (`u64`), and that many XOR bytes. Records do not overlap and are in
+  offset order. All integers are little-endian. A copy has no records.
+
+To reconstruct the parent, verify the child hash, then XOR each record into
+a separate copy of the child. The result must match the parent hash. Never
+apply the delta in place. The HTTP API returns the summary, not the file.
+
 ## Limits and behavior on failure
 
 - The worker library reads at most 16 MiB of JSON from one source. The

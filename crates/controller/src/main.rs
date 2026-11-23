@@ -13,6 +13,7 @@ mod infra_hosts;
 mod local_edit;
 mod profiles;
 mod remote_edit;
+mod scratch;
 mod settings;
 mod store;
 mod suggestions;
@@ -48,6 +49,7 @@ struct App {
     remote_edit: Arc<remote_edit::Installer>,
     suggestions: suggestions::PathSuggestions,
     feed_subscribers: Arc<tokio::sync::Semaphore>,
+    scratch_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl App {
@@ -149,6 +151,7 @@ async fn main() -> Result<(), Error> {
         remote_edit,
         suggestions: suggestions::PathSuggestions::new(dispatcher.command.clone()),
         feed_subscribers: Arc::new(tokio::sync::Semaphore::new(feed::SUBSCRIBERS)),
+        scratch_slots: Arc::new(tokio::sync::Semaphore::new(1)),
     });
     let listener = TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;

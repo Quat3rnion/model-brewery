@@ -13,7 +13,10 @@ use std::{
 };
 
 mod chunks;
+mod header;
+pub mod scratch;
 pub use chunks::{CHUNK_INDEX, CHUNK_INDEX_LIMIT, CHUNK_INDEX_SHA256, build_chunk_index};
+pub use header::{Header, Tensor};
 
 pub const GATE: &str = "BREWERY_WEIGHT_SAFETENSORS";
 pub const PUBLICATION: &str = "BREWERY_WEIGHT_SAFETENSORS_PUBLICATION";

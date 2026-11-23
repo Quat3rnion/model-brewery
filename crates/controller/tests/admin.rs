@@ -10,6 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "support/scratch.rs"]
+mod scratch;
+
 struct Test {
     root: tempfile::TempDir,
     child: Option<Child>,

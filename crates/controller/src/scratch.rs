@@ -1,0 +1,598 @@
+//! Scratch artifacts use the Library store and local CPU editor admission,
+//! but do not enter the Library until a separate operator action.
+use crate::{
+    App,
+    domain::{NewModel, id, now},
+    idempotency::{self, Replay, Submission},
+    local_edit::Lane,
+    store::Store,
+    web::{ApiError, read, single},
+};
+use axum::{
+    Json, Router,
+    extract::{Path, State, rejection::JsonRejection},
+    http::{HeaderMap, StatusCode},
+    routing::{get, post},
+};
+use brewery_worker::weight_source::{
+    open_regular,
+    scratch::{self, Operation, Summary, TensorInfo},
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    fs::{self, File},
+    os::unix::fs::{DirBuilderExt, MetadataExt},
+    path::{Path as FsPath, PathBuf},
+    sync::Arc,
+};
+
+type Result<T> = std::result::Result<T, ApiError>;
+type Payload<T> = std::result::Result<Json<T>, JsonRejection>;
+type Mutation = Result<(StatusCode, Json<Revision>)>;
+const LIMIT: u32 = 64;
+const PROVENANCE: &str = "provenance.json";
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevisionState {
+    Scratch,
+    PublishRequested,
+    Approved,
+    Discarded,
+}
+
+impl RevisionState {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Scratch => "scratch",
+            Self::PublishRequested => "publish_requested",
+            Self::Approved => "approved",
+            Self::Discarded => "discarded",
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct Revision {
+    pub id: String,
+    kind: String,
+    pub state: RevisionState,
+    sha256: String,
+    qualification: String,
+    library_model_id: Option<String>,
+    pub provenance: Provenance,
+    delta: Summary,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct Provenance {
+    schema: String,
+    pub parent_id: String,
+    parent_sha256: String,
+    revision_id: String,
+    revision_sha256: String,
+    worker: String,
+    method: String,
+    operations: Vec<Operation>,
+    tensors: Vec<TensorInfo>,
+    tool: String,
+    tool_version: String,
+    runtime_version: String,
+    created_at_ms: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Create {
+    parent_id: String,
+    parent_sha256: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Edit {
+    operations: Vec<Operation>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Review {
+    sha256: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Discard {}
+
+pub fn router() -> Router<Arc<App>> {
+    Router::new()
+        .route("/scratch", get(list).post(create))
+        .route("/scratch/{id}/edits", post(edit))
+        .route("/scratch/{id}/delta", get(delta))
+        .route("/scratch/{id}/discard", post(discard))
+        .route("/scratch/{id}/publish-request", post(request_publish))
+        .route("/admin/scratch/{id}/approve", post(approve))
+}
+
+async fn list(State(app): State<Arc<App>>) -> Result<Json<Vec<Revision>>> {
+    let store = app.store.lock().map_err(ApiError::storage)?;
+    Ok(Json(store.scratches().map_err(ApiError::storage)?))
+}
+
+async fn delta(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Summary>> {
+    let store = app.store.lock().map_err(ApiError::storage)?;
+    Ok(Json(visible(&store, &id)?.delta))
+}
+
+async fn create(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    payload: Payload<Create>,
+) -> Mutation {
+    mutate(
+        app,
+        headers,
+        "scratch-create",
+        None,
+        read(payload)?,
+        |app, _, request, key| {
+            build(
+                app,
+                request.parent_id,
+                Some(request.parent_sha256),
+                Vec::new(),
+                key,
+            )
+        },
+    )
+    .await
+}
+
+async fn edit(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    payload: Payload<Edit>,
+) -> Mutation {
+    mutate(
+        app,
+        headers,
+        "scratch-edit",
+        Some(id),
+        read(payload)?,
+        |app, target, request, key| {
+            if !(1..=32).contains(&request.operations.len()) {
+                return Err(ApiError::bad("expected 1 to 32 edit operations"));
+            }
+            build(app, request_id(target)?, None, request.operations, key)
+        },
+    )
+    .await
+}
+
+async fn discard(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    payload: Payload<Discard>,
+) -> Mutation {
+    mutate(
+        app,
+        headers,
+        "scratch-discard",
+        Some(id),
+        read(payload)?,
+        |app, target, _, key| change(app, target, RevisionState::Discarded, None, key),
+    )
+    .await
+}
+
+async fn request_publish(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    payload: Payload<Review>,
+) -> Mutation {
+    mutate(
+        app,
+        headers,
+        "scratch-request",
+        Some(id),
+        read(payload)?,
+        |app, target, request, key| {
+            change(
+                app,
+                target,
+                RevisionState::PublishRequested,
+                Some(request.sha256),
+                key,
+            )
+        },
+    )
+    .await
+}
+
+// This route has the same trust boundary as /api/admin/actions. The agent
+// interface must not expose it. It does not grant qualification.
+async fn approve(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    payload: Payload<Review>,
+) -> Mutation {
+    mutate(
+        app,
+        headers,
+        "scratch-approve",
+        Some(id),
+        read(payload)?,
+        |app, target, request, key| {
+            change(
+                app,
+                target,
+                RevisionState::Approved,
+                Some(request.sha256),
+                key,
+            )
+        },
+    )
+    .await
+}
+
+async fn mutate<T: Serialize + Send + 'static>(
+    app: Arc<App>,
+    headers: HeaderMap,
+    scope: &'static str,
+    target: Option<String>,
+    request: T,
+    action: impl FnOnce(&App, Option<String>, T, Option<&Submission<'_>>) -> Mutation + Send + 'static,
+) -> Mutation {
+    let invalid = || ApiError::bad("invalid Idempotency-Key");
+    let key = single(&headers, "idempotency-key").map_err(|_| invalid())?;
+    if key.is_some_and(|key| !idempotency::valid_key(key)) {
+        return Err(invalid());
+    }
+    let slot = app.scratch_slots.clone().try_acquire_owned().map_err(|_| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "scratch editor is busy".into(),
+        )
+    })?;
+    let key = key.map(str::to_owned);
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        // Use typed input and bind path parameters to the key as well.
+        let key = key
+            .as_deref()
+            .map(|key| Submission::new(scope, key, &(&target, &request)))
+            .transpose()
+            .map_err(ApiError::storage)?;
+        if let Some(key) = &key {
+            let store = app.store.lock().map_err(ApiError::storage)?;
+            match store.replay(key).map_err(ApiError::storage)? {
+                Replay::New => {}
+                Replay::Conflict => {
+                    return Err(conflict(
+                        "Idempotency-Key already used for a different request",
+                    ));
+                }
+                Replay::Matched(id) => {
+                    let row = store
+                        .scratch(&id)
+                        .map_err(ApiError::storage)?
+                        .ok_or_else(|| {
+                            ApiError::storage("idempotent scratch revision is missing")
+                        })?;
+                    if scope == "scratch-discard" {
+                        remove(store.scratch_root(), &id)?;
+                    }
+                    return Ok((StatusCode::OK, Json(row)));
+                }
+            }
+        }
+        action(&app, target, request, key.as_ref())
+    })
+    .await
+    .map_err(ApiError::storage)?
+}
+
+fn request_id(target: Option<String>) -> Result<String> {
+    target.ok_or_else(|| ApiError::not_found("scratch revision"))
+}
+
+fn visible(store: &Store, id: &str) -> Result<Revision> {
+    store
+        .scratch(id)
+        .map_err(ApiError::storage)?
+        .filter(|row| row.state != RevisionState::Discarded)
+        .ok_or_else(|| ApiError::not_found("scratch revision"))
+}
+
+fn conflict(message: &str) -> ApiError {
+    ApiError(StatusCode::CONFLICT, message.into())
+}
+
+fn admit<'a>(app: &'a App, worker: &str) -> Result<&'a Lane> {
+    let enabled = app
+        .effective_hosts()
+        .map_err(ApiError::storage)?
+        .iter()
+        .any(|host| {
+            host.id == worker
+                && host.local_edit
+                && !host.scheduling_paused
+                && host.capabilities["weight_apply"]
+                && host.capabilities["weight_safetensors"]
+        });
+    app.local_edit
+        .get(worker)
+        .filter(|_| enabled)
+        .ok_or_else(|| conflict("enable the local SafeTensors editor on this worker"))
+}
+
+fn require_source(app: &App, worker: &str, path: &FsPath) -> Result<()> {
+    if !app
+        .scratch_source_allowed(worker, path)
+        .map_err(ApiError::storage)?
+    {
+        return Err(conflict("source is not in an approved model directory"));
+    }
+    Ok(())
+}
+
+fn build(
+    app: &App,
+    parent_id: String,
+    supplied_pin: Option<String>,
+    operations: Vec<Operation>,
+    key: Option<&Submission<'_>>,
+) -> Mutation {
+    let (root, worker, source, expected, library_source, reserve) = {
+        let store = app.store.lock().map_err(ApiError::storage)?;
+        if store.scratch_count().map_err(ApiError::storage)? >= LIMIT {
+            return Err(conflict("scratch revision limit reached"));
+        }
+        let root = store.scratch_root().to_owned();
+        let scratch_parent = store.scratch(&parent_id).map_err(ApiError::storage)?;
+        let (worker, source, expected, library_source) = if let Some(row) = scratch_parent {
+            if row.state == RevisionState::Discarded {
+                return Err(ApiError::not_found("scratch revision"));
+            }
+            if supplied_pin.as_ref().is_some_and(|pin| pin != &row.sha256) {
+                return Err(ApiError::bad("parent SHA-256 mismatch"));
+            }
+            (
+                row.provenance.worker,
+                root.join(&row.id).join(scratch::MODEL),
+                row.sha256,
+                false,
+            )
+        } else {
+            let pin = supplied_pin.ok_or_else(|| ApiError::not_found("scratch revision"))?;
+            let model = store
+                .model(&parent_id)
+                .map_err(ApiError::storage)?
+                .ok_or_else(|| ApiError::not_found("parent revision"))?;
+            let path = PathBuf::from(model.path);
+            if model.kind != "safetensors" || store.is_scratch_path(&path) {
+                return Err(ApiError::bad(
+                    "use a standalone SafeTensors Library source or a scratch ID",
+                ));
+            }
+            (model.host, path, pin, true)
+        };
+        let lane = admit(app, &worker)?;
+        if library_source {
+            require_source(app, &worker, &source)?;
+        }
+        (
+            root,
+            worker,
+            source,
+            expected,
+            library_source,
+            lane.scratch_disk_reserve(),
+        )
+    };
+    if !brewery_worker::is_digest(&expected) {
+        return Err(ApiError::bad("expected a lowercase parent SHA-256"));
+    }
+    private_root(&root)?;
+    let bytes = open_regular(&source)
+        .map_err(|_| ApiError::bad("cannot open standalone SafeTensors source"))?
+        .metadata()
+        .map_err(ApiError::storage)?
+        .len();
+    if !(10..=scratch::MAX_FILE).contains(&bytes) {
+        return Err(ApiError::bad("SafeTensors file exceeds scratch limit"));
+    }
+    let budget = bytes
+        .saturating_add(reserve)
+        .saturating_add(scratch::DELTA_OVERHEAD)
+        .saturating_add(if operations.is_empty() {
+            0
+        } else {
+            scratch::MAX_EDIT_BYTES
+        });
+    if brewery_worker::available(&root).map_err(ApiError::storage)? < budget {
+        return Err(conflict(
+            "not enough disk space for scratch and the configured reserve",
+        ));
+    }
+    let id = id();
+    let mut output = Uncommitted::new(root.join(&id))?;
+    let result = scratch::build(&source, &expected, &output.path, &operations).map_err(|e| {
+        if e.downcast_ref::<std::io::Error>().is_some() {
+            ApiError::storage(e)
+        } else {
+            ApiError::bad(e.to_string())
+        }
+    })?;
+    let provenance = Provenance {
+        schema: "brewery.scratch-provenance.v1".into(),
+        parent_id,
+        parent_sha256: expected,
+        revision_id: id.clone(),
+        revision_sha256: result.sha256.clone(),
+        worker,
+        method: if operations.is_empty() {
+            "copy"
+        } else {
+            "direct"
+        }
+        .into(),
+        operations,
+        tensors: result.tensors,
+        tool: "brewery SafeTensors scratch editor".into(),
+        tool_version: env!("CARGO_PKG_VERSION").into(),
+        runtime_version: format!(
+            "native-cpu-v1/{}-{}",
+            std::env::consts::ARCH,
+            std::env::consts::OS
+        ),
+        created_at_ms: now(),
+    };
+    brewery_worker::atomic(&output.path.join(PROVENANCE), &provenance)
+        .map_err(ApiError::storage)?;
+    File::open(&root)
+        .and_then(|file| file.sync_all())
+        .map_err(ApiError::storage)?;
+    let row = Revision {
+        id,
+        kind: "scratch".into(),
+        state: RevisionState::Scratch,
+        sha256: result.sha256,
+        qualification: "not release-qualified".into(),
+        library_model_id: None,
+        provenance,
+        delta: result.delta,
+    };
+    let mut store = app.store.lock().map_err(ApiError::storage)?;
+    admit(app, &row.provenance.worker)?;
+    if library_source {
+        require_source(app, &row.provenance.worker, &source)?;
+        if store
+            .model(&row.provenance.parent_id)
+            .map_err(ApiError::storage)?
+            .is_none()
+        {
+            return Err(conflict("parent Library revision was removed"));
+        }
+    }
+    store.insert_scratch(&row, key).map_err(ApiError::storage)?;
+    output.keep = true;
+    Ok((StatusCode::CREATED, Json(row)))
+}
+
+fn change(
+    app: &App,
+    target: Option<String>,
+    new: RevisionState,
+    pin: Option<String>,
+    key: Option<&Submission<'_>>,
+) -> Mutation {
+    use RevisionState::*;
+    let id = request_id(target)?;
+    let (mut row, root) = {
+        let store = app.store.lock().map_err(ApiError::storage)?;
+        let row = visible(&store, &id)?;
+        if pin.is_some_and(|pin| pin != row.sha256) {
+            return Err(conflict("review hash does not match this scratch revision"));
+        }
+        (row, store.scratch_root().to_owned())
+    };
+    let old = row.state;
+    match (old, new) {
+        (Scratch, PublishRequested)
+        | (PublishRequested, Approved)
+        | (Scratch | PublishRequested, Discarded) => {}
+        _ => return Err(conflict("invalid scratch state transition")),
+    }
+    let path = root.join(&row.id).join(scratch::MODEL);
+    let model = if new == Approved {
+        let mut source =
+            open_regular(&path).map_err(|_| conflict("scratch artifact is not available"))?;
+        if scratch::file_sha256(&mut source).map_err(ApiError::storage)? != row.sha256 {
+            return Err(conflict(
+                "scratch artifact no longer matches the reviewed hash",
+            ));
+        }
+        let model = NewModel {
+            host: row.provenance.worker.clone(),
+            name: Some(format!("Scratch revision ({})", row.id)),
+            path: path
+                .to_str()
+                .ok_or_else(|| ApiError::storage("non-UTF-8 scratch path"))?
+                .into(),
+            kind: "safetensors".into(),
+        }
+        .validate()
+        .map_err(ApiError::bad)?;
+        row.library_model_id = Some(model.id.clone());
+        Some(model)
+    } else {
+        None
+    };
+    let mut store = app.store.lock().map_err(ApiError::storage)?;
+    if new != Discarded {
+        admit(app, &row.provenance.worker)?;
+    } else if store.has_scratch_children(&id).map_err(ApiError::storage)? {
+        return Err(conflict("discard the child scratch revisions first"));
+    }
+    row.state = new;
+    store
+        .update_scratch(&row, old, model.as_ref(), key)
+        .map_err(ApiError::storage)?;
+    if new == Discarded {
+        remove(&root, &id)?;
+    }
+    Ok((StatusCode::OK, Json(row)))
+}
+
+fn private_root(path: &FsPath) -> Result<()> {
+    match fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(ApiError::storage(e)),
+    }
+    let meta = fs::symlink_metadata(path).map_err(ApiError::storage)?;
+    if !meta.is_dir() || meta.mode() & 0o7777 != 0o700 || meta.uid() != unsafe { libc::geteuid() } {
+        return Err(ApiError::storage(
+            "scratch root must be private and controller-owned",
+        ));
+    }
+    Ok(())
+}
+
+fn remove(root: &FsPath, id: &str) -> Result<()> {
+    match fs::remove_dir_all(root.join(id)) {
+        Ok(()) => File::open(root)
+            .and_then(|file| file.sync_all())
+            .map_err(ApiError::storage),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(ApiError::storage(e)),
+    }
+}
+
+struct Uncommitted {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl Uncommitted {
+    fn new(path: PathBuf) -> Result<Self> {
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .map_err(ApiError::storage)?;
+        Ok(Self { path, keep: false })
+    }
+}
+
+impl Drop for Uncommitted {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}

@@ -313,6 +313,12 @@ impl Lanes {
 }
 
 impl Lane {
+    pub fn scratch_disk_reserve(&self) -> u64 {
+        self.worker_config["disk_reserve_bytes"]
+            .as_u64()
+            .unwrap_or(1 << 30)
+    }
+
     pub fn job_config(&self, id: &str) -> PathBuf {
         self.config
             .with_file_name(format!("grant-{id}-dispatch.json"))

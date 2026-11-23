@@ -93,6 +93,7 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
             }),
         )
         .merge(crate::admin::router())
+        .merge(crate::scratch::router())
         .merge(crate::infra_hosts::router())
         .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "API endpoint not found".into()) })
         .method_not_allowed_fallback(|| async {
@@ -177,7 +178,10 @@ async fn guard(State(listen): State<SocketAddr>, req: Request, next: Next) -> Re
     response
 }
 
-fn single<'a>(headers: &'a HeaderMap, name: &str) -> std::result::Result<Option<&'a str>, ()> {
+pub(crate) fn single<'a>(
+    headers: &'a HeaderMap,
+    name: &str,
+) -> std::result::Result<Option<&'a str>, ()> {
     let all = headers.get_all(name);
     let mut values = all.iter();
     let value = values
@@ -482,6 +486,9 @@ async fn add_model(
         return Ok(response);
     }
     let model = request.validate().map_err(ApiError::bad)?;
+    if store.is_scratch_path(std::path::Path::new(&model.path)) {
+        return Err(ApiError::bad("scratch files require operator approval"));
+    }
     if model.kind == brewery_worker::hgn_recipe::ARCHIVE {
         return Err(ApiError::bad(
             "native HGN archives are registered only by verified recipes",
@@ -977,7 +984,7 @@ async fn cancel(State(app): State<Shared>, Path(id): Path<String>) -> Result<imp
     ))
 }
 
-fn read<T>(payload: std::result::Result<Json<T>, JsonRejection>) -> Result<T> {
+pub(crate) fn read<T>(payload: std::result::Result<Json<T>, JsonRejection>) -> Result<T> {
     payload
         .map(|Json(body)| body)
         .map_err(|e| ApiError(e.status(), e.body_text()))
