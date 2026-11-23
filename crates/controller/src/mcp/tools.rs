@@ -24,6 +24,7 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("start_trace", "post", "/api/jobs"),
     ("steer_feature", "post", "/api/jobs"),
     ("read_feature_trace", "get", "/api/jobs/{id}/trace/features"),
+    ("routing_atlas", "get", "/api/jobs/{id}/trace/routing-atlas"),
     ("get_job", "get", "/api/jobs/{id}"),
     ("list_interventions", "get", "/api/interventions"),
     ("create_intervention", "post", "/api/interventions"),

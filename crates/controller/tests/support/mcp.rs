@@ -3,6 +3,66 @@ use super::*;
 const ACCEPT: &str = "Accept: application/json, text/event-stream\r\n";
 const VERSION: &str = "MCP-Protocol-Version: 2025-06-18\r\n";
 
+#[test]
+fn routing_atlas_pairs_matching_traces_over_rest_and_mcp() {
+    let mut t = Fixture::new();
+    fs::write(
+        t.path("dispatch.json"),
+        r#"{"hosts":{"alpha":{"local":true,"capabilities":{"trace":true}}}}"#,
+    )
+    .unwrap();
+    t.launch();
+    let model = t.register("alpha", "gguf", "/models/moe.gguf");
+    let run = |key: &str, prompt: &str, edited: bool| {
+        let mut args = json!({"idempotency_key":key,"input_ids":[model],"prompt":prompt,
+            "options":{"layers":[0],"positions":[0],"top_k":1,
+            "roles":["ffn_moe_logits","ffn_moe_topk","ffn_moe_route_weights","l_out"]}});
+        if edited {
+            args["options"]["interventions"] = json!([
+                {"layer":0,"role":"ffn_out","positions":[0],"op":"zero_expert","expert":0}
+            ]);
+        }
+        let result = call(&t, "start_trace", args);
+        assert_eq!(result["result"]["isError"], false, "{result}");
+        let id = result["result"]["structuredContent"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            call(&t, "get_job", json!({"id":id,"wait_ms":4000}))["result"]["structuredContent"]["state"],
+            "succeeded"
+        );
+        id
+    };
+    let baseline = run("routing-baseline", "one", false);
+    let edit = run("routing-edit", "one", true);
+    let mismatch = run("routing-wrong-source", "other", true);
+    let path = format!("/api/jobs/{baseline}/trace/routing-atlas?layer=0&start=0&end=1");
+    let data = t.json("GET", &path, None, 200);
+    assert_eq!(data["experts"][0]["load"], 1.);
+    assert_eq!(data["ablation"], Value::Null);
+    t.touch("routing-digest-mismatch");
+    t.json("GET", &format!("{path}&ablation_job_id={edit}"), None, 422);
+    fs::remove_file(t.path("routing-digest-mismatch")).unwrap();
+    t.json(
+        "GET",
+        &format!("{path}&ablation_job_id={mismatch}"),
+        None,
+        422,
+    );
+    let response = call(
+        &t,
+        "routing_atlas",
+        json!({
+            "id":baseline,"layer":0,"start":0,"end":1,"ablation_job_id":edit
+        }),
+    );
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let data = &response["result"]["structuredContent"];
+    assert_eq!(data["ablation"]["rows"][0]["residual_l2"], 1.);
+    assert_eq!(data["ablation"]["rows"][0]["top_token_changed"], true);
+}
+
 pub(super) fn call(t: &Fixture, name: &str, arguments: Value) -> Value {
     let (status, body) = t.request(
         "POST",

@@ -16,6 +16,11 @@ runtime. Report a missing GPU or admission failure.
 For inference-only changes, use trace interventions or
 `steer_feature` without editing weights. Use `compile_program` for supported
 standalone programs, not to edit another model.
+Use `routing_atlas` after you capture router logits, expert IDs, and weights
+on Qwen2MoE or Qwen3MoE. To compare an expert ablation, set the expert-zero
+operation on the FFN output and capture the block output in both traces. Attach atlas observations
+to `plan_experts` as evidence for the same source digest. They do not
+replace independent calibration and held-out REAP data.
 
 For a weight change, convert the child to private GGUF with the same assets.
 Trace it with the same prompts and capture settings as the parent. Always

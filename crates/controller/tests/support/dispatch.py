@@ -137,6 +137,24 @@ if action == "trace-read":
             "logit_lens": [{"position": 0, "layer": 0, "top": top[:spec["top_k"]]}],
             "model_logits": [{"position": 0, "top": top[:spec["top_k"]]}],
         }})
+    elif query["view"] == "routing_input":
+        env = prior["result"]["envelope"]
+        edited = bool(env["options"].get("interventions"))
+        if (query["layer"], query["start"], query["end"]) != (0, 0, 1):
+            out({"status": "missing"})
+        else:
+            out({"status": "ok", "data": {
+                "model_id": env["inputs"][0]["id"],
+                "model_sha256": ("b" if (root / "routing-digest-mismatch").exists() and edited
+                                 else "a") * 64,
+                "manifest_sha256": ("c" if edited else "d") * 64,
+                "lanternfish_commit": "5699379af18d6428a6589c996f516c07a91e1a86",
+                "tokens": [{"position": 0, "token_id": 11}],
+                "rows": [{"position": 0, "logits": [1., 0.], "ids": [0], "weights": [1.],
+                          "residual": [0. if edited else 1.], "top_token": 8 if edited else 7}],
+                "interventions": ([{"layer": 0, "role": "ffn_out", "position": 0, "expert": 0}]
+                                  if edited else []),
+            }})
     elif query["end"] is None:
         out({"status": "too_large"})
     else:

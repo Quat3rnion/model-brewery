@@ -13,12 +13,17 @@ use std::{
 };
 
 pub mod diff;
+pub mod routing;
 
 pub const JOB: &str = "trace";
 pub const EXECUTABLE: &str = "BREWERY_LANTERNFISH_TRACE";
 pub const LIB_DIR: &str = "BREWERY_LANTERNFISH_TRACE_LIB_DIR";
 pub const COMMIT: &str = "0ea30b37729a136a76b8412e7ad1ec91bd7de9b5";
 pub const SHA256: &str = "0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f";
+pub const ROUTING_EXECUTABLE: &str = "BREWERY_LANTERNFISH_ROUTING";
+pub const ROUTING_LIB_DIR: &str = "BREWERY_LANTERNFISH_ROUTING_LIB_DIR";
+pub const ROUTING_COMMIT: &str = "5699379af18d6428a6589c996f516c07a91e1a86";
+pub const ROUTING_SHA256: &str = "fda55c709a0ef81920daae882147f7f066f506d27d73846785880c424c56a581";
 pub const HARD_BYTE_CAP: u64 = 32 << 20;
 pub const RESPONSE_CAP: usize = 4 << 20;
 const MAX_POSITIONS: usize = 4096;
@@ -62,8 +67,19 @@ pub enum Role {
     FfnInp,
     FfnOut,
     KqSoftMax,
+    FfnMoeLogits,
+    FfnMoeTopk,
+    FfnMoeRouteWeights,
 }
 
+impl Role {
+    fn routing(self) -> bool {
+        matches!(
+            self,
+            Self::FfnMoeLogits | Self::FfnMoeTopk | Self::FfnMoeRouteWeights
+        )
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capture {
     layers: BTreeSet<usize>,
@@ -104,6 +120,7 @@ pub enum Operation {
     Scale { factor: f32 },
     Add { vector: Vec<f32> },
     Replace { vector: Vec<f32> },
+    ZeroExpert { expert: usize },
 }
 
 impl Rule {
@@ -114,6 +131,7 @@ impl Rule {
             ensure!(
                 rule.layer < 4096
                     && rule.role != Role::KqSoftMax
+                    && !rule.role.routing()
                     && !rule.positions.is_empty()
                     && rule
                         .positions
@@ -128,6 +146,10 @@ impl Rule {
                     "invalid trace intervention vector"
                 ),
                 Operation::Zero => {}
+                Operation::ZeroExpert { expert } => ensure!(
+                    rule.role == Role::FfnOut && *expert < 4096,
+                    "zero_expert requires ffn_out and an expert ID below 4096"
+                ),
             }
         }
         Ok(())
@@ -142,6 +164,14 @@ pub struct Request {
 }
 
 impl Request {
+    pub fn routing(&self) -> bool {
+        self.capture.roles.iter().any(|r| r.routing())
+            || self
+                .interventions
+                .iter()
+                .any(|r| matches!(r.op, Operation::ZeroExpert { .. }))
+    }
+
     pub fn controller(options: &Value, prompt: Option<&str>, policy: Policy) -> Result<Self> {
         policy.check()?;
         let o: Options =
@@ -272,11 +302,18 @@ struct Manifest {
     tokens: Vec<Token>,
     tensors: Vec<Tensor>,
     missing: Vec<Key>,
-    interventions: Vec<Key>,
+    interventions: Vec<Applied>,
     model_logits: Vec<Logits>,
     logit_lens: Vec<Logits>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Applied {
+    #[serde(flatten)]
+    key: Key,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expert: Option<usize>,
+}
 #[derive(Deserialize, Serialize, PartialEq)]
 struct Token {
     position: usize,
@@ -427,6 +464,39 @@ pub fn verify(dir: &Path, spec: &Capture) -> Result<Export> {
     Ok(export)
 }
 
+pub fn verify_interventions(dir: &Path, export: &Export, rules: &[Rule]) -> Result<()> {
+    let (m, fingerprint) = manifest(dir, export.bytes)?;
+    ensure!(
+        fingerprint.manifest_sha256 == export.manifest_sha256,
+        "trace manifest changed"
+    );
+    let mut expected = BTreeSet::new();
+    for rule in rules {
+        let expert = match rule.op {
+            Operation::ZeroExpert { expert } => Some(expert),
+            _ => None,
+        };
+        for &position in &rule.positions {
+            expected.insert((
+                Key {
+                    layer: rule.layer,
+                    role: rule.role,
+                    position,
+                },
+                expert,
+            ));
+        }
+    }
+    for applied in m.interventions {
+        ensure!(
+            expected.remove(&(applied.key, applied.expert)),
+            "unexpected trace intervention"
+        );
+    }
+    ensure!(expected.is_empty(), "missing trace intervention");
+    Ok(())
+}
+
 fn seen_row_top(top: &[TopLogit], k: usize) -> bool {
     top.len() == k
         && top
@@ -443,6 +513,8 @@ pub enum View {
     ModelLogits,
     /// Internal: joined, bounded slice used by controller trace diffs.
     DiffInput,
+    /// Internal: validated rows for one routing atlas layer.
+    RoutingInput,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -477,6 +549,13 @@ impl Slice {
             }
             View::Tensor => self.layer.is_some() && self.role.is_some(),
             View::LogitLens | View::DiffInput => self.role.is_none(),
+            View::RoutingInput => {
+                self.layer.is_some()
+                    && self.role.is_none()
+                    && self.start.is_some()
+                    && self.end.is_some()
+                    && end - start <= routing::MAX_ROWS
+            }
             View::ModelLogits => self.layer.is_none() && self.role.is_none(),
         };
         ensure!(valid, "invalid query for trace view");
@@ -515,6 +594,7 @@ pub fn read(root: &Path, slice: &Slice, result: &Value) -> Result<ReadReply> {
         |p: usize| (slice.start.unwrap_or(0)..slice.end.unwrap_or(MAX_POSITIONS)).contains(&p);
     let data = match slice.view {
         View::DiffInput => return diff::input(&dir, m, slice),
+        View::RoutingInput => return routing::input(&dir, m, slice, result, &expected),
         View::Manifest => {
             let mut model = m.model;
             model
@@ -522,7 +602,7 @@ pub fn read(root: &Path, slice: &Slice, result: &Value) -> Result<ReadReply> {
                 .context("invalid trace model")?
                 .remove("path");
             json!({"schema_version":1, "prompt":slice.prompt,"model":model,"model_id":result["model_id"],
-                "model_sha256":result["model_sha256"],"lanternfish_commit":COMMIT,
+                "model_sha256":result["model_sha256"],"lanternfish_commit":result["lanternfish_commit"].as_str().unwrap_or(COMMIT),
                 "bytes":expected.bytes,"manifest_sha256":expected.manifest_sha256,
                 "spec":m.spec,"tokens":m.tokens,"tensor_count":m.tensors.len(),
                 "missing_count":m.missing.len(),"intervention_count":m.interventions.len(),

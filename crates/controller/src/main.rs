@@ -20,6 +20,7 @@ mod mcp;
 mod model_availability;
 mod profiles;
 mod remote_edit;
+mod routing_atlas;
 mod sae;
 mod scratch;
 mod settings;

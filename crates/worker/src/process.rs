@@ -456,6 +456,11 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 scratch_eval::CACHE,
             ],
             locate_edit::JOB => &[],
+            trace::JOB
+                if trace::Request::worker(&job.options, job.prompt.as_deref())?.routing() =>
+            {
+                &[trace::ROUTING_EXECUTABLE, trace::ROUTING_LIB_DIR]
+            }
             _ => &[trace::EXECUTABLE, trace::LIB_DIR],
         };
         command.env_clear().envs(
@@ -749,6 +754,11 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     }
     if job.kind == trace::JOB {
         let request = trace::Request::worker(&job.options, job.prompt.as_deref())?;
+        let (commit, sha) = if request.routing() {
+            (trace::ROUTING_COMMIT, trace::ROUTING_SHA256)
+        } else {
+            (trace::COMMIT, trace::SHA256)
+        };
         ensure!(
             value["kind"] == trace::JOB
                 && value["schema_version"] == 1
@@ -756,8 +766,8 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 && value["model_id"] == job.inputs[0].extra["id"]
                 && value["model_sha256"].as_str().is_some_and(is_digest)
                 && value["model_sha256"] == job.inputs[0].extra["sha256"]
-                && value["lanternfish_commit"] == trace::COMMIT
-                && value["executable_sha256"] == trace::SHA256,
+                && value["lanternfish_commit"] == commit
+                && value["executable_sha256"] == sha,
             "trace receipt does not match resolved input and runtime"
         );
         let exports: Vec<trace::Export> = serde_json::from_value(value["prompts"].clone())?;
@@ -771,10 +781,12 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         let mut spec = request.capture;
         let cap = spec.byte_cap;
         for (i, export) in exports.into_iter().enumerate() {
+            let dir = root.join(i.to_string());
             ensure!(
-                trace::verify(&root.join(i.to_string()), &spec)? == export,
+                trace::verify(&dir, &spec)? == export,
                 "trace receipt does not match export"
             );
+            trace::verify_interventions(&dir, &export, &request.interventions)?;
             spec.byte_cap -= export.bytes;
         }
         ensure!(

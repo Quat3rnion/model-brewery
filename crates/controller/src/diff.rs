@@ -127,7 +127,7 @@ fn stamp(file: &File) -> Result<Stamp> {
 }
 
 impl Service {
-    fn acquire(&self) -> Result<OwnedSemaphorePermit> {
+    pub(crate) fn acquire(&self) -> Result<OwnedSemaphorePermit> {
         self.slot.clone().try_acquire_owned().map_err(|_| {
             ApiError(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -311,7 +311,7 @@ async fn traces(State(app): State<Arc<App>>, query: Params<Traces>) -> Result<im
     Ok(response(bytes))
 }
 
-async fn trace_read(app: &App, job: &Job, slice: &trace::Slice) -> Result<Value> {
+pub(crate) async fn trace_read(app: &App, job: &Job, slice: &trace::Slice) -> Result<Value> {
     match app.dispatcher.trace_read(job, slice).await.map_err(|e| {
         eprintln!("Trace diff read failed for {}: {e}", job.id);
         ApiError(

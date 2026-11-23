@@ -279,6 +279,8 @@ impl Lanes {
                 scratch_eval::CACHE,
                 trace::EXECUTABLE,
                 trace::LIB_DIR,
+                trace::ROUTING_EXECUTABLE,
+                trace::ROUTING_LIB_DIR,
                 locate_edit::EXECUTABLE,
                 locate_edit::LIB_DIR,
                 "BREWERY_CPU_THREADS",

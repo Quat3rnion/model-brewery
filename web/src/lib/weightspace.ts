@@ -6,16 +6,24 @@
 import type { Tone } from './format';
 import type { NewJob } from './types';
 
-export const TRACE_ROLES = ['l_out', 'attn_out', 'ffn_inp', 'ffn_out', 'kq_soft_max'] as const;
+export const PATCH_ROLES = ['l_out', 'attn_out', 'ffn_inp', 'ffn_out'] as const;
+export const ROUTING_ROLES = ['ffn_moe_logits', 'ffn_moe_topk', 'ffn_moe_route_weights'] as const;
+export const TRACE_ROLES = [...PATCH_ROLES, 'kq_soft_max', ...ROUTING_ROLES] as const;
 export type TraceRole = (typeof TRACE_ROLES)[number];
-export type PatchRole = Exclude<TraceRole, 'kq_soft_max'>;
+export type PatchRole = (typeof PATCH_ROLES)[number];
 export const ROLE_LABELS: Record<TraceRole, string> = {
   l_out: 'Block output (l_out)',
   attn_out: 'Attention write (attn_out)',
   ffn_inp: 'FFN input (ffn_inp)',
   ffn_out: 'FFN write (ffn_out)',
   kq_soft_max: 'Attention probabilities (kq_soft_max)',
+  ffn_moe_logits: 'MoE router logits',
+  ffn_moe_topk: 'MoE expert IDs',
+  ffn_moe_route_weights: 'MoE expert weights',
 };
+export function routingRole(role: string): boolean {
+  return (ROUTING_ROLES as readonly string[]).includes(role);
+}
 export const MAX_PROMPTS = 4;
 export const MAX_PATCHES = 8;
 export const MAX_POSITION = 4096;
@@ -74,10 +82,11 @@ const MANIFEST_ENTRY = 256;
  * this only helps to pick a capture that can fit.
  */
 export function estimateTraceBytes(e: EstimateInput): { bytes: number; payload: number; complete: boolean } {
-  const plain = e.roles.filter((r) => r !== 'kq_soft_max').length;
+  const plain = e.roles.filter((r) => r !== 'kq_soft_max' && !routingRole(r)).length;
+  const routing = e.roles.some(routingRole);
   const attn = e.roles.includes('kq_soft_max');
   const rows = e.layers * e.positions;
-  let complete = true;
+  let complete = !routing;
   let row = 0;
   if (plain) {
     if (e.hidden && e.hidden > 0) row += plain * e.hidden * 4;
@@ -87,7 +96,7 @@ export function estimateTraceBytes(e: EstimateInput): { bytes: number; payload: 
     if (e.heads && e.heads > 0) row += e.heads * Math.max(1, e.keys) * 4;
     else complete = false;
   }
-  const logits = e.topK > 0 ? (rows + e.positions) * e.topK * LOGIT_ENTRY : 0;
+  const logits = e.topK > 0 ? ((routing ? 0 : rows) + e.positions) * e.topK * LOGIT_ENTRY : 0;
   const payload = e.prompts * (rows * row + logits);
   const entries = e.prompts * (rows * e.roles.length + (e.topK > 0 ? rows + e.positions : 0));
   return { bytes: payload + e.prompts * MANIFEST_BASE + entries * MANIFEST_ENTRY, payload, complete };
@@ -115,6 +124,7 @@ export interface TraceForm {
   fullDump: boolean;
   artifact: { id: string; version: number } | null;
   patches: PatchForm[];
+  ablation?: { layer: number | undefined; expert: number | undefined; positions: string };
 }
 
 export function buildTraceJob(f: TraceForm): { job: NewJob | null; blockers: string[] } {
@@ -144,6 +154,7 @@ export function buildTraceJob(f: TraceForm): { job: NewJob | null; blockers: str
     const n = `Patch ${i + 1}`;
     if (!p.source) out.push(`${n}: select a source trace.`);
     if (p.role === 'kq_soft_max') out.push(`${n}: attention probabilities are read-only.`);
+    if (routingRole(p.role)) out.push(`${n}: routing roles are read-only.`);
     const layer = parseIndexList(p.layer, MAX_LAYER);
     if (!layer.ok || layer.value.length !== 1) out.push(`${n}: enter one layer.`);
     const pos = parseIndexList(p.positions, MAX_POSITION);
@@ -158,6 +169,19 @@ export function buildTraceJob(f: TraceForm): { job: NewJob | null; blockers: str
       positions: pos.ok ? pos.value : [],
     };
   });
+  const ablation = f.ablation;
+  const edited = ablation ? parseIndexList(ablation.positions, MAX_POSITION) : null;
+  if (ablation) {
+    if (!ROUTING_ROLES.every((r) => f.roles.includes(r)) || !f.roles.includes('l_out'))
+      out.push('Expert ablation needs all routing roles and the block output.');
+    if (f.artifact || f.patches.length) out.push('Do not combine expert ablation with other interventions.');
+    if (ablation.layer === undefined || !layers.ok || !layers.value.includes(ablation.layer))
+      out.push('Select a captured layer for the ablation.');
+    if (ablation.expert === undefined || !Number.isInteger(ablation.expert) || ablation.expert < 0 || ablation.expert >= 4096)
+      out.push('Enter an expert ID from 0 to 4095.');
+    if (!edited?.ok || !positions.ok || edited.value.some((p) => !positions.value.includes(p)))
+      out.push('Enter the captured token positions to ablate.');
+  }
   if (out.length || !layers.ok || !positions.ok) return { job: null, blockers: out };
   const options: Record<string, unknown> = { layers: layers.value, roles: [...f.roles], positions: positions.value, top_k: f.topK };
   if (byteCap !== undefined) options.byte_cap = byteCap;
@@ -165,11 +189,14 @@ export function buildTraceJob(f: TraceForm): { job: NewJob | null; blockers: str
   if (prompts.length > 1) options.prompts = [...prompts];
   if (f.artifact) options.intervention_artifact = { id: f.artifact.id, version: f.artifact.version };
   if (patches.length) options.activation_patches = patches;
+  if (ablation && edited?.ok)
+    options.interventions = [{ layer: ablation.layer, role: 'ffn_out', positions: edited.value, op: 'zero_expert', expert: ablation.expert }];
   const job: NewJob = { kind: 'trace', input_ids: [f.model], options };
   if (f.host) job.host = f.host;
   if (prompts.length === 1) job.prompt = prompts[0];
   return { job, blockers: [] };
 }
+
 
 // ---- Trace slices ----
 

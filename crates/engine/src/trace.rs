@@ -1,11 +1,30 @@
 use crate::{
-    child_threads, gguf_conversion::Tool, integrity, progress::Progress, w0_libraries, write_json,
-    Job,
+    Job, child_threads, gguf_conversion::Tool, integrity, progress::Progress, w0_libraries,
+    write_json,
 };
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use brewery_worker::trace::{self, Request};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+
+const ROUTING_LIBS: &[(&str, &str)] = &[
+    (
+        "libllama.so.0",
+        "dc933d3ad896057d3f824dd0867242456a87d62d29693076cc48448630348cd4",
+    ),
+    (
+        "libggml.so.0",
+        "5dabaac15aaaeafbfe8d2b6d48d17c7591c99e7c45f0ba1f37551c84326900a1",
+    ),
+    (
+        "libggml-base.so.0",
+        "3f8e5b01616fdaf8006495e8f600b365cd9336bbea86f95b4f2bcc2b82a2933f",
+    ),
+    (
+        "libggml-cpu.so.0",
+        "80a3aa5789309cb75a28bb441190410fada3407b93176aadb1ed37a4feec25dc",
+    ),
+];
 
 pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let request = Request::worker(&job.options, job.prompt.as_deref())?;
@@ -32,19 +51,31 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         .prefix(".trace-")
         .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in(cwd)?;
+    let (executable, sha, commit, lib_dir, pins) = if request.routing() {
+        (
+            trace::ROUTING_EXECUTABLE,
+            trace::ROUTING_SHA256,
+            trace::ROUTING_COMMIT,
+            trace::ROUTING_LIB_DIR,
+            ROUTING_LIBS,
+        )
+    } else {
+        (
+            trace::EXECUTABLE,
+            trace::SHA256,
+            trace::COMMIT,
+            trace::LIB_DIR,
+            w0_libraries::PINS,
+        )
+    };
     let tool = Tool::pinned_digest(
         private.path(),
-        trace::EXECUTABLE,
-        trace::SHA256,
+        executable,
+        sha,
         "lanternfish",
         "Lanternfish",
     )?;
-    let libs = w0_libraries::stage(
-        private.path(),
-        trace::LIB_DIR,
-        "Lanternfish trace",
-        w0_libraries::PINS,
-    )?;
+    let libs = w0_libraries::stage(private.path(), lib_dir, "Lanternfish trace", pins)?;
     let ids = integrity::check_inputs(&job.inputs, progress)?;
     let id = &ids[0];
     trace::check_model_revision(&job.options, &id.sha256)?;
@@ -92,6 +123,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             .context("Lanternfish trace failed")?;
         id.check()?;
         let verified = trace::verify(&out, &capture)?;
+        trace::verify_interventions(&out, &verified, &request.interventions)?;
         capture.byte_cap -= verified.bytes;
         receipts.push(verified);
         phase.advance(1);
@@ -100,7 +132,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     phase.finish();
     Ok(
         json!({"kind":trace::JOB,"schema_version":1,"model_id":model_id,
-        "model_sha256":id.sha256,"lanternfish_commit":trace::COMMIT,"executable_sha256":trace::SHA256,
+         "model_sha256":id.sha256,"lanternfish_commit":commit,"executable_sha256":sha,
         "bytes":receipts.iter().map(|p| p.bytes).sum::<u64>(),"prompts":receipts}),
     )
 }
