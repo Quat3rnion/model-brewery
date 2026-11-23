@@ -99,3 +99,63 @@ all metrics improved.
 The Trace list labels private scratch inputs `Removed entry` because
 they are not in the Library. The traces open and display their results.
 Use their job IDs to match them to the scratch revisions in the report.
+
+## Stage 5: pruning
+
+Use the same binaries and pinned CPU runtime as above. Give the script a
+new root under `/arboretum`:
+
+```sh
+TMPDIR=/arboretum/tmp python3 -B qualification/weight_space_pruning_acceptance.py \
+  --root /arboretum/w12-accept
+```
+
+The script uses the same held-out corpus for all dense cases. It applies
+10% and 30% unstructured masks to each of the three MLP matrices in
+Qwen2.5-0.5B-Instruct layer 8. It also runs separate layer 8 head,
+neuron, and Wanda-style neuron masks. It records W4 checks, the W5 tensor,
+trace, and behavior diffs, and the held-out perplexity curve. It deletes
+the private scratch copies after use. GSM8K is not run.
+
+All five cases passed integrity, generation smoke, and behavior
+collection. Each behavior diff contains 17 metrics. The evidence is in
+`/arboretum/w12-w4-w5-evidence/report.json`.
+
+| Layer 8 only | Changed tensors | Changed bytes | Held-out perplexity |
+|---|---:|---:|---:|
+| None (parent) | 0 | 0 | 81.04 |
+| Unstructured, 10% of weights in each of three MLP matrices | 3 | 2,607,985 | 81.19 |
+| Unstructured, 30% of weights in each of three MLP matrices | 3 | 7,835,105 | 77.74 |
+| Magnitude, 30% of MLP neurons | 1 | 2,608,903 | 83.52 |
+| Magnitude, 4 of 14 query heads | 1 | 457,812 | 81.61 |
+| Wanda-style, 30% of MLP neurons | 1 | 2,608,939 | 81.12 |
+
+No case prunes another layer. The percentages do not measure model-wide
+sparsity. The full source file has 988,097,824 bytes (about 942 MiB).
+The test corpus has 16 short sentences and 222 scored tokens. A repeat
+of the 30% case produced different parent and child GGUF hashes that
+matched the original run. A separate check verified exactly 1,307,443
+zeroed weights per edited matrix and no other changed tensor payloads.
+The repeat reproduced the 4.07% decrease in perplexity. One sentence
+contributed about 53% of the net increase in log probability. This small
+corpus does not show that quality improved on other workloads. See
+`magnitude-30-repeat.json` in the evidence directory.
+
+The masks keep tensor shapes and configuration unchanged. Physical dense
+pruning needs a scratch artifact format that can pin the updated
+configuration and reverse or compare changes of shape. W3 uses a
+same-size XOR delta for one SafeTensors file.
+
+The tiny Qwen2MoE fixture uses synthetic observations to exercise REAP
+planning, not quality. The MCP plan keeps three of four experts at each
+routed layer. Apply returns 503 and does not create any artifact. The
+managed expert workflow in review can preview or reorder GGUF, but its
+apply adds a Library revision. It cannot be used for scratch. The offline
+GGUF writer can prune and verify, but does not produce scratch
+SafeTensors. The offline SafeTensors writer needs a separate configuration
+file and does not have an admitted private scratch verification path.
+Before MoE acceptance can run, a verified writer must emit a private
+scratch SafeTensors child and its pinned configuration, or the plan must
+approve a format-aware private GGUF child. The new child must pass
+integrity, generation, quality checks, and diffs without Library
+registration. These results are not release-qualified.

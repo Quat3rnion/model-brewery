@@ -271,6 +271,148 @@ fn merge_pins_inputs_and_reuses_scratch_admission() {
 }
 
 #[test]
+fn mcp_pruning_creates_a_private_reversible_child() {
+    let mut t = Test::new();
+    let source = fixture(&t, &[2., -1., 1., 3., -4., 5.]);
+    let original = fs::read(&source).unwrap();
+    let hash = sha(&original);
+    t.launch();
+    let (status, model) = t.request(
+        "/api/models",
+        "",
+        Some(json!({"host":"existing","kind":"safetensors","path":source})),
+    );
+    assert_eq!(status, 201);
+    assert_eq!(
+        t.admin(Some(
+            json!({"action":"set_weight_editor","worker":"existing",
+        "revision":0,"enabled":true})
+        ))
+        .0,
+        200
+    );
+    let (status, root) = t.request(
+        "/api/scratch",
+        "",
+        Some(json!({"parent_id":model["id"],"parent_sha256":hash})),
+    );
+    assert_eq!(status, 201, "{root}");
+
+    let call = |name, arguments| {
+        let (status, reply) = t.request("/mcp", "Accept: application/json, text/event-stream\r\n",
+            Some(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}})));
+        assert_eq!(status, 200, "{reply}");
+        reply
+    };
+    let mut args = json!({"id":root["id"],"sha256":root["sha256"],"idempotency_key":"prune-test",
+        "pruning":{"mode":"unstructured","basis_points":2000,"tensors":["w"]}});
+    let reply = call("prune_model", args.clone());
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let child = &reply["result"]["structuredContent"];
+    assert_eq!(child["state"], "scratch");
+    assert_eq!(child["provenance"]["method"], "prune");
+    assert_eq!(child["provenance"]["pruning"]["mode"], "unstructured");
+    assert_eq!(child["provenance"]["parent_id"], root["id"]);
+    assert_eq!(child["delta"]["changed_tensors"], 1);
+    let dir = |id: &Value| {
+        t.root
+            .path()
+            .join("state/scratch")
+            .join(id.as_str().unwrap())
+    };
+    let child_dir = dir(&child["id"]);
+    let output = fs::read(child_dir.join("model.safetensors")).unwrap();
+    let mut expected = original.clone();
+    let offset = expected.len() - 20;
+    expected[offset..offset + 4].fill(0);
+    assert_eq!(output, expected, "tie breaks by first element index");
+    assert_eq!(
+        call("prune_model", args.clone())["result"]["structuredContent"],
+        *child
+    );
+    args["pruning"]["basis_points"] = json!(5000);
+    assert_eq!(
+        call("prune_model", args)["result"]["structuredContent"]["status"],
+        409
+    );
+
+    let restored = t.root.path().join("restored.safetensors");
+    brewery_worker::weight_source::scratch::revert(
+        &child_dir.join("model.safetensors"),
+        &child_dir.join("delta.bin"),
+        &restored,
+    )
+    .unwrap();
+    assert_eq!(fs::read(restored).unwrap(), original);
+    assert_eq!(
+        fs::read(dir(&root["id"]).join("model.safetensors")).unwrap(),
+        original
+    );
+    assert_eq!(fs::read(source).unwrap(), original);
+    assert_eq!(
+        call("list_models", json!({}))["result"]["structuredContent"]["models"],
+        json!([model])
+    );
+}
+
+#[test]
+fn mcp_expert_apply_cannot_publish_or_make_a_partial_scratch() {
+    let mut t = Test::new();
+    let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
+    let original = fs::read(source).unwrap();
+    t.launch();
+    let (status, model) = t.request(
+        "/api/models",
+        "",
+        Some(json!({
+            "host":"existing","kind":"gguf","path":"/models/moe.gguf"
+        })),
+    );
+    assert_eq!(status, 201);
+    let call = |name, arguments| {
+        let (status, reply) = t.request("/mcp", "Accept: application/json, text/event-stream\r\n",
+            Some(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}})));
+        assert_eq!(status, 200, "{reply}");
+        reply["result"].clone()
+    };
+    let reply = call(
+        "plan_experts",
+        json!({"id":model["id"],
+        "source_sha256":sha(&original),"keep":2,"calibration":"{}","held_out":"{}"}),
+    );
+    assert_eq!(reply["structuredContent"]["status"], 409, "{reply}");
+    let map = json!({"schema":"brewery.expert-map.v1","source_sha256":sha(&original),
+        "layers":{"0":[2,0]},"top_k":2,"review":{"method":"reap","release_qualified":false}})
+    .to_string();
+    let mismatch = call(
+        "prune_experts",
+        json!({"id":model["id"],"idempotency_key":"reap-bad-hash",
+        "plan":map,"plan_sha256":"0".repeat(64),"reviewed":true}),
+    );
+    assert_eq!(mismatch["structuredContent"]["status"], 400);
+    let reply = call(
+        "prune_experts",
+        json!({"id":model["id"],"idempotency_key":"reap-apply-test",
+        "plan":map,"plan_sha256":sha(map.as_bytes()),"reviewed":true}),
+    );
+    assert_eq!(reply["structuredContent"]["status"], 503, "{reply}");
+    assert!(
+        reply["structuredContent"]["details"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("private scratch")
+    );
+    assert_eq!(
+        call("list_scratch", json!({}))["structuredContent"]["revisions"],
+        json!([])
+    );
+    assert_eq!(
+        call("list_models", json!({}))["structuredContent"]["models"],
+        json!([model])
+    );
+}
+
+#[test]
 fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
     let mut t = Test::new();
     let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
@@ -715,6 +857,9 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "memit_edit",
             "merge_models",
             "new_intervention_version",
+            "plan_experts",
+            "prune_experts",
+            "prune_model",
             "read_feature_trace",
             "read_trace",
             "register_model",

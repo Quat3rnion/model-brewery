@@ -172,6 +172,8 @@ pub(crate) fn finish(
         method: request.method.key().into(),
         operations,
         merge: None,
+        pruning: None,
+        pruning_trace: None,
         tensors: output.tensors,
         tool: "Lanternfish locate-edit and Brewery SafeTensors scratch editor".into(),
         tool_version: locate_edit::COMMIT.into(),

@@ -33,6 +33,8 @@ const LIMIT: u32 = 64;
 const PROVENANCE: &str = "provenance.json";
 #[path = "scratch_checks.rs"]
 mod checks;
+#[path = "scratch_experts.rs"]
+mod experts;
 #[path = "scratch_jobs.rs"]
 pub(crate) mod jobs;
 #[path = "scratch_locate.rs"]
@@ -41,6 +43,8 @@ pub(crate) mod locate;
 mod merge;
 #[path = "scratch_program.rs"]
 mod program;
+#[path = "scratch_prune.rs"]
+mod prune;
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -96,6 +100,10 @@ pub struct Provenance {
     operations: Vec<Operation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     merge: Option<merge::Spec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pruning: Option<prune::Params>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pruning_trace: Option<prune::Evidence>,
     tensors: Vec<TensorInfo>,
     tool: String,
     tool_version: String,
@@ -149,6 +157,9 @@ pub fn router() -> Router<Arc<App>> {
         .route("/scratch/{id}/rome", post(locate::rome))
         .route("/scratch/{id}/memit", post(locate::memit))
         .route("/scratch/{id}/alphaedit", post(locate::alphaedit))
+        .route("/scratch/{id}/prune", post(prune::model))
+        .route("/scratch/experts/{id}/plan", post(experts::plan))
+        .route("/scratch/experts/{id}/prune", post(experts::prune))
         .route("/scratch/{id}/delta", get(delta))
         .route("/scratch/{id}/gguf", post(jobs::convert))
         .route("/scratch/{id}/checks", get(checks::get).post(checks::run))
@@ -409,6 +420,18 @@ fn build(
     merge: Option<merge::Spec>,
     key: Option<&Submission<'_>>,
 ) -> Mutation {
+    build_with_pruning(app, parent_id, supplied_pin, operations, merge, None, key)
+}
+
+fn build_with_pruning(
+    app: &App,
+    parent_id: String,
+    supplied_pin: Option<String>,
+    operations: Vec<Operation>,
+    merge: Option<merge::Spec>,
+    pruning: Option<prune::Params>,
+    key: Option<&Submission<'_>>,
+) -> Mutation {
     let (root, worker, source, expected, library_source, reserve, merge_paths) = {
         let store = app.store.lock().map_err(ApiError::storage)?;
         if store.scratch_count().map_err(ApiError::storage)? >= LIMIT {
@@ -484,7 +507,7 @@ fn build(
             bytes + scratch::MERGE_DELTA_OVERHEAD
         } else {
             scratch::DELTA_OVERHEAD
-                + if operations.is_empty() {
+                + if operations.is_empty() && pruning.is_none() {
                     0
                 } else {
                     scratch::MAX_EDIT_BYTES
@@ -495,12 +518,27 @@ fn build(
             "not enough disk space for scratch and the configured reserve",
         ));
     }
+    let calibration = match &pruning {
+        Some(p) => p.calibration(app, &parent_id)?,
+        None => None,
+    };
     let id = id();
     let mut output = Uncommitted::new(root.join(&id))?;
     let result = if let Some((spec, paths)) = merge.as_ref().zip(merge_paths.as_ref()) {
         spec.build(&source, &expected, &output.path, paths)?
     } else {
-        scratch::build(&source, &expected, &output.path, &operations).map_err(|e| {
+        let output = if let Some(p) = &pruning {
+            scratch::build_pruned(
+                &source,
+                &expected,
+                &output.path,
+                &p.plan,
+                calibration.as_ref().map(|c| c.rows.as_slice()),
+            )
+        } else {
+            scratch::build(&source, &expected, &output.path, &operations)
+        };
+        output.map_err(|e| {
             if e.downcast_ref::<std::io::Error>().is_some() {
                 ApiError::storage(e)
             } else {
@@ -517,6 +555,8 @@ fn build(
         worker,
         method: if let Some(spec) = &merge {
             spec.method()
+        } else if pruning.is_some() {
+            "prune"
         } else if operations.is_empty() {
             "copy"
         } else {
@@ -525,6 +565,8 @@ fn build(
         .into(),
         operations,
         merge,
+        pruning,
+        pruning_trace: calibration.map(|c| c.evidence),
         tensors: result.tensors,
         tool: "brewery SafeTensors scratch editor".into(),
         tool_version: env!("CARGO_PKG_VERSION").into(),

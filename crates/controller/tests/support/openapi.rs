@@ -80,6 +80,17 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("post", "/api/scratch/{id}/rome", "romeEdit"),
         ("post", "/api/scratch/{id}/memit", "memitEdit"),
         ("post", "/api/scratch/{id}/alphaedit", "alphaEdit"),
+        ("post", "/api/scratch/{id}/prune", "pruneScratch"),
+        (
+            "post",
+            "/api/scratch/experts/{id}/plan",
+            "planScratchExperts",
+        ),
+        (
+            "post",
+            "/api/scratch/experts/{id}/prune",
+            "pruneScratchExperts",
+        ),
         ("get", "/api/scratch/{id}/delta", "getScratchDelta"),
         ("post", "/api/scratch/{id}/gguf", "convertScratchGguf"),
         ("get", "/api/scratch/{id}/checks", "getScratchChecks"),

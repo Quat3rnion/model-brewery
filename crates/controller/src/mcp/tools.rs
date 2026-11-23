@@ -48,6 +48,9 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("rome_edit", "post", "/api/scratch/{id}/rome"),
     ("memit_edit", "post", "/api/scratch/{id}/memit"),
     ("alphaedit_edit", "post", "/api/scratch/{id}/alphaedit"),
+    ("prune_model", "post", "/api/scratch/{id}/prune"),
+    ("plan_experts", "post", "/api/scratch/experts/{id}/plan"),
+    ("prune_experts", "post", "/api/scratch/experts/{id}/prune"),
     ("convert_scratch_gguf", "post", "/api/scratch/{id}/gguf"),
     ("discard_scratch", "post", "/api/scratch/{id}/discard"),
     ("run_checks", "post", "/api/scratch/{id}/checks"),
@@ -129,7 +132,12 @@ impl Server {
                 }
                 _ => &route.description,
             };
-            tools.push(tool(name, description, schema, !route.write));
+            tools.push(tool(
+                name,
+                description,
+                schema,
+                !route.write || name == "plan_experts",
+            ));
         }
         let variants: Vec<_> = trace_views
             .iter()
@@ -234,10 +242,11 @@ impl Server {
                 Method::GET
             })
             .uri(path);
+        if route.write {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+        }
         if let Some(key) = key {
-            request = request
-                .header("Idempotency-Key", key)
-                .header(header::CONTENT_TYPE, "application/json");
+            request = request.header("Idempotency-Key", key);
         }
         let request = request
             .body(Body::from(body))
@@ -327,7 +336,11 @@ impl Route {
                 }
             }
         }
-        assert!(!write || properties.contains_key("idempotency_key"));
+        assert!(
+            !write
+                || properties.contains_key("idempotency_key")
+                || path == "/api/scratch/experts/{id}/plan"
+        );
         schema["properties"] = json!(properties);
         schema["required"] = json!(required);
         schema["additionalProperties"] = json!(false);
@@ -360,7 +373,7 @@ impl Route {
         {
             return Err("missing required tool argument");
         }
-        let key = if self.write {
+        let key = if object(&self.schema["properties"]).contains_key("idempotency_key") {
             let key = args
                 .remove("idempotency_key")
                 .and_then(|v| v.as_str().map(str::to_owned))
