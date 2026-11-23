@@ -10,7 +10,7 @@ import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from behavior_direction_acceptance import ARB, MODEL, MODEL_SHA, run, save, sha
+from behavior_direction_acceptance import ARB, MODEL, MODEL_SHA, W0_PIN, run, save, sha
 
 
 def exercise(evidence, base, commit, pin):
@@ -77,7 +77,7 @@ def exercise(evidence, base, commit, pin):
         }
         trace_job = await_job(submit("start_trace", key, input_ids=[model], prompt=prompt, options=options))
         assert trace_job["result"]["model_sha256"] == MODEL_SHA
-        assert trace_job["result"]["executable_sha256"] == sha(pin)
+        assert trace_job["result"]["executable_sha256"] == sha(pin if saved else W0_PIN)
         return trace_job["id"]
 
     a, b = trace("baseline"), trace("projected", projected)
@@ -101,6 +101,7 @@ def exercise(evidence, base, commit, pin):
     report = {
         "release_qualified": False, "brewery_commit": commit,
         "model": MODEL.name, "model_sha256": MODEL_SHA, "lanternfish_sha256": sha(pin),
+        "baseline_lanternfish_sha256": sha(W0_PIN),
         "behavior": "slop", "direction_id": job["id"], "direction_version": 2,
         "layer": layer, "role": "l_out", "position": 4, "prompt": prompt,
         "baseline_trace": a, "projected_trace": b, "component_before": before,
