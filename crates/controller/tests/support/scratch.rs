@@ -624,12 +624,14 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "list_models",
             "list_scratch",
             "new_intervention_version",
+            "read_feature_trace",
             "read_trace",
             "register_model",
             "request_publish",
             "run_checks",
             "run_program",
             "start_trace",
+            "steer_feature",
         ]
     );
     for tool in listed {
