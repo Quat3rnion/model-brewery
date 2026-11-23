@@ -1,5 +1,6 @@
 //! A controller-owned CPU worker per configured local source host.
 use crate::{Error, dispatch::read_limited, domain::Host};
+use brewery_worker::locate_edit::{self, Backend};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -41,6 +42,8 @@ pub struct Lane {
     worker: PathBuf,
     worker_config: Value,
     scratch_env: BTreeMap<String, Value>,
+    scratch_gpu_admission: Option<PathBuf>,
+    scratch_gpu_env: BTreeMap<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -273,8 +276,8 @@ impl Lanes {
                 "BREWERY_SCRATCH_CHECKS_RUNNER_SHA256",
                 "BREWERY_SCRATCH_CHECKS_CACHE",
                 "BREWERY_LANTERNFISH_TRACE",
-                brewery_worker::locate_edit::EXECUTABLE,
-                brewery_worker::locate_edit::LIB_DIR,
+                locate_edit::EXECUTABLE,
+                locate_edit::LIB_DIR,
                 "BREWERY_CPU_THREADS",
             ]
             .into_iter()
@@ -282,6 +285,25 @@ impl Lanes {
                 original["engine_env"][name]
                     .as_str()
                     .map(|v| (name.into(), json!(v)))
+            })
+            .collect();
+            let scratch_gpu_admission =
+                original["admission"]
+                    .as_str()
+                    .map(PathBuf::from)
+                    .filter(|path| {
+                        path.is_absolute() && original["engine_env"][locate_edit::GPU_GATE] == "1"
+                    });
+            let scratch_gpu_env = [
+                locate_edit::CUDA_EXECUTABLE,
+                locate_edit::CUDA_LIB_DIR,
+                locate_edit::CUDA_DEVICES,
+            ]
+            .into_iter()
+            .filter_map(|key| {
+                original["engine_env"][key]
+                    .as_str()
+                    .map(|value| (key.into(), json!(value)))
             })
             .collect();
             brewery_worker::atomic(&config, &worker_config)?;
@@ -318,6 +340,8 @@ impl Lanes {
                     worker: worker.clone(),
                     worker_config,
                     scratch_env,
+                    scratch_gpu_admission,
+                    scratch_gpu_env,
                 },
             );
         }
@@ -339,18 +363,21 @@ impl Lanes {
 }
 
 impl Lane {
-    pub fn locate_edit_configured(&self) -> bool {
-        [
-            brewery_worker::locate_edit::EXECUTABLE,
-            brewery_worker::locate_edit::LIB_DIR,
-        ]
-        .iter()
-        .all(|k| {
-            self.scratch_env
-                .get(*k)
+    pub fn locate_edit_configured(&self, backend: Backend) -> bool {
+        let pin = backend.pin();
+        let env = match backend {
+            Backend::Cpu => &self.scratch_env,
+            Backend::Cuda => &self.scratch_gpu_env,
+        };
+        [pin.executable, pin.lib_dir].iter().all(|k| {
+            env.get(*k)
                 .and_then(Value::as_str)
                 .is_some_and(|p| Path::new(p).is_absolute())
         })
+    }
+
+    pub fn scratch_gpu_allowed(&self) -> bool {
+        self.scratch_gpu_admission.is_some()
     }
 
     pub fn scratch_disk_reserve(&self) -> u64 {
@@ -398,16 +425,25 @@ impl Lane {
         host: &str,
         id: &str,
         pins: &BTreeMap<String, String>,
+        cuda: bool,
     ) -> Result<(), Error> {
         use std::io::Write as _;
         let config = self
             .config
             .with_file_name(format!("scratch-{id}-worker.json"));
         let mut worker_config = self.worker_config.clone();
-        worker_config["engine_env"]
-            .as_object_mut()
-            .unwrap()
-            .extend(self.scratch_env.clone());
+        let env = worker_config["engine_env"].as_object_mut().unwrap();
+        env.extend(self.scratch_env.clone());
+        if cuda {
+            env.remove(locate_edit::CUDA_DEVICES);
+            env.extend(self.scratch_gpu_env.clone());
+            env.insert(locate_edit::GPU_GATE.into(), json!("1"));
+            worker_config["admission"] = json!(
+                self.scratch_gpu_admission
+                    .as_ref()
+                    .ok_or("Missing scratch GPU admission")?
+            );
+        }
         worker_config["scratch_access"] = json!({"job_id":id,"paths":pins});
         let mut file = fs::OpenOptions::new()
             .write(true)

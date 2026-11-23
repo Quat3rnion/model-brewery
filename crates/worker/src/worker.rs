@@ -185,7 +185,11 @@ impl Config {
                     && md.mode() & 0o077 == 0
                     && (1..=4).contains(&access.paths.len())
                     && cfg.source_grants.is_empty()
-                    && cfg.admission.is_none()
+                    && (cfg.admission.is_none()
+                        || cfg
+                            .engine_env
+                            .get(locate_edit::GPU_GATE)
+                            .is_some_and(|v| v == "1"))
                     && cfg.pinned_publication.is_none()
                     && cfg.managed_settings.is_none()
                     && cfg.hf_download.is_none()
@@ -841,15 +845,6 @@ impl Worker {
             .filter(|access| access.job_id == id);
         if scratch_eval::private_output(&job.kind) || access.is_some() {
             let valid = access.is_some_and(|access| access.permits(&action, &job))
-                && (job.kind != locate_edit::JOB
-                    || [locate_edit::EXECUTABLE, locate_edit::LIB_DIR]
-                        .iter()
-                        .all(|k| {
-                            self.cfg
-                                .engine_env
-                                .get(*k)
-                                .is_some_and(|p| Path::new(p).is_absolute())
-                        }))
                 && (job.kind != scratch_eval::CHECKS
                     || [
                         scratch_eval::SCRIPT,
@@ -874,6 +869,39 @@ impl Worker {
                     job,
                     Reply::error("Invalid scratch access, job, or worker check configuration"),
                 );
+            }
+            if job.kind == locate_edit::JOB {
+                let backend = locate_edit::Request::parse(&job.options)?.edit.backend;
+                let pin = backend.pin();
+                let error = if ![pin.executable, pin.lib_dir].iter().all(|key| {
+                    self.cfg
+                        .engine_env
+                        .get(*key)
+                        .is_some_and(|path| Path::new(path).is_absolute())
+                }) {
+                    Some(match backend {
+                        locate_edit::Backend::Cpu => {
+                            "Pinned Lanternfish CPU editor is not configured"
+                        }
+                        locate_edit::Backend::Cuda => {
+                            "Pinned Lanternfish CUDA editor is not configured"
+                        }
+                    })
+                } else if backend == locate_edit::Backend::Cuda
+                    && (self.cfg.admission.is_none()
+                        || self
+                            .cfg
+                            .engine_env
+                            .get(locate_edit::GPU_GATE)
+                            .is_none_or(|v| v != "1"))
+                {
+                    Some("CUDA edit requires GPU load permission and a GPU admission wrapper")
+                } else {
+                    None
+                };
+                if let Some(error) = error {
+                    return self.record_prepare(id, action, job, Reply::error(error));
+                }
             }
         }
         if !job.resources.is_empty() {
@@ -1878,6 +1906,9 @@ impl Worker {
                 let admission = if job.kind == exl3_layer::JOB {
                     exl3_layer::Spec::parse(&job.options)
                         .is_ok_and(|spec| spec.backend != exl3_layer::Backend::Cpu)
+                } else if job.kind == locate_edit::JOB {
+                    locate_edit::Request::parse(&job.options)
+                        .is_ok_and(|request| request.edit.backend == locate_edit::Backend::Cuda)
                 } else if job.kind == trace::JOB || scratch_eval::private_output(&job.kind) {
                     false
                 } else {

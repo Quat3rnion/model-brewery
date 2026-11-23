@@ -570,6 +570,8 @@ worker environment applies to jobs that run on that worker.
 | `BREWERY_LANTERNFISH_TRACE` | engine | Absolute path to the pinned CPU Lanternfish binary for `trace`. |
 | `BREWERY_LANTERNFISH_EDIT` | engine | Absolute path to the pinned CPU Lanternfish binary for locate-then-edit jobs. |
 | `BREWERY_LANTERNFISH_EDIT_LIB_DIR` | engine | Absolute path to the directory with the four pinned llama.cpp and ggml libraries. |
+| `BREWERY_LANTERNFISH_EDIT_CUDA` | engine | Absolute path to the pinned W14b Lanternfish binary for CUDA locate-then-edit jobs. |
+| `BREWERY_LANTERNFISH_EDIT_CUDA_LIB_DIR` | engine | Absolute path to the directory with the five pinned W14b libraries. |
 | `BREWERY_CONVERTER` | engine | Pinned bf16-to-hgn converter for `inspect`, `plan`, `convert`, and `verify`. |
 | `BREWERY_COMPONENT_CONVERTER` | engine | Separate role-overlay converter build for HF jobs that replace a component. See [Conversion components](#conversion-components). |
 | `BREWERY_COMPONENT_CPU_ONLY` | engine | Set to `1` to refuse non-CPU backends for those jobs. |
@@ -1599,7 +1601,7 @@ Do not delete the Library entry if you need to select that parent later.
 | --- | --- | --- |
 | `POST /api/scratch` | `{"parent_id":"<id>","parent_sha256":"<hash>"}` | New scratch record with an empty delta (`201`). |
 | `POST /api/scratch/{id}/edits` | `{"operations":[...]}` | New scratch child of `{id}` (`201`). |
-| `POST /api/scratch/{id}/rome`, `/memit`, `/alphaedit` | `{"sha256":"<parent hash>","layers":[12],"facts":[{"subject":"Alice","prompt":"{} lives in","target":"Paris"}]}` | Queued CPU edit (`202`). Read `result.scratch_id` when it succeeds. |
+| `POST /api/scratch/{id}/rome`, `/memit`, `/alphaedit` | Parent `sha256`, `layers`, `facts`, optional `steps` and `backend` (`cpu` or `cuda`). | Queued edit (`202`). Read `result.scratch_id` when it succeeds. |
 | `GET /api/scratch` | None | List of scratch records with provenance (`200`). |
 | `GET /api/scratch/{id}/delta` | None | Parent and child hashes, delta hash and size, and counts of changed tensors and bytes (`200`). |
 | `POST /api/scratch/{id}/gguf` | `{"sha256":"<hash>","assets_id":"<Library assets ID>"}` | Private BF16 conversion job (`202`). |
@@ -1672,12 +1674,12 @@ The merge reserves space for the full child and a delta as large as its
 payload. To run paired checks, use a scratch base with its private BF16
 GGUF. The output remains scratch and **not release-qualified**.
 
-#### Locate and edit a fact on CPU
+#### Locate and edit a fact
 
 Convert the parent to private BF16 GGUF first. Configure the two
-`BREWERY_LANTERNFISH_EDIT` settings on the local worker. The engine checks
-the binary and the four shared libraries against the compiled pins before
-it starts the CLI. The W0 trace binary and its libraries are separate.
+`BREWERY_LANTERNFISH_EDIT` settings on the local worker for the default CPU
+backend. The engine checks the binary and the four shared libraries against
+the compiled pins before launch. The W0 trace pin is separate.
 The private converter supports Qwen2 and bounded dense Llama models with
 local BPE tokenizer JSON and unscaled RoPE. Larger models and other Llama
 variants may exceed the conversion or tensor limits.
@@ -1689,6 +1691,24 @@ AlphaEdit takes up to eight facts and one to three layers. The optional
 `steps` parameter is 1 to 32 (default 16). The 32 MiB tensor limit also
 applies to these jobs. Success makes a child without changing the parent
 or the Library. Use the normal private conversion and check tools on it.
+
+To use CUDA, set `backend` to `cuda` in the API or MCP request. Configure
+the original local worker as follows:
+
+- Set `admission` to the absolute path of the GPU admission wrapper. Use
+  the same lock as other GPU jobs on this host.
+- In `engine_env`, set `BREWERY_ALLOW_GPU_LOAD` to `"1"`. Optionally set
+  `CUDA_VISIBLE_DEVICES` to restrict the available devices.
+- In `engine_env`, set `BREWERY_LANTERNFISH_EDIT_CUDA` to the absolute path
+  of the W14b executable and `BREWERY_LANTERNFISH_EDIT_CUDA_LIB_DIR` to the
+  absolute directory of its five pinned libraries. See the
+  [W14b pin](qualification/lanternfish-w14b-cuda.md).
+
+Only the CUDA edit uses this GPU configuration. The engine verifies the
+executable and all five library hashes before launch. The runtime requires
+GPU placement for forward and backward compute and disables TF32. It does
+not fall back to CPU if CUDA is unavailable. The scratch provenance gives
+the backend and device.
 
 The worker expands BF16 GGUF to F32 for ggml backward. The W3 editor writes
 the update in the original SafeTensors dtype. The private forward pass

@@ -553,7 +553,7 @@
     "/api/scratch/{id}/rome": {
       "post": {
         "operationId": "romeEdit",
-        "summary": "Queue one CPU ROME edit on one layer of a scratch revision with private GGUF",
+        "summary": "Queue one ROME edit on one layer of a scratch revision with private GGUF",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RomeRequest"}}}},
         "responses": {
@@ -562,14 +562,15 @@
           "400": {"$ref": "#/components/responses/BadRequest"},
           "403": {"$ref": "#/components/responses/Forbidden"},
           "404": {"$ref": "#/components/responses/NotFound"},
-          "409": {"$ref": "#/components/responses/ScratchConflict"}
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"}
         }
       }
     },
     "/api/scratch/{id}/memit": {
       "post": {
         "operationId": "memitEdit",
-        "summary": "Queue a CPU MEMIT batch on two or three layers of a scratch revision with private GGUF",
+        "summary": "Queue a MEMIT batch on two or three layers of a scratch revision with private GGUF",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MemitRequest"}}}},
         "responses": {
@@ -578,14 +579,15 @@
           "400": {"$ref": "#/components/responses/BadRequest"},
           "403": {"$ref": "#/components/responses/Forbidden"},
           "404": {"$ref": "#/components/responses/NotFound"},
-          "409": {"$ref": "#/components/responses/ScratchConflict"}
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"}
         }
       }
     },
     "/api/scratch/{id}/alphaedit": {
       "post": {
         "operationId": "alphaEdit",
-        "summary": "Queue a projected CPU AlphaEdit batch on a scratch revision with private GGUF",
+        "summary": "Queue a projected AlphaEdit batch on a scratch revision with private GGUF",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AlphaEditRequest"}}}},
         "responses": {
@@ -594,7 +596,8 @@
           "400": {"$ref": "#/components/responses/BadRequest"},
           "403": {"$ref": "#/components/responses/Forbidden"},
           "404": {"$ref": "#/components/responses/NotFound"},
-          "409": {"$ref": "#/components/responses/ScratchConflict"}
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"}
         }
       }
     },
@@ -1669,7 +1672,7 @@
       "InterventionVersion": {"description": "The immutable intervention version.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/InterventionVersion"}}}},
       "ScratchRow": {"description": "The current scratch revision record.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ScratchRevision"}}}},
       "ScratchConflict": {"description": "The key, admission, hash, disk space, capacity, check bundle, or state does not permit the change.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
-      "LocateEditQueued": {"description": "Queued CPU edit. On success the job result includes the new scratch ID, SHA-256 and optimization losses.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+      "LocateEditQueued": {"description": "Queued edit. On success the job result includes the new scratch ID, SHA-256 and optimization losses.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
       "ScratchBusy": {"description": "Another scratch write is in progress. Retry with the same key.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "BadRequest": {"description": "Malformed JSON, invalid header or cursor, or a request that fails controller validation.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "Forbidden": {"description": "The loopback Host, Origin, or Fetch Metadata guard rejected this request.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}, "example": {"error": "host or origin is not allowed"}}}},
@@ -1805,12 +1808,14 @@
           "target": {"type": "string", "minLength": 1, "maxLength": 256}
         }
       },
+      "LocateEditBackend": {"type": "string", "enum": ["cpu", "cuda"], "default": "cpu", "description": "CUDA requires an approved local GPU worker with the pinned CUDA editor. It never falls back to CPU."},
       "RomeRequest": {
         "type": "object", "additionalProperties": false, "required": ["sha256", "layers", "facts"],
         "properties": {
           "sha256": {"$ref": "#/components/schemas/ScratchHash"},
           "layers": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"type": "integer", "minimum": 0, "maximum": 1023}},
           "facts": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/components/schemas/LocateEditFact"}},
+          "backend": {"$ref": "#/components/schemas/LocateEditBackend"},
           "steps": {"type": "integer", "minimum": 1, "maximum": 32, "default": 16}
         }
       },
@@ -1820,6 +1825,7 @@
           "sha256": {"$ref": "#/components/schemas/ScratchHash"},
           "layers": {"type": "array", "minItems": 2, "maxItems": 3, "description": "Enter indices in increasing order.", "items": {"type": "integer", "minimum": 0, "maximum": 1023}},
           "facts": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/components/schemas/LocateEditFact"}},
+          "backend": {"$ref": "#/components/schemas/LocateEditBackend"},
           "steps": {"type": "integer", "minimum": 1, "maximum": 32, "default": 16}
         }
       },
@@ -1829,6 +1835,7 @@
           "sha256": {"$ref": "#/components/schemas/ScratchHash"},
           "layers": {"type": "array", "minItems": 1, "maxItems": 3, "description": "Enter indices in increasing order.", "items": {"type": "integer", "minimum": 0, "maximum": 1023}},
           "facts": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/components/schemas/LocateEditFact"}},
+          "backend": {"$ref": "#/components/schemas/LocateEditBackend"},
           "steps": {"type": "integer", "minimum": 1, "maximum": 32, "default": 16}
         }
       },
@@ -1914,7 +1921,7 @@
           "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "revision_id": {"$ref": "#/components/schemas/Id"},
           "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "worker": {"type": "string"},
           "method": {"enum": ["copy", "direct", "compile_program", "linear", "task_arithmetic", "ties", "dare_linear", "dare_ties", "rome", "memit", "alphaedit", "prune"]},
-          "locate_edit": {"type": "object", "description": "Edit request, covariance digest, runtime library digests and optimization losses."},
+          "locate_edit": {"type": "object", "description": "Edit request, covariance digest, runtime library digests and optimization losses. CUDA receipts include backend and device in the nested provenance object."},
           "operations": {"type": "array", "items": {"$ref": "#/components/schemas/ScratchOperation"}},
           "merge": {"type": "object", "required": ["algorithm", "inputs"], "properties": {
             "algorithm": {"$ref": "#/components/schemas/ScratchMergeAlgorithm"},

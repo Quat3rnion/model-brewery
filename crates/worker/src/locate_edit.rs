@@ -27,8 +27,82 @@ pub const LIBRARIES: [(&str, &str); 4] = [
         "a2b68b5eab8eec8daa9bba9ee8e56b6d93ca6c2c7ca31f1b0b9533f3791977e6",
     ),
 ];
+pub const CUDA_EXECUTABLE: &str = "BREWERY_LANTERNFISH_EDIT_CUDA";
+pub const CUDA_LIB_DIR: &str = "BREWERY_LANTERNFISH_EDIT_CUDA_LIB_DIR";
+pub const GPU_GATE: &str = "BREWERY_ALLOW_GPU_LOAD";
+pub const CUDA_DEVICES: &str = "CUDA_VISIBLE_DEVICES";
+const CUDA_LIBRARIES: [(&str, &str); 5] = [
+    (
+        "libggml-base.so.0",
+        "c9b00aa527999534c80b90c8459d00d7975c6a9f844409e1753d25b1844bd773",
+    ),
+    (
+        "libggml-cpu.so.0",
+        "db9e2e0c9a18e2ef1b66e1629dc38ed33b29eec1b9bc9ffbc001b2efe50f24ae",
+    ),
+    (
+        "libggml-cuda.so.0",
+        "b9a2c9c43421da2ad63cc9b9172ff6c06532b8665ece3296ee8cc2d04772326b",
+    ),
+    (
+        "libggml.so.0",
+        "e18423ed800f5ab61ae3e88c5bffcb26d49207dcf977ee888ee77f7c13e694ec",
+    ),
+    (
+        "libllama.so.0",
+        "7c42ebe0f25be95472dc4a13f1dffa351c5b12281935baa205bc3d02d89dad0c",
+    ),
+];
 pub const INPUTS: [&str; 2] = ["gguf", "safetensors"];
 pub const SAMPLE_SHA: &str = "21ffd89a9f728b1b760433afd385852589cf5012aac10336ac33b2ad23609877";
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    #[default]
+    Cpu,
+    Cuda,
+}
+
+pub struct Pin {
+    pub executable: &'static str,
+    pub lib_dir: &'static str,
+    pub commit: &'static str,
+    pub sha256: &'static str,
+    pub libraries: &'static [(&'static str, &'static str)],
+}
+
+impl Backend {
+    fn is_cpu(&self) -> bool {
+        *self == Self::Cpu
+    }
+
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Cuda => "cuda",
+        }
+    }
+
+    pub const fn pin(self) -> Pin {
+        match self {
+            Self::Cpu => Pin {
+                executable: EXECUTABLE,
+                lib_dir: LIB_DIR,
+                commit: COMMIT,
+                sha256: SHA256,
+                libraries: &LIBRARIES,
+            },
+            Self::Cuda => Pin {
+                executable: CUDA_EXECUTABLE,
+                lib_dir: CUDA_LIB_DIR,
+                commit: "3b59809c42e8301222ca4a2bc3121266c12a3532",
+                sha256: "816a74eaf076648c97e7d86950a57a3da6b22dbc7940285b955edb15e9c0c959",
+                libraries: &CUDA_LIBRARIES,
+            },
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -63,6 +137,8 @@ pub struct Edit {
     facts: Vec<Fact>,
     #[serde(default = "steps")]
     steps: usize,
+    #[serde(default, skip_serializing_if = "Backend::is_cpu")]
+    pub backend: Backend,
 }
 
 fn steps() -> usize {
@@ -88,6 +164,7 @@ impl Request {
             layers,
             facts,
             steps,
+            ..
         } = &self.edit;
         ensure!(
             (1..=32).contains(steps)
@@ -122,6 +199,13 @@ impl Request {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct Provenance {
+    pub backend: Backend,
+    pub device: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Update {
     layer: usize,
     keys: Vec<Vec<f32>>,
@@ -138,11 +222,31 @@ pub struct Factors {
     pub source_dtype: String,
     pub gradient_dtype: String,
     pub losses: Vec<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Provenance>,
     updates: Vec<Update>,
 }
 
 impl Factors {
     pub fn verify(&self, request: &Request, gguf: &str) -> Result<()> {
+        let backend = request.edit.backend;
+        ensure!(
+            match &self.provenance {
+                None => backend == Backend::Cpu,
+                Some(audit) => {
+                    audit.backend == backend
+                        && match backend {
+                            Backend::Cpu => audit.device == "CPU",
+                            Backend::Cuda => audit
+                                .device
+                                .strip_prefix("CUDA")
+                                .is_some_and(|index| index.parse::<u32>().is_ok()),
+                        }
+                }
+            },
+            "edit factor provenance does not match requested {} backend",
+            backend.key()
+        );
         ensure!(
             self.schema_version == 1
                 && is_digest(gguf)
@@ -203,5 +307,48 @@ impl Factors {
                 v: u.keys.clone(),
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn cuda_receipt_requires_cuda_device_provenance() {
+        let model = "a".repeat(64);
+        let mut options = json!({"method":"rome","backend":"cuda","layers":[12],
+            "facts":[{"subject":"Apple A5","prompt":"{} was created by","target":"Google"}]});
+        let request = Request::parse(&options).unwrap();
+        let old_receipt = json!({"schema_version":1,"model_sha256":model,
+            "covariance_sha256":SAMPLE_SHA,"method":"rome","source_dtype":"bf16",
+            "gradient_dtype":"f32","losses":[[2.0,0.25]],
+            "updates":[{"layer":12,"keys":[[0.5]],"values":[[0.25]]}]});
+        let mut receipt = old_receipt.clone();
+        receipt["provenance"] = json!({"backend":"cuda","device":"CUDA0"});
+        let parsed: Factors = serde_json::from_value(receipt.clone()).unwrap();
+        parsed.verify(&request, &model).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), receipt);
+        let old_factors: Factors = serde_json::from_value(old_receipt).unwrap();
+        assert!(old_factors.verify(&request, &model).is_err());
+        for audit in [
+            json!({"backend":"cpu","device":"CPU"}),
+            json!({"backend":"cuda","device":""}),
+            json!({"backend":"cuda","device":"CPU"}),
+        ] {
+            receipt["provenance"] = audit;
+            let parsed: Factors = serde_json::from_value(receipt.clone()).unwrap();
+            assert!(parsed.verify(&request, &model).is_err());
+        }
+        options.as_object_mut().unwrap().remove("backend");
+        let default = Request::parse(&options).unwrap();
+        old_factors.verify(&default, &model).unwrap();
+        assert!(
+            serde_json::to_value(default)
+                .unwrap()
+                .get("backend")
+                .is_none()
+        );
     }
 }

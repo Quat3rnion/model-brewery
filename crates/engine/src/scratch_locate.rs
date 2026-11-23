@@ -10,6 +10,15 @@ use std::{
 
 pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let request = locate_edit::Request::parse(&job.options)?;
+    let backend = request.edit.backend;
+    let cuda = backend == locate_edit::Backend::Cuda;
+    let pin = backend.pin();
+    if cuda {
+        ensure!(
+            env::var(locate_edit::GPU_GATE).as_deref() == Ok("1"),
+            "CUDA edit requires GPU load permission"
+        );
+    }
     ensure!(
         job.prompt.is_none()
             && job
@@ -34,13 +43,13 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         .tempdir_in(cwd)?;
     let tool = Tool::pinned_digest(
         work.path(),
-        locate_edit::EXECUTABLE,
-        locate_edit::SHA256,
+        pin.executable,
+        pin.sha256,
         "lanternfish",
         "Lanternfish",
     )?;
     let configured = PathBuf::from(
-        env::var_os(locate_edit::LIB_DIR).context("missing edit runtime library directory")?,
+        env::var_os(pin.lib_dir).with_context(|| format!("{} is required", pin.lib_dir))?,
     );
     ensure!(
         integrity::canonical(&configured)?.is_dir(),
@@ -48,7 +57,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     );
     let libs = work.path().join("libs");
     fs::create_dir(&libs)?;
-    for (name, sha) in locate_edit::LIBRARIES {
+    for &(name, sha) in pin.libraries {
         let library = configured.join(name).canonicalize()?;
         ensure!(
             library.parent() == Some(configured.as_path()),
@@ -72,7 +81,10 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         "invalid moment cache"
     );
     let request_file = work.path().join("request.json");
-    write_json(&request_file, &serde_json::to_value(&request)?)?;
+    let mut native_request = serde_json::to_value(&request)?;
+    // Lanternfish selects the backend by flag, not in its strict JSON request.
+    native_request.as_object_mut().unwrap().remove("backend");
+    write_json(&request_file, &native_request)?;
     let out = work.path().join("factors.json");
     let threads = child_threads(None)?.min(16);
     let mut command = tool.command(work.path(), threads);
@@ -89,6 +101,16 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         .arg(cache)
         .arg("--threads")
         .arg(threads.to_string());
+    if cuda {
+        match env::var_os(locate_edit::CUDA_DEVICES) {
+            Some(devices) => command.env(locate_edit::CUDA_DEVICES, devices),
+            None => command.env_remove(locate_edit::CUDA_DEVICES),
+        };
+        command
+            .args(["--backend", "cuda"])
+            .env("NVIDIA_TF32_OVERRIDE", "0")
+            .env("GGML_CUDA_CUBLAS_COMPUTE_TYPE", "f32");
+    }
     ids.iter().try_for_each(integrity::Identity::check)?;
     let mut phase = progress.start("locate_edit", "items", Some(1));
     tool.capture(&mut command, work.path())
@@ -105,7 +127,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     phase.finish();
     Ok(json!({
         "kind":locate_edit::JOB,"parent_sha256":ids[1].sha256,
-        "executable_sha256":locate_edit::SHA256,"lanternfish_commit":locate_edit::COMMIT,
+        "executable_sha256":pin.sha256,"lanternfish_commit":pin.commit,
         "factors":factors
     }))
 }

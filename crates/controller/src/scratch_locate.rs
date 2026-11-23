@@ -1,11 +1,11 @@
-//! Submit a pinned private CPU edit; materialize its W3 child on verified success.
+//! Submit a pinned private edit; materialize its W3 child on verified success.
 use super::*;
 use crate::{
     domain::Job,
     web::{read_submission, replay},
 };
 use axum::response::Response;
-use brewery_worker::locate_edit::{self, Edit, Factors, Method, Request};
+use brewery_worker::locate_edit::{self, Backend, Edit, Factors, Method, Request};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -67,9 +67,16 @@ fn run(
     let (gguf, gguf_sha) = jobs::trace_input(&store, parent)?;
     let safe = jobs::input(&store, &row, scratch::MODEL, "safetensors");
     let lane = admit(app, &row.provenance.worker)?;
-    if !lane.locate_edit_configured() {
+    let backend = request.edit.backend;
+    if !lane.locate_edit_configured(backend) {
+        return Err(conflict(match backend {
+            Backend::Cpu => "configure the pinned Lanternfish CPU editor on this local worker",
+            Backend::Cuda => "configure the pinned Lanternfish CUDA editor on this local worker",
+        }));
+    }
+    if backend == Backend::Cuda && !lane.scratch_gpu_allowed() {
         return Err(conflict(
-            "configure the pinned Lanternfish CPU editor on this local worker",
+            "CUDA edit requires GPU load permission and a GPU admission wrapper on this worker",
         ));
     }
     if store.scratch_count().map_err(ApiError::storage)? >= LIMIT {
@@ -114,6 +121,8 @@ pub(crate) fn finish(
 ) -> std::result::Result<(Revision, Value, Uncommitted), crate::Error> {
     let envelope = store.envelope(&job.id)?;
     let request = Request::parse(&Value::Object(envelope.options))?;
+    let backend = request.edit.backend;
+    let pin = backend.pin();
     let [gguf, safe] = envelope.inputs.as_slice() else {
         return Err("missing private editor inputs".into());
     };
@@ -137,8 +146,8 @@ pub(crate) fn finish(
         && envelope.scratch_pins.get(&safe.path) == Some(&row.sha256)
         && result["parent_sha256"] == row.sha256
         && result["kind"] == locate_edit::JOB
-        && result["executable_sha256"] == locate_edit::SHA256
-        && result["lanternfish_commit"] == locate_edit::COMMIT)
+        && result["executable_sha256"] == pin.sha256
+        && result["lanternfish_commit"] == pin.commit)
     {
         return Err("private edit receipt does not match the pinned parent".into());
     }
@@ -162,6 +171,14 @@ pub(crate) fn finish(
         &guard.path,
         &operations,
     )?;
+    let mut locate = json!({
+        "request":request,"parent_gguf_sha256":gguf_pin,"covariance_sha256":factors.covariance_sha256,
+        "gguf_weight_dtype":factors.source_dtype,"gradient_dtype":factors.gradient_dtype,
+        "optimization_nll":factors.losses,"runtime_libraries":pin.libraries,
+    });
+    if let Some(audit) = &factors.provenance {
+        locate["provenance"] = serde_json::to_value(audit)?;
+    }
     let provenance = Provenance {
         schema: "brewery.scratch-provenance.v1".into(),
         parent_id: row.id,
@@ -176,13 +193,9 @@ pub(crate) fn finish(
         pruning_trace: None,
         tensors: output.tensors,
         tool: "Lanternfish locate-edit and Brewery SafeTensors scratch editor".into(),
-        tool_version: locate_edit::COMMIT.into(),
-        runtime_version: format!("cpu-ggml-backward-f32; sha256:{}", locate_edit::SHA256),
-        locate_edit: Some(json!({
-            "request":request,"parent_gguf_sha256":gguf_pin,"covariance_sha256":factors.covariance_sha256,
-            "gguf_weight_dtype":factors.source_dtype,"gradient_dtype":factors.gradient_dtype,
-            "optimization_nll":factors.losses,"runtime_libraries":locate_edit::LIBRARIES,
-        })),
+        tool_version: pin.commit.into(),
+        runtime_version: format!("{}-ggml-backward-f32; sha256:{}", backend.key(), pin.sha256),
+        locate_edit: Some(locate),
         created_at_ms: now(),
         compiled_program: None,
     };

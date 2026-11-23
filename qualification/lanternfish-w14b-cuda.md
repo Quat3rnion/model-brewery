@@ -1,8 +1,8 @@
 # W14b standalone CUDA backward pin
 
 This pin is **not release-qualified**. It is not a replacement for the W0
-trace pin or the W9 managed edit pin. The W9 receipt parser does not accept
-the new `provenance` field.
+trace pin or the W9 CPU edit pin. Managed CUDA edits use this pin only
+when the request sets `backend` to `cuda`.
 
 Lanternfish commit: `3b59809c42e8301222ca4a2bc3121266c12a3532`.
 llama.cpp base: `184f6536024668e8908ab8c86033d56708e62b40`, with the eight
@@ -22,9 +22,11 @@ export LD_LIBRARY_PATH="$pin/lib"
 The checksum file covers the binary and all five project libraries. It
 does not cover system libraries, the NVIDIA driver, or the CUDA toolkit.
 Use a GPU queue ticket for model loads. Both `grad` and `locate-edit`
-accept `--backend cuda`; CPU remains the default. The factor solve and
-host-to-device transfers do not count as ggml graph operations. The
-native call rejects CPU computation in the forward and backward passes.
+accept `--backend cuda`; CPU remains the default. The CUDA runtime uses
+`NVIDIA_TF32_OVERRIDE=0` and `GGML_CUDA_CUBLAS_COMPUTE_TYPE=f32`. The
+factor solve and host-to-device transfers do not count as ggml graph
+operations. The native call rejects CPU computation in the forward and
+backward passes.
 Patch 0007 checks the scheduled backend before each graph dispatch. The
 CLI places the input embedding table on the GPU so `GET_ROWS` also runs there.
 

@@ -156,7 +156,9 @@ pub(crate) fn prepare_enqueue(app: &App, mut job: Job, envelope: &Envelope) -> R
     if crate::domain::candidates(&job, envelope, &hosts).is_empty() {
         return Err(conflict("no eligible local worker for this scratch job"));
     }
-    lane.snapshot_scratch(&job.host, &job.id, &envelope.scratch_pins)
+    let cuda = job.kind == brewery_worker::locate_edit::JOB
+        && envelope.options.get("backend").is_some_and(|v| v == "cuda");
+    lane.snapshot_scratch(&job.host, &job.id, &envelope.scratch_pins, cuda)
         .map_err(ApiError::storage)?;
     Ok(job)
 }

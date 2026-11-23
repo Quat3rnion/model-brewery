@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the three CPU edit methods through MCP with the same pinned Qwen parent."""
+"""Run the managed edit methods through MCP with the same pinned Qwen parent."""
 
 import argparse
 import asyncio
@@ -19,6 +19,8 @@ from weight_space_acceptance import (
 RUNTIME = ARB / "w9-runtime"
 LIBRARIES = ARB / "llama-w9/build/bin"
 LIBRARY_NAMES = ("libllama.so.0", "libggml.so.0", "libggml-base.so.0", "libggml-cpu.so.0")
+CUDA_RUNTIME = ARB / "pins/lanternfish-w14b-3b59809"
+CUDA_MANIFEST = REPO / "qualification/lanternfish-w14b-cuda.sha256"
 CASE_IDS = (7, 0, 1, 2, 3)
 METHODS = ("rome", "memit", "alphaedit")
 CHECKS = REPO / "tools/scratch_checks.py"
@@ -117,10 +119,14 @@ async def exercise(base, run, args):
         root = run / "state/scratch"
         parent_path = root / parent_id / "model.gguf"
         require(sha(parent_path) == parent_gguf["gguf"]["sha256"], "private parent pin mismatch")
+        cuda = args.backend == "cuda"
+        runtime = CUDA_RUNTIME if cuda else RUNTIME
+        libraries = CUDA_RUNTIME / "lib" if cuda else LIBRARIES
+        names = LIBRARY_NAMES + ("libggml-cuda.so.0",) if cuda else LIBRARY_NAMES
         report = {"qualification": "not release-qualified", "parent_safetensors": parent_sha,
                   "parent_gguf": parent_gguf["gguf"]["sha256"],
-                  "lanternfish_sha256": sha(RUNTIME / "lanternfish"),
-                  "library_sha256": {n: sha(LIBRARIES / n) for n in LIBRARY_NAMES},
+                  "backend": args.backend, "lanternfish_sha256": sha(runtime / "lanternfish"),
+                  "library_sha256": {n: sha(libraries / n) for n in names},
                   "methods": {}}
 
         for method in (args.method or METHODS):
@@ -128,12 +134,25 @@ async def exercise(base, run, args):
             layers = [12] if method == "rome" else [10, 12]
             write = dict(id=parent_id, sha256=parent_sha, layers=layers,
                          facts=targets[:len(ids)], steps=args.steps)
+            if cuda:
+                write["backend"] = "cuda"
             job = await submit(method + "_edit", method, **write)
             repeated = await submit(method + "_edit", method, **write)
             require(job["id"] == repeated["id"], "idempotent job replay failed")
             result = await wait(job, method)
             child_id, child_sha = result["scratch_id"], result["sha256"]
             require(child_sha != parent_sha, "unexpected unchanged child")
+            revision = await call("get_scratch", id=child_id)
+            locate = revision["provenance"]["locate_edit"]
+            require(dict(locate["runtime_libraries"]) == report["library_sha256"],
+                    "scratch runtime library pins do not match")
+            if cuda:
+                audit = locate["provenance"]
+                require(audit["backend"] == "cuda" and re.fullmatch(r"CUDA[0-9]+", audit["device"]),
+                        "edit did not report the CUDA device")
+                save(args.evidence, f"{method}-provenance", locate)
+                log = run / "state/local-edit/local/worker/jobs" / job["id"] / "engine-stderr.log"
+                (args.evidence / f"{method}-admission.log").write_bytes(log.read_bytes())
             diff = await call("diff_tensors", a=parent_id, b=child_id)
             expected = {f"model.layers.{layer}.mlp.down_proj.weight" for layer in layers}
             require({t["name"] for t in diff["tensors"] if t["changed_elements"]} == expected
@@ -157,6 +176,7 @@ async def exercise(base, run, args):
                 "w4_metrics": measured["metrics"], "integrity": bundle["integrity"],
                 "smoke": [measured[k] for k in ("parent_generation", "child_generation")],
                 "child": child_sha, "tensors": sorted(expected),
+                "locate_edit": locate,
             }
             report["methods"][method] = summary
             save(args.evidence, "report", report)
@@ -175,6 +195,13 @@ async def run_acceptance(run, args):
         "BREWERY_LANTERNFISH_EDIT_LIB_DIR": str(LIBRARIES),
         "BREWERY_CPU_THREADS": "6",
     })
+    if args.backend == "cuda":
+        doc["admission"] = str(args.gpu_admission)
+        doc["engine_env"].update({
+            "BREWERY_ALLOW_GPU_LOAD": "1",
+            "BREWERY_LANTERNFISH_EDIT_CUDA": str(CUDA_RUNTIME / "lanternfish"),
+            "BREWERY_LANTERNFISH_EDIT_CUDA_LIB_DIR": str(CUDA_RUNTIME / "lib"),
+        })
     config.write_text(json.dumps(doc))
     path = args.evidence / "controller.log"
     with path.open("w") as log:
@@ -209,10 +236,17 @@ def main():
     parser.add_argument("--bins", type=Path, default=RUNTIME / "bin")
     parser.add_argument("--web-dist", type=Path, default=ARB / "w8-accept/web")
     parser.add_argument("--method", choices=METHODS, action="append")
+    parser.add_argument("--backend", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--gpu-admission", type=Path,
+                        help="Trusted host wrapper for CUDA. It must take the shared GPU lock.")
     parser.add_argument("--steps", type=int, choices=range(1, 33), default=16)
     args = parser.parse_args()
     require(args.evidence.is_absolute() and args.evidence.is_relative_to(ARB), "use an absolute evidence directory under /arboretum")
     require(not args.evidence.exists(), "use a new evidence directory")
+    if args.backend == "cuda":
+        require(args.gpu_admission is not None and args.gpu_admission.is_absolute()
+                and os.access(args.gpu_admission, os.X_OK), "use an absolute GPU admission wrapper")
+        subprocess.run(["sha256sum", "-c", CUDA_MANIFEST], cwd=CUDA_RUNTIME, check=True)
     for path, pin in PINS.items():
         require(sha(path) == pin, f"pin mismatch: {path}")
     args.evidence.mkdir(parents=True)

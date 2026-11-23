@@ -346,7 +346,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .context("trace disk reserve overflow")?,
         )?;
     }
-    if job.kind == locate_edit::JOB {
+    let edit_backend = if job.kind == locate_edit::JOB {
         let bytes = weight_source::open_regular(&job.inputs[0].path)?
             .metadata()?
             .len();
@@ -356,6 +356,21 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .saturating_add(bytes.saturating_mul(2))
                 .saturating_add(512 << 20),
         )?;
+        Some(locate_edit::Request::parse(&job.options)?.edit.backend)
+    } else {
+        None
+    };
+    let cuda_edit = edit_backend == Some(locate_edit::Backend::Cuda);
+    if cuda_edit {
+        ensure!(
+            scratch_job
+                && w.cfg.admission.is_some()
+                && w.cfg
+                    .engine_env
+                    .get(locate_edit::GPU_GATE)
+                    .is_some_and(|v| v == "1"),
+            "CUDA edit requires GPU load permission and a GPU admission wrapper"
+        );
     }
     fs::create_dir(&work)?;
     *created_work = true;
@@ -412,7 +427,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         .cfg
         .admission
         .as_ref()
-        .filter(|_| job.kind != trace::JOB && !scratch_job)
+        .filter(|_| cuda_edit || (job.kind != trace::JOB && !scratch_job))
     {
         let mut c = Command::new(wrapper);
         c.args(["--wait", "--"]).arg(&w.cfg.engine);
@@ -436,6 +451,12 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 scratch_eval::RUNNER_SHA,
                 scratch_eval::CACHE,
             ],
+            locate_edit::JOB if cuda_edit => &[
+                locate_edit::CUDA_EXECUTABLE,
+                locate_edit::CUDA_LIB_DIR,
+                locate_edit::GPU_GATE,
+                locate_edit::CUDA_DEVICES,
+            ],
             locate_edit::JOB => &[locate_edit::EXECUTABLE, locate_edit::LIB_DIR],
             _ => &[trace::EXECUTABLE],
         };
@@ -445,6 +466,9 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .chain(["BREWERY_CPU_THREADS"])
                 .filter_map(|key| w.cfg.engine_env.get(key).map(|value| (key, value))),
         );
+        if cuda_edit {
+            command.env("PATH", "/usr/bin:/bin");
+        }
     } else {
         command.envs(&w.cfg.engine_env);
     }
@@ -691,6 +715,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     }
     if job.kind == locate_edit::JOB {
         let request = locate_edit::Request::parse(&job.options)?;
+        let pin = request.edit.backend.pin();
         let factors: locate_edit::Factors = serde_json::from_value(value["factors"].clone())?;
         factors.verify(
             &request,
@@ -699,8 +724,8 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         ensure!(
             value["kind"] == locate_edit::JOB
                 && value["parent_sha256"] == job.inputs[1].extra["sha256"]
-                && value["executable_sha256"] == locate_edit::SHA256
-                && value["lanternfish_commit"] == locate_edit::COMMIT,
+                && value["executable_sha256"] == pin.sha256
+                && value["lanternfish_commit"] == pin.commit,
             "private edit receipt does not match input or executable pin"
         );
         return Ok(value);

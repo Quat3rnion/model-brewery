@@ -18,6 +18,17 @@ The harness needs free space for one parent and one child SafeTensors file,
 their private GGUF files, and the converter's temporary files. It discards
 each child after it saves evidence and removes the isolated stack at exit.
 
+For managed CUDA ROME, use a W14c build and the W14b pin. Pass an absolute
+GPU admission wrapper that takes the host's normal GPU lock. Do not take
+the lock outside the worker.
+
+```sh
+uv run --no-project --offline --with mcp==1.26.0 python -B \
+  qualification/weight_space_stage2.py --method rome --backend cuda \
+  --bins /path/to/w14c/bin --gpu-admission /path/to/gpu-admission \
+  --evidence /arboretum/w14c-acceptance
+```
+
 The harness submits ROME for CounterFact case 7, then submits MEMIT and
 AlphaEdit for the same five cases (7, 0, 1, 2 and 3) from the W4 pinned
 subset. It uses one BF16 Qwen2.5-0.5B-Instruct parent. It checks that each
