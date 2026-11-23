@@ -30,12 +30,19 @@ const MAX_REQUESTS = 64;
 // Bound exact wire strings without requiring Web Crypto's secure context.
 const MAX_HISTORY_CHARS = 1024 * 1024;
 
-/** Keep the most recent entries up to both limits. */
+/** Bound the number and total size of exact requests. */
 export class RequestHistory<T> {
   #entries = new Map<string, T>();
   #size = 0;
 
   get(request: string) { return this.#entries.get(request); }
+
+  tryInsert(request: string, value: T): boolean {
+    if (this.#entries.has(request) || this.#entries.size >= MAX_REQUESTS || this.#size + request.length > MAX_HISTORY_CHARS) return false;
+    this.#entries.set(request, value);
+    this.#size += request.length;
+    return true;
+  }
 
   set(request: string, value: T) {
     if (request.length > MAX_HISTORY_CHARS) return;
@@ -71,8 +78,9 @@ export class PlainAttempt {
       this.#pending.clear();
       this.#current = current;
     }
-    const key = this.#pending.get(request) ?? `conv-${hex(crypto.getRandomValues(new Uint8Array(16)))}`;
-    this.#pending.set(request, key);
+    const existing = this.#pending.get(request);
+    const key = existing ?? `conv-${hex(crypto.getRandomValues(new Uint8Array(16)))}`;
+    if (!existing && !this.#pending.tryInsert(request, key)) return null;
     return {
       key,
       complete: () => { if (this.#pending.get(request) === key) this.#pending.delete(request); },

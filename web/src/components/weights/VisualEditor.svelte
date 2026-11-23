@@ -12,7 +12,7 @@
   import SubmitStatus from '../SubmitStatus.svelte';
   import JobState from '../JobState.svelte';
   import { brewery } from '../../lib/store.svelte';
-  import { acceptedJobSummary, guardReadLink, jobRequestKey, Submitter } from '../../lib/submit.svelte';
+  import { acceptedJobSummary, guardReadLink, jobRequestKey, ReadVisit, Submitter } from '../../lib/submit.svelte';
   import type { PlainAttempt } from '../../lib/submission-key';
   import { captureResultFocus } from '../../lib/focus';
   import { route } from '../../lib/route.svelte';
@@ -35,6 +35,7 @@
     step,
     tileJob,
     tileRequest,
+    type InventoryPage,
     type TensorInfo,
     type Tile,
   } from '../../lib/weightmap';
@@ -71,7 +72,9 @@
   const stateJobs = $derived(brewery.state?.jobs ?? []);
   const submitted = $derived([...acceptedReads.values()]
     .filter(job => job.host === source.host && job.input_ids[0] === source.id).reverse());
-  const jobs = $derived([...stateJobs, ...submitted.filter(j => !stateJobs.some(row => row.id === j.id))]);
+  const readVisit = new ReadVisit();
+  const jobs = $derived([...stateJobs, ...submitted.filter(j => !stateJobs.some(row => row.id === j.id))
+    .map(job => brewery.details[job.id] ?? job)].filter(job => readVisit.shows(job)));
   const models = $derived(brewery.state?.models ?? []);
 
   // Ignore old reports only when the user asks the worker to read again.
@@ -87,42 +90,58 @@
   let acceptedReadMode = $state<'inventory' | 'tile'>();
   let inventoryLink: HTMLAnchorElement | undefined = $state();
   let tileLink: HTMLAnchorElement | undefined = $state();
+  let receiptError = $state<string | null>(null);
 
   function want(job: JobSummary | null): void {
     if (job?.state === 'succeeded' && !brewery.details[job.id]) void brewery.loadJob(job.id).catch(() => {});
   }
-  async function read(job: ReturnType<typeof inventoryJob>, event: MouseEvent) {
+  async function read(job: ReturnType<typeof inventoryJob>, event: MouseEvent, replace?: (id: string) => void) {
     const key = jobRequestKey(readLauncher(job), job);
-    readKey = JSON.stringify(job.options);
     const focus = captureResultFocus(event);
-    const created = await reads.submit(job, event, false);
+    const created = await reads.submit(job, event, false, () => {
+      readKey = key;
+      receiptError = null;
+    });
     if (!created) return;
     const id = created.id;
+    const summary = acceptedJobSummary(created, job);
+    if (!findRead([summary], job.input_ids[0], job.options!, job.host)) {
+      receiptError = 'The read job does not match this request.';
+      return;
+    }
     acceptedReadMode = job.options?.mode === 'tile' ? 'tile' : 'inventory';
     function record(summary: JobSummary) {
       if (summary.id !== id || !findRead([summary], job.input_ids[0], job.options!, job.host)) return;
+      readVisit.remember(id);
       acceptedReads.delete(key);
       acceptedReads.set(key, summary);
     }
-    record(acceptedJobSummary(created, job));
+    replace?.(id);
+    record(summary);
     void focus?.(() => job.options?.mode === 'tile' ? tileLink : inventoryLink);
     if (!('state' in created)) void brewery.loadJob(id).then(detail => {
       if (acceptedReads.get(key)?.id === id) record(detail);
     }).catch(() => {});
   }
-  function ignoreReads(match: (job: JobSummary) => boolean) {
+  function ignoreReads(keep: string, match: (job: JobSummary) => boolean) {
     const next = new Set(ignored);
     for (const j of jobs) if (j.kind === 'weight_inspect' && j.input_ids[0] === source.id && !isActive(j.state) && match(j)) next.add(j.id);
+    next.delete(keep);
     ignored = next;
   }
 
   // ---- Inventory, page by page. ----
   const inv = $derived(walkInventory(source, usable, brewery.details, { packed: packedHost, format: isSafeSource(source.kind) ? source.kind : undefined }));
-  const sha = $derived(inv.pages[0]?.source_sha256 ?? null);
-  const total = $derived(inv.pages[0]?.total ?? 0);
-  const tensors = $derived(inv.pages.flatMap((p) => p.tensors.map(t => isPacked(t.dtype) && (!packedHost || (source.kind === 'hgn') !== (t.dtype === 'Q8G64')) ? {...t, reason: t.reason ?? 'Packed editing is not enabled for this source and worker.'} : t)));
+  let previousPages = $state.raw<InventoryPage[]>([]);
+  const shownPages = $derived(inv.pages.length ? inv.pages : previousPages);
+  const sha = $derived(shownPages[0]?.source_sha256 ?? null);
+  const total = $derived(shownPages[0]?.total ?? 0);
+  const tensors = $derived(shownPages.flatMap((p) => p.tensors.map(t => isPacked(t.dtype) && (!packedHost || (source.kind === 'hgn') !== (t.dtype === 'Q8G64')) ? {...t, reason: t.reason ?? 'Packed editing is not enabled for this source and worker.'} : t)));
   const inventoryRequest = $derived(inv.need ? inventoryJob(source.id, source.host, inv.need.offset, inv.need.sha, packedHost) : null);
-  const inventoryError = $derived(inv.error ?? (inventoryRequest && readKey === JSON.stringify(inventoryRequest.options) ? reads.error : null));
+  const firstPage = $derived(inventoryJob(source.id, source.host, 0, undefined, packedHost));
+  const restartInventory = $derived(!inventoryRequest || (inv.need?.offset === 0 && shownPages.length > 0));
+  const inventoryError = $derived(readKey === jobRequestKey(inventoryLauncher, inventoryRequest ?? firstPage)
+    ? reads.error ?? receiptError ?? inv.error : inv.error);
   const lastInventoryRead = $derived(submitted.find(j => j.options?.mode === 'inventory' && !ignored.has(j.id)));
   const inventoryJobFound = $derived(inv.job ?? jobs.find(j => j.id === lastInventoryRead?.id));
   $effect(() => {
@@ -131,10 +150,11 @@
   });
   function readInventoryPage(event: MouseEvent) {
     if (!canVisual || (inv.job && !inv.error)) return;
-    if (!inventoryRequest) {
-      ignoreReads(j => j.options?.mode === 'inventory');
-      void read(inventoryJob(source.id, source.host, 0, undefined, packedHost), event);
-    } else void read(inventoryRequest, event);
+    const request = inventoryRequest ?? firstPage;
+    void read(request, event, restartInventory ? id => {
+      previousPages = shownPages;
+      ignoreReads(id, j => j.options?.mode === 'inventory');
+    } : undefined);
   }
 
   // ---- Current tensor and tile. ----
@@ -185,7 +205,8 @@
     return d ? readTile(d.result, { tensor: tensor.name, origin: req.origin, shape: req.shape, sha, dtype: tensor.dtype, full: tensor.shape }) : null;
   });
   const tileOk = $derived(typeof tile === 'object' ? tile : null);
-  const tileError = $derived(typeof tile === 'string' ? tile : tileOptions && readKey === JSON.stringify(tileOptions) ? reads.error : null);
+  const tileError = $derived((tileRead && readKey === jobRequestKey(tileLauncher, tileRead) ? reads.error ?? receiptError : null) ??
+    (typeof tile === 'string' ? tile : null));
   const otherTileActive = $derived(jobs.some((j) => j.kind === 'weight_inspect' && j.input_ids[0] === source.id && (j.options as Record<string, unknown> | undefined)?.mode === 'tile' && isActive(j.state)));
   $effect(() => {
     void brewery.lastUpdated;
@@ -195,8 +216,7 @@
     const request = tileRead;
     const options = request?.options;
     if (!canVisual || !request || !options || otherTileActive || (tileJobFound && !tileError)) return;
-    if (tileJobFound) ignoreReads(j => !!findRead([j], source.id, options));
-    void read(request, event);
+    void read(request, event, tileJobFound ? id => ignoreReads(id, j => !!findRead([j], source.id, options)) : undefined);
   }
 
   // Stored values seen in loaded tiles, for edits across tiles.
@@ -393,7 +413,7 @@
       {#if !inv.job || inv.error}
         <div class="row">
           <button type="button" class="btn small" onclick={readInventoryPage} disabled={reads.busy}>
-            {!inventoryRequest ? 'Read tensor list again' : inv.pages.length ? 'Read next tensors' : 'Read tensor list'}
+            {restartInventory ? 'Read tensor list again' : inv.pages.length ? 'Read next tensors' : 'Read tensor list'}
           </button>
           <span class="hint">This queues a <code>weight_inspect</code> job on {sourceHost}.</span>
         </div>

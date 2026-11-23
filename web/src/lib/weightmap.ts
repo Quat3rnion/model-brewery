@@ -308,7 +308,10 @@ export function walkInventory(
     const options = inventoryJob(source.id, source.host, offset, sha, packed).options!;
     const job = findRead(jobs, source.id, options, matchHost ? source.host : undefined);
     if (!job) return { pages, need: { offset, sha } };
-    if (job.state !== 'succeeded') return { pages, job, error: isActive(job.state) ? undefined : (job.error ?? 'The tensor list could not be read.') };
+    if (job.state !== 'succeeded') {
+      if (isActive(job.state)) return { pages, job };
+      return { pages, job, need: { offset, sha }, error: job.error ?? 'The tensor list could not be read.' };
+    }
     const detail = details[job.id];
     if (!detail) return { pages, job };
     const p = readInventory(detail.result, format);

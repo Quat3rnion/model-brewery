@@ -11,6 +11,7 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly controllerError = false,
   ) {
     super(message);
   }
@@ -45,11 +46,13 @@ async function requestWithStatus<T>(method: string, path: string, body?: unknown
     }
   }
   if (!response.ok) {
-    const message =
-      data && typeof data === 'object' && typeof (data as { error?: unknown }).error === 'string'
-        ? (data as { error: string }).error
-        : `Request failed with HTTP ${response.status}.`;
-    throw new ApiError(message, response.status);
+    const error = data && typeof data === 'object' ? (data as { error?: unknown }).error : undefined;
+    // Controller ApiError (including JSON extractor errors) is a JSON object
+    // with exactly one field. Do not use a proxy's status code as provenance.
+    const controllerError = typeof error === 'string' && Object.keys(data as object).length === 1 &&
+      /^\s*application\/json\s*(?:;|$)/i.test(response.headers.get('content-type') ?? '');
+    const message = typeof error === 'string' ? error : `Request failed with HTTP ${response.status}.`;
+    throw new ApiError(message, response.status, controllerError);
   }
   return { data: data as T, status: response.status };
 }
@@ -92,9 +95,9 @@ export function errorText(error: unknown): string {
   return String(error);
 }
 
-/** A network or server error does not tell us if the controller accepted the POST. */
+/** Only a controller rejection tells us it did not accept the POST. */
 export function rejectedSubmission(error: unknown): boolean {
-  return error instanceof ApiError && error.status >= 400 && error.status < 500;
+  return error instanceof ApiError && error.controllerError && error.status >= 400 && error.status < 500;
 }
 
 export function submissionError(error: unknown): string {

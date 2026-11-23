@@ -155,7 +155,7 @@ for (const [kind, action] of [
   expect(second.headers['idempotency-key']).toBe(first.headers['idempotency-key']);
 });
 
-for (const lost of [true, false]) test(`Weight Apply does not requeue a reviewed proposal after ${lost ? 'a matched retry' : 'a 201'}`, async ({ page, controller }) => {
+for (const [lost, activation] of [[true, 'Enter'], [false, 'Enter'], [false, 'Space']]) test(`Weight Apply does not requeue after ${activation} receives ${lost ? 'a matched retry' : 'a 201'}`, async ({ page, controller }) => {
   const state = scenario('weight-reads');
   const proposalId = '6ecf76ee-0473-4544-ac77-106a37c05ddd';
   const proposal = detail(job(proposalId, 'weight_propose', { state: 'succeeded', input_ids: ['gguf-a'] }), {
@@ -192,7 +192,7 @@ for (const lost of [true, false]) test(`Weight Apply does not requeue a reviewed
   }, { times: 1 });
   try {
     const match = page.waitForResponse(r => r.url().endsWith('/api/jobs') && r.request().method() === 'POST');
-    await button(page, action).press('Enter');
+    await button(page, action).press(activation);
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     release();
     const accepted = await match;
@@ -202,8 +202,10 @@ for (const lost of [true, false]) test(`Weight Apply does not requeue a reviewed
       finished = detail({ ...(await accepted.json()), state: 'succeeded' });
     }
     const status = page.getByText(/^(?:This request was already queued|Queued) as job /);
-    await expect(status.getByRole('link', { name: finished.id, exact: true })).toBeFocused();
+    const result = status.getByRole('link', { name: finished.id, exact: true });
+    await expect(result).toBeFocused();
     await expect(button(page, action)).toBeDisabled({ timeout: 1500 });
+    await expect(result).toBeInViewport({ ratio: 1, timeout: 1500 });
   } finally { release(); }
   const [first, second] = posts(controller);
   expect(key(first)).toMatch(/^conv-/);
@@ -212,12 +214,115 @@ for (const lost of [true, false]) test(`Weight Apply does not requeue a reviewed
     expect(first.body).toEqual(second.body);
     expect(key(first)).toBe(key(second));
   }
-  state.jobs.push(finished);
+  if (activation === 'Enter' && !lost) {
+    state.jobs.push({ ...finished, state: 'queued' });
+    state.jobs.push(...Array.from({ length: 20 }, (_, i) => job(`newer-${i}`, 'weight_propose', {
+      input_ids: ['gguf-a'], created_at: '2026-12-01T00:00:00Z',
+    })));
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await expect(page.getByRole('radio', { name: /newer-19/ })).toBeVisible();
+    const focused = page.locator(':focus');
+    await expect(focused).toHaveText(new RegExp(`^(?:${finished.id}|Review and apply)$`), { timeout: 1500 });
+    const index = state.jobs.indexOf(proposal);
+    state.jobs.splice(index, 1);
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await expect(page.getByRole('heading', { name: 'Review and apply' })).toBeFocused({ timeout: 1500 });
+    state.jobs.splice(index, 0, proposal);
+    state.jobs.splice(-20);
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await page.getByRole('radio', { name: new RegExp(proposalId) }).check();
+  }
+  state.jobs = [...state.jobs.filter(job => job.id !== finished.id), finished];
   controller.respond('GET', `/api/jobs/${finished.id}`, { json: finished });
   await page.evaluate(() => window.dispatchEvent(new Event('online')));
   await expect(page.getByText(/^Applied by/).getByRole('link')).toHaveText(finished.id);
   await expect(button(page, action)).toHaveCount(0);
   expect(posts(controller)).toHaveLength(lost ? 2 : 1);
+});
+
+test('visual reread keeps the loaded inventory after suppression, POST failure, or terminal failure', async ({ page, controller }) => {
+  controller.load('weight-reads');
+  await controller.open(page, 'weights?source=gguf-a');
+  const tensor = page.getByRole('option', { name: /^blk\.0\.ffn_down\.weight,/ });
+  expect((await submit(page, 'Read tensor list'))[0]).toBe(201);
+  await expect(tensor).toBeVisible();
+  expect((await submit(page, 'Read next tensors'))[0]).toBe(201);
+  const reread = button(page, 'Read tensor list again');
+  await reread.press('Enter');
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  expect(posts(controller)).toHaveLength(2);
+  expect(await tensor.isVisible()).toBe(true);
+  await page.waitForTimeout(850); // A deliberate new keyboard press.
+  await page.route('**/api/jobs', route => route.fulfill({ status: 403, body: 'Forbidden' }), { times: 1 });
+  await reread.press('Enter');
+  await expect(page.getByRole('alert').filter({ hasText: 'Forbidden' })).toBeVisible();
+  expect(await tensor.isVisible()).toBe(true);
+  const state = await (await page.request.get(`${controller.origin}/api/state`)).json();
+  const message = 'The refreshed file could not be opened.';
+  const editor = page.getByRole('region', { name: '1. Tensor' });
+  controller.respond('GET', '/api/state', () => ({ json: state }));
+  controller.respond('POST', '/api/jobs', ({ body }) => {
+    const failed = job('failed-reread', 'weight_inspect', { ...body, state: 'failed', error: message });
+    state.jobs.push(failed);
+    return { status: 201, json: failed };
+  });
+  expect(await submit(page, 'Read tensor list again')).toEqual([201, 'failed-reread']);
+  await expect(editor.getByRole('alert').filter({ hasText: message })).toBeVisible();
+  await expect(reread).toBeEnabled();
+  expect(await tensor.isVisible()).toBe(true);
+  await choose(page, '#w-source', /^Fixture checkpoint/);
+  await choose(page, '#w-source', /^Fixture GGUF GGUF/);
+  await expect(tensor).toBeVisible();
+  await expect(editor.getByText(message)).toHaveCount(0);
+});
+
+test('a failed layer inventory leaves a retry available and is not retained across source switches', async ({ page, controller }) => {
+  controller.load('weight-reads');
+  const state = scenario('weight-reads');
+  state.models.push({ ...state.models.find(m => m.id === 'source-a'), id: 'source-b', name: 'Second checkpoint' });
+  controller.respond('GET', '/api/state', () => ({ json: state }));
+  await controller.open(page, 'convert?format=recipe&output=gguf');
+  await choose(page, '#recipe-source', /^Fixture checkpoint/);
+  await page.route('**/api/jobs', async route => {
+    const response = await route.fetch();
+    await route.fulfill({ status: 201, json: { ...await response.json(), state: 'queued' } });
+  }, { times: 1 });
+  const [status, id] = await submit(page, 'Read layers');
+  expect(status).toBe(201);
+  const message = 'Fixture read failed after the worker could not open the path.';
+  state.jobs.push(job(id, 'weight_inspect', { ...posts(controller)[0].body, state: 'failed', error: message }));
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect(page.getByRole('alert').filter({ hasText: message })).toBeVisible();
+  await expect(button(page, 'Read layers')).toBeEnabled({ timeout: 1500 });
+  await choose(page, '#recipe-source', /^Second checkpoint/);
+  await choose(page, '#recipe-source', /^Fixture checkpoint/);
+  await expect(page.getByText(message)).toHaveCount(0);
+  await page.waitForTimeout(850);
+  const [retryStatus, retryId] = await submit(page, 'Read layers');
+  expect(retryStatus).toBe(201);
+  expect(retryId).not.toBe(id);
+  expect(key(posts(controller)[0])).not.toBe(key(posts(controller)[1]));
+});
+
+test('Profiles GGUF retries a transient inventory detail error on the next state poll', async ({ page, controller }) => {
+  controller.load('weight-reads');
+  await controller.open(page, 'profiles?format=gguf');
+  const picker = page.getByRole('combobox', { name: 'Source model', exact: true });
+  await picker.click();
+  await page.getByRole('option', { name: /^Fixture GGUF GGUF/ }).click();
+  const message = 'Fixture temporary receipt outage.';
+  const path = '/api/jobs/job-mock-1';
+  await page.route(`**${path}`, async route => {
+    await route.fetch();
+    await route.fulfill({ status: 503, json: { error: message } });
+  }, { times: 1 });
+  expect(await submit(page, 'Read tensor list')).toEqual([201, 'job-mock-1']);
+  await expect(page.getByText(message, { exact: true })).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect(button(page, 'Read next tensors')).toBeEnabled({ timeout: 1500 });
+  await expect(page.getByText(message)).toHaveCount(0);
+  expect(controller.requests('GET', path)).toHaveLength(2);
+  expect(posts(controller)).toHaveLength(1);
 });
 
 for (const mode of ['inventory', 'tile']) {

@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest';
 import { PlainAttempt } from './submission-key';
-import { stripEmpty, Submission } from './submit.svelte';
-import { ApiError } from './api';
+import { ReadVisit, stripEmpty, Submission } from './submit.svelte';
+import { api, ApiError } from './api';
 
 it('canonicalizes only set-valued wire fields', () => {
   const first = stripEmpty({ kind: 'transfer', input_ids: ['b', 'a'] });
@@ -9,8 +9,8 @@ it('canonicalizes only set-valued wire fields', () => {
   expect(first).toEqual(second);
   expect(first.input_ids).toEqual(['a', 'b']);
   const plain = new PlainAttempt();
-  expect(plain.take('transfers.transfer', first, () => true).key)
-    .toBe(plain.take('transfers.transfer', second, () => true).key);
+  expect(plain.take('transfers.transfer', first, () => true)!.key)
+    .toBe(plain.take('transfers.transfer', second, () => true)!.key);
   expect(stripEmpty({ kind: 'compare', input_ids: ['b', 'a'] }).input_ids).toEqual(['b', 'a']);
   expect(stripEmpty({ kind: 'weight_tune', input_ids: ['source', 'train', 'check'], options: { indices: [[3, 1], [1, 2], [1, 0]] } }))
     .toEqual({ kind: 'weight_tune', input_ids: ['source', 'train', 'check'], options: { indices: [[1, 0], [1, 2], [3, 1]] } });
@@ -20,15 +20,15 @@ it('reuses an unconfirmed key only for the same launcher and body in the same vi
   const plain = new PlainAttempt();
   const body = { host: 'worker-a', input_ids: ['input-a'] };
   let current = true;
-  const first = plain.take('convert.plan', body, () => current);
-  expect(plain.take('convert.plan', { input_ids: ['input-a'], host: 'worker-a' }, () => current).key).toBe(first.key);
+  const first = plain.take('convert.plan', body, () => current)!;
+  expect(plain.take('convert.plan', { input_ids: ['input-a'], host: 'worker-a' }, () => current)?.key).toBe(first.key);
   current = false;
-  const next = plain.take('convert.plan', body, () => true);
+  const next = plain.take('convert.plan', body, () => true)!;
   expect(next.key).not.toBe(first.key);
   next.complete();
-  const afterSuccess = plain.take('convert.plan', body, () => true);
+  const afterSuccess = plain.take('convert.plan', body, () => true)!;
   expect(afterSuccess.key).not.toBe(next.key);
-  expect(plain.take('convert.inspect', body, () => true).key).not.toBe(afterSuccess.key);
+  expect(plain.take('convert.inspect', body, () => true)?.key).not.toBe(afterSuccess.key);
 });
 
 it('uses the native sequence across touch contacts and changed bodies, but not across launchers', async () => {
@@ -85,6 +85,51 @@ it('lets the keyboard retry an unconfirmed request immediately with its original
   expect(await submission.send('timed.retry', body, async (_, key) => key, { detail: 0 })).toBe(original);
 });
 
+it('notifies reads only after admission; a failed send does not replace the result', async () => {
+  const read = new Submission();
+  const body = { input_ids: ['source'] };
+  const admitted = vi.fn();
+  const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
+  try {
+    let visible = await read.send('read.admission', body, async () => 'old inventory', { detail: 0 });
+    const retry = async () => {
+      const next = await read.send('read.admission', body, async () => { throw new Error('Read failed.'); }, { detail: 0 }, admitted);
+      if (next !== null) visible = next;
+    };
+    await retry();
+    expect(admitted).not.toHaveBeenCalled();
+    expect(visible).toBe('old inventory');
+    clock.mockReturnValue(901);
+    await retry();
+    expect(admitted).toHaveBeenCalledExactlyOnceWith(true);
+    expect(read.error).toContain('Read failed.');
+    expect(visible).toBe('old inventory');
+    expect(await read.send('read.admission', body, async () => 'new inventory', { detail: 0 })).toBe('new inventory');
+  } finally { clock.mockRestore(); }
+});
+
+it('lets read panes report a local rejection without admitting the send', async () => {
+  const read = new Submission();
+  const body = { prompt: 'x'.repeat(256 * 1024) };
+  const attempted = vi.fn();
+  const post = vi.fn();
+  expect(await read.send('read.preflight', body, post, { detail: 0 }, attempted)).toBeNull();
+  expect(attempted).toHaveBeenCalledExactlyOnceWith(false);
+  expect(read.error).toContain('256 KiB');
+  expect(post).not.toHaveBeenCalled();
+});
+
+it('shows a terminal read error only during the source visit that started it', () => {
+  const visit = new ReadVisit();
+  const queued = { id: 'read', state: 'queued' } as const;
+  const failed = { ...queued, state: 'failed' } as const;
+  expect(visit.shows(queued)).toBe(true);
+  visit.remember(queued.id);
+  expect(visit.shows(failed)).toBe(true);
+  expect(new ReadVisit().shows(failed)).toBe(false);
+  expect(new ReadVisit().shows(queued)).toBe(true);
+});
+
 it('suppresses a keyboard activation after an earlier send is accepted out of order', async () => {
   const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
   try {
@@ -124,20 +169,72 @@ it('keeps each unconfirmed wire request key through other sends until acceptance
 it.each([400, 409, 413, 415, 422])('discards the key after a definitive HTTP %d rejection', async (status) => {
   const submission = new Submission();
   const body = { input_ids: ['model-a'] };
-  let failed = '';
-  await submission.send('preview', body, async (_, key) => {
-    failed = key;
-    throw new ApiError('Request rejected.', status);
-  });
-  expect(await submission.send('preview', body, async (_, key) => key)).not.toBe(failed);
+  const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(Response.json({ error: 'Request rejected.' }, { status }));
+  try {
+    await submission.send('preview', body, (_, key) => api.queueJob({ ...body, kind: 'inspect' }, key));
+    expect(submission.error).toBe('Request rejected.');
+    const failed = new Headers(fetch.mock.calls[0][1]?.headers).get('Idempotency-Key');
+    expect(await submission.send('preview', body, async (_, key) => key)).not.toBe(failed);
+  } finally { fetch.mockRestore(); }
 });
 
-it('evicts old unconfirmed keys instead of growing the history indefinitely', () => {
-  const plain = new PlainAttempt();
-  const current = () => true;
-  const first = plain.take('preview', { offset: 0 }, current).key;
-  for (let offset = 1; offset <= 64; offset++) plain.take('preview', { offset }, current);
-  const last = plain.take('preview', { offset: 64 }, current).key;
-  expect(plain.take('preview', { offset: 0 }, current).key).not.toBe(first);
-  expect(plain.take('preview', { offset: 64 }, current).key).toBe(last);
+it.each([
+  [403, 'text/plain', 'Forbidden'],
+  [403, 'text/plain', '{"error":"Forbidden"}'],
+  [502, 'text/html', '<h1>Bad gateway</h1>'],
+  [503, 'application/json', '{"error":"Unavailable"}'],
+  [504, 'application/json', '{"error":"Timed out"}'],
+  [422, 'application/json', '{"message":"Not the controller error shape"}'],
+] as const)('keeps the original key after an ambiguous HTTP %d reply', async (status, type, text) => {
+  const submission = new Submission();
+  const job = { kind: 'generate', input_ids: ['model-a'], prompt: 'Fixture prompt' } as const;
+  const body = { ...job, input_ids: [...job.input_ids] };
+  const fetch = vi.spyOn(globalThis, 'fetch')
+    .mockRejectedValueOnce(new TypeError('Reply lost.'))
+    .mockResolvedValueOnce(new Response(text, { status, headers: { 'content-type': type } }));
+  const post = (request: typeof body, key: string) => api.queueJob(request, key);
+  try {
+    await submission.send('generate', body, post);
+    await submission.send('generate', body, post);
+    expect(submission.error).toContain('without reloading');
+    const original = new Headers(fetch.mock.calls[0][1]?.headers).get('Idempotency-Key');
+    expect(new Headers(fetch.mock.calls[1][1]?.headers).get('Idempotency-Key')).toBe(original);
+    expect(await submission.send('generate', body, async (_, key) => key)).toBe(original);
+  } finally { fetch.mockRestore(); }
+});
+
+it.each([64, 4])('rejects a new entry when %d unresolved requests fill the history', async count => {
+  const submission = new Submission();
+  const prompt = count === 64 ? 'small' : 'a'.repeat(256 * 1024 - 128);
+  let original = '';
+  const lose = async (body: { offset: number }, key: string) => {
+    if (!body.offset) original = key;
+    throw new Error('Reply lost.');
+  };
+  for (let offset = 0; offset < count; offset++) await submission.send('generate', { prompt, offset }, lose);
+  const post = vi.fn(async (_, key) => key);
+  const newBody = { prompt: count === 64 ? prompt : 'x'.repeat(1024), offset: count };
+  expect(await submission.send('generate', newBody, post)).toBeNull();
+  expect(submission.error).toMatch(/unconfirmed/i);
+  expect(post).not.toHaveBeenCalled();
+  expect(await submission.send('generate', { prompt, offset: 0 }, post)).toBe(original);
+  expect(await submission.send('generate', newBody, post)).toMatch(/^conv-/);
+});
+
+it.each([
+  { name: 'large ASCII', prompt: 'x'.repeat(1024 * 1024 - 128) },
+  { name: 'UTF-8 byte limit', prompt: '\u00e9'.repeat(128 * 1024) },
+])('rejects $name bodies before sending or affecting an earlier retry', async ({ prompt }) => {
+  const submission = new Submission();
+  const body = { prompt: 'small' };
+  let original = '';
+  await submission.send('generate', body, async (_, key) => {
+    original = key;
+    throw new Error('Reply lost.');
+  });
+  const post = vi.fn(async (_, key) => key);
+  expect(await submission.send('generate', { prompt }, post)).toBeNull();
+  expect(submission.error).toContain('256 KiB');
+  expect(post).not.toHaveBeenCalled();
+  expect(await submission.send('generate', body, post)).toBe(original);
 });

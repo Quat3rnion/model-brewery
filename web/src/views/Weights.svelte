@@ -22,7 +22,7 @@
   import { WEIGHT_SOURCES, isSafeSource, formatTime, hostName, isActive, isTerminal, kindTitle, modelLabel, newestFirst, shortHash } from '../lib/format';
   import { canInspectVisually, weightAccess, weightCapability, weightFormat } from '../lib/weight-access';
   import { addDraftEdits, editKey, type DraftEdit } from '../lib/weight-draft';
-  import { focusAfterRemoval } from '../lib/focus';
+  import { captureResultFocus, focusAfterRemoval } from '../lib/focus';
   import { unsavedChanges } from '../lib/unsaved-changes.svelte';
   import {
     MAX_COORDINATES,
@@ -266,9 +266,21 @@
   }
 
   // ---- Review and apply. ----
-  const proposals = $derived(newestFirst(jobsFor(jobs, sourceId, PROPOSAL_KINDS)).slice(0, 20));
   let reviewId = $state<string | null>(null);
+  const proposals = $derived.by(() => {
+    const ordered = newestFirst(jobsFor(jobs, sourceId, PROPOSAL_KINDS));
+    const selected = ordered.findIndex(job => job.id === reviewId);
+    // Polls must not close an open review just because newer proposals arrived.
+    return selected >= 20 ? [...ordered.slice(0, 19), ordered[selected]] : ordered.slice(0, 20);
+  });
   const reviewed = $derived(proposals.find((j) => j.id === reviewId) ?? null);
+  let applyPanel: HTMLElement | undefined = $state();
+  let reviewHeading: HTMLHeadingElement | undefined = $state();
+  $effect.pre(() => {
+    if (!reviewed && untrack(() => applyPanel?.contains(document.activeElement))) {
+      void focusAfterRemoval(() => {}, () => reviewHeading);
+    }
+  });
   let detail = $state<JobDetail | null>(null);
   let detailError = $state<string | null>(null);
   $effect(() => {
@@ -331,10 +343,17 @@
     const request = applyRequest;
     const proposalId = reviewed?.id;
     if (!request || !proposalId || applyBlockers.length) return;
+    const focus = captureResultFocus(event);
     // The controller requires the exact source of the proposal job.
-    const accepted = await applySub.submit(request, event);
+    const accepted = await applySub.submit(request, event, false);
     if (accepted) {
       acceptedApplies.set(proposalId, acceptedJobSummary(accepted, request));
+      void focus?.(() => {
+        if (reviewed?.id !== proposalId) return;
+        const link = applySub.statusElement?.querySelector('a');
+        if (link && event.detail === 0) link.scrollIntoView({ block: 'nearest' });
+        return link;
+      });
       if (!jobs.some(job => job.id === accepted.id)) void brewery.loadJob(accepted.id).catch(() => {});
     }
   }
@@ -617,7 +636,7 @@
   </section>
 
   <section class="panel" aria-labelledby="w-rev-h">
-    <header><h2 id="w-rev-h" tabindex="-1">Review and apply</h2>{#if proposals.length}<span class="xs muted">{proposals.length} {proposals.length === 1 ? 'proposal' : 'proposals'} for this source</span>{/if}</header>
+    <header><h2 bind:this={reviewHeading} id="w-rev-h" tabindex="-1">Review and apply</h2>{#if proposals.length}<span class="xs muted">{proposals.length} {proposals.length === 1 ? 'proposal' : 'proposals'} for this source</span>{/if}</header>
     {#if !source}
       <p class="empty">Select a source to see its proposals.</p>
     {:else if proposals.length === 0}
@@ -664,7 +683,7 @@
               <WeightReport job={detail} />
               <p class="xs muted">Effects on quantized blocks are not measured here. If you quantize the new file, neighbouring weights in the same block can change too.</p>
 
-              <div class="apply stack">
+              <div class="apply stack" bind:this={applyPanel}>
                 <h3 class="h">Apply</h3>
                 {#if doneApply}
                   <p class="note info small">
