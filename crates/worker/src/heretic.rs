@@ -1,6 +1,7 @@
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 pub const RUN: &str = "heretic";
@@ -49,6 +50,21 @@ pub struct Options {
     pub base_hf_commit: Option<String>,
     pub invocation: Value,
     pub manifest: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StudyTrial {
+    index: u8,
+    scores: Vec<StudyScore>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StudyScore {
+    name: String,
+    value: f64,
+    baseline: f64,
 }
 
 impl Options {
@@ -124,6 +140,31 @@ impl Options {
                     && journal["source_config"].is_string(),
                 "Heretic trial or config mismatch"
             );
+            if let Some(trials) = journal.get("trials") {
+                let trials: Vec<StudyTrial> = serde_json::from_value(trials.clone())?;
+                let budget = self.invocation["trials"].as_u64().unwrap_or_default();
+                let mut indexes = BTreeSet::new();
+                let valid = trials.iter().all(|trial| {
+                    let index = u64::from(trial.index);
+                    (1..=budget).contains(&index)
+                        && indexes.insert(index)
+                        && (1..=16).contains(&trial.scores.len())
+                        && trial.scores.iter().all(|score| {
+                            (1..=80).contains(&score.name.chars().count())
+                                && !score.name.chars().any(char::is_control)
+                                && score.value.is_finite()
+                                && score.baseline.is_finite()
+                        })
+                });
+                ensure!(
+                    (1..=budget as usize).contains(&trials.len())
+                        && valid
+                        && journal["selected_study_trial"]
+                            .as_u64()
+                            .is_some_and(|i| indexes.contains(&i)),
+                    "invalid Heretic trial summary"
+                );
+            }
         } else if let Some(manifest) = &self.manifest {
             ensure!(
                 manifest["hashes"]["model.safetensors"] == export

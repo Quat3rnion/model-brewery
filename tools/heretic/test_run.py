@@ -46,5 +46,26 @@ class PolicyTest(unittest.TestCase):
                 run.local_datasets(spec, root)
 
 
+    def test_study_summary_reports_trials_without_display_payloads(self):
+        import optuna
+        from optuna.storages import JournalStorage
+        from optuna.storages.journal import JournalFileBackend
+
+        with tempfile.TemporaryDirectory() as root:
+            checkpoint = Path(root) / "study.jsonl"
+            store = JournalStorage(JournalFileBackend(str(checkpoint)))
+            study = optuna.create_study(study_name="heretic", storage=store)
+            trial = study.ask()
+            trial.set_user_attr("index", 1)
+            trial.set_user_attr("scores", [{
+                "name": "KL divergence", "score": {"value": 0.125, "rich_display": "ignored"},
+                "baseline": {"value": 0.0, "md_display": "ignored"},
+            }])
+            study.tell(trial, 0.125)
+            self.assertEqual(run.study_trials(Path(root), 1, 1), [{
+                "index": 1, "scores": [{"name": "KL divergence", "value": 0.125, "baseline": 0.0}],
+            }])
+
+
 if __name__ == "__main__":
     unittest.main()

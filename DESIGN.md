@@ -4,7 +4,7 @@ This guide records the current Model Brewery web interface. It is not a redesign
 
 ## Surface and routes
 
-`web/src/App.svelte` owns the shared header, section links, connection status, and active-job strip. The visible sections are Library, Jobs, Transfers, Compare, Trace, Edits, Convert, Evaluate, Benchmarks, Calibration, and Settings.
+`web/src/App.svelte` owns the shared header, section links, connection status, and active-job strip. The visible sections are Library, Jobs, Transfers, Compare, Trace, Edits, Abliteration, Agent, Convert, Evaluate, Benchmarks, Calibration, and Settings.
 
 Keep nested routes under their parent section. Profiles uses Convert in the header. Weight edits uses Library. Job details use Jobs. Infrastructure settings stay under Settings. `App.svelte` marks the parent link with `aria-current="page"`.
 
@@ -54,6 +54,13 @@ Keep requested values separate from reported values. `web/src/components/Compone
 Keep workflow stages and result types distinct. `web/src/components/ConversionRun.svelte` lists Inspect, Plan, Convert, and Verify with links to their jobs. `web/src/components/results/JobResult.svelte` keeps file verification separate from hardware proof.
 
 Preserve provenance in reports. Keep the host, target, model, job ID, hashes, protocol, and reported metrics near the result when the view provides them. Label endpoint benchmark results, GSM8K scores (including the full pinned split), scratch revisions, and scratch diffs as not release-qualified.
+
+**Abliteration** is a read-only view of direction, native search and Heretic
+jobs. Select a run with `#/abliteration?job=<id>`. A direction plot marks the
+selected layer. The screen plot uses circles for fitted trials and squares for
+matched random controls. Tables give the exact plot values and paired child
+results. Keep Heretic optimization scores separate from the held-out scores
+in **Edits**. Put configs and the reproduce journal in disclosures.
 
 Only the operator approves a scratch publish request. `web/src/components/trace/ApproveScratch.svelte` shows the exact SHA-256 and the check results in a confirmation dialog before it sends the approval. Do not present a requested option or a single score as proof.
 

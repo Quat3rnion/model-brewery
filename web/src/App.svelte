@@ -20,6 +20,7 @@
   import Weights from './views/Weights.svelte';
   import Trace from './views/Trace.svelte';
   import Edits from './views/Edits.svelte';
+  import Abliteration from './views/Abliteration.svelte';
   import Agent from './views/Agent.svelte';
 
   onMount(() => {
@@ -144,6 +145,7 @@
     {:else if route.view === 'weights'}<Weights />
     {:else if route.view === 'trace'}<Trace />
     {:else if route.view === 'edits'}<Edits />
+    {:else if route.view === 'abliteration'}<Abliteration />
     {:else if route.view === 'agent'}<Agent />
     {:else}
       <div class="stack">

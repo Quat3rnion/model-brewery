@@ -3,6 +3,7 @@
 import hashlib
 from importlib.metadata import version
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -189,6 +190,35 @@ def stage_source(src, source_assets, expected, destination):
     return assets
 
 
+def study_trials(directory, budget, selected):
+    """Read scalar scores from the pinned Optuna checkpoint, not terminal output."""
+    import optuna
+    from optuna.storages import JournalStorage
+    from optuna.storages.journal import JournalFileBackend
+
+    checkpoint, = sorted(directory.glob("*.jsonl"))
+    info = checkpoint.lstat()
+    need(stat.S_ISREG(info.st_mode) and info.st_size <= 16 << 20, "invalid Heretic study journal")
+    study = optuna.load_study(study_name="heretic", storage=JournalStorage(JournalFileBackend(str(checkpoint))))
+    trials = []
+    for trial in study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,)):
+        index = trial.user_attrs.get("index")
+        records = trial.user_attrs.get("scores")
+        need(type(index) is int and 1 <= index <= budget and isinstance(records, list) and 1 <= len(records) <= 16,
+             "invalid Heretic trial")
+        scores = []
+        for record in records:
+            name, value, baseline = record["name"], record["score"]["value"], record["baseline"]["value"]
+            need(isinstance(name, str) and 1 <= len(name) <= 80 and name.isprintable()
+                 and all(type(x) in (float, int) and math.isfinite(x) for x in (value, baseline)),
+                 "invalid Heretic trial score")
+            scores.append({"name": name, "value": value, "baseline": baseline})
+        trials.append({"index": index, "scores": scores})
+    indexes = {row["index"] for row in trials}
+    need(len(trials) == len(indexes) <= budget and selected in indexes, "incomplete Heretic study journal")
+    return sorted(trials, key=lambda row: row["index"])
+
+
 def run(root, run_dir, source, options, *, cpu=False, assets=None):
     root = root.resolve(strict=True)
     size = source.stat().st_size
@@ -309,6 +339,7 @@ def run(root, run_dir, source, options, *, cpu=False, assets=None):
             journal["effective_manifest"] = json.loads(path.read_text())
         else:
             journal["selected_study_trial"] = actual_trial
+            journal["trials"] = study_trials(Path(effective["study_checkpoint_dir"]), record["trials"], actual_trial)
         (run_dir / "journal.json").write_text(json.dumps(journal, sort_keys=True))
 
 

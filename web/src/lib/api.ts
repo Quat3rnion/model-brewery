@@ -100,6 +100,10 @@ export const api = {
     request<unknown>('GET', `/api/jobs/${encodeURIComponent(id)}/trace${view ? `/${view}` : ''}?${new URLSearchParams(Object.entries(query).map(([k, v]) => [k, String(v)]))}`, undefined, signal),
   interventions: (signal?: AbortSignal) => request<unknown>('GET', '/api/interventions', undefined, signal),
   scratch: (signal?: AbortSignal) => request<unknown>('GET', '/api/scratch', undefined, signal),
+  scratchRevision: (id: string, signal?: AbortSignal) =>
+    request<import('./weightspace').ScratchRevision>('GET', `/api/scratch/${encodeURIComponent(id)}`, undefined, signal),
+  direction: (id: string, version: number, signal?: AbortSignal) =>
+    request<import('./abliteration').DirectionArtifact>('GET', `/api/directions/${encodeURIComponent(id)}/versions/${version}`, undefined, signal),
   diff: (kind: 'tensors' | 'traces' | 'behavior', query: string, signal?: AbortSignal) => request<unknown>('GET', `/api/diff/${kind}?${query}`, undefined, signal),
   // Built-in agent (W15). The provider API key has its own write-only calls in AgentProviderSettings.
   agentProvider: (signal?: AbortSignal) => request<unknown>('GET', '/api/settings/agent-provider', undefined, signal),

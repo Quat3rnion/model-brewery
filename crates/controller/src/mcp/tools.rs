@@ -148,6 +148,21 @@ impl Server {
                 "create_direction_intervention" => {
                     "Save trace rules from a verified direction version. Project out its activation component or subtract a scaled unit vector. Pass the saved ID and version to start_trace."
                 }
+                "ablate_direction" => {
+                    "Apply one fitted direction to a private scratch child. Use the exact parent revision and a version 2 direction. Convert the child with convert_scratch_gguf and score it with run_checks."
+                }
+                "search_ablation" => {
+                    "Fit the direction on the exact private parent GGUF before searching. Use disjoint confirmation pins in behavior_direction.prompt_sets. Read get_job for the fitted and matched random screen results, then get_checks for the selected children."
+                }
+                "run_heretic" => {
+                    "Queue an offline Heretic GPU job on the original Library SafeTensors parent, not its scratch copy. Read get_job for scratch_id and get_scratch for the journal. Convert the byte-identical baseline and imported child with the same assets, then call run_checks."
+                }
+                "reproduce_heretic" => {
+                    "Import a verified community Heretic v4 manifest using a matching pinned Library SafeTensors download. A Brewery journal is not a v4 manifest. Read get_job for the scratch child and use run_checks after conversion."
+                }
+                "run_checks" => {
+                    "Check the exact scratch child. Convert the parent and child with identical assets for measured checks. To score slop, sycophancy, length and KL, pass behavior_direction.prompt_sets with the verified holdout digests; add benign_refusal only for over-refusal. Poll get_job if queued and read get_checks."
+                }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({
                         "type":"integer", "minimum":0, "maximum":WAIT_MS_MAX, "default":0,

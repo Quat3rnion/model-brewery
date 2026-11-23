@@ -2042,7 +2042,8 @@ release-qualified.
 Set `BREWERY_CONTRAST_CACHE` to an absolute path in the worker's `engine_env`.
 Use a runner built with `--behavior-v1` support. Put each normalized
 `brewery.contrast-prompts.v1` set in `<sha256>.json` in this cache.
-Use the same digest as the direction job. Set `behavior_direction` in
+Use a held-out set with no fit or search-screen prompts when you confirm an
+edit. Set `behavior_direction` in
 `POST /api/scratch/{id}/checks` or `run_checks`, with `prompt_sets` that
 contains the `slop`, `sycophancy`, and `response_length` digests. Keep each
 contrast set to 1 to 32 held-out rows. The worker checks each file's hash
@@ -2086,6 +2087,48 @@ per reply. For the benign refusal set, it saves only the scores and
 replies or produce a refusal direction. W5 behavior diffs include the
 numeric scores. These are research results, not release-qualified. Get
 operator approval before publication.
+
+### Abliteration workflow through MCP
+
+1. Pin the Library SafeTensors file and the conversion `assets_id`. Use
+   `create_scratch` to copy the parent, then `convert_scratch_gguf` to make
+   a private baseline. Poll queued jobs with `get_job`.
+2. For a native run, register the exact baseline GGUF bytes in the Library
+   and verify the digest. Call `compute_direction` on that GGUF. Use its
+   job ID and `version: 2` with `get_direction`. The selected layer and
+   held-out Cohen's d measure separation, not a change in replies.
+3. To probe the direction without changing weights, use
+   `create_direction_intervention` and pass the saved version to
+   `start_trace`. Compare with an unmodified trace. Use `ablate_direction`
+   for one weight edit or `search_ablation` for a bounded search. Search
+   evaluates the selected scratch children and compares the screen with
+   matched random controls. Use the child IDs and check jobs from the
+   search receipt.
+4. For a Heretic run, call `run_heretic` on the original Library SafeTensors
+   ID, not the scratch copy. Use `reproduce_heretic` only for a community v4
+   manifest with a verified matching base. Read `scratch_id` from `get_job`
+   and inspect the child with `get_scratch`. The Brewery journal is
+   provenance; it is not the community v4 input. Reinstall the pinned
+   launcher with `tools/heretic/setup.sh PRIVATE_RUNTIME_DIR --offline`
+   when you upgrade to the launcher that records per-trial scores.
+5. Convert each child with the same assets as the baseline if needed.
+   Use `run_checks` with the exact child hash and
+   `behavior_direction.prompt_sets`. Use the same disjoint holdout pins for
+   all children in a comparison. Use `get_checks` to read W4 locality and
+   perplexity, first-token and continuation KL, marker rates and paired
+   flags. Add the optional `benign_refusal` pin to measure over-refusal;
+   there is no native refusal direction. Do not treat a check that completes
+   as proof of an improvement.
+6. Open **Abliteration** for direction pins, native screen and paired
+   results, or the Heretic config, trials and journal. Follow the child link
+   to **Edits** to see the behavior-direction scores. The workbench views
+   do not submit jobs. Only the operator can approve a publish request.
+
+On Qwen2.5-0.5B-Instruct, the tested native directions carried only a
+small part of the sycophancy signal. Neither A3 nor A5 found significant
+paired flips. Stock slop was too rare to measure a reliable reduction.
+Heretic `noslop` did not show a measurable reduction either. These
+experiments are not release-qualified.
 
 ### Review and approve
 

@@ -64,6 +64,16 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
 
 ## Limits and evidence
 
+- For an ablation comparison, follow the [MCP abliteration workflow](../../../OPERATOR.md#abliteration-workflow-through-mcp).
+  Fit the native direction on the exact baseline GGUF. Give Heretic the
+  original Library SafeTensors ID. Report fitted probe scores separately
+  from paired child results. Use identical, disjoint held-out
+  `run_checks` pins for the children and record the hashes, flip counts,
+  intervals, KL, locality and perplexity.
+- On Qwen2.5-0.5B-Instruct, the tested native directions carried only a
+  small part of the sycophancy signal. A3 and A5 found no significant paired
+  flips. Stock slop was too rare to measure a reliable reduction. Heretic
+  `noslop` did not show a measurable reduction either.
 - Use single-file SafeTensors on an enabled local editor. For direct edits,
   dense pruning, and fact edits, the 32 MiB guard counts the full size of all
   affected tensors, even for a slice. Fact edits support bounded dense Llama

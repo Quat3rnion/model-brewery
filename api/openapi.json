@@ -2045,7 +2045,18 @@
           "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "worker": {"type": "string"},
           "method": {"enum": ["copy", "direct", "compile_program", "linear", "task_arithmetic", "ties", "dare_linear", "dare_ties", "rome", "memit", "alphaedit", "prune", "ablate_direction", "heretic", "heretic_reproduce"]},
           "locate_edit": {"type": "object", "description": "Edit request, covariance digest, runtime library digests and optimization losses. CUDA receipts include backend and device in the nested provenance object."},
-          "heretic": {"type": "object", "description": "Brewery Heretic journal: base and export digests, input and effective config, seed, selected trial index, offline prompt and asset digests, and runtime and lock digests."},
+          "heretic": {"type": "object", "description": "Brewery Heretic journal: base and export digests, input and effective config, seed, selected trial index, optional scalar trial scores, offline prompt and asset digests, and runtime and lock digests.",
+            "properties": {
+              "trials": {"type": "array", "maxItems": 64, "description": "Completed Heretic study trials on its optimization data, not Brewery held-out checks.",
+                "items": {"type": "object", "required": ["index", "scores"], "properties": {
+                  "index": {"type": "integer", "minimum": 1, "maximum": 64},
+                  "scores": {"type": "array", "maxItems": 16, "items": {"type": "object", "required": ["name", "value", "baseline"], "properties": {
+                    "name": {"type": "string", "maxLength": 80}, "value": {"type": "number"}, "baseline": {"type": "number"}
+                  }}}
+                }}
+              }
+            }
+          },
           "operations": {"type": "array", "items": {"$ref": "#/components/schemas/ScratchOperation"}},
           "merge": {"type": "object", "required": ["algorithm", "inputs"], "properties": {
             "algorithm": {"$ref": "#/components/schemas/ScratchMergeAlgorithm"},

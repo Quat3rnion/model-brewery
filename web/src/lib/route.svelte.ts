@@ -1,4 +1,4 @@
-export type View = 'library' | 'queue' | 'transfers' | 'compare' | 'convert' | 'evaluate' | 'benchmarks' | 'calibration' | 'settings' | 'profiles' | 'weights' | 'trace' | 'edits' | 'agent' | 'job' | 'not-found';
+export type View = 'library' | 'queue' | 'transfers' | 'compare' | 'convert' | 'evaluate' | 'benchmarks' | 'calibration' | 'settings' | 'profiles' | 'weights' | 'trace' | 'edits' | 'abliteration' | 'agent' | 'job' | 'not-found';
 
 export const VIEWS: { id: Exclude<View, 'job' | 'not-found'>; label: string }[] = [
   { id: 'library', label: 'Library' },
@@ -7,6 +7,7 @@ export const VIEWS: { id: Exclude<View, 'job' | 'not-found'>; label: string }[] 
   { id: 'compare', label: 'Compare' },
   { id: 'trace', label: 'Trace' },
   { id: 'edits', label: 'Edits' },
+  { id: 'abliteration', label: 'Abliteration' },
   { id: 'agent', label: 'Agent' },
   { id: 'convert', label: 'Convert' },
   { id: 'evaluate', label: 'Evaluate' },

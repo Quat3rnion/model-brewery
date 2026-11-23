@@ -251,6 +251,9 @@ fn hosted_agent_reuses_mcp_scratch_workflow_without_approval() {
             "`ablate_direction`",
             "`search_ablation`",
             "`create_direction_intervention`",
+            "`run_heretic`",
+            "`reproduce_heretic`",
+            "behavior-direction prompt set digests",
             "`request_publish`",
             "not release-qualified",
         ] {
