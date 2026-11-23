@@ -31,6 +31,8 @@ type Payload<T> = std::result::Result<Json<T>, JsonRejection>;
 type Mutation = Result<(StatusCode, Json<Revision>)>;
 const LIMIT: u32 = 64;
 const PROVENANCE: &str = "provenance.json";
+#[path = "scratch_checks.rs"]
+mod checks;
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +64,8 @@ pub struct Revision {
     library_model_id: Option<String>,
     pub provenance: Provenance,
     pub(crate) delta: Summary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    check_bundle: Option<checks::Bundle>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -102,6 +106,14 @@ struct Review {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct PublishRequest {
+    sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    acknowledge_bundle: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Discard {}
 
 pub fn router() -> Router<Arc<App>> {
@@ -109,6 +121,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/scratch", get(list).post(create))
         .route("/scratch/{id}/edits", post(edit))
         .route("/scratch/{id}/delta", get(delta))
+        .route("/scratch/{id}/checks", get(checks::get).post(checks::run))
         .route("/scratch/{id}/discard", post(discard))
         .route("/scratch/{id}/publish-request", post(request_publish))
         .route("/admin/scratch/{id}/approve", post(approve))
@@ -182,7 +195,7 @@ async fn discard(
         "scratch-discard",
         Some(id),
         read(payload)?,
-        |app, target, _, key| change(app, target, RevisionState::Discarded, None, key),
+        |app, target, _, key| change(app, target, RevisionState::Discarded, None, None, key),
     )
     .await
 }
@@ -191,7 +204,7 @@ async fn request_publish(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    payload: Payload<Review>,
+    payload: Payload<PublishRequest>,
 ) -> Mutation {
     mutate(
         app,
@@ -205,6 +218,7 @@ async fn request_publish(
                 target,
                 RevisionState::PublishRequested,
                 Some(request.sha256),
+                request.acknowledge_bundle,
                 key,
             )
         },
@@ -232,6 +246,7 @@ async fn approve(
                 target,
                 RevisionState::Approved,
                 Some(request.sha256),
+                None,
                 key,
             )
         },
@@ -466,6 +481,7 @@ fn build(
         library_model_id: None,
         provenance,
         delta: result.delta,
+        check_bundle: None,
     };
     let mut store = app.store.lock().map_err(ApiError::storage)?;
     admit(app, &row.provenance.worker)?;
@@ -489,6 +505,7 @@ fn change(
     target: Option<String>,
     new: RevisionState,
     pin: Option<String>,
+    acknowledgement: Option<String>,
     key: Option<&Submission<'_>>,
 ) -> Mutation {
     use RevisionState::*;
@@ -509,7 +526,8 @@ fn change(
         _ => return Err(conflict("invalid scratch state transition")),
     }
     let path = root.join(&row.id).join(scratch::MODEL);
-    let model = if new == Approved {
+    if new != Discarded {
+        checks::require_publishable(&mut row, new, acknowledgement.as_deref())?;
         let mut source =
             open_regular(&path).map_err(|_| conflict("scratch artifact is not available"))?;
         if scratch::file_sha256(&mut source).map_err(ApiError::storage)? != row.sha256 {
@@ -517,6 +535,8 @@ fn change(
                 "scratch artifact no longer matches the reviewed hash",
             ));
         }
+    }
+    let model = if new == Approved {
         let model = NewModel {
             host: row.provenance.worker.clone(),
             name: Some(format!("Scratch revision ({})", row.id)),

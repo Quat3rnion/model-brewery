@@ -87,6 +87,64 @@ records the immutable file digest and does not copy arbitrary metadata. It may
 keep a valid `precision` label as descriptive data. An import does not attest
 how the model was served.
 
+## Scratch behavior checks
+
+These CPU checks are **not release-qualified**. Run them on private local
+copies. Convert the parent and child SafeTensors files to GGUF with the same
+converter, tokenizer files, and precision. Do not register a private scratch
+file as a Library source.
+
+Build the runner against a CPU build of llama.cpp that has
+`llama_get_logits_ith` and `llama_memory_clear`. The test used base commit
+`184f6536024668e8908ab8c86033d56708e62b40` with the W0 trace changes.
+Run these commands from the Brewery repository root. Set `LLAMA` to the
+llama.cpp checkout and `BIN` to its CPU build directory that has `libllama`.
+Set `WORK` to a private local directory. Use Python 3.11 or later.
+
+```sh
+c++ -std=c++17 -O2 -I"$LLAMA/include" -I"$LLAMA/ggml/include" \
+  tools/scratch_check_logits.cpp -L"$BIN" -Wl,-rpath,"$BIN" -lllama \
+  -o "$WORK/scratch-check-logits"
+python3 tools/scratch_checks.py --runner "$WORK/scratch-check-logits" \
+  --cache "$WORK/check-data" --fetch \
+  --parent-gguf "$WORK/parent.gguf" --child-gguf "$WORK/child.gguf" \
+  --parent-safetensors "$WORK/parent.safetensors" \
+  --child-safetensors "$WORK/child.safetensors" > "$WORK/behavior.json"
+```
+
+`--fetch` gets missing files only. Omit it to use only the local cache. The
+runner checks the full source hashes before it reads rows. It then checks
+the hash of each selected subset and of the held-out corpus.
+
+- [`sources.json`](data/edit-checks/sources.json) pins the source URLs,
+  loader commits, full file SHA-256 hashes, and 50 item IDs per dataset.
+  CounterFact uses the case IDs from ROME. zsRE uses zero-based row IDs from
+  the MEND QA validation adaptation distributed with MEMIT.
+- [`manifest.json`](data/edit-checks/manifest.json) pins the SHA-256 of the
+  normalized JSON Lines subsets and the held-out text. The held-out text
+  contains 16 original sentences supplied by this project. The ROME, MEMIT,
+  and MEND code repositories use MIT licenses. The dataset downloads do not
+  state a separate data license. This repository does not redistribute the
+  downloaded datasets or their subsets.
+
+For each row, the runner reads the probability and rank of each expected
+answer token, given the prompt and the previous answer tokens.
+It checks that both models use the same token IDs
+for the scored text. Efficacy and paraphrase scores are the fraction of
+answers whose tokens are all rank one. Rank is one plus the count of logits
+above the answer logit. Probability and rank means count each answer token
+once. CounterFact uses two paraphrases and two neighborhood prompts per
+case; zsRE uses one of each. Locality compares the same control answer before
+and after the edit. Perplexity is the exponential of the mean negative log
+probability of the held-out suffix tokens. The first word of each sentence
+is its prompt. The report includes samples from an eight-token greedy smoke
+test on both files.
+
+Send `behavior.json` as `offline_report` in a scratch check request. Results
+from this tool are diagnostic. Use the paired scores to review the effect of
+the edit. A change in score does not qualify a release. The controller does
+not verify the ancestry of the local GGUF files.
+
 ## Operator configuration
 
 For HGN inputs use `kind` `hgn`, `brewery-bundle`, `hgn-v2`, or `ht43`.

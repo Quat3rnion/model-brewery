@@ -18,10 +18,25 @@ fn fixture(t: &Test, values: &[f32]) -> std::path::PathBuf {
     .unwrap();
     fs::write(
         t.root.path().join("dispatch.json"),
-        json!({"hosts":{"existing":{"local":true,"config":config}}}).to_string(),
+        json!({"hosts":{"existing":{"local":true,"config":config,
+          "capabilities":{"benchmark":true},
+          "benchmark_targets":[{"id":"cpu","label":"CPU"}],
+          "benchmarks":[{"id":"gsm8k","label":"GSM8K"}]}}})
+        .to_string(),
     )
     .unwrap();
     fs::remove_file(t.root.path().join("catalog.json")).unwrap();
+    fs::write(
+        t.root.path().join("dispatch"),
+        r#"#!/bin/sh
+case "$1" in
+  start) cat >/dev/null; printf '%s\n' '{"state":"running","progress":"mock benchmark"}' ;;
+  status) printf '%s\n' '{"state":"succeeded","progress":"mock benchmark done","result":{"mock":true}}' ;;
+  *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
     for (name, script) in [
         ("editor-DISPATCH", "#!/bin/sh\nexit 1\n"),
         ("editor-WORKER", "#!/bin/sh\nexit 1\n"),
@@ -177,6 +192,54 @@ fn diff_scratch_tensors_and_behavior() {
 }
 
 #[test]
+fn scratch_integrity_cannot_be_waived_for_nonfinite_tensors() {
+    let mut t = Test::new();
+    let source = fixture(&t, &[1., 2., 3., 4., 5., f32::NAN]);
+    let hash = sha(&fs::read(&source).unwrap());
+    t.launch();
+    let (status, parent) = t.request(
+        "/api/models",
+        "",
+        Some(json!({"host":"existing","kind":"safetensors","path":source})),
+    );
+    assert_eq!(status, 201, "{parent}");
+    assert_eq!(
+        t.admin(Some(
+            json!({"action":"set_weight_editor","worker":"existing",
+            "revision":0,"enabled":true})
+        ))
+        .0,
+        200
+    );
+    let (status, scratch) = t.request(
+        "/api/scratch",
+        "",
+        Some(json!({"parent_id":parent["id"],"parent_sha256":hash})),
+    );
+    assert_eq!(status, 201, "{scratch}");
+    let id = scratch["id"].as_str().unwrap();
+    let checks = format!("/api/scratch/{id}/checks");
+    let (status, checked) = t.request(&checks, "", Some(json!({"sha256":hash})));
+    assert_eq!(status, 200, "{checked}");
+    assert_eq!(checked["check_bundle"]["integrity"]["status"], "failed");
+    assert!(
+        checked["check_bundle"]["integrity"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("non-finite")
+    );
+    assert_eq!(
+        t.request(
+            &format!("/api/scratch/{id}/publish-request"),
+            "",
+            Some(json!({"sha256":hash,"acknowledge_bundle":checked["check_bundle"]["id"]})),
+        )
+        .0,
+        409
+    );
+}
+
+#[test]
 fn scratch_edits_keep_parents_and_require_separate_publish_approval() {
     let mut t = Test::new();
     let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
@@ -294,8 +357,146 @@ fn scratch_edits_keep_parents_and_require_separate_publish_approval() {
         409
     );
     let requested = format!("{path}/{child_id}/publish-request");
+    assert_eq!(t.request(&requested, "", Some(review.clone())).0, 409);
+    let checks = format!("{path}/{child_id}/checks");
     assert_eq!(
-        t.request(&requested, "", Some(review.clone())).1["state"],
+        t.request(&checks, "", Some(json!({"sha256": "0".repeat(64)})))
+            .0,
+        409
+    );
+    let key = "Idempotency-Key: scratch.checks\r\n";
+    let (status, checked) = t.request(&checks, key, Some(review.clone()));
+    assert_eq!(status, 200, "{checked}");
+    let bundle = &checked["check_bundle"];
+    assert_eq!(bundle["schema"], "brewery.scratch-checks.v1");
+    assert_eq!(bundle["revision_sha256"], child["sha256"]);
+    assert_eq!(bundle["parent_sha256"], parent_hash);
+    assert_eq!(bundle["integrity"]["status"], "passed");
+    assert_eq!(bundle["smoke"]["status"], "not_run");
+    assert_eq!(t.request(&checks, "", None), (200, bundle.clone()));
+    assert_eq!(
+        t.request(&checks, key, Some(review.clone())),
+        (200, checked.clone())
+    );
+    let sidecar: Value =
+        serde_json::from_slice(&fs::read(root.join(child_id).join("behavior.v1.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        sidecar,
+        json!({"schema_version":1,"parent_id":id,"child_id":child_id,"metrics":[]})
+    );
+    assert_eq!(
+        t.request(
+            &checks,
+            "",
+            Some(
+                json!({"sha256":child["sha256"],"job_refs":[{"job_id":"missing","role":"child"}]})
+            )
+        )
+        .0,
+        400
+    );
+    assert_eq!(t.request(&requested, "", Some(review.clone())).0, 409);
+    let (status, job) = t.request(
+        "/api/jobs",
+        "",
+        Some(json!({
+            "kind":"benchmark", "host":"existing",
+            "options":{"benchmark_target":"cpu", "benchmarks":["gsm8k"]}
+        })),
+    );
+    assert_eq!(status, 201, "{job}");
+    let job_path = format!("/api/jobs/{}", job["id"].as_str().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let result = t.request(&job_path, "", None).1;
+        if result["state"] == "succeeded" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{result}");
+        sleep(Duration::from_millis(15));
+    }
+    let contract: Value =
+        serde_json::from_str(include_str!("../../../../api/openapi.json")).unwrap();
+    let names = contract["components"]["schemas"]["ScratchOfflineReport"]["properties"]["metrics"]
+        ["items"]["properties"]["name"]["enum"]
+        .as_array()
+        .unwrap();
+    let metrics: Vec<_> = names
+        .iter()
+        .map(|name| {
+            let name = name.as_str().unwrap();
+            let is_rank = name.ends_with("_rank");
+            let is_perplexity = name == "perplexity";
+            let (parent, child) = if is_rank || is_perplexity {
+                (10., 12.)
+            } else {
+                (0.5, 0.6)
+            };
+            let better = if name.contains("_locality_") {
+                "neither"
+            } else if is_rank || is_perplexity {
+                "lower"
+            } else {
+                "higher"
+            };
+            json!({"name":name, "parent":parent, "child":child, "better":better})
+        })
+        .collect();
+    let report = json!({
+        "schema":"brewery.scratch-behavior.v1",
+        "qualification":"not release-qualified",
+        "parent_sha256":parent_hash,
+        "revision_sha256":child["sha256"],
+        "parent_gguf_sha256":"a".repeat(64),
+        "revision_gguf_sha256":"b".repeat(64),
+        "runner_sha256":"c".repeat(64),
+        "fixture_sha256":serde_json::from_str::<Value>(include_str!(
+            "../../../eval/data/edit-checks/manifest.json"
+        )).unwrap(),
+        "metrics":metrics, "parent_generation":"before", "child_generation":"after"
+    });
+    let mut attach = json!({"sha256":child["sha256"], "offline_report":report,
+        "job_refs":[{"job_id":job["id"], "role":"child"}]});
+    attach["offline_report"]["revision_sha256"] = json!("0".repeat(64));
+    assert_eq!(t.request(&checks, "", Some(attach.clone())).0, 400);
+    attach["offline_report"]["revision_sha256"] = child["sha256"].clone();
+    let (status, checked_again) = t.request(&checks, "", Some(attach));
+    assert_eq!(status, 200, "{checked_again}");
+    let latest = &checked_again["check_bundle"];
+    assert_eq!(latest["behavior"]["status"], "reported");
+    assert_eq!(
+        latest["job_refs"],
+        json!([{"job_id":job["id"], "role":"child",
+        "kind":"benchmark", "verified_revision":false}])
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(
+            &fs::read(root.join(child_id).join("behavior.v1.json")).unwrap()
+        )
+        .unwrap(),
+        json!({"schema_version":1,"parent_id":id,"child_id":child_id,"metrics":metrics})
+    );
+    assert_eq!(
+        t.request(
+            &requested,
+            "",
+            Some(json!({
+                "sha256":child["sha256"], "acknowledge_bundle":bundle["id"]
+            }))
+        )
+        .0,
+        409
+    );
+    assert_eq!(t.request(&requested, "", Some(review.clone())).0, 409);
+    let ack = json!({"sha256":child["sha256"],"acknowledge_bundle":latest["id"]});
+    // A bundle for the original hash cannot permit publication of changed bytes.
+    fs::set_permissions(model(child_id), fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(model(child_id), &original).unwrap();
+    assert_eq!(t.request(&requested, "", Some(ack.clone())).0, 409);
+    fs::write(model(child_id), &output).unwrap();
+    assert_eq!(
+        t.request(&requested, "", Some(ack)).1["state"],
         "publish_requested"
     );
     assert_eq!(
@@ -313,6 +514,8 @@ fn scratch_edits_keep_parents_and_require_separate_publish_approval() {
     let (status, approved) = t.request(&approval, "Idempotency-Key: approve\r\n", Some(review));
     assert_eq!(status, 200, "{approved}");
     assert_eq!(approved["state"], "approved");
+    assert_eq!(approved["check_bundle"]["id"], latest["id"]);
+    assert!(approved["check_bundle"]["acknowledged_at_ms"].is_number());
     let library = t.request("/api/state", "", None).1["models"].clone();
     assert!(
         library

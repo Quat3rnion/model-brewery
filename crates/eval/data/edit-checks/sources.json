@@ -1,0 +1,16 @@
+{
+  "counterfact.jsonl": {
+    "url": "https://rome.baulab.info/data/dsets/counterfact.json",
+    "loader": "https://github.com/kmeng01/rome/blob/0874014cd9837e4365f3e6f3c71400ef11509e04/dsets/counterfact.py",
+    "cache": "counterfact.json",
+    "sha256": "d017056125178a13728594e66a801357a8db9ed7973a7425554bb4271de9fc6f",
+    "item_ids": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49]
+  },
+  "zsre.jsonl": {
+    "url": "https://rome.baulab.info/data/dsets/zsre_mend_eval.json",
+    "loader": "https://github.com/kmeng01/memit/blob/80426fd9316cf9a50c5ba15e0912f2c5bfe84b/dsets/zsre.py",
+    "cache": "zsre.json",
+    "sha256": "8a371d512f8a6ab175db4ef672181d5c0e52da23298cb51e5a2eeea2f89aa9cd",
+    "item_ids": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49]
+  }
+}
