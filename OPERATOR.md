@@ -1532,6 +1532,62 @@ still apply to the approved file. An unapproved scratch ID is not a
 conversion source. Use the existing conversion workflow after approval if
 the worker can read the file and supports the source and target formats.
 
+#### Compiled programs
+
+Run `sh tools/provision_compiled_program.sh fetch` to fetch the pinned CPU
+compiler sources and Python wheels. Use `offline` in place of `fetch` to
+sync the environment from the local cache. The environment uses Python
+3.12.15 under `/arboretum/tmp/brewery-w13`; it does not modify the system
+Python. Tracr and ALTA both use the Apache-2.0 license. The ALTA compiler uses
+its pinned source tree; its training and data packages are not required.
+
+Set these controller environment variables before startup:
+
+- `BREWERY_COMPILED_PROGRAM_PYTHON`: `/arboretum/tmp/brewery-w13/.venv/bin/python`.
+- `BREWERY_COMPILED_PROGRAM_SCRIPT`: Absolute path of `tools/compiled_program.py`.
+
+Enable a local SafeTensors editor. Use MCP `compile_program` with `worker`
+and `program`, or `POST /api/scratch/compile_program` with the same fields.
+The available programs are `sort`, `histogram`, `reverse`, `frac_prevs`,
+`alta_parity_relative`, and `alta_parity_absolute`. The endpoint accepts only
+these names. It does not accept code or paths.
+
+Use MCP `run_program` with `id`, `sha256`, and `tokens`, or send `sha256`
+and `tokens` to `POST /api/scratch/{id}/run_program`. Use one to four
+integer tokens. Use tokens `0` to `3` for Tracr and `0` to `1` for ALTA.
+`frac_prevs` returns the fraction of `1` tokens up to and including the
+current position. Both ALTA programs return parity at each position. Each
+run loads the compiled weights. It does not save the inputs or output.
+
+Use the same scratch check and publish routes. The compiled revision is a
+root, not an edit of a model. Its parent ID is the nil UUID and
+`parent_sha256` is the SHA-256 of zero bytes. It has no `delta.bin`. The
+compiler stores `config.json` with `model.safetensors`. The provenance
+records the compiler commit, program name, config hash, and runner hash.
+The local CPU runner checks every valid input sequence and compares the
+decoded outputs with the program specification. Review
+`program_correctness` and `program_cases` in the check bundle. You cannot
+waive a failure. Language-model behavior checks do not apply; acknowledge
+the bundle before you request publication. An operator still must approve.
+
+These models do not support GGUF, llama.cpp traces, or edit deltas. They run
+only in the CPU reference runner. Brewery does not inject a compiled
+program into the residual stream of another model.
+
+To use the tools without the controller, make an empty artifact directory
+and use the pinned Python:
+
+```sh
+PYTHON=/arboretum/tmp/brewery-w13/.venv/bin/python
+"$PYTHON" tools/compiled_program.py compile sort "$artifact"
+"$PYTHON" tools/compiled_program.py run "$artifact" '[2,0,2,1]'
+"$PYTHON" tools/compiled_program.py check "$artifact"
+```
+
+The compile result includes the SHA-256 of the weights and config. The same
+program produces the same hashes on the verified platform with the pinned
+environment.
+
 #### Scratch files
 
 The controller stores these files in its private

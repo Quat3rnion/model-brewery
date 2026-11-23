@@ -35,6 +35,8 @@ const PROVENANCE: &str = "provenance.json";
 mod checks;
 #[path = "scratch_jobs.rs"]
 pub(crate) mod jobs;
+#[path = "scratch_program.rs"]
+mod program;
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +74,12 @@ pub struct Revision {
     pub(crate) gguf: Option<jobs::PrivateGguf>,
 }
 
+impl Revision {
+    pub(crate) fn is_compiled_program(&self) -> bool {
+        self.provenance.compiled_program.is_some()
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct Provenance {
     schema: String,
@@ -87,6 +95,8 @@ pub struct Provenance {
     tool_version: String,
     runtime_version: String,
     created_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compiled_program: Option<program::Recipe>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -123,6 +133,8 @@ struct Discard {}
 pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/scratch", get(list).post(create))
+        .route("/scratch/compile_program", post(program::compile))
+        .route("/scratch/{id}/run_program", post(program::run))
         .route("/scratch/{id}", get(get_revision))
         .route("/scratch/{id}/edits", post(edit))
         .route("/scratch/{id}/delta", get(delta))
@@ -387,6 +399,11 @@ fn build(
             if row.state == RevisionState::Discarded {
                 return Err(ApiError::not_found("scratch revision"));
             }
+            if row.is_compiled_program() {
+                return Err(conflict(
+                    "compiled program revisions do not support scratch edits",
+                ));
+            }
             if supplied_pin.as_ref().is_some_and(|pin| pin != &row.sha256) {
                 return Err(ApiError::bad("parent SHA-256 mismatch"));
             }
@@ -480,6 +497,7 @@ fn build(
             std::env::consts::OS
         ),
         created_at_ms: now(),
+        compiled_program: None,
     };
     brewery_worker::atomic(&output.path.join(PROVENANCE), &provenance)
         .map_err(ApiError::storage)?;
@@ -545,6 +563,9 @@ fn change(
         // Reject incomplete bundles before hashing the full model. Recheck the
         // current record after the hash in case a worker finished in between.
         checks::require_publishable(&row, new, acknowledgement.as_deref())?;
+        if row.is_compiled_program() {
+            program::integrity(&row, &root.join(&row.id)).map_err(|error| conflict(&error))?;
+        }
         let mut source =
             open_regular(&path).map_err(|_| conflict("scratch artifact is not available"))?;
         if scratch::file_sha256(&mut source).map_err(ApiError::storage)? != row.sha256 {
@@ -572,7 +593,7 @@ fn change(
     let model = if new == Approved {
         let model = NewModel {
             host: row.provenance.worker.clone(),
-            name: Some(format!("Scratch revision ({})", row.id)),
+            name: Some(program::library_name(&row)),
             path: path
                 .to_str()
                 .ok_or_else(|| ApiError::storage("non-UTF-8 scratch path"))?

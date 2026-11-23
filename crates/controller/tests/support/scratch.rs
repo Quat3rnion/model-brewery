@@ -68,6 +68,121 @@ fn sha(bytes: &[u8]) -> String {
 }
 
 #[test]
+fn mcp_compiled_root_checks_and_approval_boundary() {
+    let mut t = Test::new();
+    fixture(&t, &[1., 2., 3., 4., 5., 6.]);
+    fs::write(
+        t.root.path().join("program.py"),
+        r#"import hashlib, json, pathlib, struct, sys
+action = sys.argv[1]
+directory = pathlib.Path(sys.argv[3 if action == "compile" else 2])
+weights = directory / "model.safetensors"
+config = directory / "config.json"
+if action == "compile":
+    header = b'{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}'
+    weights.write_bytes(struct.pack("<Q", len(header)) + header + struct.pack("<f", 1))
+    config.write_text('{"schema":"brewery.compiled-program.v1","program":"sort","compiler_commit":"9ce2b8c82b6ba10e62e86cf6f390e7536d4fd2cd","architecture":"tracr","runtime":"mock"}')
+    print(json.dumps({"sha256": hashlib.sha256(weights.read_bytes()).hexdigest(),
+        "config_sha256": hashlib.sha256(config.read_bytes()).hexdigest()}))
+elif action == "run":
+    print(json.dumps([0, 1, 2, 2]))
+elif action == "check":
+    print(json.dumps({"cases":340}))
+"#,
+    )
+    .unwrap();
+    t.launch();
+    let call = |name, args| {
+        let (status, response) = t.request(
+            "/mcp",
+            "Accept: application/json, text/event-stream\r\n",
+            Some(json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+                "params":{"name":name,"arguments":args}})),
+        );
+        assert_eq!(status, 200, "{name}: {response}");
+        assert!(response["error"].is_null(), "{name}: {response}");
+        response["result"].clone()
+    };
+    let ok = |name, args| {
+        let result = call(name, args);
+        assert_eq!(result["isError"], false, "{name}: {result}");
+        result["structuredContent"].clone()
+    };
+    let compile = json!({"worker":"existing", "program":"sort", "idempotency_key":"compile-sort"});
+    assert_eq!(
+        call("compile_program", compile.clone())["structuredContent"]["status"],
+        409
+    );
+    assert_eq!(
+        t.admin(Some(
+            json!({"action":"set_weight_editor","worker":"existing",
+        "revision":0,"enabled":true})
+        ))
+        .0,
+        200
+    );
+    let row = ok("compile_program", compile.clone());
+    assert_eq!(
+        call(
+            "compile_program",
+            json!({"worker":"existing", "program":"histogram",
+            "idempotency_key":"compile-sort"})
+        )["structuredContent"]["status"],
+        409
+    );
+    assert_eq!(row["kind"], "compiled_program");
+    assert_eq!(row["provenance"]["method"], "compile_program");
+    assert_eq!(ok("compile_program", compile)["id"], row["id"]);
+    assert!(
+        ok("list_models", json!({}))["models"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let (id, pin) = (&row["id"], &row["sha256"]);
+    let run = json!({"id":id, "sha256":pin, "tokens":[2,0,2,1], "idempotency_key":"run-sort"});
+    assert_eq!(
+        ok("run_program", run.clone())["output"],
+        json!([0, 1, 2, 2])
+    );
+    let invalid = json!({"id":id,"sha256":pin,"tokens":[4],"idempotency_key":"run-invalid"});
+    assert_eq!(
+        call("run_program", invalid)["structuredContent"]["status"],
+        400
+    );
+    let checks = |key| {
+        ok(
+            "run_checks",
+            json!({"id":id,"sha256":pin,"idempotency_key":key}),
+        )
+    };
+    let bundle = checks("check-sort")["check_bundle"].clone();
+    assert_eq!(bundle["integrity"]["status"], "passed");
+    assert_eq!(bundle["smoke"]["status"], "passed");
+    assert_eq!(bundle["program_correctness"]["status"], "passed");
+    assert_eq!(bundle["program_cases"], 340);
+    assert_eq!(bundle["behavior"]["status"], "not_run");
+    let approve = format!("/api/admin/scratch/{}/approve", id.as_str().unwrap());
+    assert_eq!(t.request(&approve, "", Some(json!({"sha256":pin}))).0, 409);
+
+    let directory = t
+        .root
+        .path()
+        .join("state/scratch")
+        .join(id.as_str().unwrap());
+    fs::write(directory.join("config.json"), "{}").unwrap();
+    assert_eq!(call("run_program", run)["structuredContent"]["status"], 409);
+    let failed = checks("check-tampered-sort");
+    assert_eq!(failed["check_bundle"]["integrity"]["status"], "failed");
+    let publish = json!({"id":id,"sha256":pin,"idempotency_key":"publish-sort",
+                        "acknowledge_bundle":failed["check_bundle"]["id"]});
+    assert_eq!(
+        call("request_publish", publish)["structuredContent"]["status"],
+        409
+    );
+}
+
+#[test]
 fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
     let mut t = Test::new();
     let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
@@ -492,6 +607,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
         names,
         [
             "apply_edit",
+            "compile_program",
             "convert_scratch_gguf",
             "create_intervention",
             "create_scratch",
@@ -512,6 +628,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "register_model",
             "request_publish",
             "run_checks",
+            "run_program",
             "start_trace",
         ]
     );

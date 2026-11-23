@@ -40,6 +40,11 @@ pub(super) async fn convert(
         return Ok(response);
     }
     let row = visible(&store, &id)?;
+    if row.is_compiled_program() {
+        return Err(conflict(
+            "compiled program architectures do not support GGUF conversion",
+        ));
+    }
     if row.state != RevisionState::Scratch || row.sha256 != request.sha256 {
         return Err(conflict(
             "convert the current hash of an unrequested scratch revision",

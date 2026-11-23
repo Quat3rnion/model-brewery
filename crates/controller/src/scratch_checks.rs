@@ -45,6 +45,10 @@ pub(super) struct Bundle {
     smoke: Check,
     behavior: Check,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    program_correctness: Option<Check>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    program_cases: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     offline_report: Option<OfflineReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     measured_report: Option<OfflineReport>,
@@ -57,7 +61,7 @@ pub(super) struct Bundle {
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-enum Check {
+pub(super) enum Check {
     Passed,
     Failed { reason: String },
     NotRun { reason: String },
@@ -223,6 +227,11 @@ fn check(app: &App, id: String, request: Run, key: Option<&Submission<'_>>) -> R
         }
         admit(app, &row.provenance.worker)?;
         let root = store.scratch_root();
+        if row.is_compiled_program() {
+            let directory = root.join(&id);
+            drop(store);
+            return program::check(app, row, &directory, key);
+        }
         let parent_id = &row.provenance.parent_id;
         let parent = if let Some(parent) = store.scratch(parent_id).map_err(ApiError::storage)? {
             (parent.state != RevisionState::Discarded
@@ -361,12 +370,36 @@ fn bundle(
         integrity: failure.map_or(Check::Passed, |reason| Check::Failed { reason }),
         smoke: measured_status(),
         behavior: measured_status(),
+        program_correctness: None,
+        program_cases: None,
         offline_report: None,
         measured_report,
         measured_job_id,
         job_refs: Vec::new(),
         acknowledged_at_ms: None,
     }
+}
+
+pub(super) fn program_bundle(
+    row: &Revision,
+    failure: Option<String>,
+    correctness: Check,
+    cases: usize,
+) -> Bundle {
+    let mut result = bundle(row, failure, None);
+    result.smoke = if cases > 0 || matches!(correctness, Check::Failed { .. }) {
+        Check::Passed
+    } else {
+        Check::NotRun {
+            reason: "integrity check did not pass".into(),
+        }
+    };
+    result.behavior = Check::NotRun {
+        reason: "language-model behavior checks do not apply to compiled programs".into(),
+    };
+    result.program_correctness = Some(correctness);
+    result.program_cases = Some(cases);
+    result
 }
 
 fn write_behavior(row: &Revision, directory: &FsPath) -> std::result::Result<(), crate::Error> {
@@ -410,6 +443,11 @@ pub(super) fn require_publishable(
                 && matches!(b.integrity, Check::Passed)
         })
         .ok_or_else(|| conflict("passing scratch integrity checks are required for this hash"))?;
+    if row.is_compiled_program() && !matches!(bundle.program_correctness, Some(Check::Passed)) {
+        return Err(conflict(
+            "passing program correctness checks are required for this hash",
+        ));
+    }
     if matches!(
         (&bundle.smoke, &bundle.behavior),
         (Check::Passed, Check::Passed)
@@ -432,23 +470,27 @@ pub(super) fn acknowledge(row: &mut Revision) {
     }
 }
 
-fn integrity(row: &Revision, parent: &FsPath, child: &FsPath) -> std::result::Result<(), String> {
-    fn open(path: &FsPath, pin: &str) -> std::result::Result<(File, Header), String> {
-        let mut file =
-            open_regular(path).map_err(|_| "cannot open regular SafeTensors artifact")?;
-        let bytes = file
-            .metadata()
-            .map_err(|_| "cannot read artifact size")?
-            .len();
-        if bytes > scratch::MAX_FILE {
-            return Err("SafeTensors artifact exceeds scratch size limit".into());
-        }
-        if scratch::file_sha256(&mut file).map_err(|_| "cannot hash artifact")? != pin {
-            return Err("SafeTensors hash does not match provenance".into());
-        }
-        let header = Header::read(&mut file, bytes, HEADER_LIMIT).map_err(|e| e.to_string())?;
-        Ok((file, header))
+pub(super) fn open_pinned(
+    path: &FsPath,
+    pin: &str,
+    limit: u64,
+) -> std::result::Result<(File, Header), String> {
+    let mut file = open_regular(path).map_err(|_| "cannot open regular SafeTensors artifact")?;
+    let bytes = file
+        .metadata()
+        .map_err(|_| "cannot read artifact size")?
+        .len();
+    if bytes > limit {
+        return Err("SafeTensors artifact exceeds scratch size limit".into());
     }
+    if scratch::file_sha256(&mut file).map_err(|_| "cannot hash artifact")? != pin {
+        return Err("SafeTensors hash does not match provenance".into());
+    }
+    let header = Header::read(&mut file, bytes, HEADER_LIMIT).map_err(|e| e.to_string())?;
+    Ok((file, header))
+}
+
+fn integrity(row: &Revision, parent: &FsPath, child: &FsPath) -> std::result::Result<(), String> {
     let p = &row.provenance;
     if p.revision_id != row.id
         || p.revision_sha256 != row.sha256
@@ -457,8 +499,8 @@ fn integrity(row: &Revision, parent: &FsPath, child: &FsPath) -> std::result::Re
     {
         return Err("revision metadata does not match provenance".into());
     }
-    let (mut parent, ph) = open(parent, &p.parent_sha256)?;
-    let (mut child, ch) = open(child, &row.sha256)?;
+    let (mut parent, ph) = open_pinned(parent, &p.parent_sha256, scratch::MAX_FILE)?;
+    let (mut child, ch) = open_pinned(child, &row.sha256, scratch::MAX_FILE)?;
     if ph.payload_start != ch.payload_start
         || ph.entries.len() != ch.entries.len()
         || ph.entries.iter().any(|(name, a)| {
@@ -478,7 +520,7 @@ fn integrity(row: &Revision, parent: &FsPath, child: &FsPath) -> std::result::Re
     finite(&mut child, &ch)
 }
 
-fn finite(file: &mut File, header: &Header) -> std::result::Result<(), String> {
+pub(super) fn finite(file: &mut File, header: &Header) -> std::result::Result<(), String> {
     let mut buf = vec![0; 256 * 1024];
     for (name, t) in &header.entries {
         // C64 contains two F32 components. Inspect exponent bits for each float format.

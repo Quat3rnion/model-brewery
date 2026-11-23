@@ -295,6 +295,8 @@ export interface CheckBundle {
   integrity: CheckStatus | { status: string; reason?: string };
   smoke: CheckStatus | { status: string; reason?: string };
   behavior: CheckStatus | { status: string; reason?: string };
+  program_correctness?: CheckStatus;
+  program_cases?: number;
   offline_report?: unknown;
   measured_job_id?: string;
   acknowledged_at_ms: number | null;
@@ -325,6 +327,7 @@ export interface ScratchRevision {
     tool_version: string;
     runtime_version: string;
     created_at_ms: number;
+    compiled_program?: { program: string; config_sha256: string; runner_sha256: string };
     [extra: string]: unknown;
   };
   delta: { changed_tensors: number; changed_bytes: number; delta_bytes: number; delta_sha256: string; [extra: string]: unknown };
@@ -367,7 +370,7 @@ export function flatten(nodes: LineageNode[]): LineageNode[] {
   return nodes.flatMap((n) => [n, ...flatten(n.children)]);
 }
 
-const CHECK_NAMES: [keyof Pick<CheckBundle, 'integrity' | 'smoke' | 'behavior'>, string][] = [
+const CHECK_NAMES: [keyof Pick<CheckBundle, 'integrity' | 'smoke' | 'behavior' | 'program_correctness'>, string][] = [
   ['integrity', 'Integrity'],
   ['smoke', 'Load and generate'],
   ['behavior', 'Behavior'],
@@ -381,10 +384,13 @@ const CHECK_STATUS: Record<string, { label: string; tone: Tone }> = {
 
 export function checkRows(b: CheckBundle | undefined | null) {
   if (!b) return [];
-  return CHECK_NAMES.map(([k, name]) => {
+  const names = b.program_correctness
+    ? [...CHECK_NAMES, ['program_correctness', 'Program correctness'] as const]
+    : CHECK_NAMES;
+  return names.map(([k, name]) => {
     const c = (b[k] ?? {}) as { status?: string; reason?: string };
     const s = CHECK_STATUS[c.status ?? ''] ?? { label: c.status ?? 'Unknown', tone: 'warn' as Tone };
-    return { name, status: c.status ?? 'unknown', label: s.label, tone: s.tone, reason: c.reason ?? '' };
+    return { name: k === 'smoke' && b.program_correctness ? 'Load and run' : name, status: c.status ?? 'unknown', label: s.label, tone: s.tone, reason: c.reason ?? '' };
   });
 }
 
