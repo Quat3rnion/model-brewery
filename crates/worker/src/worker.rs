@@ -992,6 +992,28 @@ impl Worker {
                 Reply::error("This worker only runs Hugging Face download jobs"),
             );
         }
+        if job.kind == behavior_direction::JOB
+            && !(action == "start"
+                && job.prompt.is_none()
+                && job.inputs.len() == 1
+                && job.inputs[0].kind == "gguf"
+                && [trace::EXECUTABLE, trace::LIB_DIR, behavior_direction::CACHE]
+                    .iter()
+                    .all(|key| {
+                        self.cfg
+                            .engine_env
+                            .get(*key)
+                            .is_some_and(|p| Path::new(p).is_absolute())
+                    })
+                && behavior_direction::Request::parse(&job.options).is_ok())
+        {
+            return self.record_prepare(
+                id,
+                action,
+                job,
+                Reply::error("Invalid direction request or unavailable CPU trace runtime or cache"),
+            );
+        }
         if job.kind == trace::JOB {
             let allowed = action == "start"
                 && job.inputs.len() == 1
@@ -1712,6 +1734,13 @@ impl Worker {
                 &job.options,
                 input.extra["sha256"].as_str().unwrap_or_default(),
             )?;
+        }
+        if job.kind == behavior_direction::JOB {
+            let request = behavior_direction::Request::parse(&job.options)?;
+            ensure!(
+                input.extra["sha256"] == request.model_sha256,
+                "direction model SHA-256 mismatch"
+            );
         }
         input.extra.extend([
             ("bundle_sha256".into(), json!(bundle.digest)),

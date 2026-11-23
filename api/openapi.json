@@ -850,6 +850,24 @@
         }
       }
     },
+    "/api/directions/{id}/versions/{version}": {
+      "get": {
+        "operationId": "getDirection",
+        "summary": "Read an immutable behavior direction artifact",
+        "parameters": [
+          {"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/InterventionVersion"},
+          {"in":"query","name":"layer","schema":{"$ref":"#/components/schemas/TraceLayer"},"description":"Return one layer. Omit to return all layers."}
+        ],
+        "responses": {
+          "200": {"description": "Version 1 of the direction artifact. The artifact ID is the direction job ID.",
+            "content": {"application/json": {"schema": {"type":"object","required":["id","version","direction"],"properties":{
+              "id":{"$ref":"#/components/schemas/Id"},"version":{"const":1},"direction":{"$ref":"#/components/schemas/BehaviorDirectionResult"}
+            }}}}},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
     "/api/jobs/{id}/trace": {
       "get": {
         "operationId": "getTraceManifest",
@@ -2110,7 +2128,7 @@
           "truncated": {"type": "boolean"}
         }
       },
-      "JobKind": {"type": "string", "enum": ["compare", "trace", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer"]},
+      "JobKind": {"type": "string", "enum": ["compare", "trace", "behavior_direction", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer"]},
       "JobState": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled"]},
       "CapabilityMap": {
         "type": "object", "description": "Map from each known job kind to its availability.",
@@ -2281,7 +2299,8 @@
           {"$ref": "#/components/schemas/HfDownloadJob"},
           {"$ref": "#/components/schemas/WeightInspectJob"}, {"$ref": "#/components/schemas/WeightProposeJob"},
           {"$ref": "#/components/schemas/WeightTuneJob"}, {"$ref": "#/components/schemas/WeightApplyJob"},
-          {"$ref": "#/components/schemas/Exl3LayerJob"}, {"$ref": "#/components/schemas/TraceJob"}
+          {"$ref": "#/components/schemas/Exl3LayerJob"}, {"$ref": "#/components/schemas/TraceJob"},
+          {"$ref": "#/components/schemas/BehaviorDirectionJob"}
         ],
         "discriminator": {
           "propertyName": "kind",
@@ -2293,7 +2312,8 @@
             "hf_download": "#/components/schemas/HfDownloadJob",
             "weight_inspect": "#/components/schemas/WeightInspectJob", "weight_propose": "#/components/schemas/WeightProposeJob",
             "weight_tune": "#/components/schemas/WeightTuneJob", "weight_apply": "#/components/schemas/WeightApplyJob",
-            "exl3_layer": "#/components/schemas/Exl3LayerJob", "trace": "#/components/schemas/TraceJob"
+            "exl3_layer": "#/components/schemas/Exl3LayerJob", "trace": "#/components/schemas/TraceJob",
+            "behavior_direction": "#/components/schemas/BehaviorDirectionJob"
           }
         }
       },
@@ -2349,6 +2369,28 @@
           {"allOf":[{"$ref":"#/components/schemas/OnePrompt"}],"properties":{"options":{"not":{"required":["prompts"]}}}},
           {"allOf":[{"$ref":"#/components/schemas/NoPrompt"}],"properties":{"options":{"required":["prompts"]}}}
         ]
+      },
+      "DirectionBehavior": {"type":"string","enum":["slop","sycophancy","response_length"]},
+      "DirectionRole": {"type":"string","enum":["l_out","attn_out","ffn_out"],"default":"l_out"},
+      "BehaviorDirectionOptions": {
+        "type":"object","required":["behavior","model_sha256","layers"],"additionalProperties":false,
+        "properties":{
+          "behavior":{"$ref":"#/components/schemas/DirectionBehavior"},
+          "model_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "layers":{"type":"array","description":"Layers in increasing order.","minItems":1,"maxItems":64,"uniqueItems":true,"items":{"$ref":"#/components/schemas/TraceLayer"}},
+          "role":{"$ref":"#/components/schemas/DirectionRole"},
+          "position":{"anyOf":[{"$ref":"#/components/schemas/TracePosition"},{"type":"null"}],"description":"Zero-based position including special tokens. Omit or use null for the last user instruction token."}
+        }
+      },
+      "BehaviorDirectionJob": {
+        "description":"Fit per-layer behavior directions from an approved contrast set. Run on one opted-in CPU worker with the Library Qwen2 GGUF.",
+        "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"},{"$ref":"#/components/schemas/NoPrompt"}],
+        "required":["input_ids","options"],
+        "properties":{
+          "kind":{"const":"behavior_direction"},
+          "input_ids":{"minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
+          "options":{"$ref":"#/components/schemas/BehaviorDirectionOptions"}
+        }
       },
       "TraceOptions": {
         "type":"object",
@@ -3534,16 +3576,35 @@
           {"$ref": "#/components/schemas/HfDownloadResult"},
           {"$ref": "#/components/schemas/Exl3LayerResult"},
           {"$ref": "#/components/schemas/TraceResult"},
+          {"$ref": "#/components/schemas/BehaviorDirectionResult"},
           {"type": "object", "not": {"anyOf": [
             {"$ref": "#/components/schemas/CompareResult"}, {"$ref": "#/components/schemas/ConversionResult"},
             {"$ref": "#/components/schemas/GenerateResult"}, {"$ref": "#/components/schemas/Gsm8kResult"},
             {"$ref": "#/components/schemas/BenchmarkResult"}, {"$ref": "#/components/schemas/TransferResult"},
              {"$ref": "#/components/schemas/CacheCleanupResult"}, {"$ref": "#/components/schemas/WeightApplyResult"},
-             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace"]}}}
+             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace", "behavior_direction"]}}}
           ]}}
         ]
       },
       "ByteCount": {"type": "integer", "minimum": 0},
+      "BehaviorDirectionResult": {
+        "type":"object","required":["kind","schema_version","release_qualified","model_id","model_sha256","position","behavior","contrast_sha256","lanternfish_commit","executable_sha256","fit"],
+        "properties":{
+          "kind":{"const":"behavior_direction"},"schema_version":{"const":1},"release_qualified":{"const":false},
+          "model_id":{"$ref":"#/components/schemas/Id"},"model_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "position":{"type":["integer","null"]},"behavior":{"$ref":"#/components/schemas/DirectionBehavior"},
+          "contrast_sha256":{"$ref":"#/components/schemas/Sha256"},"lanternfish_commit":{"type":"string"},
+          "executable_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "fit":{"type":"object","required":["role","train_pairs","held_out_pairs","selected_layer","layers"],"properties":{
+            "role":{"$ref":"#/components/schemas/DirectionRole"},"train_pairs":{"const":12},"held_out_pairs":{"const":8},
+            "selected_layer":{"type":["integer","null"]},"layers":{"type":"array","items":{"type":"object",
+              "required":["layer","norm","unit_vector","held_out_margin"],"properties":{
+                "layer":{"$ref":"#/components/schemas/TraceLayer"},"norm":{"type":"number","minimum":0},
+                "unit_vector":{"type":["array","null"],"items":{"type":"number"}},"held_out_margin":{"type":["number","null"]}
+              }}}
+          }}
+        }
+      },
       "TraceResult": {
         "type":"object","required":["kind","schema_version","model_id","model_sha256","lanternfish_commit","executable_sha256","bytes","prompts"],
         "properties":{

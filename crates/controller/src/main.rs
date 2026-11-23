@@ -5,6 +5,7 @@ mod backend_hf;
 mod conversion;
 mod dedupe;
 mod diff;
+mod directions;
 mod dispatch;
 mod domain;
 mod eligibility;

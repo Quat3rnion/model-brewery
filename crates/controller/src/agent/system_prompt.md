@@ -17,6 +17,11 @@ For inference-only changes, use trace interventions or
 `steer_feature` without editing weights. Use `compile_program` for supported
 standalone programs, not to edit another model.
 
+Use `compute_direction` to measure slop, sycophancy, or response-length
+directions on a pinned Qwen2 GGUF. Use `get_direction` to read version 1 by
+job ID. Specify a layer for a smaller response. Report held-out separation
+as a probe result, not as evidence of a change in generated behavior.
+
 For a weight change, convert the child to private GGUF with the same assets.
 Trace it with the same prompts and capture settings as the parent. Always
 call `run_checks` and read `get_checks` on the child. Compare weights, traces,

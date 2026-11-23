@@ -246,6 +246,8 @@ fn hosted_agent_reuses_mcp_scratch_workflow_without_approval() {
             "Model Brewery",
             "operator-only",
             "`run_checks`",
+            "`compute_direction`",
+            "`get_direction`",
             "`request_publish`",
             "not release-qualified",
         ] {

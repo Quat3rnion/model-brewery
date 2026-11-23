@@ -162,7 +162,8 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
         }
         Ok(value)
     });
-    if (job.kind == trace::JOB || scratch_eval::private_output(&job.kind))
+    if (matches!(job.kind.as_str(), trace::JOB | behavior_direction::JOB)
+        || scratch_eval::private_output(&job.kind))
         && created_work
         && (r.cancel || result.is_err())
         && let Err(error) =
@@ -346,6 +347,14 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .context("trace disk reserve overflow")?,
         )?;
     }
+    if job.kind == behavior_direction::JOB {
+        resources::disk_check(
+            &w.cfg.root,
+            w.disk_floor(job.resources.disk_reserve_bytes)
+                .checked_add(trace::HARD_BYTE_CAP + (16 << 20))
+                .context("direction disk reserve overflow")?,
+        )?;
+    }
     let edit_backend = if job.kind == locate_edit::JOB {
         let backend = locate_edit::Request::parse(&job.options)?.edit.backend;
         let bytes = weight_source::open_regular(&job.inputs[0].path)?
@@ -426,19 +435,17 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .env("OMP_NUM_THREADS", "1");
         }
         c
-    } else if let Some(wrapper) = w
-        .cfg
-        .admission
-        .as_ref()
-        .filter(|_| gpu_edit || (job.kind != trace::JOB && !scratch_job))
-    {
+    } else if let Some(wrapper) = w.cfg.admission.as_ref().filter(|_| {
+        gpu_edit
+            || (!matches!(job.kind.as_str(), trace::JOB | behavior_direction::JOB) && !scratch_job)
+    }) {
         let mut c = Command::new(wrapper);
         c.args(["--wait", "--"]).arg(&w.cfg.engine);
         c
     } else {
         Command::new(&w.cfg.engine)
     };
-    if scratch_job {
+    if scratch_job || job.kind == behavior_direction::JOB {
         let keys: &[&str] = match job.kind.as_str() {
             scratch_eval::GGUF => &[
                 "BREWERY_GGUF_SAFETENSORS",
@@ -456,6 +463,9 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 scratch_eval::CACHE,
             ],
             locate_edit::JOB => &[],
+            behavior_direction::JOB => {
+                &[trace::EXECUTABLE, trace::LIB_DIR, behavior_direction::CACHE]
+            }
             _ => &[trace::EXECUTABLE, trace::LIB_DIR],
         };
         command.env_clear().envs(
@@ -701,6 +711,14 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         value.is_object(),
         "Engine output is not a JSON object; check private engine-output.json"
     );
+    if job.kind == behavior_direction::JOB {
+        behavior_direction::Request::parse(&job.options)?.verify_result(
+            &value,
+            job.inputs[0].extra["id"].as_str().unwrap_or_default(),
+            job.inputs[0].extra["sha256"].as_str().unwrap_or_default(),
+        )?;
+        return Ok(value);
+    }
     if job.kind == scratch_eval::CHECKS {
         let hashes = std::array::from_fn(|i| {
             job.inputs[i]

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, ensure};
+pub mod behavior_direction;
 pub mod compiled_program;
 pub mod exl3_layer;
 pub mod hf_download;

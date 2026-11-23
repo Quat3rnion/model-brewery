@@ -1,3 +1,4 @@
+mod behavior_direction;
 mod benchmark;
 mod compare;
 mod converter;
@@ -398,6 +399,7 @@ fn run() -> Result<i32> {
         "benchmark" => benchmark::run(&job, &cwd, &progress)?,
         "compare" => compare::run(&job, &cwd, &progress)?,
         brewery_worker::trace::JOB => trace::run(&job, &cwd, &progress)?,
+        brewery_worker::behavior_direction::JOB => behavior_direction::run(&job, &cwd, &progress)?,
         brewery_worker::scratch_eval::CHECKS => scratch_checks::run(&job, &cwd, &progress)?,
         brewery_worker::locate_edit::JOB => scratch_locate::run(&job, &cwd, &progress)?,
         brewery_worker::scratch_eval::GGUF => {

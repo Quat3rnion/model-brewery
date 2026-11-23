@@ -22,6 +22,12 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("compile_program", "post", "/api/scratch/compile_program"),
     ("run_program", "post", "/api/scratch/{id}/run_program"),
     ("start_trace", "post", "/api/jobs"),
+    ("compute_direction", "post", "/api/jobs"),
+    (
+        "get_direction",
+        "get",
+        "/api/directions/{id}/versions/{version}",
+    ),
     ("steer_feature", "post", "/api/jobs"),
     ("read_feature_trace", "get", "/api/jobs/{id}/trace/features"),
     ("get_job", "get", "/api/jobs/{id}"),
@@ -94,20 +100,12 @@ impl Server {
         let routes: BTreeMap<_, _> = ROUTES
             .iter()
             .map(|&(name, method, path)| {
-                (
-                    name,
-                    Route::new(
-                        &contract,
-                        method,
-                        path,
-                        matches!(name, "start_trace" | "steer_feature"),
-                    ),
-                )
+                (name, Route::new(&contract, method, path, job_schema(name)))
             })
             .collect();
         let trace_views: BTreeMap<_, _> = TRACE_VIEWS
             .iter()
-            .map(|&(view, path)| (view, Route::new(&contract, "get", path, false)))
+            .map(|&(view, path)| (view, Route::new(&contract, "get", path, None)))
             .collect();
         let mut tools = Vec::new();
         for (&name, route) in &routes {
@@ -119,6 +117,9 @@ impl Server {
                 "steer_feature" => {
                     schema["properties"]["options"]["required"] = json!(["feature_steering"]);
                     "Queue a CPU trace with one SAE decoder direction. Set options.feature_steering. Poll its ID with get_job."
+                }
+                "compute_direction" => {
+                    "Queue CPU behavior directions for one pinned Library GGUF and an approved contrast set. Poll with get_job. Read version 1 with get_direction."
                 }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({
@@ -204,7 +205,7 @@ impl Server {
             return Err("steer_feature requires options.feature_steering");
         }
         let (path, key, allow_duplicate, body) =
-            route.request(args, matches!(name, "start_trace" | "steer_feature"))?;
+            route.request(args, job_schema(name).map(|(kind, _)| kind))?;
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
         let result = loop {
             let result = match self
@@ -289,15 +290,15 @@ impl Server {
 }
 
 impl Route {
-    fn new(contract: &Value, method: &str, path: &'static str, trace: bool) -> Self {
+    fn new(contract: &Value, method: &str, path: &'static str, job: Option<(&str, &str)>) -> Self {
         let operation = &contract["paths"][path][method];
         let description = operation["summary"]
             .as_str()
             .expect("tool source operation")
             .into();
         let write = method == "post";
-        let mut schema = if trace {
-            trace_schema(contract)
+        let mut schema = if let Some((_, variant)) = job {
+            fixed_job_schema(contract, variant)
         } else if write {
             let body = resolve(contract, &operation["requestBody"]);
             resolve(contract, &body["content"]["application/json"]["schema"])
@@ -374,7 +375,7 @@ impl Route {
     fn request(
         &self,
         mut args: Map<String, Value>,
-        trace: bool,
+        kind: Option<&str>,
     ) -> Result<(String, Option<String>, bool, Vec<u8>), &'static str> {
         if !args
             .keys()
@@ -451,8 +452,8 @@ impl Route {
             }
         }
         let body = if self.write {
-            if trace {
-                args.insert("kind".into(), json!("trace"));
+            if let Some(kind) = kind {
+                args.insert("kind".into(), json!(kind));
             }
             serde_json::to_vec(&args).expect("serialize tool arguments")
         } else {
@@ -462,20 +463,37 @@ impl Route {
     }
 }
 
-fn trace_schema(contract: &Value) -> Value {
+fn job_schema(tool: &str) -> Option<(&'static str, &'static str)> {
+    match tool {
+        "start_trace" | "steer_feature" => Some(("trace", "TraceJob")),
+        "compute_direction" => Some((
+            brewery_worker::behavior_direction::JOB,
+            "BehaviorDirectionJob",
+        )),
+        _ => None,
+    }
+}
+
+fn fixed_job_schema(contract: &Value, variant: &str) -> Value {
     let base = &contract["components"]["schemas"];
-    let trace = &base["TraceJob"];
+    let job = &base[variant];
     let mut schema = base["JobRequestFields"].clone();
-    schema["required"] = trace["required"].clone();
-    schema["description"] = trace["description"].clone();
-    schema["oneOf"] = trace["oneOf"].clone();
+    schema["required"] = job["required"].clone();
+    schema["description"] = job["description"].clone();
+    if let Some(one_of) = job.get("oneOf") {
+        schema["oneOf"] = one_of.clone();
+    }
     let props = schema["properties"].as_object_mut().unwrap();
     props.remove("kind");
+    if variant == "BehaviorDirectionJob" {
+        props.remove("prompt");
+        props.remove("prompt_id");
+    }
     props.insert(
         "host".into(),
         base["DefaultInputHost"]["properties"]["host"].clone(),
     );
-    for (name, rules) in object(&trace["properties"]) {
+    for (name, rules) in object(&job["properties"]) {
         if name != "kind" {
             match props.get_mut(name) {
                 Some(generic) => object_mut(generic).extend(object(rules).clone()),
@@ -486,7 +504,7 @@ fn trace_schema(contract: &Value) -> Value {
         }
     }
     // Replace the generic options schema, not a composite $ref with siblings.
-    props.insert("options".into(), trace["properties"]["options"].clone());
+    props.insert("options".into(), job["properties"]["options"].clone());
     resolve(contract, &schema)
 }
 

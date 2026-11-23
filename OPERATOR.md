@@ -441,6 +441,60 @@ trace retention before it returns a cached report. Report size is limited
 to 4 MiB. Try a smaller trace slice on 413. Only one diff can run at a
 time. On 429, wait and retry.
 
+### Behavior directions
+
+Use this CPU job to measure activation differences for `slop`, `sycophancy`,
+or `response_length` on a Library Qwen2 GGUF. The job does not change weights
+or run text generation.
+
+1. Run `python3 tools/direction_prompt_cache.py /absolute/path/to/cache` on
+   a machine with network access. The script checks the source size and
+   SHA-256 before it reads any rows. Copy the generated digest-named `.json`
+   files to a worker-owned directory. The worker can run offline.
+2. In the worker `engine_env`, set `BREWERY_CONTRAST_CACHE` to that absolute
+   directory. Set the two pinned Lanternfish trace paths as for a CPU trace.
+   Enable the `behavior_direction` capability for that worker.
+3. Send `POST /api/jobs` with `kind: "behavior_direction"`, one Library GGUF
+   ID in `input_ids`, and `options` with `behavior`, `model_sha256`, and
+   `layers` in increasing order. Do not send prompts. The MCP tool
+   `compute_direction` supplies the job kind.
+4. Wait for the job to succeed. Read
+   `GET /api/directions/{id}/versions/1` or MCP `get_direction` with the
+   job ID and `version: 1`. This immutable artifact contains the model
+   digest and the prompt and runtime pins. Each run makes a new artifact.
+   Specify `layer` to read one layer instead of all vectors.
+
+The default role is `l_out`; you can select `attn_out` or `ffn_out`. The
+default token is the last user instruction token. Set `position` for one
+explicit zero-based index, including special tokens. The worker captures the
+prefix through the end of the user text. The fit uses 12 prompt pairs and
+scores 8 disjoint pairs. Each layer has the L2 norm of the training mean
+difference, its unit vector, and the mean held-out signed projection of
+positive minus negative rows. The largest strictly positive projection
+selects the layer; equal projections select the lower layer. A zero-norm
+direction has no unit vector or score. Scores measure separation for these
+prompt pairs only. They do not measure a change in generated behavior.
+Results are not release-qualified.
+
+The cache script modifies the source data by selecting a small subset and
+pairing each original user text with two system instructions. It does not
+vendor any rows:
+
+- **Slop and response length:** Databricks, [Databricks Dolly 15K](
+  https://huggingface.co/datasets/databricks/databricks-dolly-15k/tree/bdd27f4d94b9c1f951818a7da7fd7aeea5dbff1a),
+  [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/).
+  Source SHA-256:
+  `2df9083338b4abd6bceb5635764dab5d833b393b55759dffb0959b6fcbf794ec`.
+  The derived sets use separate creative-writing and open-QA subsets.
+  Share those derived sets under CC BY-SA 3.0 with this attribution.
+- **Sycophancy:** Anthropic, [Language model evaluations: sycophancy on the
+  NLP survey](https://github.com/anthropics/evals/tree/84fcc677e52e1902d696c32cd1a6b663e70d3993/sycophancy),
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+  Source SHA-256:
+  `582860b42e2beec806a7d361a08bcce7fdb264e2e697d55104074540352fb308`.
+  The derived set keeps one persona per survey question and its agreement
+  label. Keep this attribution if you redistribute it.
+
 ### Trace interventions
 
 Use `options.interventions` for inline rules. Each rule specifies a `layer`,

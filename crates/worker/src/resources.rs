@@ -143,6 +143,7 @@ pub fn engine_job(kind: &str) -> bool {
             | "generate"
             | "compare"
             | crate::trace::JOB
+            | crate::behavior_direction::JOB
             | crate::scratch_eval::GGUF
             | crate::scratch_eval::CHECKS
             | crate::locate_edit::JOB

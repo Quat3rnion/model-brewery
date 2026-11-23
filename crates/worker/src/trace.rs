@@ -427,6 +427,67 @@ pub fn verify(dir: &Path, spec: &Capture) -> Result<Export> {
     Ok(export)
 }
 
+pub fn direction_probe() -> Capture {
+    Capture {
+        layers: BTreeSet::new(),
+        roles: BTreeSet::new(),
+        positions: BTreeSet::from([0]),
+        top_k: 0,
+        byte_cap: HARD_BYTE_CAP,
+    }
+}
+
+pub fn direction_capture(layers: &[usize], role: Role, position: usize) -> Capture {
+    Capture {
+        layers: layers.iter().copied().collect(),
+        roles: BTreeSet::from([role]),
+        positions: BTreeSet::from([position]),
+        top_k: 0,
+        byte_cap: HARD_BYTE_CAP,
+    }
+}
+
+/// Read one verified, unedited CPU trace row per layer. Keep token IDs in
+/// memory to cross-check the probe and the activation run.
+pub fn direction_rows(
+    dir: &Path,
+    spec: &Capture,
+    verified: &Export,
+) -> Result<(Vec<i32>, Vec<Vec<f32>>)> {
+    let (m, check) = manifest(dir, spec.byte_cap)?;
+    ensure!(
+        check.manifest_sha256 == verified.manifest_sha256
+            && m.model["arch"] == "qwen2"
+            && m.interventions.is_empty()
+            && m.missing.is_empty(),
+        "direction needs complete, unedited Qwen2 trace rows"
+    );
+    let width = m.model["hidden"]
+        .as_u64()
+        .context("missing Qwen2 hidden width")?;
+    let mut tensors = m.tensors;
+    tensors.sort_unstable_by_key(|t| t.key.layer);
+    let rows = tensors
+        .into_iter()
+        .map(|t| {
+            ensure!(
+                t.shape == [width] && (1..=16384).contains(&width),
+                "invalid direction tensor shape"
+            );
+            let data = read_file(&dir.join(t.file), t.bytes)?;
+            ensure!(
+                data.len() as u64 == t.bytes && format!("{:x}", Sha256::digest(&data)) == t.sha256,
+                "direction tensor size or SHA-256 mismatch"
+            );
+            Ok(data
+                .chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+                .collect())
+        })
+        .collect::<Result<_>>()?;
+    Ok((m.tokens.into_iter().map(|t| t.token_id).collect(), rows))
+}
+
 fn seen_row_top(top: &[TopLogit], k: usize) -> bool {
     top.len() == k
         && top

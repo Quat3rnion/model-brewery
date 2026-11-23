@@ -869,6 +869,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "alphaedit_edit",
             "apply_edit",
             "compile_program",
+            "compute_direction",
             "convert_scratch_gguf",
             "create_intervention",
             "create_scratch",
@@ -878,6 +879,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "discard_scratch",
             "export_control_vector",
             "get_checks",
+            "get_direction",
             "get_intervention",
             "get_job",
             "get_scratch",
@@ -918,7 +920,10 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
                     .contains(&json!("backend"))
             );
         }
-        if matches!(tool["name"].as_str(), Some("start_trace" | "steer_feature")) {
+        if matches!(
+            tool["name"].as_str(),
+            Some("start_trace" | "steer_feature" | "compute_direction")
+        ) {
             let flag = &schema["properties"]["allow_duplicate"];
             assert_eq!(flag["type"], "boolean");
             assert_eq!(flag["default"], false);
