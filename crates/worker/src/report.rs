@@ -94,6 +94,8 @@ pub fn engine_exit(base: &Path, status: ExitStatus) -> String {
         "CUDA out of memory; check free GPU memory or use a smaller job"
     } else if log.contains("cuda backend unavailable:") {
         "CUDA backend unavailable; check that the worker has a visible CUDA GPU"
+    } else if log.contains("rocm backend unavailable:") {
+        "ROCm backend unavailable; check that the worker has a visible ROCm GPU"
     } else if log.lines().any(|s| {
         s.starts_with("gpu-thermal-run:")
             && (s.contains("permission denied") || s.contains("scope") || s.contains("lock"))

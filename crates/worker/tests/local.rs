@@ -185,6 +185,75 @@ fn scratch_grant_is_job_scoped_exact_and_verified_before_use() {
 }
 
 #[test]
+fn rocm_scratch_edit_uses_admission_and_reports_invisible_device() {
+    let t = Rig::new();
+    let gguf = t.root.join("private.gguf");
+    let safe = t.root.join("private.safetensors");
+    for path in [&gguf, &safe] {
+        fs::write(path, b"abc").unwrap();
+    }
+    let pin = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    let admitting = t.root.join("gpu-admission");
+    fs::write(
+        &admitting,
+        "#!/bin/sh\nset -eu\n[ \"$1\" = --wait ] && [ \"$2\" = -- ]\nshift 2\ntouch admitted\nexec \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&admitting, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        t.root.join("engine"),
+        r#"#!/bin/sh
+set -eu
+test -f admitted
+test "$BREWERY_ALLOW_GPU_LOAD" = 1
+test "$BREWERY_LANTERNFISH_EDIT_ROCM" = /fixture-rocm
+test "$BREWERY_LANTERNFISH_EDIT_ROCM_LIB_DIR" = /fixture-rocm-libs
+test "$HIP_VISIBLE_DEVICES" = 99
+test "$ROCR_VISIBLE_DEVICES" = 0
+test -z "${CUDA_VISIBLE_DEVICES+x}"
+test -z "${BREWERY_LANTERNFISH_EDIT_CUDA+x}"
+printf 'brewery-engine: Lanternfish locate-then-edit failed: ROCm backend unavailable: no device\n' >&2
+exit 2
+"#,
+    )
+    .unwrap();
+    let mut cfg: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
+    cfg["admission"] = json!(admitting);
+    cfg["engine_env"] = json!({
+        "BREWERY_ALLOW_GPU_LOAD":"1", "BREWERY_LANTERNFISH_EDIT_ROCM":"/fixture-rocm",
+        "BREWERY_LANTERNFISH_EDIT_ROCM_LIB_DIR":"/fixture-rocm-libs",
+        "HIP_VISIBLE_DEVICES":"99", "ROCR_VISIBLE_DEVICES":"0",
+        "CUDA_VISIBLE_DEVICES":"7", "BREWERY_LANTERNFISH_EDIT_CUDA":"/must-not-pass"
+    });
+    cfg["scratch_access"] = json!({"job_id":"rocm-edit","paths":{
+        (gguf.to_str().unwrap()):pin,(safe.to_str().unwrap()):pin
+    }});
+    fs::write(&t.b, cfg.to_string()).unwrap();
+    fs::set_permissions(&t.b, fs::Permissions::from_mode(0o600)).unwrap();
+    let response = t.dispatch(
+        "start",
+        "rocm-edit",
+        Some(&json!({
+            "kind":"scratch_locate_edit",
+            "inputs":[{"host":"b","path":gguf,"kind":"gguf","id":"parent"},
+                      {"host":"b","path":safe,"kind":"safetensors","id":"parent"}],
+            "options":{"method":"rome","backend":"rocm","layers":[0],
+                "facts":[{"subject":"Alice","prompt":"{} lives in","target":"Paris"}]}
+        })),
+    );
+    assert_eq!(response["state"], "queued", "{response}");
+    let failed = t.wait("rocm-edit", "failed");
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("check that the worker has a visible ROCm GPU"),
+        "{failed}"
+    );
+    assert!(failed.get("result").is_none(), "{failed}");
+}
+
+#[test]
 fn scratch_conversion_outputs_never_become_worker_sources() {
     let t = Rig::new();
     fs::write(

@@ -21,6 +21,7 @@ LIBRARIES = ARB / "llama-w9/build/bin"
 LIBRARY_NAMES = ("libllama.so.0", "libggml.so.0", "libggml-base.so.0", "libggml-cpu.so.0")
 CUDA_RUNTIME = ARB / "pins/lanternfish-w14b-3b59809"
 CUDA_MANIFEST = REPO / "qualification/lanternfish-w14b-cuda.sha256"
+ROCM_MANIFEST = REPO / "qualification/lanternfish-rocm.sha256"
 CASE_IDS = (7, 0, 1, 2, 3)
 METHODS = ("rome", "memit", "alphaedit")
 CHECKS = REPO / "tools/scratch_checks.py"
@@ -57,6 +58,18 @@ def exact_scores(parent, child, ids):
             "paired edit prompt token mismatch")
     a, b = checks.aggregate(before), checks.aggregate(after)
     return {k: {"before": a[k][0], "after": b[k][0], "delta": b[k][0] - a[k][0]} for k in a}
+
+
+def runtime_paths(args):
+    if args.backend == "cuda":
+        return CUDA_RUNTIME, CUDA_RUNTIME / "lib", LIBRARY_NAMES + ("libggml-cuda.so.0",)
+    if args.backend == "rocm":
+        root = args.rocm_runtime
+        manifest = ROCM_MANIFEST.read_text().splitlines()
+        libraries = [line.split(maxsplit=1)[1].lstrip("*").removeprefix("./")
+                     for line in manifest if line.strip()]
+        return root, root / "lib", tuple(path.removeprefix("lib/") for path in libraries if path.startswith("lib/"))
+    return RUNTIME, LIBRARIES, LIBRARY_NAMES
 
 
 async def exercise(base, run, args):
@@ -119,10 +132,8 @@ async def exercise(base, run, args):
         root = run / "state/scratch"
         parent_path = root / parent_id / "model.gguf"
         require(sha(parent_path) == parent_gguf["gguf"]["sha256"], "private parent pin mismatch")
-        cuda = args.backend == "cuda"
-        runtime = CUDA_RUNTIME if cuda else RUNTIME
-        libraries = CUDA_RUNTIME / "lib" if cuda else LIBRARIES
-        names = LIBRARY_NAMES + ("libggml-cuda.so.0",) if cuda else LIBRARY_NAMES
+        gpu = args.backend != "cpu"
+        runtime, libraries, names = runtime_paths(args)
         report = {"qualification": "not release-qualified", "parent_safetensors": parent_sha,
                   "parent_gguf": parent_gguf["gguf"]["sha256"],
                   "backend": args.backend, "lanternfish_sha256": sha(runtime / "lanternfish"),
@@ -134,8 +145,8 @@ async def exercise(base, run, args):
             layers = [12] if method == "rome" else [10, 12]
             write = dict(id=parent_id, sha256=parent_sha, layers=layers,
                          facts=targets[:len(ids)], steps=args.steps)
-            if cuda:
-                write["backend"] = "cuda"
+            if gpu:
+                write["backend"] = args.backend
             job = await submit(method + "_edit", method, **write)
             repeated = await submit(method + "_edit", method, **write)
             require(job["id"] == repeated["id"], "idempotent job replay failed")
@@ -146,10 +157,11 @@ async def exercise(base, run, args):
             locate = revision["provenance"]["locate_edit"]
             require(dict(locate["runtime_libraries"]) == report["library_sha256"],
                     "scratch runtime library pins do not match")
-            if cuda:
+            if gpu:
                 audit = locate["provenance"]
-                require(audit["backend"] == "cuda" and re.fullmatch(r"CUDA[0-9]+", audit["device"]),
-                        "edit did not report the CUDA device")
+                device = "ROCm0" if args.backend == "rocm" else r"CUDA[0-9]+"
+                require(audit["backend"] == args.backend and re.fullmatch(device, audit["device"]),
+                        f"edit did not report the {args.backend} device")
                 save(args.evidence, f"{method}-provenance", locate)
                 log = run / "state/local-edit/local/worker/jobs" / job["id"] / "engine-stderr.log"
                 (args.evidence / f"{method}-admission.log").write_bytes(log.read_bytes())
@@ -195,13 +207,17 @@ async def run_acceptance(run, args):
         "BREWERY_LANTERNFISH_EDIT_LIB_DIR": str(LIBRARIES),
         "BREWERY_CPU_THREADS": "6",
     })
-    if args.backend == "cuda":
+    if args.backend != "cpu":
+        runtime, libraries, _ = runtime_paths(args)
+        tag = args.backend.upper()
         doc["admission"] = str(args.gpu_admission)
         doc["engine_env"].update({
             "BREWERY_ALLOW_GPU_LOAD": "1",
-            "BREWERY_LANTERNFISH_EDIT_CUDA": str(CUDA_RUNTIME / "lanternfish"),
-            "BREWERY_LANTERNFISH_EDIT_CUDA_LIB_DIR": str(CUDA_RUNTIME / "lib"),
+            f"BREWERY_LANTERNFISH_EDIT_{tag}": str(runtime / "lanternfish"),
+            f"BREWERY_LANTERNFISH_EDIT_{tag}_LIB_DIR": str(libraries),
         })
+        if args.backend == "rocm":
+            doc["engine_env"]["HIP_VISIBLE_DEVICES"] = args.hip_visible_devices
     config.write_text(json.dumps(doc))
     path = args.evidence / "controller.log"
     with path.open("w") as log:
@@ -236,17 +252,24 @@ def main():
     parser.add_argument("--bins", type=Path, default=RUNTIME / "bin")
     parser.add_argument("--web-dist", type=Path, default=ARB / "w8-accept/web")
     parser.add_argument("--method", choices=METHODS, action="append")
-    parser.add_argument("--backend", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--backend", choices=("cpu", "cuda", "rocm"), default="cpu")
     parser.add_argument("--gpu-admission", type=Path,
-                        help="Trusted host wrapper for CUDA. It must take the shared GPU lock.")
+                        help="Trusted host wrapper for CUDA or ROCm. It must take the shared GPU lock.")
+    parser.add_argument("--rocm-runtime", type=Path, help="Pinned ROCm package with SHA256SUMS.")
+    parser.add_argument("--hip-visible-devices", default="0", help="HIP mask for ROCm acceptance.")
     parser.add_argument("--steps", type=int, choices=range(1, 33), default=16)
     args = parser.parse_args()
     require(args.evidence.is_absolute() and args.evidence.is_relative_to(ARB), "use an absolute evidence directory under /arboretum")
     require(not args.evidence.exists(), "use a new evidence directory")
-    if args.backend == "cuda":
+    if args.backend != "cpu":
         require(args.gpu_admission is not None and args.gpu_admission.is_absolute()
                 and os.access(args.gpu_admission, os.X_OK), "use an absolute GPU admission wrapper")
+    if args.backend == "cuda":
         subprocess.run(["sha256sum", "-c", CUDA_MANIFEST], cwd=CUDA_RUNTIME, check=True)
+    if args.backend == "rocm":
+        require(args.rocm_runtime is not None and args.rocm_runtime.is_absolute(),
+                "use an absolute ROCm package path")
+        subprocess.run(["sha256sum", "-c", ROCM_MANIFEST], cwd=args.rocm_runtime, check=True)
     for path, pin in PINS.items():
         require(sha(path) == pin, f"pin mismatch: {path}")
     args.evidence.mkdir(parents=True)

@@ -3,6 +3,7 @@ use crate::{is_digest, weight_source::scratch::Operation};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::LazyLock;
 
 pub const JOB: &str = "scratch_locate_edit";
 pub const EXECUTABLE: &str = "BREWERY_LANTERNFISH_EDIT";
@@ -29,6 +30,31 @@ pub const LIBRARIES: [(&str, &str); 4] = [
 ];
 pub const CUDA_EXECUTABLE: &str = "BREWERY_LANTERNFISH_EDIT_CUDA";
 pub const CUDA_LIB_DIR: &str = "BREWERY_LANTERNFISH_EDIT_CUDA_LIB_DIR";
+pub const ROCM_EXECUTABLE: &str = "BREWERY_LANTERNFISH_EDIT_ROCM";
+pub const ROCM_LIB_DIR: &str = "BREWERY_LANTERNFISH_EDIT_ROCM_LIB_DIR";
+const ROCM_MANIFEST: &str = include_str!("../../../qualification/lanternfish-rocm.sha256");
+type LibraryPins = Vec<(&'static str, &'static str)>;
+static ROCM_PIN: LazyLock<(&str, LibraryPins)> = LazyLock::new(|| {
+    let mut records = ROCM_MANIFEST.lines().map(|line| {
+        let (sha, path) = line
+            .split_once("  ")
+            .expect("invalid embedded ROCm manifest");
+        assert!(is_digest(sha), "invalid embedded ROCm digest");
+        (path, sha)
+    });
+    let (binary, sha256) = records.next().expect("empty embedded ROCm manifest");
+    assert_eq!(binary, "lanternfish");
+    let libraries = records
+        .map(|(path, sha)| {
+            (
+                path.strip_prefix("lib/")
+                    .expect("invalid embedded ROCm path"),
+                sha,
+            )
+        })
+        .collect();
+    (sha256, libraries)
+});
 pub const GPU_GATE: &str = "BREWERY_ALLOW_GPU_LOAD";
 pub const CUDA_DEVICES: &str = "CUDA_VISIBLE_DEVICES";
 const CUDA_LIBRARIES: [(&str, &str); 5] = [
@@ -62,6 +88,7 @@ pub enum Backend {
     #[default]
     Cpu,
     Cuda,
+    Rocm,
 }
 
 pub struct Pin {
@@ -77,14 +104,50 @@ impl Backend {
         *self == Self::Cpu
     }
 
+    pub const fn is_gpu(self) -> bool {
+        !matches!(self, Self::Cpu)
+    }
+
+    pub const fn runtime_stage_reserve(self) -> u64 {
+        match self {
+            Self::Rocm => 768 << 20,
+            _ => 0,
+        }
+    }
+
     pub const fn key(self) -> &'static str {
         match self {
             Self::Cpu => "cpu",
             Self::Cuda => "cuda",
+            Self::Rocm => "rocm",
         }
     }
 
-    pub const fn pin(self) -> Pin {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Cpu => "CPU",
+            Self::Cuda => "CUDA",
+            Self::Rocm => "ROCm",
+        }
+    }
+
+    pub const fn visibility_vars(self) -> &'static [&'static str] {
+        match self {
+            Self::Cpu => &[],
+            Self::Cuda => &[CUDA_DEVICES],
+            Self::Rocm => &["HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"],
+        }
+    }
+
+    pub fn env_keys(self) -> impl Iterator<Item = &'static str> {
+        let pin = self.pin();
+        [pin.executable, pin.lib_dir]
+            .into_iter()
+            .chain(self.is_gpu().then_some(GPU_GATE))
+            .chain(self.visibility_vars().iter().copied())
+    }
+
+    pub fn pin(self) -> Pin {
         match self {
             Self::Cpu => Pin {
                 executable: EXECUTABLE,
@@ -99,6 +162,13 @@ impl Backend {
                 commit: "3b59809c42e8301222ca4a2bc3121266c12a3532",
                 sha256: "816a74eaf076648c97e7d86950a57a3da6b22dbc7940285b955edb15e9c0c959",
                 libraries: &CUDA_LIBRARIES,
+            },
+            Self::Rocm => Pin {
+                executable: ROCM_EXECUTABLE,
+                lib_dir: ROCM_LIB_DIR,
+                commit: "a55898fd807d78291d2195abed1e8ca171bc2d16",
+                sha256: ROCM_PIN.0,
+                libraries: &ROCM_PIN.1,
             },
         }
     }
@@ -235,12 +305,16 @@ impl Factors {
                 None => backend == Backend::Cpu,
                 Some(audit) => {
                     audit.backend == backend
-                        && match backend {
-                            Backend::Cpu => audit.device == "CPU",
-                            Backend::Cuda => audit
+                        && if backend.is_gpu() {
+                            audit
                                 .device
-                                .strip_prefix("CUDA")
-                                .is_some_and(|index| index.parse::<u32>().is_ok()),
+                                .strip_prefix(backend.label())
+                                .is_some_and(|index| {
+                                    index.bytes().all(|b| b.is_ascii_digit())
+                                        && index.parse::<u32>().is_ok()
+                                })
+                        } else {
+                            audit.device == backend.label()
                         }
                 }
             },
@@ -316,9 +390,15 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn cuda_receipt_requires_cuda_device_provenance() {
+    fn gpu_receipt_requires_matching_device_provenance() {
+        for (backend, device) in [("cuda", "CUDA0"), ("rocm", "ROCm0")] {
+            verify_device(backend, device);
+        }
+    }
+
+    fn verify_device(backend: &str, device: &str) {
         let model = "a".repeat(64);
-        let mut options = json!({"method":"rome","backend":"cuda","layers":[12],
+        let mut options = json!({"method":"rome","backend":backend,"layers":[12],
             "facts":[{"subject":"Apple A5","prompt":"{} was created by","target":"Google"}]});
         let request = Request::parse(&options).unwrap();
         let old_receipt = json!({"schema_version":1,"model_sha256":model,
@@ -326,7 +406,7 @@ mod tests {
             "gradient_dtype":"f32","losses":[[2.0,0.25]],
             "updates":[{"layer":12,"keys":[[0.5]],"values":[[0.25]]}]});
         let mut receipt = old_receipt.clone();
-        receipt["provenance"] = json!({"backend":"cuda","device":"CUDA0"});
+        receipt["provenance"] = json!({"backend":backend,"device":device});
         let parsed: Factors = serde_json::from_value(receipt.clone()).unwrap();
         parsed.verify(&request, &model).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), receipt);
@@ -334,8 +414,11 @@ mod tests {
         assert!(old_factors.verify(&request, &model).is_err());
         for audit in [
             json!({"backend":"cpu","device":"CPU"}),
-            json!({"backend":"cuda","device":""}),
-            json!({"backend":"cuda","device":"CPU"}),
+            json!({"backend":backend,"device":""}),
+            json!({"backend":backend,"device":"CPU"}),
+            json!({"backend":backend,"device":format!("{device}extra")}),
+            json!({"backend":"cuda","device":"ROCm0"}),
+            json!({"backend":"rocm","device":"CUDA0"}),
         ] {
             receipt["provenance"] = audit;
             let parsed: Factors = serde_json::from_value(receipt.clone()).unwrap();

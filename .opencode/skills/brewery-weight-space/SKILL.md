@@ -54,8 +54,10 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
 - Use single-file SafeTensors on an enabled local editor. For direct edits,
   dense pruning, and fact edits, the 32 MiB guard counts the full size of all
   affected tensors, even for a slice. Fact edits support bounded dense Llama
-  and Qwen2. CUDA needs operator GPU admission. See [scratch file
-  provenance](../../../OPERATOR.md#scratch-files).
+  and Qwen2. Use `backend: cpu` by default. Use `backend: cuda` or
+  `backend: rocm` only with the matching pinned runtime and operator GPU
+  admission. If no GPU is visible, report the job failure. See [Locate and
+  edit a fact](../../../OPERATOR.md#locate-and-edit-a-fact).
 - Use narrow trace captures. The hard trace cap is 32 MiB. Read traces
   before the worker removes old results. A successful job can return 404
   for expired trace data. Check [CPU trace

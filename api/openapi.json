@@ -1808,7 +1808,7 @@
           "target": {"type": "string", "minLength": 1, "maxLength": 256}
         }
       },
-      "LocateEditBackend": {"type": "string", "enum": ["cpu", "cuda"], "default": "cpu", "description": "CUDA requires an approved local GPU worker with the pinned CUDA editor. It never falls back to CPU."},
+      "LocateEditBackend": {"type": "string", "enum": ["cpu", "cuda", "rocm"], "default": "cpu", "description": "CUDA and ROCm require a local GPU worker with the matching pinned editor and GPU admission. They do not fall back to CPU."},
       "RomeRequest": {
         "type": "object", "additionalProperties": false, "required": ["sha256", "layers", "facts"],
         "properties": {

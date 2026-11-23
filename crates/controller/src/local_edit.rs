@@ -297,18 +297,15 @@ impl Lanes {
                     .filter(|path| {
                         path.is_absolute() && original["engine_env"][locate_edit::GPU_GATE] == "1"
                     });
-            let scratch_gpu_env = [
-                locate_edit::CUDA_EXECUTABLE,
-                locate_edit::CUDA_LIB_DIR,
-                locate_edit::CUDA_DEVICES,
-            ]
-            .into_iter()
-            .filter_map(|key| {
-                original["engine_env"][key]
-                    .as_str()
-                    .map(|value| (key.into(), json!(value)))
-            })
-            .collect();
+            let scratch_gpu_env = [Backend::Cuda, Backend::Rocm]
+                .into_iter()
+                .flat_map(Backend::env_keys)
+                .filter_map(|key| {
+                    original["engine_env"][key]
+                        .as_str()
+                        .map(|value| (key.into(), json!(value)))
+                })
+                .collect();
             brewery_worker::atomic(&config, &worker_config)?;
             let dispatch = lane_dir.join("dispatch.json");
             brewery_worker::atomic(
@@ -368,9 +365,10 @@ impl Lanes {
 impl Lane {
     pub fn locate_edit_configured(&self, backend: Backend) -> bool {
         let pin = backend.pin();
-        let env = match backend {
-            Backend::Cpu => &self.scratch_env,
-            Backend::Cuda => &self.scratch_gpu_env,
+        let env = if backend.is_gpu() {
+            &self.scratch_gpu_env
+        } else {
+            &self.scratch_env
         };
         [pin.executable, pin.lib_dir].iter().all(|k| {
             env.get(*k)
@@ -428,7 +426,7 @@ impl Lane {
         host: &str,
         id: &str,
         pins: &BTreeMap<String, String>,
-        cuda: bool,
+        backend: Backend,
     ) -> Result<(), Error> {
         use std::io::Write as _;
         let config = self
@@ -437,10 +435,15 @@ impl Lane {
         let mut worker_config = self.worker_config.clone();
         let env = worker_config["engine_env"].as_object_mut().unwrap();
         env.extend(self.scratch_env.clone());
-        if cuda {
-            env.remove(locate_edit::CUDA_DEVICES);
-            env.extend(self.scratch_gpu_env.clone());
-            env.insert(locate_edit::GPU_GATE.into(), json!("1"));
+        if backend.is_gpu() {
+            for key in backend.visibility_vars() {
+                env.remove(*key);
+            }
+            env.extend(backend.env_keys().filter_map(|key| {
+                self.scratch_gpu_env
+                    .get(key)
+                    .map(|value| (key.into(), value.clone()))
+            }));
             worker_config["admission"] = json!(
                 self.scratch_gpu_admission
                     .as_ref()

@@ -893,15 +893,11 @@ impl Worker {
                         .get(*key)
                         .is_some_and(|path| Path::new(path).is_absolute())
                 }) {
-                    Some(match backend {
-                        locate_edit::Backend::Cpu => {
-                            "Pinned Lanternfish CPU editor is not configured"
-                        }
-                        locate_edit::Backend::Cuda => {
-                            "Pinned Lanternfish CUDA editor is not configured"
-                        }
-                    })
-                } else if backend == locate_edit::Backend::Cuda
+                    Some(format!(
+                        "Pinned Lanternfish {} editor is not configured",
+                        backend.label()
+                    ))
+                } else if backend.is_gpu()
                     && (self.cfg.admission.is_none()
                         || self
                             .cfg
@@ -909,7 +905,10 @@ impl Worker {
                             .get(locate_edit::GPU_GATE)
                             .is_none_or(|v| v != "1"))
                 {
-                    Some("CUDA edit requires GPU load permission and a GPU admission wrapper")
+                    Some(format!(
+                        "{} edit requires GPU load permission and a GPU admission wrapper",
+                        backend.label()
+                    ))
                 } else {
                     None
                 };
@@ -1935,7 +1934,7 @@ impl Worker {
                         .is_ok_and(|spec| spec.backend != exl3_layer::Backend::Cpu)
                 } else if job.kind == locate_edit::JOB {
                     locate_edit::Request::parse(&job.options)
-                        .is_ok_and(|request| request.edit.backend == locate_edit::Backend::Cuda)
+                        .is_ok_and(|request| request.edit.backend.is_gpu())
                 } else if job.kind == trace::JOB || scratch_eval::private_output(&job.kind) {
                     false
                 } else {

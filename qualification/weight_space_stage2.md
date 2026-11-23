@@ -18,15 +18,24 @@ The harness needs free space for one parent and one child SafeTensors file,
 their private GGUF files, and the converter's temporary files. It discards
 each child after it saves evidence and removes the isolated stack at exit.
 
-For managed CUDA ROME, use a W14c build and the W14b pin. Pass an absolute
-GPU admission wrapper that takes the host's normal GPU lock. Do not take
-the lock outside the worker.
+For managed GPU ROME, pass an absolute GPU admission wrapper that takes
+the host's normal GPU lock. Do not take the lock outside the worker. Use
+the W14b pin for CUDA. For ROCm, use a Brewery build with the embedded
+[ROCm pin](lanternfish-rocm.sha256) and the complete Lanternfish package.
 
 ```sh
 uv run --no-project --offline --with mcp==1.26.0 python -B \
   qualification/weight_space_stage2.py --method rome --backend cuda \
   --bins /path/to/w14c/bin --gpu-admission /path/to/gpu-admission \
   --evidence /arboretum/w14c-acceptance
+```
+
+```sh
+uv run --no-project --offline --with mcp==1.26.0 python -B \
+  qualification/weight_space_stage2.py --method rome --backend rocm \
+  --bins /path/to/brewery/bin --gpu-admission /path/to/gpu-admission \
+  --rocm-runtime /arboretum/pins/lanternfish-rocm-a55898f \
+  --hip-visible-devices 0 --evidence /arboretum/rocm-edit-acceptance
 ```
 
 The harness submits ROME for CounterFact case 7, then submits MEMIT and
