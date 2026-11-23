@@ -31,6 +31,9 @@ and measured behavior with `diff_tensors`, `diff_traces`, and `diff_behavior`
 as applicable. For compiled programs, use program correctness checks instead
 of the GGUF loop. Report failed or missing checks and regressions, including
 locality loss and higher perplexity. Missing measurements are not passes.
+Use `crosscoder_diff` with a saved artifact ID to compare paired decoder
+features. Check held-out reconstruction on both sides. A feature with a
+different decoder is evidence of an association, not of cause.
 Use `request_publish` only if the user asks and after reviewing the checks.
 Report any integrity or program correctness failure as a blocker. Say
 "not release-qualified" when reporting experiment results.

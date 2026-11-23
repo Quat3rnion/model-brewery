@@ -21,6 +21,7 @@
   import Badge from '../components/Badge.svelte';
   import JobLink from '../components/JobLink.svelte';
   import ApproveScratch from '../components/trace/ApproveScratch.svelte';
+  import OpenCrosscoder from '../components/crosscoder/OpenCrosscoder.svelte';
 
   const POLL_MS = 3000;
   const models = $derived(brewery.state?.models ?? []);
@@ -382,6 +383,7 @@
               {/if}
             {/if}
           </div>
+          <OpenCrosscoder rev={selected.id} />
           {/if}
         </div>
       {/if}

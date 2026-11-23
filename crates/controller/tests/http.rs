@@ -17,6 +17,8 @@ mod mcp;
 
 #[path = "support/sae.rs"]
 mod sae;
+#[path = "support/crosscoder.rs"]
+mod crosscoder;
 
 #[path = "support/sensitivity.rs"]
 mod sensitivity;
