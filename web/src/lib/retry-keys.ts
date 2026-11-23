@@ -1,3 +1,6 @@
+import type { ConversionBody } from './conversion';
+import type { NewJob } from './types';
+
 // Compare wire values, not property insertion order or form-only state.
 export function bodyKey(body: unknown): string | undefined {
   const json = JSON.stringify(body);
@@ -40,13 +43,25 @@ export async function retryKey(failedId: string, launcher: string, body: object)
   return prefix + (await sha256(bodyKey(body)!)).slice(0, keyLimit - prefix.length);
 }
 
+export type SubmissionBody = NewJob | ConversionBody;
+export type OpenPlain = (inputs?: 'submitted' | 'current') => boolean;
+
 export interface RetrySubmission {
   blocked: boolean;
   failedId?: string;
   /** Canonical launcher when several controls submit the same failed operation. */
   launcher?: string;
-  /** Capture the draft now; open the plain form only on a later explicit press. */
-  preparePlain?: () => () => boolean;
+  /** Capture the submitted body and draft now; open a plain form only on an explicit press. */
+  preparePlain?: (body: SubmissionBody) => OpenPlain;
+}
+
+/** Both submission paths consume the repeat choice only after a form opens. */
+export function openOnce(open: OpenPlain, clear: () => void): OpenPlain {
+  return inputs => {
+    if (!open(inputs)) return false;
+    clear();
+    return true;
+  };
 }
 
 export function resultOfPreviousSubmission(accepted: string | undefined, current: unknown): boolean {

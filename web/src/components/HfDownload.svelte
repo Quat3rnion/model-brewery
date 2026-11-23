@@ -9,6 +9,7 @@
   import { unsavedChanges } from '../lib/unsaved-changes.svelte';
   import { hostName } from '../lib/format';
   import Submit from './Submit.svelte';
+  import type { NewJob } from '../lib/types';
 
   const submitter = new Submitter('library.hf-download');
   let host = $state('backend-hf');
@@ -54,15 +55,16 @@
       errors.push(`Downloads are not available on ${hostName(hosts, host)}.`);
     return errors;
   });
+  const request = $derived<NewJob>({
+    kind: 'hf_download', input_ids: [],
+    host: host === 'backend-hf' ? undefined : host,
+    options: { repo_id: repo.trim(), revision: revision.trim(), filename: scope === 'file' ? filename.trim() : undefined },
+  });
   async function start() {
     if (submitter.busy || retry.loading || blockers.length) return;
     const visit = route.capture();
     const submitted = draft();
-    const job = await submitter.submit({
-      kind: 'hf_download', input_ids: [],
-      host: host === 'backend-hf' ? undefined : host,
-      options: { repo_id: repo.trim(), revision: revision.trim(), filename: scope === 'file' ? filename.trim() : undefined },
-    }, retry.action('hf_download'));
+    const job = await submitter.submit(request, retry.action('hf_download'));
     if (job && visit.current()) {
       savedDraft = submitted;
       if (!submitter.replayed && visit.canPresent()) location.hash = `#/jobs/${encodeURIComponent(job.id)}`;
@@ -104,7 +106,7 @@
     {#if host !== 'backend-hf'}<p class="hint">Download on {hostName(hosts, host)}.</p>{/if}
     <p class="hint">Track progress or cancel in Jobs. The download service verifies the files before it adds the entry to Library.</p>
     <Submit {blockers} busy={submitter.busy} disabled={retry.unavailable} onclick={start}>Start download</Submit>
-    <SubmitStatus s={submitter} />
+    <SubmitStatus s={submitter} current={request} />
   </div>
 </details>
 

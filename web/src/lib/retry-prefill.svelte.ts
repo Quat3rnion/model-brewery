@@ -1,7 +1,8 @@
 import { onDestroy, tick, untrack } from 'svelte';
-import { bodyKey, type RetrySubmission } from './retry-keys';
+import { bodyKey, type RetrySubmission, type SubmissionBody } from './retry-keys';
 import { hashParam, plainRunHref, route } from './route.svelte';
 import { readRetry } from './rerun';
+import type { JobDetail, NewJob } from './types';
 
 export type { RetrySubmission } from './retry-keys';
 
@@ -72,7 +73,8 @@ interface Prefill<D, R, C> {
   defaults: D;
   read: () => D;
   write: (draft: D) => void;
-  load: (id: string, signal: AbortSignal) => Promise<R>;
+  load: ((id: string, signal: AbortSignal) => Promise<R>) & { fromSubmission?: (body: SubmissionBody) => R | undefined };
+  fromSubmission?: (body: SubmissionBody) => R | undefined;
   restore: (request: R) => Restoration<D, C>;
   applied?: (patch: Partial<D>) => void;
   focus?: (id: string) => void;
@@ -117,10 +119,14 @@ interface Applied<D> {
  *   like compare inputs, component inputs or tensor axes. The benchmark
  *   worker runs suites in wire order: retain historical suite order and
  *   append new suites in a stable order.
- * - A match shows the accepted ID and offers Start a new run with the
- *   submitted inputs. It opens a plain form but does not submit it. Plain
- *   keys are random and can only be reused for an unconfirmed submission in
- *   its visit. An accepted result belongs to its submitted body, not later edits.
+ * - Label a result as previous when the current wire body differs from
+ *   the accepted body. A match offers an explicit plain run with the submitted
+ *   inputs. Recheck omissions against that submitted body, not the failed job,
+ *   and require acknowledgment again for unavailable inputs. Give edited inputs
+ *   a separate choice or ask before replacing them. Opening does not queue.
+ *   Plain keys are random and can only be reused for an unconfirmed submission
+ *   in its visit. A completed Weight Apply can open a plain repeat only when no
+ *   apply for that proposal is active; a repeat needs a new review and submit.
  * - Async replies may update visible results. Only the visit that started
  *   the request may navigate or move focus, and only before the user moves
  *   on. Returning to the same history entry starts a different visit.
@@ -147,6 +153,7 @@ export class RetryPrefill<D extends object, R, C = never> {
   #baseline: string | undefined;
   #restored: Partial<D> | undefined;
   #keepDraft = false;
+  #keepPolicy = false;
   #record: HistoryRecord<R> | undefined;
   #visit?: ReturnType<typeof route.capture>;
   #deferredFocus?: { id: string; canPresent: () => boolean };
@@ -197,16 +204,25 @@ export class RetryPrefill<D extends object, R, C = never> {
       blocked: this.unavailable || (missing.length > 0 && (missing.some(item => item.required) || !this.acknowledged(action))),
       failedId: binding?.failedId,
       launcher: binding?.launcher,
-      preparePlain: () => {
+      preparePlain: body => {
         const draft = copy(this.form.read());
         const fields = binding?.fields;
         const href = plainRunHref(route.hash);
-        return () => {
-          const next = fields ? copy(this.form.read()) : copy(draft);
-          if (fields) for (const key of fields) next[key] = copy(draft[key]);
-          this.form.write(next);
+        const request = (this.form.fromSubmission ?? this.form.load.fromSubmission)?.(copy(body));
+        return (inputs = 'submitted') => {
+          if (inputs === 'submitted') {
+            const restored = request === undefined ? undefined : this.form.restore(request);
+            const next = fields || restored ? copy(this.form.read()) : copy(draft);
+            if (fields) for (const key of fields) next[key] = copy(draft[key]);
+            this.form.write({ ...next, ...copy(restored?.patch) });
+            if (restored) {
+              this.#installPolicy(restored);
+              this.#keepPolicy = !!this.#id;
+              this.form.applied?.(restored.patch);
+            }
+          }
           this.#keepDraft = !!this.#id;
-          this.startNew(href);
+          this.startNew(inputs === 'submitted' ? href : plainRunHref(route.hash));
           return true;
         };
       },
@@ -232,11 +248,15 @@ export class RetryPrefill<D extends object, R, C = never> {
     }
     this.#keepDraft = false;
     this.#restored = undefined;
-    this.context = undefined;
+    const keepPolicy = !id && this.#keepPolicy;
+    this.#keepPolicy = false;
+    if (!keepPolicy) {
+      this.context = undefined;
+      this.#current = undefined;
+    }
     this.#id = id;
     this.#binding = undefined;
-    this.#current = undefined;
-    this.#applied = this.#applied.filter(policy => policy.retains?.(this.form.read()));
+    this.#applied = this.#applied.filter(policy => policy === this.#current || policy.retains?.(this.form.read()));
     this.#acknowledged = new Map([...this.#acknowledged].filter(([policy]) => this.#applied.includes(policy)));
     this.#baseline = bodyKey(this.form.read());
     this.#edited = (edited || wasRetry) && this.#baseline !== bodyKey(this.form.defaults);
@@ -361,13 +381,7 @@ export class RetryPrefill<D extends object, R, C = never> {
     if (!restoration) return;
     this.#restored = copy(restoration.patch);
     this.form.write({ ...this.form.read(), ...copy(restoration.patch) });
-    const { actions, omissions, retains } = restoration;
-    const applied = { actions, omissions, retains };
-    this.#current = applied;
-    this.#applied = [applied,
-      ...this.#applied.filter(policy => !policy.actions.some(action => actions.includes(action)))];
-    this.#acknowledged = new Map([...this.#acknowledged].filter(([policy]) => this.#applied.includes(policy)));
-    this.context = restoration.context;
+    this.#installPolicy(restoration);
     this.pending = undefined;
     this.form.applied?.(restoration.patch);
     const target = explicit ? restoration.focus : restoration.autoFocus;
@@ -387,6 +401,15 @@ export class RetryPrefill<D extends object, R, C = never> {
     }
   }
 
+  #installPolicy({ actions, omissions, retains, context }: Restoration<D, C>) {
+    const applied = { actions, omissions, retains };
+    this.#current = applied;
+    this.#applied = [applied,
+      ...this.#applied.filter(policy => !policy.actions.some(action => actions.includes(action)))];
+    this.#acknowledged = new Map([...this.#acknowledged].filter(([policy]) => this.#applied.includes(policy)));
+    this.context = context;
+  }
+
   #fail(error: unknown) {
     this.loading = false;
     this.pending = undefined;
@@ -394,7 +417,15 @@ export class RetryPrefill<D extends object, R, C = never> {
   }
 }
 
-export const loadRetryJob = (kinds: readonly string[]) => (id: string, signal: AbortSignal) => readRetry(id, kinds, signal);
+/** Adapt the job wire fields to the same input reader as the historical job. */
+export function submittedJob({ prompt, ...body }: NewJob): JobDetail {
+  return { ...body, prompt_text: prompt, id: '', state: 'queued' };
+}
+
+export const loadRetryJob = (kinds: readonly string[]) => Object.assign(
+  (id: string, signal: AbortSignal) => readRetry(id, kinds, signal),
+  { fromSubmission: (body: SubmissionBody) => 'kind' in body && kinds.includes(body.kind) ? submittedJob(body) : undefined },
+);
 
 /** Bind a prefill to the hash router; inventory-dependent restores wait until
  * the first snapshot, not until every subsequent poll. */

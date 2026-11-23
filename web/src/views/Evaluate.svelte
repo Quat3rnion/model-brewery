@@ -20,7 +20,7 @@
   import RetryRecovery from '../components/RetryRecovery.svelte';
   import RecentJobs from '../components/RecentJobs.svelte';
   import Badge from '../components/Badge.svelte';
-  import type { Host, JobDetail, JobSummary, Workflow } from '../lib/types';
+  import type { Host, JobDetail, JobSummary, NewJob, Workflow } from '../lib/types';
 
   const hosts = $derived(brewery.state?.hosts ?? []);
   const models = $derived(brewery.state?.models ?? []);
@@ -91,11 +91,13 @@
     ...(gMode === 'text' && !gText.trim() ? [{ field: 'g-text', text: 'Enter a prompt.' }] : []),
     ...(invalidMax ? [{ field: 'g-max-tokens', text: 'Enter a whole number from 1 to 512.' }] : []),
   ]);
+  const generationJob = $derived<NewJob>({ kind: 'generate', host: gHost || undefined, input_ids: [gBundle],
+    prompt_id: gMode === 'saved' ? gPromptId : undefined, prompt: gMode === 'text' ? gText : undefined,
+    options: gMaxTokens === undefined ? undefined : { max_tokens: gMaxTokens } });
   async function generate() {
-    const text = gMode === 'text' ? gText : undefined;
-    const job = await gen.submit({ kind: 'generate', host: gHost || undefined, input_ids: [gBundle], prompt_id: gMode === 'saved' ? gPromptId : undefined, prompt: text,
-      options: gMaxTokens === undefined ? undefined : { max_tokens: gMaxTokens } }, retry.action('generate'));
-    if (job && text !== undefined) submittedText = text;
+    const request = generationJob;
+    const job = await gen.submit(request, retry.action('generate'));
+    if (job && request.prompt !== undefined) submittedText = request.prompt;
   }
 
   // ---- Evaluate ----
@@ -115,6 +117,10 @@
       [{ field: 'e-file', text: eBaseFile ? `Reference file ${eBaseFile} is not available. Select another file.` : 'Select reference results.' }] : []),
     ...(eBaseMode === 'source' && !eSources.some((s) => s.id === eSource) ? [{ field: 'e-src', text: 'Select a reference endpoint.' }] : []),
   ]);
+  const evaluationJob = $derived<NewJob>({
+    kind: 'evaluate', host: eHost || undefined, input_ids: eBaseMode === 'file' ? [eBundle, eBaseFile] : [eBundle],
+    options: eBaseMode === 'source' ? { baseline_source: eSource } : undefined,
+  });
 
   // ---- Reference ----
   let bMode = $state<'file' | 'source'>('file');
@@ -131,6 +137,9 @@
     ...(bMode === 'source' && !bHost ? [{ field: 'b-host', text: 'Select a host.' }] : []),
     ...(bMode === 'source' && !bSources.some((s) => s.id === bSource) ? [{ field: 'b-src', text: 'Select a reference endpoint.' }] : []),
   ]);
+  const baselineJob = $derived<NewJob>(bMode === 'file'
+    ? { kind: 'baseline', host: bHost || undefined, input_ids: [bFile] }
+    : { kind: 'baseline', host: bHost, input_ids: [], options: { baseline_source: bSource } });
   const visible = $derived(visibleBlockers([...gFields, ...eFields, ...bFields], touched));
   const error = (field: string) => fieldError(visible, field);
   const defaults = {
@@ -294,13 +303,8 @@
             </div>
           {/if}
         </fieldset>
-        {@render queue('Queue full GSM8K evaluation', 'evaluate', eFields, eHostBlockers, ev, () =>
-          ev.submit({
-            kind: 'evaluate',
-            host: eHost || undefined,
-            input_ids: eBaseMode === 'file' ? [eBundle, eBaseFile] : [eBundle],
-            options: eBaseMode === 'source' ? { baseline_source: eSource } : undefined,
-          }, retry.action('evaluate')))}
+        {@render queue('Queue full GSM8K evaluation', 'evaluate', eFields, eHostBlockers, ev, evaluationJob, () =>
+          ev.submit(evaluationJob, retry.action('evaluate')))}
       </div>
     </WorkflowGate>
   </section>
@@ -337,12 +341,8 @@
             </div>
           {/if}
         </div>
-        {@render queue('Queue reference results', 'baseline', bFields, bHostBlockers, base, () => base.submit(
-          bMode === 'file'
-            ? { kind: 'baseline', host: bHost || undefined, input_ids: [bFile] }
-            : { kind: 'baseline', host: bHost, input_ids: [], options: { baseline_source: bSource } },
-          retry.action('baseline'),
-        ))}
+        {@render queue('Queue reference results', 'baseline', bFields, bHostBlockers, base, baselineJob, () =>
+          base.submit(baselineJob, retry.action('baseline')))}
       </div>
     </WorkflowGate>
   </section>
@@ -383,7 +383,7 @@
             aria-invalid={invalidMax || undefined} aria-describedby="g-max-tokens-hint" />
           <span id="g-max-tokens-hint" class="hint">{invalidMax ? 'Enter a whole number from 1 to 512.' : 'Leave blank to use the default.'}</span>
         </div>
-        {@render queue('Queue generation', 'generate', gFields, gHostBlockers, gen, generate)}
+        {@render queue('Queue generation', 'generate', gFields, gHostBlockers, gen, generationJob, generate)}
       </div>
     </WorkflowGate>
   </section>
@@ -391,11 +391,11 @@
   <RecentJobs kinds={['generate', 'evaluate', 'baseline']} title="Recent generation, evaluation and reference jobs" limit={8} />
 </div>
 
-{#snippet queue(label: string, action: string, fields: Blocker[], hosts: Blocker[], s: Submitter, submit: () => Promise<unknown>)}
+{#snippet queue(label: string, action: string, fields: Blocker[], hosts: Blocker[], s: Submitter, current: NewJob, submit: () => Promise<unknown>)}
   <div>
     <button type="button" class="btn primary" disabled={retry.action(action).blocked || s.busy || fields.length > 0 || hosts.length > 0} aria-busy={s.busy} onclick={submit}>{s.busy ? 'Submitting…' : label}</button>
   </div>
-  <SubmitStatus {s} />
+  <SubmitStatus {s} {current} />
 {/snippet}
 
 <style>
