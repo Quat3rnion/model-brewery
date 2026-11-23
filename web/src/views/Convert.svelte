@@ -2,6 +2,7 @@
   import Advanced from '../components/Advanced.svelte';
   import { brewery } from '../lib/store.svelte';
   import { Submitter } from '../lib/submit.svelte';
+  import { PlainAttempt } from '../lib/submission-key';
   import { CONVERT_SOURCE_KINDS, capability, hostName, isSafeSource } from '../lib/format';
   import { CONVERT_ENUMS, VERIFY_OUTPUT_KINDS, buildConvertJob, poolHosts, type ConvertForm, type ConvertStep } from '../lib/convert';
   import HostSelect from '../components/HostSelect.svelte';
@@ -137,6 +138,7 @@
     }
   });
   const recipeStarter = new ConversionStarter('convert.recipe');
+  const recipeReadAttempts = new PlainAttempt();
   function selectRecipeSource(id: string) {
     if (id === layerSource) return;
     layerSource = id;
@@ -337,7 +339,8 @@
         </div>
         {#if recipeSource}
           {#key recipeKey}
-            <LayerRecipe source={recipeSource} format={recipeFormat} starter={recipeStarter} bind:draft={recipeDraft} />
+            <LayerRecipe source={recipeSource} format={recipeFormat} starter={recipeStarter}
+              readAttempts={recipeReadAttempts} bind:draft={recipeDraft} />
           {/key}
         {:else}
           <p class="hint">Select a source to see if it supports a layer recipe.</p>

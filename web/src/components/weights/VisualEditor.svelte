@@ -4,6 +4,7 @@
   // and one job per 2-D tile, never one per cell. Earlier reads with equal
   // options are reused. Every read and proposal carries the source fingerprint
   // from the inventory, so a changed file is refused.
+  import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import TensorMap from './TensorMap.svelte';
   import HeatGrid from './HeatGrid.svelte';
@@ -11,7 +12,8 @@
   import SubmitStatus from '../SubmitStatus.svelte';
   import JobState from '../JobState.svelte';
   import { brewery } from '../../lib/store.svelte';
-  import { acceptedJobSummary, Submitter } from '../../lib/submit.svelte';
+  import { acceptedJobSummary, guardReadLink, Submitter } from '../../lib/submit.svelte';
+  import type { PlainAttempt } from '../../lib/submission-key';
   import { captureResultFocus } from '../../lib/focus';
   import { route } from '../../lib/route.svelte';
   import { theme } from '../../lib/theme.svelte';
@@ -49,6 +51,7 @@
     mode = $bindable('manual'),
     onproposal,
     pending,
+    readAttempts,
   }: {
     source: Model;
     canVisual: boolean;
@@ -60,6 +63,7 @@
     mode?: 'manual' | 'auto';
     onproposal: (jobId: string) => void;
     pending: SvelteMap<string, DraftEdit>;
+    readAttempts: PlainAttempt;
   } = $props();
 
   const stateJobs = $derived(brewery.state?.jobs ?? []);
@@ -72,7 +76,8 @@
   const packedHost = $derived(!isSafeSource(source.kind) && brewery.state?.hosts.find(h => h.id === source.host)?.capabilities?.weight_packed === true);
   const usable = $derived(jobs.filter((j) => !ignored.has(j.id)));
   const sourceHost = $derived(hostName(brewery.state?.hosts ?? [], source.host));
-  const reads = new Submitter(job => job.options?.mode === 'tile' ? 'weights.visual.tile' : 'weights.visual.inventory');
+  const reads = new Submitter(job => job.options?.mode === 'tile' ? 'weights.visual.tile' : 'weights.visual.inventory',
+    untrack(() => readAttempts));
   let readKey = $state('');
   let acceptedReadMode = $state<'inventory' | 'tile'>();
   let inventoryLink: HTMLAnchorElement | undefined = $state();
@@ -371,7 +376,7 @@
       </div>
       {#if inventoryJobFound}
         <div class="row" role="status">
-          <a bind:this={inventoryLink} href="#/jobs/{encodeURIComponent(inventoryJobFound.id)}">Tensor list read job</a>
+          <a bind:this={inventoryLink} href="#/jobs/{encodeURIComponent(inventoryJobFound.id)}" onclick={guardReadLink}>Tensor list read job</a>
           <JobState job={inventoryJobFound} />
         </div>
       {/if}
@@ -455,7 +460,7 @@
 
         {#if tileJobFound}
           <div class="row" role="status">
-            <a bind:this={tileLink} href="#/jobs/{encodeURIComponent(tileJobFound.id)}">Tile read job</a>
+            <a bind:this={tileLink} href="#/jobs/{encodeURIComponent(tileJobFound.id)}" onclick={guardReadLink}>Tile read job</a>
             <JobState job={tileJobFound} />
           </div>
         {/if}

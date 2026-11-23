@@ -24,20 +24,24 @@ function sortedJson(value: unknown): string {
 
 const hex = (bytes: Uint8Array) => [...bytes].map(x => x.toString(16).padStart(2, '0')).join('');
 
-/** Keep only an unconfirmed request in the current visit. */
+export const requestKey = (launcher: string, body: object): string => bodyKey([launcher, body])!;
+
+/** Keep unconfirmed requests in the current visit. */
 export class PlainAttempt {
-  #pending?: { request: string; key: string; current: () => boolean };
+  #pending = new Map<string, string>();
+  #current?: () => boolean;
 
   take(launcher: string, body: object, current: () => boolean) {
-    const request = bodyKey([launcher, body])!;
-    const prior = this.#pending;
-    const pending = prior?.current() && prior.request === request ? prior : {
-      request, key: `conv-${hex(crypto.getRandomValues(new Uint8Array(16)))}`, current,
-    };
-    this.#pending = pending;
+    if (!this.#current?.()) {
+      this.#pending.clear();
+      this.#current = current;
+    }
+    const request = requestKey(launcher, body);
+    const key = this.#pending.get(request) ?? `conv-${hex(crypto.getRandomValues(new Uint8Array(16)))}`;
+    this.#pending.set(request, key);
     return {
-      key: pending.key,
-      complete: () => { if (this.#pending === pending) this.#pending = undefined; },
+      key,
+      complete: () => { if (this.#pending.get(request) === key) this.#pending.delete(request); },
     };
   }
 }

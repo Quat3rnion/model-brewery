@@ -37,8 +37,8 @@
     const v = route.view;
     if (v !== previous) {
       previous = v;
-      // Infrastructure links manage focus for their specific destination.
-      if (v !== 'settings' || route.hash.split('?')[0] !== '#/settings/infrastructure') {
+      // Settings setup links manage focus for their specific destination.
+      if (v !== 'settings' || !['#/settings/infrastructure', '#/settings/evaluation'].includes(route.hash.split('?')[0])) {
         queueMicrotask(() => main?.querySelector<HTMLElement>('h1')?.focus());
       }
     }

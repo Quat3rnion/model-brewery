@@ -12,6 +12,7 @@
 </script>
 
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { conversionRunHref, STAGES, type ConversionBody } from '../lib/conversion';
   import type { Blocker } from '../lib/blockers';
@@ -27,19 +28,19 @@
   import Blockers from './Blockers.svelte';
   import Submit from './Submit.svelte';
   import SubmitStatus from './SubmitStatus.svelte';
-  import { acceptedJobSummary, Submitter } from '../lib/submit.svelte';
+  import { acceptedJobSummary, guardReadLink, Submitter } from '../lib/submit.svelte';
   import { captureResultFocus } from '../lib/focus';
   import { trellisProblem } from '../lib/trellis-layer';
-  import { bodyKey } from '../lib/submission-key';
+  import { bodyKey, type PlainAttempt } from '../lib/submission-key';
 
-  let { source, format, starter, draft = $bindable() }: {
-    source: Model; format: 'gguf' | 'hgn'; starter: ConversionStarter; draft: RecipeDraft;
+  let { source, format, starter, readAttempts, draft = $bindable() }: {
+    source: Model; format: 'gguf' | 'hgn'; starter: ConversionStarter; readAttempts: PlainAttempt; draft: RecipeDraft;
   } = $props();
 
   const submitted = new SvelteMap<number, JobSummary>();
   const loaded = new SvelteMap<string, JobDetail | 'rejected' | null>();
   const attempted = new Map<string, Date | null>();
-  const reads = new Submitter('convert.recipe.inventory');
+  const reads = new Submitter('convert.recipe.inventory', untrack(() => readAttempts));
   let error = $state('');
   const host = $derived(brewery.state?.hosts.find(h => h.id === source.host));
   const blocked = $derived(inventoryBlocker(source, host));
@@ -227,7 +228,7 @@
 <p class="hint">Supported architectures: {format === 'gguf' ? 'GPT-2 and Qwen2' : 'dense Llama and Qwen2'}. The exporter checks the architecture and assets before it writes output.</p>
 {#if readJob && !flash}
   <div class="row" role="status">
-    <a bind:this={readLink} href="#/jobs/{encodeURIComponent(readJob.id)}">Layer read job</a>
+    <a bind:this={readLink} href="#/jobs/{encodeURIComponent(readJob.id)}" onclick={guardReadLink}>Layer read job</a>
     <JobState job={readJob} />
   </div>
 {/if}
