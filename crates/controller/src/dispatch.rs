@@ -64,6 +64,7 @@ impl Dispatcher {
                 } else {
                     let mut wire = serde_json::to_value(envelope)?;
                     wire.as_object_mut().unwrap().remove("scratch_pins");
+                    wire.as_object_mut().unwrap().remove("heretic_runs");
                     if !job.dispatch_resources.is_empty() {
                         wire["resources"] = serde_json::to_value(job.dispatch_resources)?;
                     }
@@ -225,10 +226,14 @@ pub(crate) async fn read_limited(
 
 pub async fn run(app: Arc<App>, dispatch: Arc<Dispatcher>) -> Result<(), Error> {
     let mut jobs = JoinSet::new();
+    let mut searches = JoinSet::new();
     let recovered = {
         let mut store = app.store.lock().expect("store lock");
         let mut running = store.by_state(State::Running)?;
         for job in &mut running {
+            if job.kind == brewery_worker::ablation_search::JOB {
+                continue;
+            }
             if (job.host == backend_hf::ID
                 && dispatch
                     .backend
@@ -253,7 +258,7 @@ pub async fn run(app: Arc<App>, dispatch: Arc<Dispatcher>) -> Result<(), Error> 
             job.error = None;
             store.update(job, None)?;
         }
-        running.retain(|job| job.state == State::Running);
+        running.retain(|job| job.state == State::Running && job.kind != brewery_worker::ablation_search::JOB);
         running
     };
     for job in recovered {
@@ -261,12 +266,19 @@ pub async fn run(app: Arc<App>, dispatch: Arc<Dispatcher>) -> Result<(), Error> 
         jobs.spawn(async move { drive(&app, &dispatch, job, true).await });
     }
     loop {
+        if searches.is_empty()
+            && let Some(job) = crate::scratch::ablation_search::allocate(&app)?
+        {
+            let app = app.clone();
+            searches.spawn(async move { crate::scratch::ablation_search::drive(app, job).await });
+        }
         for job in allocate(&app)? {
             let (app, dispatch) = (app.clone(), dispatch.clone());
             jobs.spawn(async move { drive(&app, &dispatch, job, false).await });
         }
         tokio::select! {
             Some(completed) = jobs.join_next() => completed??,
+            Some(completed) = searches.join_next() => completed??,
             () = sleep(dispatch.poll) => {},
         }
     }
@@ -276,7 +288,8 @@ fn allocate(app: &App) -> Result<Vec<Job>, Error> {
     let mut store = app.store.lock().expect("store lock");
     let hosts = app.effective_hosts()?;
     store.advance_conversions()?;
-    let active = store.by_state(State::Running)?;
+    let mut active = store.by_state(State::Running)?;
+    active.retain(|job| job.kind != brewery_worker::ablation_search::JOB);
     let mut busy = std::collections::BTreeMap::<String, std::collections::BTreeSet<u64>>::new();
     for job in &active {
         busy.entry(job.host.clone())
@@ -295,6 +308,9 @@ fn allocate(app: &App) -> Result<Vec<Job>, Error> {
     }
     let mut launch = Vec::new();
     for mut job in store.by_state(State::Queued)? {
+        if job.kind == brewery_worker::ablation_search::JOB {
+            continue;
+        }
         let envelope = store.envelope(&job.id)?;
         let eligible = candidates(&job, &envelope, &hosts);
         if eligible.is_empty()

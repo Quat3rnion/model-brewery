@@ -58,6 +58,8 @@ pub fn engine(base: &Path, since: u64) -> Option<ProgressDetail> {
             | "sensitivity_gradients"
             | "circuit_attribution"
             | "circuit_patches"
+            | "prepare_screen"
+            | "screen_trials"
             | scratch_eval::CHECKS
             | "locate_edit"
             | "compare_right"
@@ -199,6 +201,8 @@ pub fn apply(reply: &mut Reply, detail: ProgressDetail) {
         "sensitivity_gradients" => "Measuring and checking gradients",
         "circuit_attribution" => "Measuring activation attribution",
         "circuit_patches" => "Checking the top activation patches",
+        "prepare_screen" => "Measuring stock screen logits",
+        "screen_trials" => "Screening edited and matched random directions",
         scratch_eval::CHECKS => "Checking scratch model behavior",
         "locate_edit" => "Computing locate-then-edit factors",
         "hf_download_transfer" => "Downloading complete files",

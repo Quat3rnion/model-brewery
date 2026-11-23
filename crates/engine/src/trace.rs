@@ -3,9 +3,129 @@ use crate::{
     write_json,
 };
 use anyhow::{Context, Result, ensure};
-use brewery_worker::trace::{self, Request};
+use brewery_worker::trace::{self, LanternfishRuntime, Request};
 use serde_json::{Value, json};
-use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+};
+
+const PROJECTION_LIBRARIES: &[(&str, &str)] = &[
+    (
+        "libllama.so.0",
+        "f4a59a07c8ebea5d02779f82e16cf23d5815a288fede9cdbf851f73b1854c005",
+    ),
+    (
+        "libggml.so.0",
+        "c51f659bc7c64ab3b675fb56cdddf1beab54c75818ace8325c7e49ff1a60e3e4",
+    ),
+    (
+        "libggml-base.so.0",
+        "c445afaddb3d37bbb8ef6d979786f66f4cae71b5597fee0feb398f9b961289b8",
+    ),
+    (
+        "libggml-cpu.so.0",
+        "fd7b911f677b93bef0b2fd31877da45bc5e78bd7197fe33df5ed4b76f75b08cd",
+    ),
+];
+
+pub(crate) struct Runtime {
+    private: tempfile::TempDir,
+    tool: Tool,
+    libs: PathBuf,
+    threads: usize,
+}
+
+impl Runtime {
+    pub(crate) fn stage(cwd: &Path) -> Result<Self> {
+        Self::stage_trace(cwd, LanternfishRuntime::Base)
+    }
+
+    pub(crate) fn stage_screen(cwd: &Path) -> Result<Self> {
+        use brewery_worker::ablation_search as search;
+        Self::stage_for(cwd, search::EXECUTABLE, search::SHA256, trace::PROJECTION_LIB_DIR, PROJECTION_LIBRARIES)
+    }
+
+    fn stage_trace(cwd: &Path, runtime: LanternfishRuntime) -> Result<Self> {
+        let (executable, lib_dir, sha, _) = runtime.pins();
+        let libs = match runtime {
+            LanternfishRuntime::Base => w0_libraries::PINS,
+            LanternfishRuntime::Projection => PROJECTION_LIBRARIES,
+            LanternfishRuntime::Routing => ROUTING_LIBS,
+        };
+        Self::stage_for(cwd, executable, sha, lib_dir, libs)
+    }
+
+    fn stage_for(
+        cwd: &Path,
+        variable: &str,
+        sha256: &str,
+        lib_dir: &str,
+        pins: &[(&str, &str)],
+    ) -> Result<Self> {
+        let private = tempfile::Builder::new()
+            .prefix(".trace-")
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir_in(cwd)?;
+        let tool = Tool::pinned_digest(
+            private.path(),
+            variable,
+            sha256,
+            "lanternfish",
+            "Lanternfish",
+        )?;
+        let libs = w0_libraries::stage(
+            private.path(),
+            lib_dir,
+            "Lanternfish trace",
+            pins,
+        )?;
+        Ok(Self {
+            private,
+            tool,
+            libs,
+            threads: child_threads(None)?.min(64),
+        })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.private.path()
+    }
+
+    pub(crate) fn capture(
+        &self,
+        model: &Path,
+        prompt: &str,
+        capture: &trace::Capture,
+        out: &Path,
+        intervention: Option<&Path>,
+    ) -> Result<trace::Export> {
+        let spec = self.path().join("current-spec.json");
+        write_json(&spec, &serde_json::to_value(capture)?)?;
+        let mut command = self.tool.command(self.path(), self.threads);
+        command
+            .env("LD_LIBRARY_PATH", &self.libs)
+            .arg("trace")
+            .arg("--model")
+            .arg(model)
+            .arg(format!("--prompt={prompt}"))
+            .arg("--spec")
+            .arg(&spec)
+            .arg("--out")
+            .arg(out)
+            .arg("--threads")
+            .arg(self.threads.to_string());
+        if let Some(path) = intervention {
+            command.arg("--intervention").arg(path);
+        }
+        self.tool
+            .capture(&mut command, self.path())
+            .context("Lanternfish trace failed")?;
+        fs::remove_file(&spec)?;
+        trace::verify(out, capture)
+    }
+}
 
 const ROUTING_LIBS: &[(&str, &str)] = &[
     (
@@ -47,35 +167,9 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     );
     let root = cwd.join(trace::JOB);
     ensure!(!root.exists(), "trace output already exists");
-    let private = tempfile::Builder::new()
-        .prefix(".trace-")
-        .permissions(fs::Permissions::from_mode(0o700))
-        .tempdir_in(cwd)?;
-    let (executable, sha, commit, lib_dir, pins) = if request.routing() {
-        (
-            trace::ROUTING_EXECUTABLE,
-            trace::ROUTING_SHA256,
-            trace::ROUTING_COMMIT,
-            trace::ROUTING_LIB_DIR,
-            ROUTING_LIBS,
-        )
-    } else {
-        (
-            trace::EXECUTABLE,
-            trace::SHA256,
-            trace::COMMIT,
-            trace::LIB_DIR,
-            w0_libraries::PINS,
-        )
-    };
-    let tool = Tool::pinned_digest(
-        private.path(),
-        executable,
-        sha,
-        "lanternfish",
-        "Lanternfish",
-    )?;
-    let libs = w0_libraries::stage(private.path(), lib_dir, "Lanternfish trace", pins)?;
+    let selection = request.lanternfish_runtime()?;
+    let (_, _, sha, commit) = selection.pins();
+    let runtime = Runtime::stage_trace(cwd, selection)?;
     let ids = integrity::check_inputs(&job.inputs, progress)?;
     let id = &ids[0];
     trace::check_model_revision(&job.options, &id.sha256)?;
@@ -83,10 +177,9 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         id.files.len() == 1 && input.path.is_file(),
         "trace needs a single-file GGUF"
     );
-    let threads = child_threads(None)?.min(64);
-    let staging = private.path().join("export");
+    let staging = runtime.path().join("export");
     fs::create_dir(&staging)?;
-    let intervention = private.path().join("interventions.json");
+    let intervention = runtime.path().join("interventions.json");
     let has_intervention = !request.interventions.is_empty();
     if has_intervention {
         write_json(
@@ -99,30 +192,16 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let mut phase = progress.start("trace_prompts", "items", Some(request.prompts.len() as u64));
     for (i, prompt) in request.prompts.iter().enumerate() {
         ensure!(capture.byte_cap > 0, "trace byte cap exhausted");
-        let spec = private.path().join(format!("spec-{i}.json"));
-        write_json(&spec, &serde_json::to_value(&capture)?)?;
         let out = staging.join(i.to_string());
-        let mut command = tool.command(private.path(), threads);
-        command
-            .env("LD_LIBRARY_PATH", &libs)
-            .arg("trace")
-            .arg("--model")
-            .arg(&input.path)
-            .arg(format!("--prompt={prompt}"))
-            .arg("--spec")
-            .arg(&spec)
-            .arg("--out")
-            .arg(&out)
-            .arg("--threads")
-            .arg(threads.to_string());
-        if has_intervention {
-            command.arg("--intervention").arg(&intervention);
-        }
         id.check()?;
-        tool.capture(&mut command, private.path())
-            .context("Lanternfish trace failed")?;
+        let verified = runtime.capture(
+            &input.path,
+            prompt,
+            &capture,
+            &out,
+            has_intervention.then_some(intervention.as_path()),
+        )?;
         id.check()?;
-        let verified = trace::verify(&out, &capture)?;
         trace::verify_interventions(&out, &verified, &request.interventions)?;
         capture.byte_cap -= verified.bytes;
         receipts.push(verified);

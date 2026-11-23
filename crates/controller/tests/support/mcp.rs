@@ -100,6 +100,27 @@ fn routing_atlas_pairs_matching_traces_over_rest_and_mcp() {
     assert_eq!(data["ablation"]["rows"][0]["top_token_changed"], true);
 }
 
+#[test]
+fn search_ablation_rejects_unbounded_budget_and_requires_a_scratch_parent() {
+    let mut t = Fixture::new();
+    t.launch();
+    let sha = "a".repeat(64);
+    let mut request = json!({
+        "sha256": sha, "direction_id":"fit", "assets_id":"assets", "seed":7,
+        "trial_budget":33, "max_children":1, "disk_budget_bytes":8589934592_u64,
+        "behavior_direction":{"prompt_sets":{"sycophancy":sha,"slop":sha,"response_length":sha}}
+    });
+    let (status, body) = t.request("POST", "/api/scratch/missing/search_ablation", Some(request.clone()), "");
+    assert_eq!(status, 400, "{body}");
+    request["trial_budget"] = json!(6);
+    let (status, body) = t.request("POST", "/api/scratch/missing/search_ablation", Some(request.clone()), "");
+    assert_eq!(status, 404, "{body}");
+    request["id"] = json!("00000000-0000-0000-0000-000000000001");
+    request["idempotency_key"] = json!("a5-test");
+    let reply = call(&t, "search_ablation", request);
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+}
+
 pub(super) fn call(t: &Fixture, name: &str, arguments: Value) -> Value {
     let (status, body) = t.request(
         "POST",

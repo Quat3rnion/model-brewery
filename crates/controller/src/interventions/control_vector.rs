@@ -11,6 +11,11 @@ const GGML_F32: u32 = 0;
 pub(super) fn encode(artifact: &Artifact) -> Result<Vec<u8>> {
     let mut directions = BTreeMap::new();
     for rule in &artifact.interventions {
+        if matches!(&rule.op, Operation::ProjectOut { .. }) {
+            return Err(ApiError::bad(
+                "llama.cpp control vectors cannot express a projection",
+            ));
+        }
         if rule.layer == 0 {
             return Err(ApiError::bad(
                 "llama.cpp control vectors cannot target layer 0",
@@ -21,19 +26,31 @@ pub(super) fn encode(artifact: &Artifact) -> Result<Vec<u8>> {
                 "Control vector export requires the l_out role",
             ));
         }
-        let Operation::Add { vector } = &rule.op else {
-            return Err(ApiError::bad(
-                "Control vector export requires the add operation",
-            ));
+        let (vector, multiplier) = match &rule.op {
+            Operation::Add { vector } => (vector, 1.0),
+            Operation::Subtract { vector, scale } => (vector, -*scale),
+            _ => {
+                return Err(ApiError::bad(
+                    "Control vector export requires add or subtract",
+                ));
+            }
         };
-        if directions.insert(rule.layer, vector).is_some() {
+        if directions
+            .insert(rule.layer, (vector, multiplier))
+            .is_some()
+        {
             return Err(ApiError::bad(
                 "Control vector export needs one direction per layer",
             ));
         }
     }
-    let width = directions.values().next().expect("nonempty artifact").len();
-    if directions.values().any(|vector| vector.len() != width) {
+    let width = directions
+        .values()
+        .next()
+        .expect("nonempty artifact")
+        .0
+        .len();
+    if directions.values().any(|(vector, _)| vector.len() != width) {
         return Err(ApiError::bad(
             "Control vector export requires one shared vector width",
         ));
@@ -66,8 +83,8 @@ pub(super) fn encode(artifact: &Artifact) -> Result<Vec<u8>> {
         out.extend_from_slice(&((i * stride) as u64).to_le_bytes());
     }
     pad(&mut out);
-    for vector in directions.values() {
-        out.extend(vector.iter().flat_map(|v| v.to_le_bytes()));
+    for (vector, multiplier) in directions.values() {
+        out.extend(vector.iter().flat_map(|v| (v * multiplier).to_le_bytes()));
         pad(&mut out);
     }
     Ok(out)

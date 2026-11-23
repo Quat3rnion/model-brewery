@@ -7,6 +7,54 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
+#[test]
+fn trace_requires_the_executable_for_its_operations() {
+    let workspace = tempfile::tempdir().unwrap();
+    let root = workspace.path();
+    let model = root.join("fixture.gguf");
+    fs::write(&model, b"GGUF").unwrap();
+    let w0 = root.join("w0");
+    let projection = root.join("projection");
+    fs::write(&w0, b"fake W0").unwrap();
+    fs::write(&projection, b"fake projection").unwrap();
+    for (rule, required) in [
+        (None, "BREWERY_LANTERNFISH_TRACE"),
+        (Some(json!({"op":"zero"})), "BREWERY_LANTERNFISH_TRACE"),
+        (Some(json!({"op":"scale","factor":0.5})), "BREWERY_LANTERNFISH_TRACE"),
+        (Some(json!({"op":"add","vector":[1]})), "BREWERY_LANTERNFISH_TRACE"),
+        (Some(json!({"op":"replace","vector":[1]})), "BREWERY_LANTERNFISH_TRACE"),
+        (Some(json!({"op":"project_out","vector":[1]})), "BREWERY_LANTERNFISH_PROJECTION"),
+        (Some(json!({"op":"subtract","vector":[1],"scale":0.5})), "BREWERY_LANTERNFISH_PROJECTION"),
+    ] {
+        let rules = rule.into_iter().map(|mut rule| {
+            rule["layer"] = json!(0);
+            rule["role"] = json!("l_out");
+            rule["positions"] = json!([0]);
+            rule
+        }).collect::<Vec<_>>();
+        let job = json!({
+            "kind":"trace","inputs":[{"kind":"gguf","host":"test","path":model,
+                "id":"fixture","sha256":format!("{:x}", Sha256::digest(b"GGUF"))}],
+            "prompt":"fixture",
+            "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":0,
+                "byte_cap":65536,"retain_jobs":2,"interventions":rules}
+        });
+        let other = if required.ends_with("_TRACE") {
+            ("BREWERY_LANTERNFISH_PROJECTION", &projection)
+        } else {
+            ("BREWERY_LANTERNFISH_TRACE", &w0)
+        };
+        let mut engine = Command::new(env!("CARGO_BIN_EXE_brewery-engine"))
+            .current_dir(root).env_remove(required).env(other.0, other.1)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn().unwrap();
+        writeln!(engine.stdin.take().unwrap(), "{job}").unwrap();
+        let output = engine.wait_with_output().unwrap();
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success() && error.contains(required), "{rules:?}: {error}");
+    }
+}
+
 fn trace(
     cwd: &Path,
     binary: &Path,

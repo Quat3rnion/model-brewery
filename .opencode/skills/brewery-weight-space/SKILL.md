@@ -1,6 +1,6 @@
 ---
 name: brewery-weight-space
-description: Run Model Brewery weight-space experiments through MCP or REST. Use for CPU traces, activation attribution, interventions, SAE features, crosscoders, Fisher tensor sensitivity, scratch edits, fact edits, merges, pruning, compiled programs, interpretability benchmark scores, checks, diffs, findings, replay, or publish requests.
+description: Run Model Brewery weight-space experiments through MCP or REST. Use for CPU traces, activation attribution, interventions, behavior directions, abliteration, Heretic, SAE features, crosscoders, Fisher tensor sensitivity, scratch edits, fact edits, merges, pruning, compiled programs, interpretability benchmark scores, checks, diffs, findings, replay, or publish requests.
 ---
 
 # Weight-space experiments
@@ -38,6 +38,14 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
    parent `a` and child `b`. Use `sentence`, `start`, and `end` to limit the
    read. Report the signed share of net log-probability gain and the check
    bundle ID.
+   To score a behavior direction, pass `behavior_direction.prompt_sets` with
+   the verified held-out set digests. Use the same digests for each run.
+   Add the approved `benign_refusal` digest to measure over-refusal on 16
+   reviewed Databricks Dolly 15K prompts (CC BY-SA 3.0). Report flags and
+   `benign_refusal_rate`, not replies or a refusal direction. This does not
+   measure harmful-set compliance. Get operator approval before you publish
+   these research results.
+   See [Behavior direction checks](../../../OPERATOR.md#behavior-direction-checks).
 6. Use `add_evidence` to select numeric paths in the finished artifacts and
    record a verdict with your reasoning. Use `get_finding` to verify the
    saved version. See [Findings](../../../OPERATOR.md#findings) to replay an
@@ -65,11 +73,26 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
 | Read MoE routing | Capture `ffn_moe_logits`, `ffn_moe_topk`, and `ffn_moe_route_weights` on Qwen2MoE or Qwen3MoE. Use `routing_atlas` for one layer. For an expert ablation, capture `l_out` in both traces and supply the `zero_expert` job as `ablation_job_id`. Pass optional `routing_evidence` to `plan_experts`; keep the independent REAP inputs. |
 | Change activations only | Use `start_trace` with [trace interventions](../../../OPERATOR.md#trace-interventions). Reuse [versioned rules](../../../OPERATOR.md#library-intervention-artifacts). Use `read_feature_trace` to inspect [SAE features](../../../OPERATOR.md#sparse-autoencoders-saes) or `steer_feature` to apply an SAE direction. Compare to an unmodified trace; there is no weight revision to publish. |
 | Compare learned features across revisions | Use `crosscoder_diff` with a saved ID. To build an artifact, use the offline [crosscoder procedure](../../../OPERATOR.md#crosscoder-model-diff) with unmodified paired traces and separate train and holdout prompts. Check reconstruction for both revisions before interpreting unique or changed features. |
+| Remove a behavior direction during inference | Use `get_direction`, then `create_direction_intervention` with `project_out` and the target rows. Pass the saved version to `start_trace` and compare the result with `diff_traces`. Use `subtract` to export a fixed scaled direction. `export_control_vector` cannot export projection. |
+| Measure a behavior direction | Use `compute_direction` with a pinned Library Qwen2 GGUF, behavior, and increasing layer numbers. Read version 2 with `get_direction`. Report held-out Cohen's d, not a change in generated behavior. See [Behavior directions](../../../OPERATOR.md#behavior-directions). |
+| Ablate a fitted direction | Use `ablate_direction` with a pinned scratch parent and a version 2 direction. Convert the private child and compare behavior and locality against its parent. See [Native directional ablation](../../../OPERATOR.md#native-directional-ablation). |
+| Search ablation settings | Use `search_ablation` when a slop or sycophancy direction is fitted on the exact parent GGUF. Set the trial, child, and disk limits. Read `get_job` for the matched control, Pareto front, and paired checks. A screen effect is not a weight-edit result. See [Native ablation search](../../../OPERATOR.md#native-ablation-search). |
+| Run or reproduce a Heretic edit | Use `run_heretic` with a standalone Library SafeTensors ID and an offline operator profile. Use `reproduce_heretic` only with a v4 manifest and a verified matching Hugging Face download. Use a byte-identical scratch copy for the parent's private GGUF, then convert and check the child with the same assets. See [Heretic jobs](../../../OPERATOR.md#heretic-jobs). |
 | Build a standalone program | Use `compile_program` for a supported named program and `run_program` for examples. Run checks and read `program_correctness` and `program_cases`. Failure blocks publication. Acknowledge the bundle before requesting publication. The GGUF, trace, and weight diff steps do not apply. See [Compiled programs](../../../OPERATOR.md#compiled-programs). |
 | Read scores on a known circuit | Call `interp_benchmark` with no arguments. Distinguish linear attribution from exact activation patching. Recall-only rows have no negative sites and cannot measure false positives. These scores do not qualify a release. See [Compiled-program benchmark](../../../OPERATOR.md#compiled-program-benchmark). |
 
 ## Limits and evidence
 
+- For an ablation comparison, follow the [MCP abliteration workflow](../../../OPERATOR.md#abliteration-workflow-through-mcp).
+  Fit the native direction on the exact baseline GGUF. Give Heretic the
+  original Library SafeTensors ID. Report fitted probe scores separately
+  from paired child results. Use identical, disjoint held-out
+  `run_checks` pins for the children and record the hashes, flip counts,
+  intervals, KL, locality and perplexity.
+- On Qwen2.5-0.5B-Instruct, the tested native directions carried only a
+  small part of the sycophancy signal. A3 and A5 found no significant paired
+  flips. Stock slop was too rare to measure a reliable reduction. Heretic
+  `noslop` did not show a measurable reduction either.
 - Use single-file SafeTensors on an enabled local editor. For direct edits,
   dense pruning, and fact edits, the 32 MiB guard counts the full size of all
   affected tensors, even for a slice. Fact edits support bounded dense Llama

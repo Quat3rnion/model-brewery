@@ -24,6 +24,7 @@
   import TokenLossDiff from '../components/trace/TokenLossDiff.svelte';
   import WeightHealth from '../components/spectra/WeightHealth.svelte';
   import OpenCrosscoder from '../components/crosscoder/OpenCrosscoder.svelte';
+  import BehaviorChecks from '../components/abliteration/BehaviorChecks.svelte';
 
   const POLL_MS = 3000;
   const models = $derived(brewery.state?.models ?? []);
@@ -314,6 +315,9 @@
               {#if b.job_refs.length}
                 <p class="xs">Referenced jobs (not verified against this revision): {#each b.job_refs as j, i (j.job_id)}{i ? ', ' : ''}<JobLink id={j.job_id} label="{j.kind} ({j.role})" />{/each}</p>
               {/if}
+              {#if b.behavior_direction && b.revision_sha256 === selected.sha256}
+                <BehaviorChecks report={b.behavior_direction} />
+              {/if}
             {/if}
           </div>
 
@@ -537,6 +541,9 @@
   }
   .node:hover {
     background: var(--accent-soft);
+  }
+  .node:hover :global(.badge.muted) {
+    color: var(--text-2);
   }
   /* Border and bar only: status badges keep their contrast on the plain surface. */
   .node[aria-current='true'] {

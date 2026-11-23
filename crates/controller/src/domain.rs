@@ -12,6 +12,7 @@ pub const KINDS: &[&str] = &[
     brewery_worker::sensitivity::JOB,
     brewery_worker::circuit::JOB,
     brewery_worker::damage::JOB,
+    brewery_worker::behavior_direction::JOB,
     "inspect",
     "plan",
     "convert",
@@ -343,6 +344,8 @@ pub struct Envelope {
     pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scratch_pins: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heretic_runs: Option<std::path::PathBuf>,
 }
 
 fn serialize_worker_inputs<S: serde::Serializer>(
@@ -672,6 +675,7 @@ impl Host {
                     | brewery_worker::sensitivity::JOB
                     | brewery_worker::circuit::JOB
                     | brewery_worker::damage::JOB
+                    | brewery_worker::behavior_direction::JOB
                     | brewery_worker::exl3_layer::JOB
             ) || crate::weights::is_kind(kind);
             let enabled = options.remove(kind).unwrap_or(!opt_in)
@@ -689,6 +693,8 @@ impl Host {
                         "Configure pinned Lanternfish sensitivity and opt in on this worker"
                     } else if kind == brewery_worker::circuit::JOB {
                         "Configure the pinned CPU Lanternfish gradient runtime and opt in on this worker"
+                    } else if kind == brewery_worker::behavior_direction::JOB {
+                        "Configure the verified contrast cache and pinned CPU Lanternfish"
                     } else if kind == brewery_worker::exl3_layer::JOB {
                         "Configure a native EXL3 helper and opt in on this worker"
                     } else if crate::weights::is_kind(kind) {
@@ -1262,7 +1268,8 @@ impl NewJob {
                 }
                 brewery_worker::trace::JOB
                 | brewery_worker::sensitivity::JOB
-                | brewery_worker::circuit::JOB => {
+                | brewery_worker::circuit::JOB
+                | brewery_worker::behavior_direction::JOB => {
                     n == 1 && main == "gguf" && host == inputs[0].host
                 }
                 "inspect" | "plan" | "convert" => (1..=5).contains(&n) && source,
@@ -1358,6 +1365,7 @@ impl NewJob {
             options: self.options.clone(),
             prompt,
             scratch_pins: Default::default(),
+            heretic_runs: None,
         };
         let requested_host = (host == "auto").then(|| host.clone());
         let job = Job {
@@ -1427,6 +1435,19 @@ fn check_options(job: &str, options: &Map<String, Value>, inputs: &[Model]) -> R
         return brewery_worker::hf_download::Spec::parse(&Value::Object(options.clone()))
             .map(|_| ())
             .map_err(|_| "invalid Hugging Face download options".into());
+    }
+    if job == brewery_worker::behavior_direction::JOB {
+        let request =
+            brewery_worker::behavior_direction::Request::parse(&Value::Object(options.clone()))
+                .map_err(|e| format!("{e:#}"))?;
+        if inputs[0]
+            .sha256
+            .as_deref()
+            .is_some_and(|sha| sha != request.model_sha256)
+        {
+            return Err("direction model SHA-256 does not match the Library model".into());
+        }
+        return Ok(());
     }
     for (key, value) in options {
         let key = key.as_str();

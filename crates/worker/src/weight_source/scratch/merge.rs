@@ -123,6 +123,40 @@ pub fn build(
     method: Method,
     inputs: &[Input<'_>],
 ) -> Result<Output> {
+    build_inner(base, sha256, dir, method, inputs, false)
+}
+
+/// Import the exact exported tensor bytes in the parent's layout. The W3
+/// delta restores the original parent, including its header and padding.
+pub fn import(
+    base: &Path,
+    sha256: &str,
+    exported: &Path,
+    export_sha256: &str,
+    dir: &Path,
+) -> Result<Output> {
+    build_inner(
+        base,
+        sha256,
+        dir,
+        Method::Linear,
+        &[Input {
+            path: exported,
+            sha256: export_sha256,
+            weight: 1.,
+        }],
+        true,
+    )
+}
+
+fn build_inner(
+    base: &Path,
+    sha256: &str,
+    dir: &Path,
+    method: Method,
+    inputs: &[Input<'_>],
+    import: bool,
+) -> Result<Output> {
     let scale = method.validate(inputs)?;
     let mut base = open(base, sha256).context("merge base")?;
     let size = base.stamp.0;
@@ -225,7 +259,17 @@ pub fn build(
                 );
                 continue;
             }
-            for i in (0..n).step_by(width) {
+            if import {
+                ensure!(
+                    buf[0][..n]
+                        .chunks_exact(width)
+                        .all(|bytes| finite(dtype, bytes))
+                        && old.chunks_exact(width).all(|bytes| finite(dtype, bytes)),
+                    "non-finite import tensor"
+                );
+                after[..n].copy_from_slice(&buf[0][..n]);
+            }
+            for i in (0..if import { 0 } else { n }).step_by(width) {
                 let bytes = i..i + width;
                 let a = decode(dtype, &old[bytes.clone()]) as f32;
                 ensure!(a.is_finite(), "non-finite merge base");

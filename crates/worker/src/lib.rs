@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, ensure};
 pub mod circuit;
+pub mod behavior_direction;
+pub mod heretic;
 pub mod compiled_program;
 pub mod damage;
 pub mod exl3_layer;
@@ -557,3 +559,4 @@ pub fn lock(p: &Path) -> Result<File> {
 pub fn available(p: &Path) -> Result<u64> {
     Ok(fs2::available_space(p)?)
 }
+pub mod ablation_search;

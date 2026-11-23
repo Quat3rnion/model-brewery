@@ -4,7 +4,7 @@ This guide records the current Model Brewery web interface. It is not a redesign
 
 ## Surface and routes
 
-`web/src/App.svelte` owns the shared header, section links, connection status, and active-job strip. The visible sections are Library, Jobs, Transfers, Compare, Trace, Edits, Agent, Findings, Convert, Evaluate, Benchmarks, Calibration, and Settings.
+`web/src/App.svelte` owns the shared header, section links, connection status, and active-job strip. The visible sections are Library, Jobs, Transfers, Compare, Trace, Edits, Abliteration, Agent, Findings, Convert, Evaluate, Benchmarks, Calibration, and Settings.
 
 Keep nested routes under their parent section. Profiles uses Convert in the header. Weight edits uses Library. Job details use Jobs. Infrastructure settings stay under Settings. `App.svelte` marks the parent link with `aria-current="page"`.
 
@@ -59,6 +59,13 @@ Findings is read-only. Keep each detail route under `#/findings`. Show
 the experiment timeline, artifact links, verdict, and provenance for that
 version. Show the original and replay numbers side by side. Label differences
 in text; a difference does not determine the verdict.
+
+**Abliteration** is a read-only view of direction, native search and Heretic
+jobs. Select a run with `#/abliteration?job=<id>`. A direction plot marks the
+selected layer. The screen plot uses circles for fitted trials and squares for
+matched random controls. Tables give the numeric plot values and paired child
+results. Keep Heretic optimization scores separate from the held-out scores
+in **Edits**. Put configs and the reproduce journal in disclosures.
 
 Only the operator approves a scratch publish request. `web/src/components/trace/ApproveScratch.svelte` shows the exact SHA-256 and the check results in a confirmation dialog before it sends the approval. Do not present a requested option or a single score as proof.
 

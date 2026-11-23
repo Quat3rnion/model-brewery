@@ -198,6 +198,7 @@ fn build(app: &App, request: Compile, key: Option<&Submission<'_>>) -> Mutation 
         merge: None,
         pruning: None,
         pruning_trace: None,
+        ablation: None,
         tensors,
         tool: config.architecture,
         tool_version: config.compiler_commit,
@@ -208,6 +209,7 @@ fn build(app: &App, request: Compile, key: Option<&Submission<'_>>) -> Mutation 
             config.runtime,
         ),
         locate_edit: None,
+        heretic: None,
         created_at_ms: now(),
         compiled_program: Some(recipe),
     };

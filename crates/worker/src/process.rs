@@ -164,7 +164,7 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
     });
     if (matches!(
         job.kind.as_str(),
-        trace::JOB | sensitivity::JOB | circuit::JOB | damage::JOB
+        trace::JOB | behavior_direction::JOB | sensitivity::JOB | circuit::JOB | damage::JOB
     ) || scratch_eval::private_output(&job.kind))
         && created_work
         && (r.cancel || result.is_err())
@@ -406,6 +406,18 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     } else {
         None
     };
+    if job.kind == behavior_direction::JOB {
+        resources::disk_check(
+            &w.cfg.root,
+            w.disk_floor(job.resources.disk_reserve_bytes)
+                .checked_add(trace::HARD_BYTE_CAP + (16 << 20))
+                .context("direction disk reserve overflow")?,
+        )?;
+    }
+    if job.kind == ablation_search::SCREEN {
+        resources::disk_check(&w.cfg.root,
+            w.disk_floor(job.resources.disk_reserve_bytes).saturating_add(ablation_search::RESERVE))?;
+    }
     let edit_backend = if job.kind == locate_edit::JOB {
         let backend = locate_edit::Request::parse(&job.options)?.edit.backend;
         let bytes = weight_source::open_regular(&job.inputs[0].path)?
@@ -422,7 +434,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     } else {
         locate_edit::Backend::Cpu
     };
-    let gpu_edit = edit_backend.is_gpu();
+    let gpu_edit = edit_backend.is_gpu() || heretic::job(&job.kind);
     if gpu_edit {
         ensure!(
             scratch_job
@@ -431,8 +443,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                     .engine_env
                     .get(locate_edit::GPU_GATE)
                     .is_some_and(|v| v == "1"),
-            "{} edit requires GPU load permission and a GPU admission wrapper",
-            edit_backend.label()
+            "This edit requires GPU load permission and a GPU admission wrapper"
         );
     }
     fs::create_dir(&work)?;
@@ -487,7 +498,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         }
         c
     } else if let Some(wrapper) = w.cfg.admission.as_ref().filter(|_| {
-        gradient_backend.map_or(gpu_edit || (job.kind != trace::JOB && !scratch_job), |b| {
+        gradient_backend.map_or(gpu_edit || (!matches!(job.kind.as_str(), trace::JOB | behavior_direction::JOB) && !scratch_job), |b| {
             b.is_gpu()
         })
     }) {
@@ -497,7 +508,14 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     } else {
         Command::new(&w.cfg.engine)
     };
-    if scratch_job || gradient_backend.is_some() {
+    if scratch_job || gradient_backend.is_some() || matches!(job.kind.as_str(), trace::JOB | behavior_direction::JOB) {
+        let trace_keys = if job.kind == trace::JOB {
+            let (executable, libraries, _, _) = trace::Request::worker(&job.options, job.prompt.as_deref())?
+                .lanternfish_runtime()?.pins();
+            [executable, libraries]
+        } else {
+            [trace::EXECUTABLE, trace::LIB_DIR]
+        };
         let keys: &[&str] = match job.kind.as_str() {
             scratch_eval::GGUF => &[
                 "BREWERY_GGUF_SAFETENSORS",
@@ -513,6 +531,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 scratch_eval::RUNNER_SHA,
                 scratch_eval::RUNNER_LIB_DIR,
                 scratch_eval::CACHE,
+                scratch_eval::CONTRAST_CACHE,
             ],
             locate_edit::JOB => &[],
             sensitivity::JOB | damage::JOB => &[
@@ -521,12 +540,14 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 locate_edit::GPU_GATE,
             ],
             circuit::JOB => &[sensitivity::PIN, sensitivity::MANIFEST_SHA],
-            trace::JOB
-                if trace::Request::worker(&job.options, job.prompt.as_deref())?.routing() =>
-            {
-                &[trace::ROUTING_EXECUTABLE, trace::ROUTING_LIB_DIR]
+            kind if heretic::job(kind) => &[heretic::RUNTIME],
+            behavior_direction::JOB => {
+                &[trace::EXECUTABLE, trace::LIB_DIR, behavior_direction::CACHE]
             }
-            _ => &[trace::EXECUTABLE, trace::LIB_DIR],
+            ablation_search::SCREEN => {
+                &[ablation_search::EXECUTABLE, trace::PROJECTION_LIB_DIR, behavior_direction::CACHE]
+            }
+            _ => &trace_keys,
         };
         command.env_clear().envs(
             keys.iter()
@@ -543,6 +564,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                         .into_iter()
                         .flat_map(|b| b.visibility_vars().iter().copied()),
                 )
+                .chain(heretic::job(&job.kind).then_some(locate_edit::CUDA_DEVICES))
                 .filter_map(|key| w.cfg.engine_env.get(key).map(|value| (key, value))),
         );
         if gpu_edit || gradient_backend.is_some_and(locate_edit::Backend::is_gpu) {
@@ -776,6 +798,20 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         value.is_object(),
         "Engine output is not a JSON object; check private engine-output.json"
     );
+    if job.kind == behavior_direction::JOB {
+        behavior_direction::Request::parse(&job.options)?.verify_result(
+            &value,
+            job.inputs[0].extra["id"].as_str().unwrap_or_default(),
+            job.inputs[0].extra["sha256"].as_str().unwrap_or_default(),
+        )?;
+        return Ok(value);
+    }
+    if job.kind == ablation_search::SCREEN {
+        let req = ablation_search::ScreenRequest::parse(&job.options)?;
+        ensure!(job.inputs[0].extra["sha256"] == req.model_sha256, "screen input hash mismatch");
+        serde_json::from_value::<ablation_search::ScreenReport>(value.clone())?.verify(&req)?;
+        return Ok(value);
+    }
     if job.kind == scratch_eval::CHECKS {
         let hashes = std::array::from_fn(|i| {
             job.inputs[i]
@@ -789,7 +825,8 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             .engine_env
             .get(scratch_eval::RUNNER_SHA)
             .context("scratch checks runner pin is missing")?;
-        scratch_eval::check_report(&value, hashes, runner)?;
+        let behavior = scratch_eval::check_options(&job.options)?;
+        scratch_eval::check_report(&value, hashes, runner, behavior.as_ref())?;
         return Ok(value);
     }
     if job.kind == locate_edit::JOB {
@@ -809,6 +846,22 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         );
         return Ok(value);
     }
+    if heretic::job(&job.kind) {
+        let spec = heretic::Options::parse(&job.kind, &job.options)?;
+        let runtime = Path::new(
+            w.cfg
+                .engine_env
+                .get(heretic::RUNTIME)
+                .context("Missing Heretic runtime")?,
+        )
+        .canonicalize()?;
+        spec.verify(&value, Some(&runtime.join("runs")))?;
+        ensure!(
+            job.inputs[0].extra["sha256"] == spec.base_sha256,
+            "Heretic base input changed"
+        );
+        return Ok(value);
+    }
     if job.kind == scratch_eval::GGUF {
         ensure!(
             value["kind"] == "convert"
@@ -824,11 +877,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     }
     if job.kind == trace::JOB {
         let request = trace::Request::worker(&job.options, job.prompt.as_deref())?;
-        let (commit, sha) = if request.routing() {
-            (trace::ROUTING_COMMIT, trace::ROUTING_SHA256)
-        } else {
-            (trace::COMMIT, trace::SHA256)
-        };
+        let (_, _, sha, commit) = request.lanternfish_runtime()?.pins();
         ensure!(
             value["kind"] == trace::JOB
                 && value["schema_version"] == 1

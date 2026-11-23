@@ -323,6 +323,7 @@ export interface CheckBundle {
   integrity: CheckStatus | { status: string; reason?: string };
   smoke: CheckStatus | { status: string; reason?: string };
   behavior: CheckStatus | { status: string; reason?: string };
+  behavior_direction?: import('./abliteration').BehaviorDirectionReport;
   program_correctness?: CheckStatus;
   program_cases?: number;
   offline_report?: unknown;

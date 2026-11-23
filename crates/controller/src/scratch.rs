@@ -31,10 +31,16 @@ type Payload<T> = std::result::Result<Json<T>, JsonRejection>;
 type Mutation = Result<(StatusCode, Json<Revision>)>;
 const LIMIT: u32 = 64;
 const PROVENANCE: &str = "provenance.json";
+#[path = "scratch_ablation.rs"]
+mod ablation;
 #[path = "scratch_checks.rs"]
 mod checks;
+#[path = "scratch_ablation_search.rs"]
+pub(crate) mod ablation_search;
 #[path = "scratch_experts.rs"]
 mod experts;
+#[path = "scratch_heretic.rs"]
+pub(crate) mod heretic;
 #[path = "scratch_jobs.rs"]
 pub(crate) mod jobs;
 #[path = "scratch_locate.rs"]
@@ -112,12 +118,16 @@ pub struct Provenance {
     pruning: Option<prune::Params>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pruning_trace: Option<prune::Evidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ablation: Option<ablation::Evidence>,
     tensors: Vec<TensorInfo>,
     tool: String,
     tool_version: String,
     runtime_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     locate_edit: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    heretic: Option<serde_json::Value>,
     created_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compiled_program: Option<program::Recipe>,
@@ -173,6 +183,8 @@ pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/scratch", get(list).post(create))
         .route("/scratch/merge", post(merge::run))
+        .route("/scratch/heretic", post(heretic::run))
+        .route("/scratch/heretic_reproduce", post(heretic::reproduce))
         .route("/scratch/compile_program", post(program::compile))
         .route("/scratch/{id}/run_program", post(program::run))
         .route("/scratch/{id}", get(get_revision))
@@ -181,6 +193,8 @@ pub fn router() -> Router<Arc<App>> {
         .route("/scratch/{id}/memit", post(locate::memit))
         .route("/scratch/{id}/alphaedit", post(locate::alphaedit))
         .route("/scratch/{id}/prune", post(prune::model))
+        .route("/scratch/{id}/ablate_direction", post(ablation::model))
+        .route("/scratch/{id}/search_ablation", post(ablation_search::submit))
         .route("/scratch/experts/{id}/plan", post(experts::plan))
         .route("/scratch/experts/{id}/prune", post(experts::prune))
         .route("/scratch/{id}/delta", get(delta))
@@ -443,16 +457,21 @@ fn build(
     merge: Option<merge::Spec>,
     key: Option<&Submission<'_>>,
 ) -> Mutation {
-    build_with_pruning(app, parent_id, supplied_pin, operations, merge, None, key)
+    build_special(app, parent_id, supplied_pin, operations, merge, None, key)
 }
 
-fn build_with_pruning(
+enum NativeEdit {
+    Prune(prune::Params),
+    Ablate(scratch::ablation::Plan, ablation::Evidence),
+}
+
+fn build_special(
     app: &App,
     parent_id: String,
     supplied_pin: Option<String>,
     operations: Vec<Operation>,
     merge: Option<merge::Spec>,
-    pruning: Option<prune::Params>,
+    edit: Option<NativeEdit>,
     key: Option<&Submission<'_>>,
 ) -> Mutation {
     let (root, worker, source, expected, library_source, reserve, merge_paths) = {
@@ -528,9 +547,11 @@ fn build_with_pruning(
         .saturating_add(reserve)
         .saturating_add(if merge.is_some() {
             bytes + scratch::MERGE_DELTA_OVERHEAD
+        } else if matches!(edit, Some(NativeEdit::Ablate(..))) {
+            scratch::MERGE_DELTA_OVERHEAD + scratch::ablation::MAX_TOTAL_BYTES
         } else {
             scratch::DELTA_OVERHEAD
-                + if operations.is_empty() && pruning.is_none() {
+                + if operations.is_empty() && edit.is_none() {
                     0
                 } else {
                     scratch::MAX_EDIT_BYTES
@@ -541,25 +562,27 @@ fn build_with_pruning(
             "not enough disk space for scratch and the configured reserve",
         ));
     }
-    let calibration = match &pruning {
-        Some(p) => p.calibration(app, &parent_id)?,
-        None => None,
+    let calibration = match &edit {
+        Some(NativeEdit::Prune(p)) => p.calibration(app, &parent_id)?,
+        _ => None,
     };
     let id = id();
     let mut output = Uncommitted::new(root.join(&id))?;
     let result = if let Some((spec, paths)) = merge.as_ref().zip(merge_paths.as_ref()) {
         spec.build(&source, &expected, &output.path, paths)?
     } else {
-        let output = if let Some(p) = &pruning {
-            scratch::build_pruned(
+        let output = match &edit {
+            Some(NativeEdit::Prune(p)) => scratch::build_pruned(
                 &source,
                 &expected,
                 &output.path,
                 &p.plan,
                 calibration.as_ref().map(|c| c.rows.as_slice()),
-            )
-        } else {
-            scratch::build(&source, &expected, &output.path, &operations)
+            ),
+            Some(NativeEdit::Ablate(plan, _)) => {
+                scratch::build_ablated(&source, &expected, &output.path, plan)
+            }
+            None => scratch::build(&source, &expected, &output.path, &operations),
         };
         output.map_err(|e| {
             if e.downcast_ref::<std::io::Error>().is_some() {
@@ -568,6 +591,11 @@ fn build_with_pruning(
                 ApiError::bad(e.to_string())
             }
         })?
+    };
+    let (pruning, ablation) = match edit {
+        Some(NativeEdit::Prune(p)) => (Some(p), None),
+        Some(NativeEdit::Ablate(_, evidence)) => (None, Some(evidence)),
+        None => (None, None),
     };
     let provenance = Provenance {
         schema: "brewery.scratch-provenance.v1".into(),
@@ -580,6 +608,8 @@ fn build_with_pruning(
             spec.method()
         } else if pruning.is_some() {
             "prune"
+        } else if ablation.is_some() {
+            "ablate_direction"
         } else if operations.is_empty() {
             "copy"
         } else {
@@ -590,6 +620,7 @@ fn build_with_pruning(
         merge,
         pruning,
         pruning_trace: calibration.map(|c| c.evidence),
+        ablation,
         tensors: result.tensors,
         tool: "brewery SafeTensors scratch editor".into(),
         tool_version: env!("CARGO_PKG_VERSION").into(),
@@ -599,6 +630,7 @@ fn build_with_pruning(
             std::env::consts::OS
         ),
         locate_edit: None,
+        heretic: None,
         created_at_ms: now(),
         compiled_program: None,
     };

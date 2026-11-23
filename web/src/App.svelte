@@ -21,6 +21,7 @@
   import Trace from './views/Trace.svelte';
   import Edits from './views/Edits.svelte';
   import Crosscoder from './views/Crosscoder.svelte';
+  import Abliteration from './views/Abliteration.svelte';
   import Agent from './views/Agent.svelte';
   import Findings from './views/Findings.svelte';
 
@@ -147,6 +148,7 @@
     {:else if route.view === 'trace'}<Trace />
     {:else if route.view === 'edits'}<Edits />
     {:else if route.view === 'crosscoder'}<Crosscoder />
+    {:else if route.view === 'abliteration'}<Abliteration />
     {:else if route.view === 'agent'}<Agent />
     {:else if route.view === 'findings'}<Findings />
     {:else}

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { abliterationKinds } from '../lib/abliteration';
   import JobProgress from '../components/JobProgress.svelte';
   import { detailLines, readDetail, summarizeHistory } from '../lib/progress';
   import { brewery } from '../lib/store.svelte';
@@ -82,7 +83,12 @@
       <h1 tabindex="-1">{#if notFound || !job}Job <span class="mono">{id}</span>{:else}{kindTitle(job.kind)}{/if}</h1>
       {#if job && !notFound}<JobState {job} />{/if}
     </div>
-    {#if job && !notFound}<p class="xs muted mono break">{job.id}</p>{/if}
+    {#if job && !notFound}
+      <p class="xs muted mono break">{job.id}</p>
+      {#if Object.hasOwn(abliterationKinds, job.kind)}
+        <a href="#/abliteration?job={encodeURIComponent(job.id)}">Open in Abliteration</a>
+      {/if}
+    {/if}
   </div>
   {#if notFound || !job}
     {#if error}<p class="note bad" role="alert">{error}</p>{:else}<p class="muted">Loading…</p>{/if}

@@ -22,7 +22,7 @@ use std::{
 const MAX_PATCHES: usize = 8;
 // Bound the resolved job envelope before it crosses the worker RPC limit,
 // including when short source selectors expand to many vectors.
-const MAX_VALUES: usize = 1 << 18;
+pub(super) const MAX_VALUES: usize = 1 << 18;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -321,13 +321,11 @@ fn set_rules(options: &mut Map<String, Value>, rules: Vec<Rule>) {
     }
 }
 
-fn value_count(rules: &[Rule]) -> usize {
+pub(super) fn value_count(rules: &[Rule]) -> usize {
     rules
         .iter()
-        .map(|rule| match &rule.op {
-            Operation::Add { vector } | Operation::Replace { vector } => vector.len(),
-            _ => 0,
-        })
+        .filter_map(|rule| rule.op.vector())
+        .map(<[f32]>::len)
         .sum()
 }
 

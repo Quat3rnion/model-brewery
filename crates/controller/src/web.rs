@@ -128,6 +128,7 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
         .merge(crate::sae::router())
         .merge(crate::crosscoder::router())
         .merge(crate::findings::router())
+        .merge(crate::directions::router())
         .merge(crate::scratch::router())
         .merge(crate::diff::router())
         .merge(crate::spectra::router())
@@ -565,9 +566,10 @@ async fn add_model(
             "private credential storage cannot enter the Library",
         ));
     }
-    if store
-        .is_private_editor_path(path)
-        .map_err(ApiError::storage)?
+    if app.local_edit.private_heretic_path(path)
+        || store
+            .is_private_editor_path(path)
+            .map_err(ApiError::storage)?
     {
         return Err(ApiError::bad(
             "private scratch job output cannot enter the Library",

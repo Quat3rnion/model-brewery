@@ -275,6 +275,8 @@ else:
                                       predicted_nll_increase=1),
                           tensors=[dict(name="blk.0.attn_q.weight", layer=0, mean_absolute_damage=1,
                                         predicted_nll_increase=1, measured_recovery=None)])
+    if envelope["kind"] == "behavior_direction" and (root / "direction-result.json").exists():
+        result = json.loads((root / "direction-result.json").read_text())
     if action == "start" and envelope["kind"] == "hf_download":
         assert envelope["inputs"] == [] and "prompt" not in envelope
         options = envelope["options"]

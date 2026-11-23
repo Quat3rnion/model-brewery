@@ -20,6 +20,8 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("register_model", "post", "/api/models"),
     ("list_scratch", "get", "/api/scratch"),
     ("get_scratch", "get", "/api/scratch/{id}"),
+    ("run_heretic", "post", "/api/scratch/heretic"),
+    ("reproduce_heretic", "post", "/api/scratch/heretic_reproduce"),
     ("compile_program", "post", "/api/scratch/compile_program"),
     ("run_program", "post", "/api/scratch/{id}/run_program"),
     ("interp_benchmark", "get", "/api/interp/benchmark"),
@@ -29,6 +31,12 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("add_evidence", "post", "/api/findings/{id}/evidence"),
     ("replay_finding", "post", "/api/findings/{id}/replay"),
     ("start_trace", "post", "/api/jobs"),
+    ("compute_direction", "post", "/api/jobs"),
+    (
+        "get_direction",
+        "get",
+        "/api/directions/{id}/versions/{version}",
+    ),
     ("steer_feature", "post", "/api/jobs"),
     ("tensor_sensitivity", "post", "/api/jobs"),
     ("find_circuit", "post", "/api/jobs"),
@@ -43,6 +51,11 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("get_job", "get", "/api/jobs/{id}"),
     ("list_interventions", "get", "/api/interventions"),
     ("create_intervention", "post", "/api/interventions"),
+    (
+        "create_direction_intervention",
+        "post",
+        "/api/interventions",
+    ),
     (
         "new_intervention_version",
         "post",
@@ -60,6 +73,8 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ),
     ("create_scratch", "post", "/api/scratch"),
     ("apply_edit", "post", "/api/scratch/{id}/edits"),
+    ("ablate_direction", "post", "/api/scratch/{id}/ablate_direction"),
+    ("search_ablation", "post", "/api/scratch/{id}/search_ablation"),
     ("merge_models", "post", "/api/scratch/merge"),
     ("rome_edit", "post", "/api/scratch/{id}/rome"),
     ("memit_edit", "post", "/api/scratch/{id}/memit"),
@@ -114,9 +129,7 @@ impl Server {
         let routes: BTreeMap<_, _> = ROUTES
             .iter()
             .map(|&(name, method, path)| {
-                (
-                    name,
-                    Route::new(
+                let mut route =                     Route::new(
                         &contract,
                         method,
                         path,
@@ -125,10 +138,22 @@ impl Server {
                             "tensor_sensitivity" => Some("sensitivity"),
                             "find_circuit" => Some("circuit"),
                             "quantization_damage_map" => Some("quantization_damage"),
+                            "compute_direction" => Some(brewery_worker::behavior_direction::JOB),
                             _ => None,
                         },
-                    ),
-                )
+);
+                if name == "create_direction_intervention" {
+                    route.schema["required"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!("direction_rules"));
+                    route.schema["properties"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("interventions");
+                    route.schema.as_object_mut().unwrap().remove("anyOf");
+                }
+                (name, route)
             })
             .collect();
         let trace_views: BTreeMap<_, _> = TRACE_VIEWS
@@ -154,6 +179,30 @@ impl Server {
                 }
                 "quantization_damage_map" => {
                     "Compare pinned Library BF16 and quantized GGUFs on the same worker. Choose target_logit for logit drift or corpus_nll for mean next-token loss on all W4 held-out lines. Read the damage map after the job finishes. The job does not apply its recipe proposal."
+                }
+                "compute_direction" => {
+                    "Queue CPU behavior directions for one pinned Library GGUF and an approved contrast set. Poll with get_job. Read version 2 with get_direction."
+                }
+                "get_direction" => {
+                    "Read an immutable direction artifact. Version 2 reports held-out Cohen's d and mean residual norm. Version 1 is only for older jobs."
+                }
+                "create_direction_intervention" => {
+                    "Save trace rules from a verified direction version. Project out its activation component or subtract a scaled unit vector. Pass the saved ID and version to start_trace."
+                }
+                "ablate_direction" => {
+                    "Apply one fitted direction to a private scratch child. Use the exact parent revision and a version 2 direction. Convert the child with convert_scratch_gguf and score it with run_checks."
+                }
+                "search_ablation" => {
+                    "Fit the direction on the exact private parent GGUF before searching. Use disjoint confirmation pins in behavior_direction.prompt_sets. Read get_job for the fitted and matched random screen results, then get_checks for the selected children."
+                }
+                "run_heretic" => {
+                    "Queue an offline Heretic GPU job on the original Library SafeTensors parent, not its scratch copy. Read get_job for scratch_id and get_scratch for the journal. Convert the byte-identical baseline and imported child with the same assets, then call run_checks."
+                }
+                "reproduce_heretic" => {
+                    "Import a verified community Heretic v4 manifest using a matching pinned Library SafeTensors download. A Brewery journal is not a v4 manifest. Read get_job for the scratch child and use run_checks after conversion."
+                }
+                "run_checks" => {
+                    "Check the exact scratch child. Convert the parent and child with identical assets for measured checks. To score slop, sycophancy, length and KL, pass behavior_direction.prompt_sets with the verified holdout digests; add benign_refusal only for over-refusal. Poll get_job if queued and read get_checks."
                 }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({
@@ -246,6 +295,14 @@ impl Server {
                 .is_some_and(Value::is_object)
         {
             return Err("steer_feature requires options.feature_steering");
+        }
+        if name == "create_direction_intervention"
+            && !args
+                .get("direction_rules")
+                .and_then(Value::as_array)
+                .is_some_and(|rules| !rules.is_empty())
+        {
+            return Err("create_direction_intervention requires nonempty direction_rules");
         }
         let (path, key, allow_duplicate, body) = route.request(args)?;
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
@@ -529,6 +586,7 @@ fn fixed_job_schema(contract: &Value, kind: &str) -> Value {
     let base = &contract["components"]["schemas"];
     let job = &base[match kind {
         "trace" => "TraceJob",
+        brewery_worker::behavior_direction::JOB => "BehaviorDirectionJob",
         "sensitivity" => "SensitivityJob",
         "circuit" => "CircuitJob",
         "quantization_damage" => "QuantizationDamageJob",

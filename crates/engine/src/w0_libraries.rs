@@ -6,7 +6,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-// Lanternfish 0ea30b3 and scratch-check-logits-v1 use the same CPU W0 build.
+// scratch-check-logits-v1 uses the original CPU W0 build.
 pub(crate) const PINS: &[(&str, &str)] = &[
     (
         "libllama.so.0",

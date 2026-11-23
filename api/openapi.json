@@ -521,6 +521,59 @@
         }
       }
     },
+    "/api/scratch/heretic": {
+      "post": {
+        "operationId": "runHeretic",
+        "summary": "Queue a pinned Heretic run that imports a private scratch child",
+        "description": "Use one Library SafeTensors file on an enabled local GPU lane. Select an operator-installed offline profile. Read the returned job with getJob, then convert and check the scratch child. This operation does not publish.",
+        "parameters": [{"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false,
+          "required": ["parent_id", "base_sha256", "profile", "trials", "trial_index", "seed"],
+          "properties": {
+            "parent_id": {"$ref": "#/components/schemas/Id"},
+            "base_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "profile": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+            "assets_id": {"$ref": "#/components/schemas/Id"},
+            "trials": {"type": "integer", "minimum": 1, "maximum": 64},
+            "trial_index": {"type": "integer", "minimum": 0, "maximum": 63},
+            "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+          }
+        }}}},
+        "responses": {
+          "200": {"description": "Previously accepted Heretic job", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "202": {"description": "Queued Heretic job", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"}
+        }
+      }
+    },
+    "/api/scratch/heretic_reproduce": {
+      "post": {
+        "operationId": "reproduceHeretic",
+        "summary": "Reproduce a community v4 Heretic manifest into a private scratch child",
+        "description": "The Library SafeTensors base must have a verified Hugging Face download receipt for the repository, base commit, and file SHA-256. The worker runs offline and verifies the exported weights against the manifest. This operation does not publish.",
+        "parameters": [{"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false,
+          "required": ["parent_id", "base_sha256", "manifest"],
+          "properties": {
+            "parent_id": {"$ref": "#/components/schemas/Id"},
+            "base_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "manifest": {"type": "object", "description": "Community Heretic v4 reproduce.json object; a URL or path is not accepted."},
+            "assets_id": {"$ref": "#/components/schemas/Id"}
+          }
+        }}}},
+        "responses": {
+          "200": {"description": "Previously accepted reproduction job", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "202": {"description": "Queued reproduction job", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"}
+        }
+      }
+    },
     "/api/scratch/compile_program": {
       "post": {
         "operationId": "compileProgram",
@@ -610,6 +663,56 @@
           "413": {"$ref": "#/components/responses/PayloadTooLarge"},
           "422": {"$ref": "#/components/responses/InvalidJsonData"},
           "503": {"$ref": "#/components/responses/ScratchBusy"}
+        }
+      }
+    },
+    "/api/scratch/{id}/ablate_direction": {
+      "post": {
+        "operationId": "ablateScratchDirection",
+        "summary": "Ablate a fitted direction in a new scratch child",
+        "description": "Edit dense attention output and MLP down projections on the CPU. Use a pinned scratch parent and a version 2 behavior direction. The child is private and has a reversible delta. Embedding edits are not supported.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false,
+          "required": ["sha256", "direction", "first_layer", "last_layer", "kernel", "variant"],
+          "properties": {
+            "sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "direction": {"$ref": "#/components/schemas/AblationDirection"},
+            "first_layer": {"$ref": "#/components/schemas/TraceLayer"},
+            "last_layer": {"$ref": "#/components/schemas/TraceLayer"},
+            "kernel": {"$ref": "#/components/schemas/AblationKernel"},
+            "variant": {"$ref": "#/components/schemas/AblationVariant"},
+            "alpha": {"type": "number", "exclusiveMinimum": 0, "maximum": 4, "default": 1},
+            "include_embeddings": {"const": false, "default": false}
+          }
+        }}}},
+        "responses": {
+          "200": {"$ref": "#/components/responses/ScratchRow"},
+          "201": {"$ref": "#/components/responses/ScratchRow"},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "503": {"$ref": "#/components/responses/ScratchBusy"}
+        }
+      }
+    },
+    "/api/scratch/{id}/search_ablation": {
+      "post": {
+        "operationId": "searchAblation",
+        "summary": "Queue a bounded native ablation search",
+        "description": "Screen fitted slop or sycophancy directions on held-out prompts against matched random controls. Run A2 and W4 on selected Pareto scratch children. Read the receipt with GET /api/jobs/{id}. No child is published or approved.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AblationSearchRequest"}}}},
+        "responses": {
+          "200": {"description": "Job ID on a matching retry."},
+          "202": {"description": "Queued search job.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"}
         }
       }
     },
@@ -791,11 +894,12 @@
       "post": {
         "operationId": "runScratchChecks",
         "summary": "Check a scratch revision and save the results",
-        "description": "Checks the exact child and immediate parent SafeTensors files. With private GGUF files, the local worker loads both models, generates text and measures behavior on fixed datasets. Poll the returned job ID. Without both files, or if integrity fails, the controller saves an integrity-only bundle. For a compiled program, checks the pinned weights and config and runs all valid inputs on the local CPU runtime. Language-model behavior checks do not apply. Do not send measured values or job references.",
+        "description": "Checks the exact child and immediate parent SafeTensors files. With private GGUF files, the local worker loads both models, generates text and measures behavior on fixed datasets. Poll the returned job ID. Set behavior_direction to also score held-out chat prompts from the verified worker cache. An opt-in request requires both GGUF files and passing integrity checks. Without opt-in, if either GGUF is missing or integrity fails, the controller saves an integrity-only bundle. For a compiled program, checks pinned weights and config and runs all valid inputs on the local CPU runtime. Language-model behavior checks do not apply. Do not send measured values or job references.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {
           "type": "object", "additionalProperties": false, "required": ["sha256"], "properties": {
-            "sha256": {"$ref": "#/components/schemas/ScratchHash"}
+            "sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionConfig"}
           }
         }}}},
         "responses": {
@@ -1004,6 +1108,24 @@
         }
       }
     },
+    "/api/directions/{id}/versions/{version}": {
+      "get": {
+        "operationId": "getDirection",
+        "summary": "Read an immutable behavior direction artifact",
+        "parameters": [
+          {"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/InterventionVersion"},
+          {"in":"query","name":"layer","schema":{"$ref":"#/components/schemas/TraceLayer"},"description":"Return one layer. Omit to return all layers."}
+        ],
+        "responses": {
+          "200": {"description": "The requested immutable version. New direction jobs write version 2; old jobs keep version 1. The artifact ID is the direction job ID.",
+            "content": {"application/json": {"schema": {"type":"object","required":["id","version","direction"],"properties":{
+              "id":{"$ref":"#/components/schemas/Id"},"version":{"enum":[1,2]},"direction":{"$ref":"#/components/schemas/BehaviorDirectionResult"}
+            }}}}},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
     "/api/jobs/{id}/trace": {
       "get": {
         "operationId": "getTraceManifest",
@@ -1149,13 +1271,14 @@
       "post": {
         "operationId": "createIntervention",
         "summary": "Save the first version of an intervention artifact",
-        "description": "Specify a Library GGUF or scratch revision ID and the SHA-256 of its GGUF file. A trace rejects rules and patch sources for another model ID or GGUF hash.",
+        "description": "Specify a Library GGUF or scratch revision ID and the SHA-256 of its GGUF file. Save inline rules, references to verified directions for the same model, or both.",
         "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateIntervention"}}}},
         "responses": {
           "200": {"$ref": "#/components/responses/InterventionVersion"},
           "201": {"$ref": "#/components/responses/InterventionVersion"},
           "400": {"$ref": "#/components/responses/BadRequest"}, "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
           "409": {"$ref": "#/components/responses/CreateConflict"}, "413": {"$ref": "#/components/responses/PayloadTooLarge"},
           "415": {"$ref": "#/components/responses/UnsupportedMediaType"}, "422": {"$ref": "#/components/responses/InvalidJsonData"},
           "500": {"$ref": "#/components/responses/StorageError"}
@@ -1194,7 +1317,7 @@
       "get": {
         "operationId": "exportInterventionGguf",
         "summary": "Download a llama.cpp control vector GGUF",
-        "description": "Export requires one add rule per l_out layer, a common vector width, and no layer 0. GGUF does not store trace positions. llama.cpp applies each vector to every token at that layer.",
+        "description": "Export requires one add or subtract rule per l_out layer, a common vector width, and no layer 0. A subtract rule exports the negative scaled vector. llama.cpp cannot express a projection. GGUF does not store trace positions. llama.cpp applies each vector to every token at that layer.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/InterventionVersion"}],
         "responses": {
           "200": {"description": "GGUF v3 controlvector file.", "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}},
@@ -2326,14 +2449,35 @@
           "schema": {"const": "brewery.scratch-provenance.v1"}, "parent_id": {"$ref": "#/components/schemas/Id"},
           "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "revision_id": {"$ref": "#/components/schemas/Id"},
           "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "worker": {"type": "string"},
-          "method": {"enum": ["copy", "direct", "compile_program", "linear", "task_arithmetic", "ties", "dare_linear", "dare_ties", "rome", "memit", "alphaedit", "prune"]},
+          "method": {"enum": ["copy", "direct", "compile_program", "linear", "task_arithmetic", "ties", "dare_linear", "dare_ties", "rome", "memit", "alphaedit", "prune", "ablate_direction", "heretic", "heretic_reproduce"]},
           "locate_edit": {"type": "object", "description": "Edit request, covariance digest, runtime library digests and optimization losses. CUDA receipts include backend and device in the nested provenance object."},
+          "heretic": {"type": "object", "description": "Brewery Heretic journal: base and export digests, input and effective config, seed, selected trial index, optional scalar trial scores, offline prompt and asset digests, and runtime and lock digests.",
+            "properties": {
+              "trials": {"type": "array", "maxItems": 64, "description": "Completed Heretic study trials on its optimization data, not Brewery held-out checks.",
+                "items": {"type": "object", "required": ["index", "scores"], "properties": {
+                  "index": {"type": "integer", "minimum": 1, "maximum": 64},
+                  "scores": {"type": "array", "maxItems": 16, "items": {"type": "object", "required": ["name", "value", "baseline"], "properties": {
+                    "name": {"type": "string", "maxLength": 80}, "value": {"type": "number"}, "baseline": {"type": "number"}
+                  }}}
+                }}
+              }
+            }
+          },
           "operations": {"type": "array", "items": {"$ref": "#/components/schemas/ScratchOperation"}},
           "merge": {"type": "object", "required": ["algorithm", "inputs"], "properties": {
             "algorithm": {"$ref": "#/components/schemas/ScratchMergeAlgorithm"},
             "inputs": {"$ref": "#/components/schemas/ScratchMergeInputs"}
           }},
           "pruning": {"$ref": "#/components/schemas/DensePruning"},
+          "ablation": {"type": "object", "required": ["direction", "source_gguf_sha256", "first_layer", "last_layer", "kernel", "variant"], "properties": {
+            "direction": {"$ref": "#/components/schemas/AblationDirection"},
+            "source_gguf_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "first_layer": {"$ref": "#/components/schemas/TraceLayer"},
+            "last_layer": {"$ref": "#/components/schemas/TraceLayer"},
+            "kernel": {"$ref": "#/components/schemas/AblationKernel"},
+            "variant": {"$ref": "#/components/schemas/AblationVariant"},
+            "alpha": {"type": "number", "exclusiveMinimum": 0, "maximum": 4, "default": 1}
+          }},
           "pruning_trace": {"type": "object", "required": ["gguf_sha256", "manifest_sha256", "lanternfish_sha256"], "properties": {
             "gguf_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "manifest_sha256": {"$ref": "#/components/schemas/ScratchHash"},
             "lanternfish_sha256": {"$ref": "#/components/schemas/ScratchHash"}
@@ -2351,6 +2495,38 @@
             }
           },
           "tool": {"type": "string"}, "tool_version": {"type": "string"}, "runtime_version": {"type": "string"}, "created_at_ms": {"type": "integer"}
+        }
+      },
+      "AblationDirection": {
+        "type": "object", "additionalProperties": false, "required": ["id", "version", "layer"],
+        "properties": {
+          "id": {"$ref": "#/components/schemas/Id"},
+          "version": {"type": "integer", "const": 2},
+          "layer": {"$ref": "#/components/schemas/TraceLayer"}
+        }
+      },
+      "AblationKernel": {
+        "type": "object", "additionalProperties": false, "required": ["shape", "peak", "width", "min_weight"],
+        "properties": {
+          "shape": {"enum": ["flat", "gaussian", "triangle"]},
+          "peak": {"$ref": "#/components/schemas/TraceLayer"},
+          "width": {"type": "number", "exclusiveMinimum": 0, "maximum": 4096},
+          "min_weight": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      },
+      "AblationVariant": {"enum": ["plain", "projected", "norm_preserving"]},
+      "AblationSearchRequest": {
+        "type": "object", "additionalProperties": false,
+        "required": ["sha256", "direction_id", "assets_id", "seed", "trial_budget", "max_children", "disk_budget_bytes", "behavior_direction"],
+        "properties": {
+          "sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "direction_id": {"type": "string", "minLength": 1},
+          "assets_id": {"type": "string", "minLength": 1},
+          "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+          "trial_budget": {"type": "integer", "minimum": 3, "maximum": 32},
+          "max_children": {"type": "integer", "minimum": 1, "maximum": 3},
+          "disk_budget_bytes": {"type": "integer", "minimum": 67108864, "maximum": 68719476736},
+          "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionConfig"}
         }
       },
       "ScratchRevision": {
@@ -2446,6 +2622,90 @@
           "top_tokens": {"type": "array", "maxItems": 8, "items": {"$ref": "#/components/schemas/TokenLossDiffToken"}, "description": "Tokens from the selected sentence, ranked by absolute loss change. The rank does not depend on the slice."}
         }
       },
+      "BehaviorDirectionConfig": {
+        "type": "object", "additionalProperties": false, "required": ["prompt_sets"],
+        "properties": {
+          "prompt_sets": {"type": "object", "additionalProperties": false,
+            "description": "SHA-256 of each normalized prompt set in the operator's local contrast cache. The optional benign_refusal set measures over-refusal on reviewed benign prompts only.",
+            "required": ["slop", "sycophancy", "response_length"],
+            "properties": {
+              "slop": {"$ref": "#/components/schemas/ScratchHash"},
+              "sycophancy": {"$ref": "#/components/schemas/ScratchHash"},
+              "response_length": {"$ref": "#/components/schemas/ScratchHash"},
+              "benign_refusal": {"const": "0a3af7d442e3043a713ccb050c4291abf360614f4164cac16e1535d46ea5d35e"}
+            }
+          },
+          "refusal_prefixes": {
+            "description": "Replace the default refusal prefixes. Requires the benign_refusal set.",
+            "type": "array", "maxItems": 32, "items": {
+              "type": "string", "minLength": 1, "maxLength": 160, "x-brewery-max-utf8-bytes": 160
+            }
+          }
+        }
+      },
+      "PairedBehaviorOutcomes": {
+        "type": "array", "minItems": 1, "maxItems": 32,
+        "items": {"type": "object", "additionalProperties": false, "required": ["parent", "child"],
+          "properties": {"parent": {"type": "boolean"}, "child": {"type": "boolean"}}
+        }
+      },
+      "BehaviorDirectionReport": {
+        "type": "object", "additionalProperties": false,
+        "required": ["schema", "config", "max_new_tokens", "max_continuation_tokens", "cpu_threads", "counts", "kl_prompts", "kl_continuation_positions", "metrics", "samples"],
+        "properties": {
+          "schema": {"const": "brewery.behavior-direction.v1"},
+          "config": {"$ref": "#/components/schemas/BehaviorDirectionConfig"},
+          "max_new_tokens": {"const": 64},
+          "max_continuation_tokens": {"const": 4},
+          "cpu_threads": {"type": "integer", "minimum": 1, "maximum": 16},
+          "counts": {
+            "type": "object", "propertyNames": {"enum": ["slop", "sycophancy", "response_length", "benign_refusal"]},
+            "properties": {"benign_refusal": {"const": 16}},
+            "additionalProperties": {"type": "integer", "minimum": 1, "maximum": 32},
+            "required": ["slop", "sycophancy", "response_length"]
+          },
+          "kl_prompts": {"type": "integer", "minimum": 1, "maximum": 32},
+          "kl_continuation_positions": {"type": "integer", "minimum": 0, "maximum": 128},
+          "metrics": {
+            "type": "array", "minItems": 5, "maxItems": 6, "items": {
+              "type": "object", "additionalProperties": false, "required": ["name", "parent", "child", "better"],
+              "properties": {
+                "name": {"enum": ["benign_refusal_rate", "slop_marker_rate", "sycophancy_agreement_rate", "response_length_tokens", "kl_first_token_nats", "kl_continuation_nats"]},
+                "parent": {"type": "number", "minimum": 0},
+                "child": {"type": "number", "minimum": 0},
+                "better": {"enum": ["lower", "neither"]}
+              }
+            }
+          },
+          "paired_outcomes": {
+            "description": "Paired flags in pinned holdout order, without replies.",
+            "type": "object", "additionalProperties": false, "required": ["slop", "sycophancy"],
+            "properties": {
+              "slop": {"$ref": "#/components/schemas/PairedBehaviorOutcomes"},
+              "sycophancy": {"$ref": "#/components/schemas/PairedBehaviorOutcomes"}
+            }
+          },
+          "benign_refusal_flags": {
+            "description": "Present when benign_refusal is enabled. Flags follow the pinned cache row order. No replies are saved.",
+            "type": "array", "minItems": 16, "maxItems": 16,
+            "items": {
+              "type": "object", "additionalProperties": false, "required": ["parent", "child"],
+              "properties": {"parent": {"type": "boolean"}, "child": {"type": "boolean"}}
+            }
+          },
+          "samples": {
+            "type": "object", "propertyNames": {"enum": ["slop", "sycophancy", "response_length"]},
+            "required": ["slop", "sycophancy", "response_length"],
+            "additionalProperties": {
+              "type": "object", "additionalProperties": false, "required": ["parent", "child"],
+              "properties": {
+                "parent": {"type": "string", "maxLength": 160, "x-brewery-max-utf8-bytes": 160},
+                "child": {"type": "string", "maxLength": 160, "x-brewery-max-utf8-bytes": 160}
+              }
+            }
+          }
+        }
+      },
       "ScratchCheckBundle": {
         "type": "object",
         "required": ["schema", "id", "revision_sha256", "parent_sha256", "created_at_ms", "qualification", "integrity", "smoke", "behavior", "job_refs", "acknowledged_at_ms"],
@@ -2458,6 +2718,7 @@
           "integrity": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "smoke": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "behavior": {"$ref": "#/components/schemas/ScratchCheckStatus"},
+          "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionReport"},
           "program_correctness": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "program_cases": {"type": "integer", "minimum": 0, "maximum": 340},
           "offline_report": {"$ref": "#/components/schemas/ScratchOfflineReport"},
@@ -2556,7 +2817,7 @@
           "truncated": {"type": "boolean"}
         }
       },
-      "JobKind": {"type": "string", "enum": ["compare", "trace", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer", "sensitivity", "circuit", "quantization_damage"]},
+      "JobKind": {"type": "string", "enum": ["compare", "trace", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer", "sensitivity", "circuit", "quantization_damage", "behavior_direction"]},
       "JobState": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled"]},
       "CapabilityMap": {
         "type": "object", "description": "Map from each known job kind to its availability.",
@@ -2658,7 +2919,7 @@
         "type": "object",
         "required": ["id", "kind", "host", "pool_slot", "state", "progress", "input_ids", "options", "cancel_requested", "has_result", "created_at", "updated_at"],
         "properties": {
-          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf","scratch_checks","scratch_locate_edit","weight_spectra"]}]},
+          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf", "scratch_checks", "scratch_locate_edit", "weight_spectra", "search_ablation", "screen_ablation", "heretic", "heretic_reproduce"]}]},
           "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}], "description": "Concrete worker ID, or auto before assignment of a pool conversion."},
           "requested_host": {"const": "auto", "description": "Present if auto conversion routing was requested."},
           "pool_slot": {"type": "boolean"}, "state": {"$ref": "#/components/schemas/JobState"}, "progress": {"type": "string"},
@@ -2673,7 +2934,9 @@
               {"$ref": "#/components/schemas/CacheCleanupOptions"}, {"$ref": "#/components/schemas/EmptyOptions"},
               {"$ref": "#/components/schemas/GgufLayerRecipeOptions"},
               {"$ref": "#/components/schemas/Exl3LayerOptions"},
+              {"type": "object", "required": ["kind", "base_sha256"], "properties": {"kind": {"enum": ["heretic", "heretic_reproduce"]}, "base_sha256": {"$ref": "#/components/schemas/ScratchHash"}}},
               {"$ref": "#/components/schemas/HgnLayerRecipeOptions"},
+              {"$ref": "#/components/schemas/AblationSearchRequest"},
               {"$ref": "#/components/schemas/WeightSpectraFilter"}
             ]
           },
@@ -2730,7 +2993,8 @@
           {"$ref": "#/components/schemas/WeightTuneJob"}, {"$ref": "#/components/schemas/WeightApplyJob"},
           {"$ref": "#/components/schemas/Exl3LayerJob"}, {"$ref": "#/components/schemas/TraceJob"},
           {"$ref": "#/components/schemas/SensitivityJob"}, {"$ref": "#/components/schemas/CircuitJob"},
-          {"$ref": "#/components/schemas/QuantizationDamageJob"}
+          {"$ref": "#/components/schemas/QuantizationDamageJob"},
+          {"$ref": "#/components/schemas/BehaviorDirectionJob"}
         ],
         "discriminator": {
           "propertyName": "kind",
@@ -2744,7 +3008,8 @@
             "weight_tune": "#/components/schemas/WeightTuneJob", "weight_apply": "#/components/schemas/WeightApplyJob",
             "exl3_layer": "#/components/schemas/Exl3LayerJob", "trace": "#/components/schemas/TraceJob",
             "sensitivity": "#/components/schemas/SensitivityJob", "circuit": "#/components/schemas/CircuitJob",
-            "quantization_damage": "#/components/schemas/QuantizationDamageJob"
+            "quantization_damage": "#/components/schemas/QuantizationDamageJob",
+            "behavior_direction": "#/components/schemas/BehaviorDirectionJob"
           }
         }
       },
@@ -2968,6 +3233,28 @@
           }}
         }
       },
+      "DirectionBehavior": {"type":"string","enum":["slop","sycophancy","response_length"]},
+      "DirectionRole": {"type":"string","enum":["l_out","attn_out","ffn_out"],"default":"l_out"},
+      "BehaviorDirectionOptions": {
+        "type":"object","required":["behavior","model_sha256","layers"],"additionalProperties":false,
+        "properties":{
+          "behavior":{"$ref":"#/components/schemas/DirectionBehavior"},
+          "model_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "layers":{"type":"array","description":"Layers in increasing order.","minItems":1,"maxItems":64,"uniqueItems":true,"items":{"$ref":"#/components/schemas/TraceLayer"}},
+          "role":{"$ref":"#/components/schemas/DirectionRole"},
+          "position":{"anyOf":[{"$ref":"#/components/schemas/TracePosition"},{"type":"null"}],"description":"Zero-based position including special tokens. Omit or use null for the last user instruction token."}
+        }
+      },
+      "BehaviorDirectionJob": {
+        "description":"Fit per-layer behavior directions from an approved contrast set. Run on one opted-in CPU worker with the Library Qwen2 GGUF.",
+        "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"},{"$ref":"#/components/schemas/NoPrompt"}],
+        "required":["input_ids","options"],
+        "properties":{
+          "kind":{"const":"behavior_direction"},
+          "input_ids":{"minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
+          "options":{"$ref":"#/components/schemas/BehaviorDirectionOptions"}
+        }
+      },
       "TraceOptions": {
         "type":"object",
         "description":"Inline rules, a saved version, and patch rows may be combined. They must not target the same row. The expanded limit is 64 rules and 262144 vector values.",
@@ -3049,16 +3336,17 @@
         "properties":{
           "layer":{"$ref":"#/components/schemas/TraceLayer"}, "role":{"enum":["l_out","attn_out","ffn_inp","ffn_out"]},
           "positions":{"type":"array","minItems":1,"items":{"$ref":"#/components/schemas/TracePosition"}},
-          "op":{"enum":["zero","scale","add","replace","zero_expert"]}, "factor":{"type":"number"},
+          "op":{"enum":["zero","scale","add","replace","zero_expert","project_out","subtract"]}, "factor":{"type":"number"},
           "expert":{"type":"integer","minimum":0,"maximum":4095},
+          "scale":{"type":"number","minimum":0},
           "vector":{"type":"array","minItems":1,"maxItems":16384,"items":{"type":"number"}}
         },
         "oneOf":[
-          {"properties":{"op":{"const":"zero"}}, "not":{"anyOf":[{"required":["factor"]},{"required":["vector"]},{"required":["expert"]}]}},
-          {"properties":{"op":{"const":"scale"}},"required":["factor"],"not":{"anyOf":[{"required":["vector"]},{"required":["expert"]}]}},
-          {"properties":{"op":{"enum":["add","replace"]}},"required":["vector"],"not":{"anyOf":[{"required":["factor"]},{"required":["expert"]}]}},
-          {"properties":{"op":{"const":"zero_expert"},"role":{"const":"ffn_out"}},"required":["expert"],
-            "not":{"anyOf":[{"required":["factor"]},{"required":["vector"]}]}}
+          {"properties":{"op":{"const":"zero"}, "factor":false, "vector":false, "scale":false, "expert":false}},
+          {"properties":{"op":{"const":"scale"}, "vector":false, "scale":false, "expert":false},"required":["factor"]},
+          {"properties":{"op":{"enum":["add","replace","project_out"]}, "factor":false, "scale":false, "expert":false},"required":["vector"]},
+          {"properties":{"op":{"const":"subtract"}, "factor":false, "expert":false},"required":["vector","scale"]},
+          {"properties":{"op":{"const":"zero_expert"}, "role":{"const":"ffn_out"}, "factor":false, "vector":false, "scale":false},"required":["expert"]}
         ]
       },
       "InterventionRef": {
@@ -3079,17 +3367,42 @@
       "InterventionRules": {
         "type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/components/schemas/TraceIntervention"}
       },
+      "DirectionInterventionRules": {
+        "description": "Resolve each nonzero unit vector from a successful direction job for the same model ID and GGUF hash. Targets must not overlap with other rules.",
+        "type": "array", "minItems": 1, "maxItems": 8,
+        "items": {
+          "type":"object","additionalProperties":false,
+          "required":["direction_id","direction_version","source_layer","layer","role","positions","op"],
+          "properties":{
+            "direction_id":{"$ref":"#/components/schemas/Id"}, "direction_version":{"type":"integer","enum":[1,2]},
+            "source_layer":{"$ref":"#/components/schemas/TraceLayer"},
+            "layer":{"$ref":"#/components/schemas/TraceLayer"}, "role":{"enum":["l_out","attn_out","ffn_inp","ffn_out"]},
+            "positions":{"type":"array","minItems":1,"items":{"$ref":"#/components/schemas/TracePosition"}},
+            "op":{"enum":["project_out","subtract"]}, "scale":{"type":"number","minimum":0}
+          },
+          "oneOf":[
+            {"properties":{"op":{"const":"project_out"}, "scale":false}},
+            {"properties":{"op":{"const":"subtract"}},"required":["scale"]}
+          ]
+        }
+      },
       "CreateIntervention": {
-        "type": "object", "additionalProperties": false, "required": ["name", "model_id", "model_sha256", "interventions"],
+        "type": "object", "additionalProperties": false, "required": ["name", "model_id", "model_sha256"],
+        "anyOf":[{"required":["interventions"]},{"required":["direction_rules"]}],
         "properties": {
           "name": {"type": "string", "minLength": 1, "maxLength": 160, "description": "At most 160 UTF-8 bytes after trimming."},
           "model_id": {"$ref": "#/components/schemas/Id"}, "model_sha256": {"$ref": "#/components/schemas/Sha256"},
-          "interventions": {"$ref": "#/components/schemas/InterventionRules"}
+          "interventions": {"$ref": "#/components/schemas/InterventionRules"},
+          "direction_rules": {"$ref": "#/components/schemas/DirectionInterventionRules"}
         }
       },
       "NewInterventionVersion": {
-        "type": "object", "additionalProperties": false, "required": ["interventions"],
-        "properties": {"interventions": {"$ref": "#/components/schemas/InterventionRules"}}
+        "type": "object", "additionalProperties": false,
+        "anyOf":[{"required":["interventions"]},{"required":["direction_rules"]}],
+        "properties": {
+          "interventions": {"$ref": "#/components/schemas/InterventionRules"},
+          "direction_rules": {"$ref": "#/components/schemas/DirectionInterventionRules"}
+        }
       },
       "InterventionSummary": {
         "type": "object", "required": ["id", "name", "model_id", "model_sha256", "latest_version"],
@@ -3105,7 +3418,8 @@
           "id": {"$ref": "#/components/schemas/Id"}, "version": {"type": "integer", "minimum": 1, "maximum": 4294967295},
           "name": {"type": "string"}, "model_id": {"$ref": "#/components/schemas/Id"},
           "model_sha256": {"$ref": "#/components/schemas/Sha256"}, "created_at_ms": {"type": "integer", "minimum": 0},
-          "model_hint": {"type": "string"}, "interventions": {"$ref": "#/components/schemas/InterventionRules"}
+          "model_hint": {"type": "string"}, "interventions": {"$ref": "#/components/schemas/InterventionRules"},
+          "direction_rules": {"$ref": "#/components/schemas/DirectionInterventionRules"}
         }
       },
       "TraceExport": {
@@ -4224,6 +4538,8 @@
           {"$ref": "#/components/schemas/TraceResult"},
           {"$ref": "#/components/schemas/WeightSpectraResult"},
           {"$ref": "#/components/schemas/QuantizationDamageArtifact"},
+          {"$ref": "#/components/schemas/BehaviorDirectionResult"},
+          {"$ref": "#/components/schemas/AblationSearchResult"},
           {"type": "object", "not": {"anyOf": [
             {"$ref": "#/components/schemas/CompareResult"}, {"$ref": "#/components/schemas/ConversionResult"},
             {"$ref": "#/components/schemas/GenerateResult"}, {"$ref": "#/components/schemas/Gsm8kResult"},
@@ -4234,6 +4550,63 @@
         ]
       },
       "ByteCount": {"type": "integer", "minimum": 0},
+      "AblationSearchResult": {
+        "type": "object",
+        "required": ["schema_version", "kind", "release_qualified", "backend", "screen", "children", "finding"],
+        "properties": {
+          "schema_version": {"const": 1},
+          "kind": {"const": "search_ablation"},
+          "release_qualified": {"const": false},
+          "backend": {"const": "cpu"},
+          "parent_safetensors_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "screen_job_id": {"$ref": "#/components/schemas/Id"},
+          "screen": {
+            "type": "object", "required": ["marker", "parent_hits", "trials", "pareto", "selected"],
+            "properties": {
+              "marker": {"type": "string"},
+              "parent_hits": {"type": "integer", "minimum": 0},
+              "trials": {"type": "array", "maxItems": 32, "items": {"type": "object"}},
+              "pareto": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+              "selected": {"type": "array", "maxItems": 3, "items": {"type": "integer", "minimum": 0}}
+            }
+          },
+          "children": {"type": "array", "maxItems": 3, "items": {
+            "type": "object", "required": ["id", "n", "exact_mcnemar_p", "holm_adjusted_p", "w4_passed"],
+            "properties": {
+              "id": {"$ref": "#/components/schemas/Id"},
+              "n": {"const": 32},
+              "exact_mcnemar_p": {"type": "number", "minimum": 0, "maximum": 1},
+              "holm_adjusted_p": {"type": "number", "minimum": 0, "maximum": 1},
+              "w4_passed": {"type": "boolean"}
+            }
+          }},
+          "finding": {"enum": ["stock_screen_marker_not_observed", "no_screen_setting_outperformed_matched_random_control",
+            "screen_effect_not_on_pareto_front", "screen_effect_not_confirmed_by_weight_edit", "screen_effect_confirmed_by_weight_edit"]}
+        }
+      },
+      "BehaviorDirectionResult": {
+        "type":"object","required":["kind","schema_version","release_qualified","model_id","model_sha256","position","behavior","contrast_sha256","lanternfish_commit","executable_sha256","fit"],
+        "if":{"properties":{"schema_version":{"const":2}}},
+        "then":{"properties":{"fit":{"properties":{"layers":{"items":{"required":["held_out_cohens_d","mean_residual_norm"]}}}}}},
+        "properties":{
+          "kind":{"const":"behavior_direction"},"schema_version":{"enum":[1,2]},"release_qualified":{"const":false},
+          "model_id":{"$ref":"#/components/schemas/Id"},"model_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "position":{"type":["integer","null"]},"behavior":{"$ref":"#/components/schemas/DirectionBehavior"},
+          "contrast_sha256":{"$ref":"#/components/schemas/Sha256"},"lanternfish_commit":{"type":"string"},
+          "executable_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "fit":{"type":"object","required":["role","train_pairs","held_out_pairs","selected_layer","layers"],"properties":{
+            "role":{"$ref":"#/components/schemas/DirectionRole"},"train_pairs":{"const":12},"held_out_pairs":{"const":8},
+            "selected_layer":{"type":["integer","null"],"description":"Layer with the highest positive held-out Cohen's d in version 2, or the highest positive raw margin in version 1. Null if none qualifies."},"layers":{"type":"array","items":{"type":"object",
+              "required":["layer","norm","unit_vector","held_out_margin"],"properties":{
+                "layer":{"$ref":"#/components/schemas/TraceLayer"},"norm":{"type":"number","minimum":0},
+                "unit_vector":{"type":["array","null"],"items":{"type":"number"}},"held_out_margin":{"type":["number","null"]},
+                "held_out_cohens_d":{"type":["number","null"],"description":"Raw margin divided by the pooled within-class sample standard deviation of held-out projections. Null if undefined."},
+                "mean_residual_norm":{"type":"number","minimum":0,"description":"Mean L2 norm of l_out over both classes of held-out prompts, at the captured token."},
+                "negative_mean":{"type":"array","minItems":1,"maxItems":16384,"items":{"type":"number"},"description":"Mean negative-class activation over training prompts. Required for projected ablation; older artifacts omit it."}
+              }}}
+          }}
+        }
+      },
       "TraceResult": {
         "type":"object","required":["kind","schema_version","model_id","model_sha256","lanternfish_commit","executable_sha256","bytes","prompts"],
         "properties":{

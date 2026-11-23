@@ -194,6 +194,26 @@ fn weight_spectra_queues_parent_comparison_and_replays_through_mcp() {
 }
 
 #[test]
+fn heretic_cannot_queue_without_a_local_gpu_lane() {
+    let mut t = Test::new();
+    let path = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
+    t.launch();
+    let (status, model) = t.request(
+        "/api/models",
+        "Idempotency-Key: heretic-fixture\r\n",
+        Some(json!({"name":"fixture","host":"existing","kind":"safetensors","path":path})),
+    );
+    assert_eq!(status, 201, "{model}");
+    let (status, response) = t.request(
+        "/api/scratch/heretic",
+        "Idempotency-Key: heretic-run\r\n",
+        Some(json!({"parent_id":model["id"],"base_sha256":sha(&fs::read(&path).unwrap()),
+                    "profile":"noslop","trials":2,"trial_index":0,"seed":12})),
+    );
+    assert_eq!(status, 409, "{response}");
+}
+
+#[test]
 fn mcp_compiled_root_checks_and_approval_boundary() {
     let mut t = Test::new();
     fixture(&t, &[1., 2., 3., 4., 5., 6.]);
@@ -1226,12 +1246,15 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
     assert_eq!(
         names,
         [
+            "ablate_direction",
             "add_evidence",
             "alphaedit_edit",
             "apply_edit",
             "compile_program",
+            "compute_direction",
             "convert_scratch_gguf",
             "create_finding",
+            "create_direction_intervention",
             "create_intervention",
             "create_scratch",
             "crosscoder_diff",
@@ -1242,6 +1265,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "export_control_vector",
             "find_circuit",
             "get_checks",
+            "get_direction",
             "get_finding",
             "get_intervention",
             "get_job",
@@ -1265,11 +1289,14 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "read_trace",
             "register_model",
             "replay_finding",
+            "reproduce_heretic",
             "request_publish",
             "rome_edit",
             "routing_atlas",
             "run_checks",
+            "run_heretic",
             "run_program",
+            "search_ablation",
             "start_trace",
             "steer_feature",
             "tensor_sensitivity",
@@ -1292,6 +1319,41 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             assert_eq!(tool["annotations"]["readOnlyHint"], true);
             assert_eq!(schema["required"], json!(["id"]));
         }
+        if tool["name"] == "ablate_direction" {
+            assert_eq!(
+                schema["properties"]["direction"]["properties"]["version"]["const"],
+                2
+            );
+            assert_eq!(
+                schema["properties"]["variant"]["enum"],
+                json!(["plain", "projected", "norm_preserving"])
+            );
+        }
+        if tool["name"] == "create_direction_intervention" {
+            assert_eq!(schema["properties"]["direction_rules"]["maxItems"], 8);
+            assert!(schema["properties"].get("interventions").is_none());
+            assert!(schema["required"].as_array().unwrap().contains(&json!("direction_rules")));
+        }
+        if tool["name"] == "run_checks" {
+            let behavior = &schema["properties"]["behavior_direction"];
+            assert_eq!(behavior["required"], json!(["prompt_sets"]));
+            assert_eq!(
+                behavior["properties"]["prompt_sets"]["required"],
+                json!(["slop", "sycophancy", "response_length"])
+            );
+            let sets = &behavior["properties"]["prompt_sets"]["properties"];
+            assert_eq!(
+                sets["benign_refusal"]["const"],
+                "0a3af7d442e3043a713ccb050c4291abf360614f4164cac16e1535d46ea5d35e"
+            );
+            assert!(sets.get("refusal").is_none());
+            assert!(
+                !schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("behavior_direction"))
+            );
+        }
         if matches!(
             tool["name"].as_str(),
             Some("rome_edit" | "memit_edit" | "alphaedit_edit")
@@ -1310,6 +1372,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             tool["name"].as_str(),
             Some(
                 "start_trace"
+                    | "compute_direction"
                     | "steer_feature"
                     | "tensor_sensitivity"
                     | "find_circuit"
@@ -1388,6 +1451,25 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
     );
     let scratch = ok("create_scratch", create.clone());
     assert_eq!(ok("create_scratch", create.clone()), scratch);
+    let mut ablation = json!({
+        "id": scratch["id"], "sha256": scratch["sha256"], "idempotency_key": "ablate-rejected",
+        "direction": {"id": parent["id"], "version": 2, "layer": 0},
+        "first_layer": 0, "last_layer": 0, "variant": "plain",
+        "kernel": {"shape": "flat", "peak": 0, "width": 1, "min_weight": 0},
+        "include_embeddings": true,
+    });
+    let rejected = call("ablate_direction", ablation.clone());
+    assert_eq!(
+        rejected["result"]["structuredContent"]["status"], 400,
+        "{rejected}"
+    );
+    ablation["include_embeddings"] = json!(false);
+    let missing = call("ablate_direction", ablation);
+    assert_eq!(
+        missing["result"]["structuredContent"]["status"], 404,
+        "{missing}"
+    );
+    assert_eq!(ok("list_scratch", json!({}))["revisions"], json!([scratch]));
     create["parent_sha256"] = json!("0".repeat(64));
     assert_eq!(
         call("create_scratch", create)["result"]["structuredContent"]["status"],
@@ -1426,6 +1508,16 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
         "apply_edit",
         json!({"id":scratch["id"],"idempotency_key":"mcp-edit",
         "operations":[{"op":"add","tensor":"w","origin":[0,1],"shape":[1,1],"values":[6.]}]}),
+    );
+    let opted_in = call(
+        "run_checks",
+        json!({"id":edit["id"],"idempotency_key":"mcp-behavior-check","sha256":edit["sha256"],
+               "behavior_direction":{"prompt_sets":{"slop":"a".repeat(64),
+                   "response_length":"b".repeat(64), "sycophancy":"c".repeat(64)}}}),
+    );
+    assert_eq!(
+        opted_in["result"]["structuredContent"]["status"], 409,
+        "{opted_in}"
     );
     let check = ok(
         "run_checks",

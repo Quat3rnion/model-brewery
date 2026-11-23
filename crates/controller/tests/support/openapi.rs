@@ -1,4 +1,5 @@
 use super::{Fixture, Read, Value};
+use serde_json::json;
 use std::collections::BTreeSet;
 
 const CONTRACT: &str = include_str!("../../../../api/openapi.json");
@@ -87,6 +88,11 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("post", "/mcp", "sendMcpMessage"),
         ("get", "/api/models", "listModels"),
         ("get", "/api/models/{id}/lineage", "readLineage"),
+        (
+            "get",
+            "/api/directions/{id}/versions/{version}",
+            "getDirection",
+        ),
         ("post", "/api/models", "createModel"),
         (
             "post",
@@ -102,10 +108,18 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/diff/token-loss", "diffTokenLoss"),
         ("post", "/api/scratch", "createScratch"),
         ("post", "/api/scratch/merge", "mergeModels"),
+        ("post", "/api/scratch/heretic", "runHeretic"),
+        ("post", "/api/scratch/heretic_reproduce", "reproduceHeretic"),
         ("post", "/api/scratch/compile_program", "compileProgram"),
         ("post", "/api/scratch/{id}/run_program", "runProgram"),
         ("get", "/api/scratch/{id}", "getScratch"),
         ("post", "/api/scratch/{id}/edits", "editScratch"),
+        (
+            "post",
+            "/api/scratch/{id}/ablate_direction",
+            "ablateScratchDirection",
+        ),
+        ("post", "/api/scratch/{id}/search_ablation", "searchAblation"),
         ("post", "/api/scratch/{id}/rome", "romeEdit"),
         ("post", "/api/scratch/{id}/memit", "memitEdit"),
         ("post", "/api/scratch/{id}/alphaedit", "alphaEdit"),
@@ -243,6 +257,25 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("post", "/api/profiles", "saveProfile"),
     ]);
     assert_eq!(operations, expected);
+    for (route, schema) in [
+        ("/api/interventions", "CreateIntervention"),
+        ("/api/interventions/{id}/versions", "NewInterventionVersion"),
+    ] {
+        let request = &contract["paths"][route]["post"]["requestBody"]["content"]["application/json"]
+            ["schema"];
+        assert_eq!(request["$ref"], format!("#/components/schemas/{schema}"));
+        assert_eq!(
+            contract["components"]["schemas"][schema]["properties"]["direction_rules"]["$ref"],
+            "#/components/schemas/DirectionInterventionRules"
+        );
+    }
+    let check = &contract["paths"]["/api/scratch/{id}/checks"]["post"]["requestBody"]["content"]["application/json"]
+        ["schema"];
+    assert_eq!(check["required"], json!(["sha256"]));
+    assert_eq!(
+        check["properties"]["behavior_direction"]["$ref"],
+        "#/components/schemas/BehaviorDirectionConfig"
+    );
     let ids: BTreeSet<_> = operations.iter().map(|entry| entry.2).collect();
     assert_eq!(ids.len(), operations.len());
     walk_refs(&contract, &contract);

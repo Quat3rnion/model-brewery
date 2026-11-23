@@ -330,8 +330,9 @@ It does not change the model or qualify a release.
    `0ea30b37729a136a76b8412e7ad1ec91bd7de9b5`. Check its SHA-256:
    `0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f`.
    The engine rejects other binaries.
-2. Install the matching CPU libraries from llama.cpp `184f653` with
-   Lanternfish patches `0001` and `0002`. Put the four files below in an
+2. Install the matching CPU libraries from llama.cpp `184f653`. Apply the
+   patches with `patches/apply-llama.sh` from the pinned Lanternfish commit.
+   Put the four files below in an
    operator-controlled release directory. The engine copies and checks each
    file in the private job directory. It sets `LD_LIBRARY_PATH` to those
    copies. It does not need the build directory in the binary's RUNPATH.
@@ -344,8 +345,9 @@ It does not change the model or qualify a release.
    not run traces. The existing GPU `compare` job still uses
    `BREWERY_LANTERNFISH` and its `run` command.
 
-Save this list as `w0-libraries.sha256` in the release library directory.
-In that directory, run `sha256sum -c w0-libraries.sha256`:
+Save this list as `trace-libraries.sha256` in the CPU trace release library
+directory. In that directory, run `sha256sum -c trace-libraries.sha256`.
+The scratch-check runner uses these same pinned CPU libraries.
 
 ```text
 bb94467edcc18c8fb875f86628d89c112adedcfea1e8f6c5549c706adf5f25cc  libllama.so.0
@@ -648,6 +650,66 @@ trace retention before it returns a cached report. Report size is limited
 to 4 MiB. Try a smaller trace slice on 413. Only one diff can run at a
 time. On 429, wait and retry.
 
+### Behavior directions
+
+Use this CPU job to measure activation differences for `slop`, `sycophancy`,
+or `response_length` on a Library Qwen2 GGUF. The job does not change weights
+or run text generation.
+
+1. Run `python3 tools/direction_prompt_cache.py /absolute/path/to/cache` on
+   a machine with network access. The script checks the source size and
+   SHA-256 before it reads any rows. Copy the generated digest-named `.json`
+   files to a worker-owned directory. The worker can run offline.
+2. In the worker `engine_env`, set `BREWERY_CONTRAST_CACHE` to that absolute
+   directory. Set the two pinned Lanternfish trace paths as for a CPU trace.
+   Enable the `behavior_direction` capability for that worker.
+3. Send `POST /api/jobs` with `kind: "behavior_direction"`, one Library GGUF
+   ID in `input_ids`, and `options` with `behavior`, `model_sha256`, and
+   `layers` in increasing order. Do not send prompts. The MCP tool
+   `compute_direction` supplies the job kind.
+4. Wait for the job to succeed. Read
+   `GET /api/directions/{id}/versions/2` or MCP `get_direction` with the
+   job ID and `version: 2`. This immutable artifact contains the model
+   digest and the prompt and runtime pins. Each run makes a new artifact.
+   Specify `layer` to read one layer instead of all vectors.
+   For an older job, request version 1 to read its original raw-margin selection.
+
+The default role is `l_out`; you can select `attn_out` or `ffn_out`. The
+default token is the last user instruction token. Set `position` for one
+explicit zero-based index, including special tokens. The worker captures the
+prefix through the end of the user text. The fit uses 12 prompt pairs and
+scores 8 disjoint pairs. Each layer has the L2 norm of the training mean
+difference, its unit vector, and the mean held-out signed projection of
+positive minus negative rows (`held_out_margin`). The job divides this
+margin by the pooled within-class sample standard deviation of the held-out
+projections to get `held_out_cohens_d`. The largest positive score selects
+the layer. Equal scores select the lower layer. Cohen's d is null if the
+pooled standard deviation is zero or the direction has zero norm. These
+layers cannot win. `mean_residual_norm` is the mean L2 norm of `l_out` at the
+same token across both classes of held-out prompts, even when the direction
+uses another role. Scores measure separation for these prompt pairs only.
+They do not measure a change in generated behavior.
+Results are not release-qualified.
+
+For direction jobs, the cache script selects a small subset of each source
+and pairs each original user text with two system instructions. It does not
+vendor any rows:
+
+- **Slop and response length:** Databricks, [Databricks Dolly 15K](
+  https://huggingface.co/datasets/databricks/databricks-dolly-15k/tree/bdd27f4d94b9c1f951818a7da7fd7aeea5dbff1a),
+  [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/).
+  Source SHA-256:
+  `2df9083338b4abd6bceb5635764dab5d833b393b55759dffb0959b6fcbf794ec`.
+  The derived sets use separate creative-writing and open-QA subsets.
+  Share those derived sets under CC BY-SA 3.0 with this attribution.
+- **Sycophancy:** Anthropic, [Language model evaluations: sycophancy on the
+  NLP survey](https://github.com/anthropics/evals/tree/84fcc677e52e1902d696c32cd1a6b663e70d3993/sycophancy),
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+  Source SHA-256:
+  `582860b42e2beec806a7d361a08bcce7fdb264e2e697d55104074540352fb308`.
+  The derived set keeps one persona per survey question and its agreement
+  label. Keep this attribution if you redistribute it.
+
 ### Trace interventions
 
 Use `options.interventions` for inline rules. Each rule specifies a `layer`,
@@ -825,11 +887,53 @@ model ID. If the registered file has a different SHA-256, the worker
 rejects it before it runs Lanternfish. A saved artifact does not change
 model weights or qualify the model for release.
 
+#### Direction ablation and subtraction
+
+For projection and subtraction traces, set `BREWERY_LANTERNFISH_PROJECTION`
+to the pinned `d842085` binary and `BREWERY_LANTERNFISH_PROJECTION_LIB_DIR`
+to its library directory. The binary SHA-256 is
+`3009f4b0c362ddc04d955e40efac9e1d88659b9a0bc393fdc8ea6da287bde010`.
+Keep the W0 settings for plain traces and W2 rules. Do not combine
+projection or subtraction with MoE routing in one trace.
+
+The projection runtime and the ablation screen use the same four libraries:
+
+```text
+f4a59a07c8ebea5d02779f82e16cf23d5815a288fede9cdbf851f73b1854c005  libllama.so.0
+c51f659bc7c64ab3b675fb56cdddf1beab54c75818ace8325c7e49ff1a60e3e4  libggml.so.0
+c445afaddb3d37bbb8ef6d979786f66f4cae71b5597fee0feb398f9b961289b8  libggml-base.so.0
+fd7b911f677b93bef0b2fd31877da45bc5e78bd7197fe33df5ed4b76f75b08cd  libggml-cpu.so.0
+```
+
+To use an A1 behavior direction, send `direction_rules` in place of or with
+`interventions`. Each rule names the immutable direction ID and version, the
+layer to read from that artifact, and the target layer, role, and positions.
+The direction must match the model ID and GGUF SHA-256. The controller saves
+the reference and the resolved unit vector in the intervention version.
+
+```json
+{
+  "direction_rules":[{
+    "direction_id":"<direction-job-id>","direction_version":2,"source_layer":15,
+    "layer":15,"role":"l_out","positions":[4],"op":"project_out"
+  }]
+}
+```
+
+Use `project_out` to remove the activation component along the direction.
+Use `subtract` with a finite, nonnegative `scale` to subtract a fixed multiple
+of the unit vector. Save these rules with `create_direction_intervention`
+or send the rules to either intervention write endpoint. Use the artifact
+with `start_trace`. Compare the edited activation and logits with an
+unmodified trace of the same prompt and capture spec.
+
 Use `GET /api/interventions/{id}/versions/{version}/gguf` to download a
 GGUF v3 control vector. Pass the file to llama.cpp with `--control-vector`.
-Export requires one `add` rule per `l_out` layer and the same vector width
-for all layers. It does not support layer 0, which the llama.cpp adapter
-does not use. For layer `N`, the F32 tensor name is `direction.N`. The file
+Export requires one `add` or `subtract` rule per `l_out` layer and the same
+vector width for all layers. A `subtract` rule exports the negative scaled
+vector. llama.cpp control vectors cannot express a projection because the
+removed component depends on the current activation. The llama.cpp adapter
+does not use layer 0. For layer `N`, the F32 tensor name is `direction.N`. The file
 has `general.architecture: "controlvector"`, `controlvector.model_hint`
 with the Library model name, and `controlvector.layer_count` with the
 number of tensors. GGUF does not store token positions or enforce the
@@ -857,6 +961,9 @@ worker environment applies to jobs that run on that worker.
 | `BREWERY_LANTERNFISH_ROUTING` | engine | Absolute path to the pinned CPU Lanternfish executable for MoE routing and expert ablation. |
 | `BREWERY_LANTERNFISH_ROUTING_LIB_DIR` | engine | Absolute path to the matching directory with the four pinned routing trace libraries. |
 | `BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR` | engine | Absolute path to the directory with the four pinned CPU scratch-check libraries. |
+| `BREWERY_LANTERNFISH_PROJECTION` | engine | Absolute path to the pinned CPU executable for projection and subtraction traces. |
+| `BREWERY_LANTERNFISH_PROJECTION_LIB_DIR` | engine | Absolute path to the pinned CPU libraries for projection traces and ablation screens. |
+| `BREWERY_LANTERNFISH_ABLATION` | engine | Absolute path to the pinned CPU executable for ablation screens. |
 | `BREWERY_LANTERNFISH_EDIT` | engine | Absolute path to the pinned CPU Lanternfish binary for locate-then-edit jobs. |
 | `BREWERY_LANTERNFISH_EDIT_LIB_DIR` | engine | Absolute path to the directory with the four pinned llama.cpp and ggml libraries. |
 | `BREWERY_LANTERNFISH_EDIT_CUDA` | engine | Absolute path to the pinned W14b Lanternfish binary for CUDA locate-then-edit jobs. |
@@ -1621,6 +1728,8 @@ workers, or deploy.
    (`wait_ms` can wait up to 5000 ms per call). Use `read_trace` with
    `manifest`, `tensor`, `logit_lens`, or `model_logits`. Use
    `create_intervention` and `new_intervention_version` to save rules.
+   Use `create_direction_intervention` to save projection or subtraction
+   rules from a verified direction artifact.
    `export_control_vector` returns a relative URL for the same workbench.
 3. Use `create_scratch` and `apply_edit` for a SafeTensors edit. Use
    `merge_models` to merge pinned revisions in a new scratch child. Use
@@ -1669,6 +1778,109 @@ edited tensors cannot exceed 32 MiB.
 Dense masks do not reduce the model dimensions, file size, or compute cost
 in a dense runtime. Use the same private conversion, checks, and diffs as
 for a direct edit.
+
+### Native directional ablation
+
+Use `ablate_direction` or `POST /api/scratch/{id}/ablate_direction`. Use
+the scratch parent's exact `sha256`. In `direction`, give the `id`,
+`version` (2), and `layer` from `get_direction`. Set inclusive
+`first_layer` and `last_layer` (at most 64 layers). Select a `variant` and
+a `kernel` with `shape`, `peak`, `width`, and `min_weight`:
+
+- `flat` uses weight 1 at all selected layers. `gaussian` uses
+  `exp(-0.5 * t^2)` and `triangle` uses `max(0, 1 - t)`, where `t` is
+  the distance from `peak` divided by `width` in layers. `min_weight`
+  is the floor (0 to 1). A zero weight skips the layer.
+- `plain` subtracts the component along the fitted direction.
+- `projected` first removes the direction's component along the source
+  layer's training negative mean. The edit leaves the component along
+  that mean unchanged.
+- `norm_preserving` also projects the direction away from the target
+  layer's training negative mean. It restores each writing vector's
+  original L2 norm after subtraction. This uses rows of the transposed
+  SafeTensors matrix (columns of the stored `[out, in]` matrix), so
+  restoring the norms does not reintroduce the removed direction.
+
+Projected variants need `negative_mean` in the artifact. Fit the
+direction again if an older artifact does not have this field. For
+`norm_preserving`, include all target layers in the fit. Optional `alpha`
+multiplies the kernel weight. The default is 1; the allowed range is
+greater than 0 and at most 4. An effective weight of 1 removes the
+component along the direction, up to storage rounding. A lower weight
+removes only part of it. A higher weight reverses the component.
+
+The editor changes `self_attn.o_proj.weight` and `mlp.down_proj.weight`
+for each active layer of a dense HF checkpoint. It rejects biased
+writers, incompatible widths, tensors over 32 MiB, and more than
+256 MiB of input tensors in one edit. Embeddings are not edited
+(`include_embeddings: true` is rejected); Qwen2.5-0.5B embeddings exceed
+the per-tensor limit.
+
+Use a direction measured on the same model in the same residual basis.
+The editor checks tensor compatibility, not equivalence between the
+Library GGUF and scratch SafeTensors. Provenance records both pins, the
+source layer, and the edit settings. The child has a reversible delta.
+Convert it to private GGUF, run checks, and review the diffs before a
+publish request. This workflow does not qualify a release.
+
+References: [Arditi et al. (2024), section 4.1](https://arxiv.org/abs/2406.11717);
+[Labonne's Gaussian layer kernel](https://huggingface.co/mlabonne/gemma-3-4b-it-abliterated-v2);
+[Lai (2025), Projected Abliteration](https://huggingface.co/blog/grimjim/projected-abliteration)
+and [Norm-Preserving Biprojected Abliteration](https://huggingface.co/blog/grimjim/norm-preserving-biprojected-abliteration).
+
+### Native ablation search
+
+Use `search_ablation` or `POST /api/scratch/{id}/search_ablation` on an
+unrequested dense Qwen2.5 scratch revision with a private GGUF. Fit a
+version 2 `l_out` direction at the last user token on a Library GGUF
+with the exact same SHA-256.
+Fit at least three nonzero layers. Include intermediate target layers
+for the norm-preserving variant. Only slop and sycophancy are supported.
+
+Supply `sha256`, `direction_id`, `assets_id`, a 32-bit `seed`,
+`trial_budget` (3 to 32), `max_children` (1 to 3, at most the trial
+budget), `disk_budget_bytes`, and a `behavior_direction` check config.
+The target behavior's pinned confirmation cache must have 32 unique
+held-out groups, with no overlap with A1 fit or screen prompts. The
+other prompt-set pins are the usual A2 inputs. The disk check charges a
+conservative allowance for each retained child, its GGUF and delta, and
+one conversion's temporary files. It also checks available disk space.
+
+Configure `BREWERY_LANTERNFISH_ABLATION` for the local CPU editor worker
+with the sealed Lanternfish `1bcb466` executable, SHA-256
+`d2c38124fad896149456869b02adccc78827ba9dcc9657f88efa6e869d8d2b92`.
+Set `BREWERY_LANTERNFISH_PROJECTION_LIB_DIR` to the shared A4 library
+directory. Configure the contrast cache, BF16
+converter and W4 checker as usual. No GPU trace backend is used.
+
+The screen edits activations, not weights. It scores the original A1
+holdout at the last user token, the last four user tokens, or the last
+user and assistant-prefix tokens. For sycophancy it reads the first-token
+logit difference between the agreeing and disagreeing answers, using the
+Qwen `(A` and `(B` tokens. For slop it chooses `Certainly`, `In`, or `It`
+by the largest difference in first-token probability between the stock
+model's positive and negative A1 training prompts. For admission, the
+slop gap must be positive in training and the opener probability at
+least 5% on one screen prompt. Sycophancy requires at least one stock
+prompt with a positive agreement margin. These are screening markers,
+not rates of generated behavior.
+
+The seeded search tries different source layers, target ranges, Gaussian
+widths, variants, scales, and position sets. It uses the marker reduction
+and the full first-token distribution KL from the parent. Each trial has
+a same-norm seeded random direction with the same settings. The result
+keeps the Pareto front. A front point can make a scratch child only when
+it lowers the marker and beats its matched control on mean reduction and
+on a majority of prompts. No other point writes weights. The screen
+applies projection to the residual; the weight edit applies it to the
+residual writers. Their effects can differ.
+
+Read the queued job with `get_job` or `GET /api/jobs/{id}`. Check the
+marker, random control, KL, child W4 checks and A2 rates. The generated
+behavior comparisons have Wilson 95% intervals and exact paired McNemar
+tests, with Holm correction across the selected children in that search.
+No result is release-qualified. The job does not request publish or
+approve a child.
 
 Use `plan_experts` with a registered local GGUF and two independent
 `brewery.expert-activations.v1` JSON observations to generate a REAP map.
@@ -2145,6 +2357,152 @@ pinned dataset files in a local cache. Set these keys in the worker's
 
 The worker does not download data during a check. Restart the controller
 after a change to the local worker's runtime configuration.
+
+### Heretic jobs
+
+Heretic 2.1.0 (upstream commit `4f89482c0d63f2552a582215939910f9f45a3e5f`,
+AGPL-3.0-or-later) runs as a separate program. Brewery does not vendor its
+code. On a Linux x86-64 CUDA worker, make a private mode-700 runtime directory
+with at least 20 GiB free. Install `uv`, Python 3.12 and Bubblewrap. Run
+`bash tools/heretic/setup.sh PRIVATE_RUNTIME_DIR`. The installer uses a
+hash-pinned uv lock and checks the four upstream TOML files. After setup,
+`--offline` verifies or restores from the local uv cache. No job installs
+packages or accesses the network.
+
+Set `engine_env.BREWERY_HERETIC_RUNTIME` to the absolute runtime directory in
+the local worker config. Enable the local SafeTensors editor. Set
+`BREWERY_ALLOW_GPU_LOAD` to `1` in `engine_env` and set `admission` to the
+local GPU queue wrapper. The wrapper must acquire the shared GPU before it
+runs the engine, accept `--wait -- COMMAND`, and preserve the working
+directory, environment and standard streams. Do not use a no-op wrapper.
+
+The worker installs the upstream profiles `noslop`, `nosyco`, `terse`, and
+`default`. A preset does not authorize its datasets. Supply only reviewed
+offline prompt lists: place newline-delimited UTF-8 prompts in
+`prompts/<sha256>.txt`. Use `prompts/index.json` to map a dataset label to
+`{"sha256":"<digest>"}`. An operator TOML in `configs/` can instead set
+`brewery_sha256` next to `dataset`. Use explicit prompt tables for the built-in
+scorers and modifier. Do not supply plugin code. Do not use unlicensed upstream
+datasets. For a short `noslop` run, use an operator copy of that preset with
+pinned Dolly creative-writing prompts and a smaller response budget.
+
+Send `POST /api/scratch/heretic` or call `run_heretic`. Set `parent_id`,
+`base_sha256`, `profile` (TOML name without its extension), `trials` (1 to 64),
+`trial_index` (zero-based on Heretic's sorted Pareto front), and `seed`.
+Use one standalone SafeTensors file with its model configuration and tokenizer
+in the same approved directory, or pass a Library `assets_id` from the same
+worker. The worker saves merged weights locally. It
+does not upload, chat or run Heretic's benchmarks.
+
+Send `POST /api/scratch/heretic_reproduce` or call `reproduce_heretic` with
+`parent_id`, `base_sha256` and the community v4 `manifest` object. The base must
+have a verified Brewery Hugging Face single-file download receipt for the
+same repository, commit and SafeTensors SHA-256. Supply its reviewed prompt
+files locally. An environment or export hash mismatch fails the job.
+
+Read the job result to get `scratch_id`. Scratch provenance includes the
+Brewery journal with the exact config, seed, trial index, versions, hashes and
+base identity. The W3 delta restores the original parent. To measure the
+change, make a byte-identical scratch copy of the Library parent. Convert that
+copy and the Heretic child to private GGUF with the same assets. Run W4 checks
+on the child with the A2 prompt-set pins. Read the checks and compare them with
+the parent before you request publication. These results are not
+release-qualified.
+
+### Behavior direction checks
+
+Set `BREWERY_CONTRAST_CACHE` to an absolute path in the worker's `engine_env`.
+Use a runner built with `--behavior-v1` support. Put each normalized
+`brewery.contrast-prompts.v1` set in `<sha256>.json` in this cache.
+Use a held-out set with no fit or search-screen prompts when you confirm an
+edit. Set `behavior_direction` in
+`POST /api/scratch/{id}/checks` or `run_checks`, with `prompt_sets` that
+contains the `slop`, `sycophancy`, and `response_length` digests. Keep each
+contrast set to 1 to 32 held-out rows. The worker checks each file's hash
+before it reads rows. It does not use the training rows.
+
+To measure over-refusal, also add the `benign_refusal` digest from
+`tools/direction_prompt_cache.py`. This set contains 16 reviewed standalone
+instructions from [Databricks Dolly 15K](
+https://huggingface.co/datasets/databricks/databricks-dolly-15k/tree/bdd27f4d94b9c1f951818a7da7fd7aeea5dbff1a)
+under [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/). The
+script selects a subset with no prompts in the direction-job splits. It
+does not vendor the prompts. Share the derived set under the same license
+with this attribution. The set has no training split and cannot be used
+with `compute_direction`.
+
+The CPU runner uses the model's GGUF chat template and greedy decoding with
+a limit of 64 new tokens. The check counts refusal prefixes, stock phrasing,
+and replies that start with the expected agreement label. It reports mean
+response length in tokens, not characters. It scores the positive side of
+the contrast sets. Agreement on prompts that ask for agreement does not
+measure unsolicited agreement. `benign_refusal_rate` is the fraction of
+benign prompts with a refusal flag. It does not measure compliance with
+harmful requests. `refusal_prefixes` can replace
+the default prefixes. A trusted local Python check script can supply a
+classifier to `main(refusal_classifier=...)`. Return a Boolean to override
+the prefix detector, or `None` to use the detector. The request cannot select
+or install a classifier. An operator wrapper can load that entry point with
+`runpy.run_path` and the trusted absolute path to `tools/scratch_checks.py`.
+
+On the held-out short-answer side of the length set, the worker computes
+full-vocabulary `D_KL(parent || child)` in nats. It reports a mean for the
+first token and a separate mean over up to four more positions on the same
+greedy parent continuation. `kl_continuation_positions` records how many
+positions contribute to the second mean. A value of zero means there were
+no continuation positions.
+
+Read `behavior_direction` in the check bundle. The worker saves aggregate
+scores and one sample pair per contrast scorer, limited to 160 UTF-8 bytes
+per reply. For the benign refusal set, it saves only the scores and
+`benign_refusal_flags`, in prompt cache row order. It does not save the
+replies or produce a refusal direction. W5 behavior diffs include the
+numeric scores. These are research results, not release-qualified. Get
+operator approval before publication.
+
+### Abliteration workflow through MCP
+
+1. Pin the Library SafeTensors file and the conversion `assets_id`. Use
+   `create_scratch` to copy the parent, then `convert_scratch_gguf` to make
+   a private baseline. Poll queued jobs with `get_job`.
+2. For a native run, register the exact baseline GGUF bytes in the Library
+   and verify the digest. Call `compute_direction` on that GGUF. Use its
+   job ID and `version: 2` with `get_direction`. The selected layer and
+   held-out Cohen's d measure separation, not a change in replies.
+3. To probe the direction without changing weights, use
+   `create_direction_intervention` and pass the saved version to
+   `start_trace`. Compare with an unmodified trace. Use `ablate_direction`
+   for one weight edit or `search_ablation` for a bounded search. Search
+   evaluates the selected scratch children and compares the screen with
+   matched random controls. Use the child IDs and check jobs from the
+   search receipt.
+4. For a Heretic run, call `run_heretic` on the original Library SafeTensors
+   ID, not the scratch copy. Use `reproduce_heretic` only for a community v4
+   manifest with a verified matching base. Read `scratch_id` from `get_job`
+   and inspect the child with `get_scratch`. The Brewery journal is
+   provenance; it is not the community v4 input. Reinstall the pinned
+   launcher with `bash tools/heretic/setup.sh PRIVATE_RUNTIME_DIR --offline`
+   when you upgrade to the launcher that records per-trial scores.
+5. Convert each child with the same assets as the baseline if needed.
+   Use `run_checks` with the exact child hash and
+   `behavior_direction.prompt_sets`. Use the same disjoint holdout pins for
+   all children in a comparison. Use `get_checks` to read W4 locality and
+   perplexity, first-token and continuation KL, marker rates and paired
+   flags. Add the optional `benign_refusal` pin to measure over-refusal;
+   there is no native refusal direction. Do not treat a check that completes
+   as proof of an improvement.
+6. Open **Abliteration** for direction pins, native screen and paired
+   results, or the Heretic config, trials and journal. Follow the child link
+   to **Edits** to see the behavior-direction scores. The workbench views
+   do not submit jobs. Only the operator can approve a publish request.
+
+On Qwen2.5-0.5B-Instruct, the tested native directions carried only a
+small part of the sycophancy signal. Neither A3 nor A5 found significant
+paired flips. Stock slop was too rare to measure a reliable reduction.
+Heretic `noslop` did not show a measurable reduction either. These
+experiments are not release-qualified.
+
+### Review and approve
 
 Review `check_bundle` for the exact `sha256`. If smoke or behavior did not
 pass, put the current bundle `id` in `acknowledge_bundle` to confirm that you
