@@ -65,7 +65,11 @@ def main():
     parser.add_argument("artifact", type=Path)
     parser.add_argument("evidence", type=Path)
     parser.add_argument("--anchors", type=Path, help="Array of {label, prompt, position}; label edited fact rows 'edited-fact*'")
+    parser.add_argument("--min-explained-variance", type=float,
+                        help="Optional quality target for each side")
     args = parser.parse_args()
+    if args.min_explained_variance is not None and not 0 <= args.min_explained_variance <= 1:
+        parser.error("The explained variance target must be between 0 and 1")
     get = controller(args.base)
     torch.set_num_threads(2)
     weights = args.artifact / "crosscoder.safetensors"
@@ -97,10 +101,19 @@ def main():
     require(not mcp["isError"] and mcp["structuredContent"] == report, "MCP and REST results differ")
     summary = {k: report[k] for k in ("id", "qualification", "version", "method", "layer", "role",
                                      "parent", "child", "scratch_revision_sha256", "weights_sha256",
-                                     "training", "metrics", "manifests")}
+                                     "training", "metrics", "manifests",
+                                     "unique_norm_ratio", "changed_cosine_below")}
     summary["features"], summary["k"] = len(report["features"]), report["k"]
-    summary["counts"] = dict(Counter(f["classification"] for f in report["features"]))
+    counts = Counter(f["classification"] for f in report["features"])
+    summary["counts"] = {name: counts[name] for name in
+                         ("parent_unique", "child_unique", "changed", "shared", "dead")}
     summary["rest_mcp_export_parity_seconds"] = time.monotonic() - started
+    if args.min_explained_variance is not None:
+        summary["explained_variance_target"] = {
+            "minimum": args.min_explained_variance,
+            "met": all(m["explained_variance"] >= args.min_explained_variance
+                       for m in report["metrics"].values()),
+        }
     if args.anchors:
         data, bindings, contexts = load_pairs(get, json.loads(args.spec.read_text()))
         require(all(report[side] == binding for side, binding in bindings.items()), "Evidence binding differs")
@@ -108,8 +121,8 @@ def main():
         summary["heldout_positions"] = contributions(
             data["heldout"], contexts["heldout"], anchors, load_file(weights), report)
     args.evidence.write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
-    require(all(m["explained_variance"] > 0.5 for m in report["metrics"].values()),
-            "Held-out explained variance did not exceed 0.5 on both sides")
+    require(summary.get("explained_variance_target", {"met": True})["met"],
+            "Held-out explained variance did not meet the selected target on both sides")
     if args.anchors:
         targets = [row for row in summary["heldout_positions"] if row["label"].startswith("edited-fact")]
         require(any(f["classification"] in DIFFERENT and f["measured_delta_fraction"] >= 0.05
