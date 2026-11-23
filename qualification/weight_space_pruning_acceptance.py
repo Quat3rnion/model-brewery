@@ -190,6 +190,18 @@ def experts(agent, run):
             "fixture": "test_expert_gguf.py tiny Qwen2MoE with synthetic observations"}
 
 
+def preserve_failure(run, evidence):
+    for receipt in evidence.glob("*-job.json"):
+        job = json.loads(receipt.read_text())
+        if job["state"] != "failed":
+            continue
+        for name in ("engine-stderr.log", "scratch-checks.log"):
+            for log in (run / "worker" / "jobs" / job["id"]).rglob(name):
+                with log.open("rb") as stream:
+                    stream.seek(max(0, log.stat().st_size - 64 * 1024))
+                    (evidence / f"{receipt.stem}-{name}").write_bytes(stream.read(64 * 1024))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True, help="new evidence root under /arboretum")
@@ -255,6 +267,9 @@ def main():
                     report["llama_cpp_runtime_pins"] = runtime_pins
                     report["input_pins"] = {str(args.lanternfish if p == LANTERN else p): v for p, v in inputs.items()}
                 save(args.root, "report", report)
+            except Exception:
+                preserve_failure(run, args.root)
+                raise
             finally:
                 process.terminate()
                 try:
