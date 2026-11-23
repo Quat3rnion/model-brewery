@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildConversion, parseConversion, parseConversions, stageRows, isActiveConversion, newerConversion, ConversionSubmitter, STAGES } from './conversion';
+import { buildConversion, parseConversion, parseConversions, stageRows, isActiveConversion, newerConversion, STAGES } from './conversion';
+import { ConversionSubmitter } from './conversions.svelte';
 
 import type { ConvertForm } from './convert';
 import type { Model } from './types';

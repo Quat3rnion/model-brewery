@@ -180,7 +180,22 @@ test('Weight Apply resends after a lost reply and does not apply a completed pro
   const action = 'Apply as new GGUF';
   await button(page, action).click();
   await expect(page.getByRole('alert').filter({ hasText: 'Accepted reply lost.' })).toBeVisible();
-  expect(await submit(page, action)).toEqual([200, finished.id]);
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  await page.route('**/api/jobs', async route => {
+    const accepted = await route.fetch();
+    await held;
+    await route.fulfill({ response: accepted });
+  }, { times: 1 });
+  try {
+    const match = page.waitForResponse(r => r.url().endsWith('/api/jobs') && r.request().method() === 'POST');
+    await button(page, action).press('Enter');
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    release();
+    const accepted = await match;
+    expect([accepted.status(), (await accepted.json()).id]).toEqual([200, finished.id]);
+    await expect(page.getByRole('link', { name: finished.id, exact: true })).toBeFocused();
+  } finally { release(); }
   await expect(page.getByText('No second job was queued.', { exact: false })).toBeVisible();
   const [first, second] = posts(controller);
   expect(first.body).toEqual(second.body);

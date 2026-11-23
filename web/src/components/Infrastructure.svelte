@@ -3,6 +3,7 @@
   import { onMount, tick } from 'svelte';
   import { adminActionAllowed, parseAdminState, type AdminAction, type AdminState } from '../lib/admin';
   import { focusAfterRemoval } from '../lib/focus';
+  import { route } from '../lib/route.svelte';
   import { formatTime } from '../lib/format';
   import { brewery } from '../lib/store.svelte';
   import type { PolicyAction } from '../lib/host-policy';
@@ -36,15 +37,39 @@
     }
     if (policy && !visitedHosts.includes(policy.id)) visitedHosts = [...visitedHosts, policy.id];
   });
+  let deferredRequest: string | undefined;
   $effect(() => {
-    if (!focusRequest || !Object.hasOwn(sections, focusRequest)) return;
-    if (focusRequest !== 'infrastructure' && (!settingsLoaded || !st || (policy && !visitedHosts.includes(policy.id)))) return;
+    if (!focusRequest || !Object.hasOwn(sections, focusRequest)) {
+      deferredRequest = undefined;
+      return;
+    }
     const id = sections[focusRequest];
+    const hash = route.hash;
+    const request = `${hash}\n${id}`;
+    const deferred = deferredRequest === request;
+    const initialFocus = document.activeElement;
+    const allowed = (el: Element | null) => el === document.body || (el instanceof HTMLAnchorElement && el.hash === hash);
+    const ready = focusRequest === 'infrastructure' ||
+      (settingsLoaded && (!!st || status === 'unavailable' || status === 'error') && (!policy || visitedHosts.includes(policy.id)));
+    const visit = route.capture();
+    const cancel = (event: FocusEvent) => {
+      if (event.target instanceof Element && !allowed(event.target)) clearFocus();
+    };
+    document.addEventListener('focusin', cancel);
     void tick().then(() => {
-      if (sections[focusRequest] !== id) return;
-      (document.getElementById(id) ?? document.getElementById('infrastructure'))?.focus();
-      clearFocus();
+      if (!visit.current() || sections[focusRequest] !== id) return;
+      const heading = document.getElementById(id) ?? (ready ? document.getElementById('infrastructure') : null);
+      const focused = document.activeElement;
+      if (heading) {
+        clearFocus();
+        if (allowed(focused) || (!deferred && focused === initialFocus)) heading.focus();
+      } else if (allowed(focused)) {
+        deferredRequest = request;
+      } else {
+        clearFocus();
+      }
     });
+    return () => document.removeEventListener('focusin', cancel);
   });
   let confirmDeactivate = $state<string | null>(null);
   let reviewPool = $state<{ worker: string; allow: boolean } | null>(null);

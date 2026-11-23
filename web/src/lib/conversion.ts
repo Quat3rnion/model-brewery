@@ -10,8 +10,6 @@
 import { buildConvertJob, type ConvertForm } from './convert';
 import { obj } from './reports';
 import type { Model } from './types';
-import { rejectedSubmission, submissionError } from './api';
-import { PlainAttempt } from './submission-key';
 
 export const STAGES = ['inspect', 'plan', 'convert', 'verify'] as const;
 export type Stage = (typeof STAGES)[number];
@@ -148,42 +146,4 @@ export function stageRows(c: Conversion, jobStates: Record<string, string | unde
     }
     return { stage, status, jobId };
   });
-}
-
-export type PostConversion = (body: ConversionBody, key: string) => Promise<{ data: unknown; status: number }>;
-
-/**
- * One submission at a time. A retry of the same body reuses the key, so a
- * lost response cannot start a second workflow; a different body gets a new key.
- */
-export class ConversionSubmitter {
-  busy = false;
-  error: string | null = null;
-  replayed = false;
-  #plain = new PlainAttempt();
-
-  constructor(private launcher: string, private post: PostConversion) {}
-
-  async submit(body: ConversionBody, current = () => true): Promise<Conversion | null> {
-    if (this.busy) return null;
-    this.error = null;
-    this.busy = true;
-    let plain: ReturnType<PlainAttempt['take']> | undefined;
-    try {
-      const snapshot: ConversionBody = JSON.parse(JSON.stringify(body));
-      plain = this.#plain.take(this.launcher, snapshot, current);
-      const { data, status } = await this.post(snapshot, plain.key);
-      const c = parseConversion(data);
-      if (!c?.id) throw new Error('The controller answered without a conversion record.');
-      plain.complete();
-      this.replayed = status === 200;
-      return c;
-    } catch (e) {
-      if (rejectedSubmission(e)) plain?.complete();
-      this.error = submissionError(e);
-      return null;
-    } finally {
-      this.busy = false;
-    }
-  }
 }

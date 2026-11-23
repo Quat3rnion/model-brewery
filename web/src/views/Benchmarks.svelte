@@ -49,8 +49,10 @@
   const selection = new Checklist();
   const host = $derived(hosts.find((h) => h.id === hostId));
   const offer = $derived(benchmarkChoices(host));
+  const selectionCount = $derived(selection.ids.length);
   const missing = $derived(selection.missing(offer.suites));
   const picked = $derived(selection.ids.filter(id => !missing.some(item => item.id === id)));
+  let checklist: HTMLFieldSetElement | undefined = $state();
   $effect(() => {
     if (target && !offer.targets.some((t) => t.id === target)) target = '';
   });
@@ -65,7 +67,7 @@
   const visible = $derived(visibleBlockers(built.blockers, touched));
   const error = (field: string) => fieldError(visible, field);
   function queueBenchmark(event: MouseEvent) {
-    if (!built.job || run.busy || missing.length) return;
+    if (!built.job || missing.length) return;
     void run.submit(built.job, event);
   }
 
@@ -177,8 +179,8 @@
         </div>
       </div>
 
-      <fieldset class="suites" aria-describedby="bm-count{error('suites') ? ' bm-suites-error' : ''}">
-        <legend class="small">Suites <span class="muted xs" id="bm-count">{picked.length} of at most {MAX_SUITES} selected</span></legend>
+      <fieldset class="suites" bind:this={checklist} aria-describedby="bm-count{error('suites') ? ' bm-suites-error' : ''}">
+        <legend class="small" tabindex="-1">Suites <span class="muted xs" id="bm-count">{selectionCount} of at most {MAX_SUITES} selected</span></legend>
         {#if !host}
           <p class="xs muted">Select a host to see its suites.</p>
         {:else if offer.suites.length === 0}
@@ -194,8 +196,8 @@
           <div class="checks">
             {#each suitesShown as s (s.id)}
               {@const on = picked.includes(s.id)}
-              <label class="check" class:off={!on && picked.length >= MAX_SUITES}>
-                <input type="checkbox" checked={on} disabled={!on && picked.length >= MAX_SUITES} onblur={() => { touched.suites = true; }} onchange={(e) => selection.set(s.id, s.label ?? s.id, e.currentTarget.checked)} />
+              <label class="check" class:off={!on && selectionCount >= MAX_SUITES}>
+                <input type="checkbox" checked={on} disabled={!on && selectionCount >= MAX_SUITES} onblur={() => { touched.suites = true; }} onchange={(e) => selection.set(s.id, s.label ?? s.id, e.currentTarget.checked)} />
                 <span>{s.label ?? s.id}{#if s.label && s.label !== s.id}{' '}<span class="mono xs muted">{s.id}</span>{/if}</span>
               </label>
             {/each}
@@ -207,7 +209,8 @@
         {/if}
       </fieldset>
 
-      <SelectionReview {missing} acknowledge={() => selection.remove(missing)} />
+      <SelectionReview {missing} acknowledge={(shown) => selection.remove(shown)}
+        focusRemaining={() => checklist?.querySelector<HTMLElement>('input:checked') ?? checklist?.querySelector('legend')} />
       <div><button type="button" class="btn primary" disabled={!built.job || run.busy || missing.length > 0} aria-busy={run.busy} onclick={queueBenchmark}>{run.busy ? 'Submitting…' : 'Queue benchmark run'}</button></div>
       <SubmitStatus s={run} />
     </div>

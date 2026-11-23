@@ -36,7 +36,7 @@
     source: Model; format: 'gguf' | 'hgn'; starter: ConversionStarter; draft: RecipeDraft;
   } = $props();
 
-  const submitted = new SvelteMap<number, JobSummary | null>();
+  const submitted = new SvelteMap<number, JobSummary>();
   const loaded = new SvelteMap<string, JobDetail | 'rejected' | null>();
   const attempted = new Map<string, Date | null>();
   const reads = new Submitter('convert.recipe.inventory');
@@ -64,22 +64,18 @@
   const flash = $derived(source.kind === 'hf' &&
     (expectedSha === flashDigest || inventory.pages[0]?.source_sha256 === flashDigest));
 
-  const readPending = $derived(!!inventory.need && submitted.get(inventory.need.offset) === null);
+  const readPending = $derived(!!inventory.need && reads.busy);
   const readJob = $derived(inventory.job ?? currentJobs.at(-1));
   let readLink: HTMLAnchorElement | undefined = $state();
 
   async function readLayers(event: MouseEvent) {
     const next = inventory.need;
-    if (flash || blocked || error || !next || submitted.has(next.offset) || event.detail > 1) return;
+    if (flash || blocked || error || !next || submitted.has(next.offset)) return;
     const { offset, sha } = next;
     const request = inventoryJob(source.id, source.host, offset, sha);
-    submitted.set(offset, null);
     const focus = captureResultFocus(event);
     const accepted = await reads.submit(request, event, false);
-    if (!accepted) {
-      submitted.delete(offset);
-      return;
-    }
+    if (!accepted) return;
     const id = accepted.id;
     function record(job: JobSummary) {
       if (job.id !== id || job.kind !== request.kind || job.host !== request.host || job.input_ids?.length !== 1 || job.input_ids[0] !== request.input_ids[0]) {
@@ -200,11 +196,10 @@
   const currentAttempt = $derived(body !== null && attemptedBody === bodyKey(body));
 
   let runLink: HTMLAnchorElement | undefined = $state();
-  async function run(event: MouseEvent) {
-    if (!body || starter.busy || event.detail > 1) return;
+  function run(event: MouseEvent) {
+    if (!body) return;
     attemptedBody = bodyKey(body);
-    const focus = captureResultFocus(event);
-    if (await starter.start(body)) void focus?.(() => runLink);
+    void starter.start(body, event, () => runLink);
   }
 
   function download() {

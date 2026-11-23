@@ -1,5 +1,6 @@
 <script lang="ts">
   import { SvelteMap } from 'svelte/reactivity';
+  import { untrack } from 'svelte';
   import ModelSelect from '../components/ModelSelect.svelte';
   import Submit from '../components/Submit.svelte';
   import SubmitStatus from '../components/SubmitStatus.svelte';
@@ -268,7 +269,10 @@
   let detail = $state<JobDetail | null>(null);
   let detailError = $state<string | null>(null);
   $effect(() => {
+    // State refreshes replace summary objects. Keep the same proposal and
+    // its Apply result mounted while the selected terminal job is unchanged.
     const j = reviewed;
+    if (j && isTerminal(j.state) && untrack(() => detail?.id === j.id && detail.state === j.state)) return;
     detail = null;
     detailError = null;
     if (!j || !isTerminal(j.state)) return;

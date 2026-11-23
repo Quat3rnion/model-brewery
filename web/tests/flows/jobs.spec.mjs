@@ -97,6 +97,27 @@ for (const [error, label, href] of [
   }
 });
 
+test('A delayed Infrastructure fix destination does not take focus after the operator moves it', async ({ page, controller }) => {
+  setJob(controller, failedCompare);
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  await page.route('**/api/admin/state', async route => {
+    const result = await route.fetch();
+    await held;
+    await route.fulfill({ response: result });
+  });
+  await controller.open(page, `jobs/${failedCompare.id}`);
+  try {
+    await page.getByRole('main').getByRole('link', { name: 'Infrastructure settings' }).press('Enter');
+    await expect(page.getByRole('heading', { name: 'Admission and resource limits' })).toHaveCount(0);
+    const other = page.getByRole('navigation', { name: 'Sections' }).getByRole('link', { name: 'Library', exact: true });
+    await other.focus();
+    release();
+    await expect(page.getByRole('heading', { name: 'Admission and resource limits' })).toBeVisible();
+    await expect(other).toBeFocused();
+  } finally { release(); }
+});
+
 test('Job detail distinguishes the submitted prompt from the current Library text', async ({ page, controller }) => {
   libraryWeights(controller);
   const submitted = { ...historicalPrompt, prompt_id: 'editable', prompt_text: 'Original text.' };
