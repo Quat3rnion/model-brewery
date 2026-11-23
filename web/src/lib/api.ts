@@ -72,6 +72,15 @@ export const api = {
   profiles: (signal?: AbortSignal) => request<unknown>('GET', '/api/profiles', undefined, signal),
   saveProfile: (body: unknown) => request<unknown>('POST', '/api/profiles', body),
   cancelJob: (id: string) => request<JobSummary>('POST', `/api/jobs/${encodeURIComponent(id)}/cancel`, {}),
+  // Weight-space programming: trace slices, scratch revisions, diffs.
+  trace: (id: string, query: Record<string, string | number>, view: '' | 'tensor' | 'logit-lens' | 'model-logits' = '', signal?: AbortSignal) =>
+    request<unknown>('GET', `/api/jobs/${encodeURIComponent(id)}/trace${view ? `/${view}` : ''}?${new URLSearchParams(Object.entries(query).map(([k, v]) => [k, String(v)]))}`, undefined, signal),
+  interventions: (signal?: AbortSignal) => request<unknown>('GET', '/api/interventions', undefined, signal),
+  scratch: (signal?: AbortSignal) => request<unknown>('GET', '/api/scratch', undefined, signal),
+  diff: (kind: 'tensors' | 'traces' | 'behavior', query: string, signal?: AbortSignal) => request<unknown>('GET', `/api/diff/${kind}?${query}`, undefined, signal),
+  // Operator only. The agent MCP interface has no route to this action.
+  approveScratch: (id: string, sha256: string, key: string) =>
+    request<unknown>('POST', `/api/admin/scratch/${encodeURIComponent(id)}/approve`, { sha256 }, undefined, { 'Idempotency-Key': key }),
 };
 
 export function errorText(error: unknown): string {

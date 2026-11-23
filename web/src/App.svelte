@@ -18,6 +18,8 @@
   import Settings from './views/Settings.svelte';
   import Profiles from './views/Profiles.svelte';
   import Weights from './views/Weights.svelte';
+  import Trace from './views/Trace.svelte';
+  import Edits from './views/Edits.svelte';
 
   onMount(() => {
     brewery.start();
@@ -131,6 +133,8 @@
     {:else if route.view === 'settings'}<Settings />
     {:else if route.view === 'profiles'}<Profiles />
     {:else if route.view === 'weights'}<Weights />
+    {:else if route.view === 'trace'}<Trace />
+    {:else if route.view === 'edits'}<Edits />
     {/if}
   {/if}
 </main>
