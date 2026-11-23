@@ -170,6 +170,8 @@ pub struct Registry {
     default_identity: Option<String>,
     changes: Semaphore,
     discovery: Semaphore,
+    #[cfg(test)]
+    pause_config_identity_check: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl Registry {
@@ -211,6 +213,8 @@ impl Registry {
                 .filter(|path| identity::safe_path(path)),
             changes: Semaphore::new(1),
             discovery: Semaphore::new(1),
+            #[cfg(test)]
+            pause_config_identity_check: None,
         };
         let state = out.state.lock().expect("SSH registry lock");
         for (id, row) in &state.rows {
@@ -272,21 +276,28 @@ impl Registry {
     }
 
     pub fn config_for(&self, ids: &[&str]) -> Result<Option<PathBuf>, &'static str> {
-        let state = self.state.lock().expect("SSH registry lock");
-        let mut managed = false;
-        for row in ids
-            .iter()
-            .filter_map(|id| state.rows.get(*id))
-            .filter(|r| self.dispatchable(r))
-        {
-            if !self.installed_identity(row).is_some_and(identity::usable) {
+        let identities: Vec<_> = {
+            let state = self.state.lock().expect("SSH registry lock");
+            ids.iter()
+                .filter_map(|id| state.rows.get(*id))
+                .filter(|r| self.dispatchable(r))
+                .map(|row| self.installed_identity(row).map(str::to_owned))
+                .collect()
+        };
+        // An installed transport is immutable, and a retired ID cannot be
+        // reused. Do not hold the registry lock while checking the key file.
+        for identity in &identities {
+            #[cfg(test)]
+            if let Some(pause) = &self.pause_config_identity_check {
+                pause();
+            }
+            if !identity.as_deref().is_some_and(identity::usable) {
                 return Err(
                     "Installed SSH identity is missing or unsafe; restore the configured private key",
                 );
             }
-            managed = true;
         }
-        Ok(managed.then(|| self.dir.join("dispatch.json")))
+        Ok((!identities.is_empty()).then(|| self.dir.join("dispatch.json")))
     }
 
     /// The editor installer must use the already defined transport identity.
@@ -432,4 +443,172 @@ fn id_valid(id: &str) -> bool {
 
 fn name_valid(name: &str) -> bool {
     !name.trim().is_empty() && name.len() <= 256 && !name.chars().any(char::is_control)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{App, dispatch::Dispatcher, domain::NewModel, store::Store};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+        time::{sleep, timeout},
+    };
+
+    #[test]
+    fn state_stays_responsive_while_stat_config_resolution_blocks() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(check_state_stays_responsive());
+    }
+
+    async fn check_state_stays_responsive() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("state");
+        let mut store = Store::open(&data).unwrap();
+        let mut ssh = Registry::open(&data, None).unwrap();
+        let mut state = ssh.state.lock().unwrap();
+        state.rows.insert(
+            "fixture".into(),
+            Row {
+                id: "fixture".into(),
+                name: "Fixture".into(),
+                target: Target {
+                    host: "127.0.0.1".into(),
+                    user: "fixture".into(),
+                    port: 22,
+                    fingerprint: String::new(),
+                },
+                identity_file: Some("/fixture-key".into()),
+                checked_identity: None,
+                revision: 1,
+                provision: Provision::Installed {
+                    key: String::new(),
+                    install: transport::Install {
+                        bundle_id: "a".repeat(64),
+                        worker: "/fixture-worker".into(),
+                        config: "/fixture-config".into(),
+                    },
+                },
+            },
+        );
+        drop(state);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let gate = Mutex::new((Some(started_tx), release_rx));
+        ssh.pause_config_identity_check = Some(Box::new(move || {
+            let mut gate = gate.lock().unwrap();
+            if let Some(sender) = gate.0.take() {
+                let _ = sender.send(());
+            }
+            // Bound the fixture even if the server does not release the registry.
+            let _ = gate.1.recv_timeout(Duration::from_secs(6));
+        }));
+        let worker = NewModel {
+            host: "fixture".into(),
+            path: "/models/fixture.gguf".into(),
+            kind: "gguf".into(),
+            name: None,
+        }
+        .validate()
+        .unwrap();
+        store.add_model(&worker, None).unwrap();
+
+        let dispatcher = Dispatcher {
+            command: "/usr/bin/false".into(),
+            backend: None,
+            local_edit: Arc::default(),
+            ssh_hosts: Arc::new(ssh),
+            remote_edit: Arc::new(crate::remote_edit::Installer::open(&data).unwrap()),
+            launch_timeout: Duration::from_secs(1),
+            poll: Duration::from_secs(1),
+        };
+        let app = Arc::new(App {
+            store: Mutex::new(store),
+            hosts: vec![],
+            settings: Default::default(),
+            hf_tokens: crate::hf_tokens::Store::from_config(None, &data),
+            backend_download: false,
+            backend_calibration: None,
+            backend_edit_formats: Default::default(),
+            admin: None,
+            local_edit: dispatcher.local_edit.clone(),
+            ssh_hosts: dispatcher.ssh_hosts.clone(),
+            remote_edit: dispatcher.remote_edit.clone(),
+            suggestions: crate::suggestions::PathSuggestions::new(dispatcher.command.clone()),
+            model_availability: Arc::new(crate::model_availability::ModelAvailability::new(
+                &dispatcher,
+            )),
+            feed_subscribers: Arc::new(Semaphore::new(crate::feed::SUBSCRIBERS)),
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = crate::web::router(app, addr, data.to_path_buf());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let get_state = async || {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client
+                .write_all(format!("GET /api/state HTTP/1.0\r\nHost: {addr}\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut out = String::new();
+            client.read_to_string(&mut out).await.unwrap();
+            assert!(out.starts_with("HTTP/1.0 200 "), "{out}");
+            serde_json::from_str::<Value>(out.split_once("\r\n\r\n").unwrap().1).unwrap()
+        };
+        let initial_started = Instant::now();
+        let initial = get_state().await;
+        assert!(
+            initial_started.elapsed() < Duration::from_secs(1),
+            "initial GET /api/state waited for the SSH identity check"
+        );
+        assert_eq!(
+            initial["models"][0]["reason"],
+            "The controller has not checked this path on the worker."
+        );
+        timeout(Duration::from_secs(1), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // Time the second poll independently of the async workers. If they
+        // are blocked on mutexes, an async timeout alone cannot fire.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    use std::io::{Read, Write};
+                    let mut conn = std::net::TcpStream::connect(addr).unwrap();
+                    conn.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                    write!(conn, "GET /api/state HTTP/1.0\r\nHost: {addr}\r\n\r\n").unwrap();
+                    let mut out = String::new();
+                    conn.read_to_string(&mut out)
+                        .expect("GET /api/state waited for the SSH identity check");
+                    assert!(out.starts_with("HTTP/1.0 200 "), "{out}");
+                })
+                .join()
+                .unwrap();
+        });
+        let checking_since = Instant::now();
+        loop {
+            let state = get_state().await;
+            let model = &state["models"][0];
+            assert!(model["available"].is_null(), "{model}");
+            if model["reason"] == "The controller could not check this path on the worker." {
+                break;
+            }
+            assert!(
+                checking_since.elapsed() < Duration::from_secs(4),
+                "the watchdog did not time out the blocked configuration check"
+            );
+            sleep(Duration::from_millis(20)).await;
+        }
+        release_tx.send(()).unwrap();
+        server.abort();
+    }
 }

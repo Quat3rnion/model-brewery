@@ -39,6 +39,10 @@ const preview = () => ({
 });
 
 describe('report detection', () => {
+  it('lists expert maps among the supported files when the schema is unknown', () => {
+    const result = parseReportText('{"schema":"unknown"}');
+    expect(result).toMatchObject({ kind: 'error', message: expect.stringContaining('expert map') });
+  });
   it('reads a usage report with layers sorted and missing phases kept as absent', () => {
     const r = parseReportText(JSON.stringify(usage()));
     expect(r.kind).toBe('usage');

@@ -69,7 +69,7 @@ export function roleOf(name: string): Role {
 }
 
 export function layerOf(name: string): number | null {
-  const m = /(?:^|\.)(?:blk|layers|h)\.(\d+)\./.exec(name);
+  const m = /(?:^|\.)(?:blk|layers|h|visual\.blocks)\.(\d+)\./.exec(name);
   return m ? Number(m[1]) : null;
 }
 
@@ -293,6 +293,12 @@ export interface InventoryWalk {
   error?: string;
 }
 
+/** Exclude the old walk only after a fresh page-one request is accepted. */
+export function supersededInventory(jobs: readonly JobSummary[], source: string, keep: string): Set<string> {
+  return new Set(jobs.filter(j => j.id !== keep && j.kind === 'weight_inspect' &&
+    j.input_ids[0] === source && j.options?.mode === 'inventory').map(j => j.id));
+}
+
 /** Reuse saved reads and accept only one ordered, fingerprint-consistent inventory. */
 export function walkInventory(
   source: { id: string; host: string },
@@ -308,7 +314,10 @@ export function walkInventory(
     const options = inventoryJob(source.id, source.host, offset, sha, packed).options!;
     const job = findRead(jobs, source.id, options, matchHost ? source.host : undefined);
     if (!job) return { pages, need: { offset, sha } };
-    if (job.state !== 'succeeded') return { pages, job, error: isActive(job.state) ? undefined : (job.error ?? 'The tensor list could not be read.') };
+    if (job.state !== 'succeeded') {
+      if (isActive(job.state)) return { pages, job };
+      return { pages, job, need: { offset, sha }, error: job.error ?? 'The tensor list could not be read.' };
+    }
     const detail = details[job.id];
     if (!detail) return { pages, job };
     const p = readInventory(detail.result, format);

@@ -15,6 +15,7 @@ try {
   page.setDefaultTimeout(5000);
   const requests = [], errors = [];
   const fingerprint = 'SHA256:'+'A'.repeat(43);
+  const updatedFingerprint = 'SHA256:'+'C'.repeat(43);
   page.on('pageerror', e=>errors.push(e.message));
   await page.route('**/api/**', route=>{
     const req = route.request(), path = new URL(req.url()).pathname;
@@ -22,7 +23,8 @@ try {
       const body = req.postDataJSON();
       requests.push({path,body});
       return route.fulfill({json:path.endsWith('/ssh-host-key')
-        ? {...body,algorithm:'ssh-ed25519',public_key:'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI'+'A'.repeat(43),fingerprint}
+        ? {...body,algorithm:'ssh-ed25519',public_key:'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI'+'A'.repeat(43),
+          fingerprint:body.port===2200 ? updatedFingerprint : fingerprint}
         : {...body,revision:1,status:'defined'}});
     }
     return route.fulfill({json:{available:false,hosts:[],workers:[],models:[],jobs:[],prompts:[]}});
@@ -65,11 +67,25 @@ try {
   assert.equal(requests.length,3);
   await save.press('Enter');
   await button('Edit definition').press('Enter');
-  assert.equal(await probe.count(),0);
+  assert.ok(await probe.isEnabled());
   assert.equal(await pin.inputValue(),fingerprint);
   assert.deepEqual(requests[3],{path:'/api/admin/ssh-hosts',body:{
     host:'other.example',port:2222,user:'worker',id:'other',name:'Other',fingerprint}});
   assert.equal(requests.length,4);
+  await label('SSH port').fill('2200');
+  assert.equal(await pin.inputValue(),'');
+  assert.ok(await save.isDisabled());
+  await probe.press('Enter');
+  await accept.waitFor();
+  assert.equal(await pin.inputValue(),'');
+  assert.ok(await save.isDisabled());
+  await accept.press('Enter');
+  assert.equal(await pin.inputValue(),updatedFingerprint);
+  assert.ok(await save.isEnabled());
+  assert.deepEqual(requests[4],{path:'/api/admin/ssh-host-key',body:{host:'other.example',port:2200}});
+  await label('Host address').fill('updated.example');
+  assert.equal(await pin.inputValue(),'');
+  assert.ok(await save.isDisabled());
   await button('Cancel edit').press('Enter');
   await button('Add SSH host').press('Enter');
   await label('Host ID').fill('manual');
@@ -79,7 +95,7 @@ try {
   await pin.fill('SHA256:'+'B'.repeat(43));
   await save.press('Enter');
   await panel.getByRole('heading',{name:'Manual (manual)'}).waitFor();
-  assert.deepEqual(requests.slice(4),[{path:'/api/admin/ssh-hosts',body:{
+  assert.deepEqual(requests.slice(5),[{path:'/api/admin/ssh-hosts',body:{
     host:'manual.example',port:22,user:'worker',id:'manual',name:'Manual',fingerprint:'SHA256:'+'B'.repeat(43)}}]);
   const discovered = '/controller/.ssh/frame_ed25519';
   let frame = {name:'Frame',id:'frame',host:'frame.example',user:'operator',port:22,

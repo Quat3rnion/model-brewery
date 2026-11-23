@@ -22,12 +22,19 @@
   import TensorList from '../components/profiles/TensorList.svelte';
   import Badge from '../components/Badge.svelte';
   import GgufEditor from '../components/profiles/GgufEditor.svelte';
+  import { focusAfterRemoval } from '../lib/focus';
+  import { hashParam, route } from '../lib/route.svelte';
+  import { unsavedChanges } from '../lib/unsaved-changes.svelte';
 
   $effect(() => {
     void profileStore.load();
   });
   const cat = $derived(profileStore.catalog);
-  let format = $state<'hgn' | 'gguf'>(location.hash.includes('format=gguf') ? 'gguf' : 'hgn');
+  const format = $derived(hashParam(route.hash, 'format') === 'gguf' ? 'gguf' : 'hgn');
+  function setFormat(event: MouseEvent, next: 'hgn' | 'gguf') {
+    event.preventDefault();
+    if (next !== format) location.hash = next === 'gguf' ? '#/profiles?format=gguf' : '#/profiles';
+  }
 
   // Editor state. `from` is what this draft started from: a built-in or a saved revision.
   let editing = $state(false);
@@ -41,15 +48,22 @@
   let saving = $state(false);
   let saveError = $state<string | null>(null);
   let savedRev = $state<SavedProfile | null>(null);
+  let opener = $state<HTMLButtonElement>();
+  let saveBarHeight = $state(0);
 
   const startOverrides = $derived(from.kind === 'saved' ? from.p.overrides : {});
-  const dirty = $derived(JSON.stringify(overrides) !== JSON.stringify(startOverrides) || (from.kind === 'saved' && name.trim() !== from.p.name));
+  const dirty = $derived(editing && format === 'hgn' && (JSON.stringify(overrides) !== JSON.stringify(startOverrides)
+    || name.trim() !== (from.kind === 'saved' ? from.p.name : '')));
+  const guard = unsavedChanges(() => dirty);
+  $effect(() => { if (format !== 'hgn') editing = false; });
   const stats = $derived(cat ? layerSummary(cat, base, overrides) : new Map());
   const size = $derived(cat ? predictSize(cat, base, overrides) : null);
   const built = $derived(cat ? buildProfileBody(cat, base, name, overrides) : { body: null, problems: ['No catalog.'] });
   const trunkRoles = $derived(cat ? [...new Set(cat.tensors.filter((t) => t.group === 'trunk').map((t) => t.role).filter(Boolean))].sort() : []);
 
-  function startFrom(b: Base) {
+  function startFrom(b: Base, button: HTMLButtonElement) {
+    if (saving || !guard.confirm()) return;
+    opener = button;
     from = { kind: 'built-in', base: b };
     base = b;
     name = '';
@@ -59,7 +73,9 @@
     savedRev = null;
     saveError = null;
   }
-  function edit(p: SavedProfile) {
+  function edit(p: SavedProfile, button: HTMLButtonElement) {
+    if (saving || !guard.confirm()) return;
+    opener = button;
     from = { kind: 'saved', p };
     base = p.base;
     name = p.name;
@@ -71,7 +87,12 @@
   }
   function reset() {
     overrides = { ...startOverrides };
-    if (from.kind === 'saved') name = from.p.name;
+    name = from.kind === 'saved' ? from.p.name : '';
+    savedRev = null;
+  }
+  function close() {
+    if (saving || !guard.confirm()) return;
+    void focusAfterRemoval(() => { editing = false; }, () => opener);
   }
   function applyBrush() {
     if (!cat || !selectedLayers.length) return;
@@ -94,6 +115,8 @@
     }
   }
   function useInConvert(p: SavedProfile) {
+    if (saving || !guard.confirm()) return;
+    editing = false;
     profileStore.pendingUse = p.revision;
     location.hash = '#/convert';
   }
@@ -104,8 +127,8 @@
   <div class="head">
     <h1 tabindex="-1">Conversion profiles</h1>
     <div class="fmt" role="radiogroup" aria-label="Output format">
-      <label class:on={format === 'hgn'}><input type="radio" bind:group={format} value="hgn" /> HGN (v2 / HT43)</label>
-      <label class:on={format === 'gguf'}><input type="radio" bind:group={format} value="gguf" /> GGUF (llama.cpp)</label>
+      <label class:on={format === 'hgn'}><input type="radio" name="profile-format" checked={format === 'hgn'} onclick={(event) => setFormat(event, 'hgn')} /> HGN (v2 / HT43)</label>
+      <label class:on={format === 'gguf'}><input type="radio" name="profile-format" checked={format === 'gguf'} onclick={(event) => setFormat(event, 'gguf')} /> GGUF (llama.cpp)</label>
     </div>
     <p class="muted small">
       {#if format === 'gguf'}
@@ -113,7 +136,7 @@
       {:else}
         Choose, tensor by tensor, between the two built-in encodings. HGN v2 and HT43 stay read-only; a custom profile starts from one of them and changes only tensors where the other profile has a different, legal encoding.
       {/if}
-      Each save is a new immutable revision. <a href="#/convert">Back to Convert</a>
+      Each save adds a new revision. Earlier revisions do not change. <a href="#/convert">Back to Convert</a>
     </p>
   </div>
 
@@ -140,7 +163,7 @@
             <article class="card builtin">
               <div class="ct"><strong>{BASE_LABEL[b]}</strong><Badge tone="muted" label="Built-in · read-only" /></div>
               <p class="xs muted num">{formatBytes(cat.baseBytes[b])}</p>
-              <button type="button" class="btn small" onclick={() => startFrom(b)}>Start from {BASE_LABEL[b]}</button>
+              <button type="button" class="btn small" onclick={(event) => startFrom(b, event.currentTarget)}>Start from {BASE_LABEL[b]}</button>
             </article>
           {/each}
         </div>
@@ -160,8 +183,8 @@
                     <td class="xs" data-label="Saved">{p.createdAt ? formatTime(p.createdAt) : '—'}</td>
                     <td class="acts">
                       {#if p.compatible}
-                        <button type="button" class="btn small" onclick={() => edit(p)} aria-label="Edit {p.name} as a new revision">Edit</button>
-                        <button type="button" class="btn small primary" onclick={() => useInConvert(p)} aria-label="Use {p.name} revision {shortRev(p.revision)} in Convert">Use in Convert</button>
+                        <button type="button" class="btn small" onclick={(event) => edit(p, event.currentTarget)} aria-label="Edit {p.name} as a new revision">Edit</button>
+                        <button type="button" class="btn small primary" onclick={() => useInConvert(p)} aria-label="Use in Convert: {p.name} revision {shortRev(p.revision)}">Use in Convert</button>
                       {:else}<span class="xs muted">Made for another catalog</span>{/if}
                     </td>
                   </tr>
@@ -176,10 +199,10 @@
     </section>
 
     {#if editing}
-      <section class="panel" aria-labelledby="ed-h">
+      <section class="panel profile-editor" aria-labelledby="ed-h" style:--save-bar-height="{saveBarHeight}px">
         <header>
           <h2 id="ed-h">{from.kind === 'saved' ? `Editing ${from.p.name}` : `New profile from ${BASE_LABEL[base]}`}</h2>
-          <button type="button" class="btn small ghost" onclick={() => (editing = false)}>Close editor</button>
+          <button type="button" class="btn small ghost" onclick={close} disabled={saving}>Close editor</button>
         </header>
         <div class="body stack">
           <div class="summary" aria-live="polite">
@@ -189,7 +212,7 @@
             <div><span class="xs muted">Change</span><strong class="num">{signedBytes(size?.delta ?? null)}</strong></div>
             <button type="button" class="btn small" onclick={reset} disabled={!dirty}>Reset changes</button>
           </div>
-          <p class="xs muted">A size prediction from the catalog, including companion tensors. It is not a quality result.</p>
+          <p class="xs muted">This size estimate includes helper tensors that store scales or rotation data. It does not measure quality.</p>
 
           <div class="block">
             <h3 class="h">Trunk layers <span class="muted">({cat.trunkLayers.length})</span></h3>
@@ -244,15 +267,12 @@
             <TensorList catalog={cat} {base} bind:overrides {selectedLayers} />
           </div>
 
-          <div class="block save">
+          <div class="block">
             <h3 class="h">Save revision</h3>
-            <div class="row end">
-              <div class="field grow">
-                <label for="pf-name">Profile name</label>
-                <input id="pf-name" class="input" bind:value={name} maxlength="80" autocomplete="off" aria-describedby="pf-name-h" />
-                <span class="hint" id="pf-name-h">Saving with the same name adds a new revision; earlier revisions stay unchanged.</span>
-              </div>
-              <button type="button" class="btn primary" disabled={!built.body || saving || (!dirty && from.kind === 'saved')} onclick={save}>{saving ? 'Saving…' : 'Save revision'}</button>
+            <div class="field">
+              <label for="pf-name">Profile name</label>
+              <input id="pf-name" class="input" bind:value={name} maxlength="80" autocomplete="off" aria-describedby="pf-name-h" />
+              <span class="hint" id="pf-name-h">Saving with the same name adds a new revision. Earlier revisions stay unchanged.</span>
             </div>
             {#if built.problems.length}<p class="why xs"><strong>Needed:</strong> {built.problems.join(' ')}</p>{/if}
             <div aria-live="polite">
@@ -264,6 +284,10 @@
                 </div>
               {/if}
             </div>
+          </div>
+          <div class="save-bar" bind:offsetHeight={saveBarHeight}>
+            {#if !name.trim()}<a href="#pf-name" onclick={(event) => { event.preventDefault(); document.getElementById('pf-name')?.focus(); }}>Enter a profile name</a>{/if}
+            <button type="button" class="btn primary" disabled={!built.body || saving || (!dirty && from.kind === 'saved')} onclick={save}>{saving ? 'Saving…' : 'Save revision'}</button>
           </div>
         </div>
       </section>
@@ -363,7 +387,7 @@
     border-radius: var(--r-tile);
     background: var(--surface-2);
     position: sticky;
-    top: 60px;
+    top: 55px;
     z-index: 2;
   }
   .summary > div {
@@ -396,11 +420,21 @@
   .brush > span {
     flex: 1 1 100%;
   }
-  .grow {
-    flex: 1 1 260px;
+  .save-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--s-2);
+    padding: var(--s-2);
+    background: var(--surface-2);
+    border-radius: var(--r-md);
   }
-  .end {
-    align-items: flex-end;
+  .profile-editor :global(:focus) {
+    scroll-margin-bottom: var(--save-bar-height);
   }
   .why {
     margin: 0;

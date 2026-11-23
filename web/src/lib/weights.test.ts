@@ -162,11 +162,23 @@ describe('result readers', () => {
   });
 
   it('reads inspect and apply receipts', () => {
-    expect(readInspect({ report: { tensor: 't', index: [0], dtype: 'BF16', value: 1, shape: [4], source_sha256: SHA } })?.dtype).toBe('BF16');
+    expect(readInspect({ report: { tensor: 't', index: [0], dtype: 'BF16', value: 1, shape: [4], source_sha256: SHA } }, 'value')?.dtype).toBe('BF16');
     expect(readInspect({ report: { tensor: 't' } })).toBeNull();
     const a = readApplied({ library_model_id: 'new', report: { schema: 'brewery.weight-edit-result.v1', source_sha256: SHA, output_sha256: SHA, edit_count: 1, verified: true } });
     expect(a).toEqual({ source_sha256: SHA, output_sha256: SHA, edit_count: 1, verified: true, library_model_id: 'new' });
     expect(readApplied({ report: { schema: 'x' } })).toBeNull();
+  });
+
+  it('reads reported inventory and tile modes without changing single-value reads', () => {
+    const inventory = { report: { mode: 'inventory', source_sha256: SHA, offset: 0, total: 1,
+      next_offset: null, tensors: [{ name: 't', dtype: 'F32', shape: [2, 2] }] } };
+    expect(readInspect(inventory)).toMatchObject({ mode: 'inventory', total: 1, tensors: [{ name: 't' }] });
+    expect(readInspect(inventory, 'value')).toBeNull();
+    const tile = { report: { mode: 'tile', source_sha256: SHA, tensor: 't', dtype: 'F32',
+      origin: [0, 0], shape: [2, 2], tile_shape: [1, 2], values: [[0.25, 0.5]] } };
+    expect(readInspect(tile)).toMatchObject({ mode: 'tile', tensor: 't', tile_shape: [1, 2], values: [[0.25, 0.5]] });
+    expect(readInspect({ report: { ...tile.report, values: [[0.25]] } })).toBeNull();
+    expect(readInspect({ report: { ...tile.report, mode: 'other' } })).toBeNull();
   });
 });
 

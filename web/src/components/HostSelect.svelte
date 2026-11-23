@@ -2,24 +2,35 @@
   import { brewery } from '../lib/store.svelte';
   import { capability } from '../lib/format';
   import { hostOptions } from '../lib/pickers';
+  import { hostWorkflowEligibility, type GgufEligibility } from '../lib/eligibility';
+  import type { EligibilityEntry, Host, Workflow } from '../lib/types';
   import Combobox from './Combobox.svelte';
+  import FieldError from './FieldError.svelte';
 
   let {
     value = $bindable(''),
     kind,
+    workflow,
+    hideIneligible = false,
+    fallbackEligibility,
+    gguf,
     label = 'Host',
     hint,
     optional = false,
     optionalLabel = 'Default (first input host)',
     id: givenId,
-  }: { value?: string; kind?: string; label?: string; hint?: string; optional?: boolean; optionalLabel?: string; id?: string } = $props();
+    error,
+    onblur,
+  }: { value?: string; kind?: string; workflow?: Workflow; hideIneligible?: boolean; fallbackEligibility?: (host: Host) => EligibilityEntry; gguf?: GgufEligibility; label?: string; hint?: string; optional?: boolean; optionalLabel?: string; id?: string; error?: string; onblur?: () => void } = $props();
 
   const uid = $props.id();
   const id = $derived(givenId ?? `${uid}-host`);
   const hosts = $derived(brewery.state?.hosts ?? []);
-  const options = $derived(hostOptions(hosts, kind));
+  const options = $derived(hostOptions(hosts, kind, (h) =>
+    (workflow && hostWorkflowEligibility(brewery.state?.eligibility, h.id, workflow, gguf)) || fallbackEligibility?.(h))
+    .filter((option) => !hideIneligible || !option.disabled));
   const selected = $derived(hosts.find((h) => h.id === value));
-  const cap = $derived(kind && selected ? capability(selected, kind) : null);
+  const cap = $derived(!workflow && kind && selected ? capability(selected, kind) : null);
 </script>
 
 <div class="field">
@@ -32,8 +43,11 @@
     {optionalLabel}
     placeholder={optional ? optionalLabel : 'Select or type a host'}
     emptyText="No host matches."
-    describedby={(cap && !cap.allowed) || hint ? `${id}-why` : undefined}
+    describedby={error ? `${id}-error` : (cap && !cap.allowed) || hint ? `${id}-why` : undefined}
+    invalid={!!error}
+    {onblur}
   />
+  <FieldError id="{id}-error" {error} />
   {#if cap && !cap.allowed}
     <span class="hint why" id="{id}-why">{cap.reason}</span>
   {:else if hint}

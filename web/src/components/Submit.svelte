@@ -4,10 +4,11 @@
   let {
     blockers = [],
     busy = false,
+    disabled = false,
     onclick,
     variant = 'primary',
     children,
-  }: { blockers?: string[]; busy?: boolean; onclick: () => void; variant?: 'primary' | 'secondary'; children: Snippet } = $props();
+  }: { blockers?: string[]; busy?: boolean; disabled?: boolean; onclick: (event: MouseEvent) => void; variant?: 'primary' | 'secondary'; children: Snippet } = $props();
 
   const id = $props.id();
   const blocked = $derived(blockers.length > 0);
@@ -17,7 +18,7 @@
   <button
     type="button"
     class="btn {variant === 'primary' ? 'primary' : ''}"
-    disabled={blocked || busy}
+    disabled={blocked || busy || disabled}
     aria-describedby={blocked ? id : undefined}
     aria-busy={busy}
     {onclick}

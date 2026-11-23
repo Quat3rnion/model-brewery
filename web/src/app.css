@@ -72,9 +72,9 @@
   --accent-soft: rgba(91, 43, 181, 0.09);
   --focus: #5b2bb5;
   --ok: #0f7a4f;
-  --warn: #a35f00;
+  --warn: #8b4e00;
   --bad: #c2283b;
-  --info: #1f74bd;
+  --info: #185e9b;
   --warn-bg: rgba(181, 115, 10, 0.08);
   --warn-line: rgba(163, 95, 0, 0.55);
   --crit-bg: rgba(194, 40, 59, 0.07);

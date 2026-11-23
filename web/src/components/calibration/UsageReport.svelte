@@ -26,30 +26,33 @@
 
 {#snippet experts(name: string, p: Phase | null)}
   <div class="ex">
-    <h4 class="h">{name}</h4>
+    <h3 class="h">{name}</h3>
     {#if !p}
       <p class="xs muted">Not captured.</p>
     {:else if p.experts.length === 0}
       <p class="xs muted">No expert selections recorded.</p>
     {:else}
       {@const top = topExperts(p.experts)}
-      <table class="data tight">
-        <caption class="sr-only">{name}: most selected experts</caption>
-        <thead>
-          <tr><th scope="col">Expert</th><th scope="col" class="r">Selections</th><th scope="col" class="r">Selection share</th><th scope="col" class="r">Mean router coeff.</th><th scope="col" class="r">Coeff. samples</th></tr>
-        </thead>
-        <tbody>
-          {#each top.shown as e (e.expert)}
-            <tr>
-              <th scope="row" class="mono">{e.expert}</th>
-              <td class="num r">{count(e.selections)}</td>
-              <td class="num r">{pct(e.selection_fraction)}</td>
-              <td class="num r">{fixed(e.weight_mean)}</td>
-              <td class="num r">{count(e.weight_samples)}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex (keyboard scrolling of wide metrics) -->
+      <div class="table-wrap" role="region" aria-label="{name} expert metrics" tabindex="0">
+        <table class="data tight">
+          <caption class="sr-only">{name}: most selected experts</caption>
+          <thead>
+            <tr><th scope="col">Expert</th><th scope="col" class="r">Selections</th><th scope="col" class="r">Selection share</th><th scope="col" class="r">Mean router coeff.</th><th scope="col" class="r">Coeff. samples</th></tr>
+          </thead>
+          <tbody>
+            {#each top.shown as e (e.expert)}
+              <tr>
+                <th scope="row" class="mono">{e.expert}</th>
+                <td class="num r">{count(e.selections)}</td>
+                <td class="num r">{pct(e.selection_fraction)}</td>
+                <td class="num r">{fixed(e.weight_mean)}</td>
+                <td class="num r">{count(e.weight_samples)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
       {#if top.hidden}<p class="xs muted">{top.hidden} more selected experts are in the file but not listed.</p>{/if}
     {/if}
   </div>
@@ -106,9 +109,9 @@
           <tr>
             <th scope="col">Layer</th>
             <th scope="col">Prefill coverage</th>
-            <th scope="col" class="r">Prefill experts selected</th>
+            <th scope="col" class="r">Prefill distinct experts</th>
             <th scope="col">Decode coverage</th>
-            <th scope="col" class="r">Decode experts selected</th>
+            <th scope="col" class="r">Decode distinct experts</th>
             <th scope="col"><span class="sr-only">Details</span></th>
           </tr>
         </thead>
@@ -122,7 +125,7 @@
               <td data-label="Decode distinct experts" class="num r">{distinct(l.decode)}</td>
               <td>
                 {#if (l.prefill?.experts.length ?? 0) + (l.decode?.experts.length ?? 0) > 0}
-                <button type="button" class="btn small" aria-expanded={open === l.layer} aria-controls="{uid}-l{l.layer}" onclick={() => (open = open === l.layer ? null : l.layer)}>
+                <button type="button" class="btn small" aria-expanded={open === l.layer} aria-controls={open === l.layer ? `${uid}-l${l.layer}` : undefined} onclick={() => (open = open === l.layer ? null : l.layer)}>
                   {open === l.layer ? 'Hide experts' : 'Experts'}<span class="sr-only"> for layer {l.layer}</span>
                 </button>
                 {/if}
@@ -182,7 +185,7 @@
     background: transparent;
     position: static;
   }
-  .detail td {
+  .detail > td {
     background: var(--bg);
   }
   .tight th,
@@ -198,11 +201,22 @@
   }
   .ex {
     min-width: 0;
-    overflow-x: auto;
   }
   @media (max-width: 640px) {
     .r {
       text-align: left;
     }
+    /* Keep column headers and cells aligned inside the stacked outer row. */
+    .layers .tight thead {
+      position: static;
+      width: auto;
+      height: auto;
+      overflow: visible;
+      clip: auto;
+    }
+    .layers .tight tbody { display: table-row-group; }
+    .layers .tight tr { display: table-row; }
+    .layers .tight th[scope='row'],
+    .layers .tight td { display: table-cell; width: auto; }
   }
 </style>

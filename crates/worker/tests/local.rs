@@ -120,6 +120,73 @@ fi
 }
 
 #[test]
+fn stat_reports_model_paths_without_following_symlinks_or_reading_private_state() {
+    let t = Rig::new();
+    let model = t.src.join("model.gguf");
+    let private = t.root.join("private");
+    fs::write(&model, b"1234567").unwrap();
+    fs::write(&private, b"not model data").unwrap();
+    symlink(&private, t.src.join("escape")).unwrap();
+    let published = t.root.join("b/jobs/job-id/work/output.gguf");
+    fs::create_dir_all(published.parent().unwrap()).unwrap();
+    fs::set_permissions(t.root.join("b"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(&published, b"123").unwrap();
+    let publication_record = t.root.join("b/jobs/job-id/state.json");
+    fs::write(
+        &publication_record,
+        json!({"action":"start","reply":{"state":"succeeded","result":{"artifact":{"path":published}}}})
+            .to_string(),
+    )
+    .unwrap();
+    for (path, reply) in [
+        (model, json!({"state":"file","bytes":7})),
+        (t.src.clone(), json!({"state":"directory"})),
+        (t.src.join("missing.gguf"), json!({"state":"missing"})),
+        (t.src.join("escape"), json!({"state":"outside_roots"})),
+        (t.src.join("../private"), json!({"state":"outside_roots"})),
+        (private, json!({"state":"outside_roots"})),
+        (published.clone(), json!({"state":"file","bytes":3})),
+        (publication_record, json!({"state":"outside_roots"})),
+        (
+            published.with_file_name("other.gguf"),
+            json!({"state":"outside_roots"}),
+        ),
+    ] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_brewery-dispatch"));
+        cmd.env("BREWERY_DISPATCH_CONFIG", &t.dispatch)
+            .args(["stat", "b"]);
+        assert_eq!(output(cmd, Some(&json!({"path":path}))), reply, "{path:?}");
+    }
+    fs::remove_file(&published).unwrap();
+    assert_eq!(
+        t.rpc_raw(&json!({"op":"stat","path":published}))["ok"],
+        json!({"state":"missing"})
+    );
+}
+
+#[test]
+fn stat_requires_a_directory_for_paths_with_directory_suffixes() {
+    let t = Rig::new();
+    let model = t.src.join("model.safetensors");
+    fs::write(&model, b"weights").unwrap();
+    for (path, state) in [
+        (
+            model.display().to_string(),
+            json!({"state":"file","bytes":7}),
+        ),
+        (format!("{}/.", model.display()), json!({"state":"missing"})),
+        (format!("{}/", model.display()), json!({"state":"missing"})),
+        (
+            format!("{}/.", t.src.display()),
+            json!({"state":"directory"}),
+        ),
+    ] {
+        let reply = t.rpc_raw(&json!({"op":"stat","path":path}));
+        assert_eq!(reply["ok"], state, "{path}");
+    }
+}
+
+#[test]
 fn pinned_hf_resolution_passes_expected_manifest_without_reading_model_payloads() {
     let t = Rig::new();
     let (_, _) = pinned_fixture(&t);
@@ -1201,7 +1268,7 @@ fn local_hosts_preview_resume_reuse_and_cleanup_bundles() {
     assert_eq!(
         t.rpc(Rpc::Write {
             id: "move".into(),
-            digest: bundle.digest,
+            digest: bundle.digest.clone(),
             entry: bundle.files[1].clone(),
             offset: 0,
             data: STANDARD.encode(&bytes[..CHUNK])
@@ -1220,6 +1287,24 @@ fn local_hosts_preview_resume_reuse_and_cleanup_bundles() {
     assert_eq!(done["result"]["missing_bytes"], 349);
     let path = Path::new(done["result"]["inputs"][0]["path"].as_str().unwrap());
     assert_eq!(fs::read(path.join("nested/weights")).unwrap(), bytes);
+    let cached = serde_json::from_value(json!({"host":"b","path":path,"kind":"hgn"})).unwrap();
+    let cached_desc: Description =
+        serde_json::from_value(t.rpc(Rpc::Describe { input: cached })).unwrap();
+    assert_eq!(cached_desc.bundle.digest, bundle.digest);
+    let stat = |path: &Path| t.rpc_raw(&json!({"op":"stat","path":path}))["ok"].clone();
+    assert_eq!(stat(path), json!({"state":"directory"}));
+    assert_eq!(
+        stat(&path.join("nested/weights")),
+        json!({"state":"file","bytes":bytes.len()})
+    );
+    assert_eq!(
+        stat(&path.parent().unwrap().join("manifest.json")),
+        json!({"state":"outside_roots"})
+    );
+    let escape = path.join("escape");
+    symlink(&t.b, &escape).unwrap();
+    assert_eq!(stat(&escape), json!({"state":"outside_roots"}));
+    fs::remove_file(escape).unwrap();
     let reuse = t.dispatch("transfer", "reuse", Some(&job));
     assert_eq!(reuse["result"]["missing_bytes"], 0);
     assert_eq!(reuse["result"]["inputs"][0]["cached"], true);

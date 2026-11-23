@@ -38,13 +38,13 @@
       "get": {
         "operationId": "getState",
         "summary": "Read the workbench snapshot and change cursor",
-        "description": "Use hosts and their capabilities, configured baseline source IDs, benchmark targets and suites to construct requests. The jobs list contains summaries, not result objects. Pass event_cursor to streamEvents to follow changes after this snapshot.",
+        "description": "Use eligibility to check if a workflow has a configured worker. Use the host's baseline source IDs, benchmark targets and suites to build the request. The jobs list contains summaries, not results. Pass event_cursor to streamEvents to follow changes after this snapshot.",
         "responses": {
           "200": {
             "description": "Current workbench state, including the cursor at the snapshot.",
             "content": {"application/json": {
               "schema": {"$ref": "#/components/schemas/WorkbenchState"},
-              "example": {"hosts": [], "models": [], "prompts": [], "jobs": [], "event_cursor": 0, "capabilities": {
+              "example": {"hosts": [], "models": [], "prompts": [], "jobs": [], "event_cursor": 0, "eligibility": {"global": {}, "hosts": {}}, "capabilities": {
                 "compare": false, "inspect": false, "plan": false, "convert": false, "verify": false, "generate": false,
                 "evaluate": false, "baseline": false, "benchmark": false, "transfer": false, "transfer_preview": false, "cache_cleanup": false
               }}
@@ -235,12 +235,49 @@
         }
       }
     },
+    "/api/prompts/{id}": {
+      "put": {
+        "operationId": "updatePrompt",
+        "summary": "Replace the name and text of a saved prompt",
+        "description": "Keeps the prompt ID and does not change the prompt text saved with existing jobs.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "requestBody": {
+          "required": true,
+          "x-brewery-max-body-bytes": 262144,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/NewPrompt"}}}
+        },
+        "responses": {
+          "200": {"description": "Updated prompt record.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Prompt"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      },
+      "delete": {
+        "operationId": "deletePrompt",
+        "summary": "Delete a saved prompt",
+        "description": "Does not change job history. A queued or running job that uses this prompt prevents deletion. This includes jobs that wait for cancellation.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "responses": {
+          "204": {"description": "The prompt was removed; no response body."},
+          "400": {"$ref": "#/components/responses/InvalidPath"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"description": "An active job uses the prompt. The error names the job.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
     "/api/jobs": {
       "post": {
         "operationId": "createJob",
         "summary": "Validate and enqueue a controller workflow",
         "description": "This operation does not wait for the worker to start or finish. Each input ID must reference a registered model whose host is still configured. Input order matters. Unless required explicitly, host defaults to the first input's host. Only convert accepts auto. Unsupported workflows or the absence of an eligible worker return 409. For a normal conversion, use createConversion. Use inspect, plan, convert and verify here only to run one stage for diagnosis. See the kind-specific schemas for host, prompt and input constraints; the controller checks their values against the live catalog.",
-        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
+        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}, {"$ref": "#/components/parameters/AllowDuplicate"}],
         "requestBody": {
           "required": true,
           "x-brewery-max-body-bytes": 262144,
@@ -253,7 +290,14 @@
           }}
         },
         "responses": {
-          "200": {"$ref": "#/components/responses/CreateReplay"},
+          "200": {
+            "description": "Same key and body, or a duplicate match. No new job was queued.",
+            "headers": {"Brewery-Duplicate": {"$ref": "#/components/headers/Duplicate"}},
+            "content": {"application/json": {"schema": {
+              "type": "object", "required": ["id"], "additionalProperties": false,
+              "properties": {"id": {"$ref": "#/components/schemas/Id"}, "duplicate_of": {"const": true}}
+            }}}
+          },
           "201": {
             "description": "Newly queued job summary; use its id with getJob to track progress.",
             "content": {"application/json": {
@@ -287,7 +331,7 @@
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
         "responses": {
           "200": {
-            "description": "Current job, ordered lifecycle events and, if present, the worker's result object.",
+            "description": "Current job, submission-time prompt text, ordered lifecycle events and, if present, the worker's result object.",
             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JobDetail"}}}
           },
           "400": {"$ref": "#/components/responses/InvalidPath"},
@@ -645,12 +689,32 @@
         }
       }
     },
+    "/api/conversions/eligibility": {
+      "post": {
+        "operationId": "checkConversionEligibility",
+        "summary": "Check admission for a specific conversion request without starting it",
+        "description": "Checks the selected source, auxiliary inputs, host or pool, profile and options. Sends no work to a worker and does not write to the controller store. A positive result does not reserve a worker or qualify a release.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/NewConversion"}}}
+        },
+        "responses": {
+          "200": {"description": "Admission decision and setup blockers, if any.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EligibilityEntry"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "415": {"$ref": "#/components/responses/UnsupportedMediaType"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
     "/api/conversions": {
       "post": {
         "operationId": "createConversion",
         "summary": "Start the default one-submit conversion workflow",
         "description": "Default way to convert a model. One request makes the controller run the child jobs inspect, plan, convert and verify in this order on one worker. The controller stores the workflow, so it continues if the client disconnects, and resumes after a controller restart by using the stored child job IDs. A child job that was running and cannot be checked is not retried. The workflow stops at the first failed or cancelled child job. Later stages are not queued. The call does not wait for the worker. Poll getConversion, or follow the child jobs with getJob and streamEvents. There is no conversion event kind and no conversion key in capabilities; the child jobs use the normal job events. A succeeded workflow means that all four child jobs succeeded. It is not a release qualification, and it does not show model quality. To run an ordinary stage alone for diagnosis, use createJob. A managed GGUF layer recipe is accepted only by createConversion.\n\nHost: omit host to use the source model's host. Set host to auto to use an eligible worker of the configured quantization pool. Set a worker ID to pin that worker. The workflow reports host auto as requested_host. A managed GGUF layer recipe must run on the source worker and does not accept auto.\n\nIdempotency: a new request returns 201. A repeat with the same key and the same typed body returns 200 with the current workflow, not only an ID. A different body for the same key returns 409.",
-        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
+        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}, {"$ref": "#/components/parameters/AllowDuplicate"}],
         "requestBody": {
           "required": true,
           "x-brewery-max-body-bytes": 262144,
@@ -671,7 +735,8 @@
         },
         "responses": {
           "200": {
-            "description": "Same key and same request. The current workflow; no new write.",
+            "description": "Same key and body, or a duplicate match. Returns the current workflow. A duplicate match includes duplicate_of: true. No new workflow was queued.",
+            "headers": {"Brewery-Duplicate": {"$ref": "#/components/headers/Duplicate"}},
             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Conversion"}}}
           },
           "201": {
@@ -758,9 +823,21 @@
       "IdempotencyKey": {
         "name": "Idempotency-Key",
         "in": "header",
-        "description": "Optional single, case-sensitive key scoped to this create operation. A new successful request returns 201 and binds the key to the typed body and generated ID. A matching retry returns 200 with only the original id and no new side effects, even if that object was deleted or the input catalog changed. The exception is createConversion: a matching retry returns 200 with the current conversion workflow. A different typed body for an already bound key returns 409. Malformed or repeated header fields return 400. JSON whitespace and object order do not change the typed body; optional null and omitted values and omitted versus empty default job lists/maps compare equally. Failed creates do not bind keys. Keys have no expiry and persist in the same controller database across restart. Without a key, each successful request creates a new resource.",
+        "description": "Optional single, case-sensitive key scoped to this create operation. A new successful request returns 201 and binds the key to the typed body and generated ID. A matching retry returns 200 with only the original id and no new side effects, even if that object was deleted or the input catalog changed. The exception is createConversion: a matching retry returns 200 with the current conversion workflow. A different typed body for an already bound key returns 409. Malformed or repeated header fields return 400. JSON whitespace and object order do not change the typed body; optional null and omitted values and omitted versus empty default job lists/maps compare equally. Failed creates do not bind keys. Keys have no expiry and persist across restart. Key lookup precedes duplicate detection. A duplicate match binds a supplied new key to the existing ID.",
         "schema": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]{1,128}$"},
         "example": "workbench.plan.001"
+      },
+      "AllowDuplicate": {
+        "name": "Brewery-Allow-Duplicate",
+        "in": "header",
+        "schema": {"const": "1"},
+        "description": "The controller matches the same canonical typed body on this route with or without an idempotency key. It returns the original ID instead of queuing work if the original is active (queued, running, or cancelling) or was accepted less than 10 seconds ago. For a deliberate repeat, including automated clients that repeat identical work, send Brewery-Allow-Duplicate: 1 and a new idempotency key. The normal admission checks and same-key replay rules still apply."
+      }
+    },
+    "headers": {
+      "Duplicate": {
+        "schema": {"$ref": "#/components/schemas/Id"},
+        "description": "Present only on duplicate matches. Contains the existing job or conversion ID."
       }
     },
     "responses": {
@@ -788,6 +865,7 @@
         }
       },
       "Error": {
+        "description": "Controller JSON errors use Content-Type: application/json, Brewery-Error: 1, and exactly one string field named error. A proxy can return a 4xx without confirming that the controller rejected the request.",
         "type": "object", "required": ["error"], "additionalProperties": false,
         "properties": {"error": {"type": "string", "description": "Human-readable diagnostic, not a stable machine code."}}
       },
@@ -825,7 +903,12 @@
         "type": "object", "required": ["id", "name", "host", "path", "kind"], "additionalProperties": false,
         "properties": {
           "id": {"$ref": "#/components/schemas/Id"}, "name": {"$ref": "#/components/schemas/Name"}, "host": {"$ref": "#/components/schemas/HostId"},
-          "path": {"$ref": "#/components/schemas/AbsoluteWorkerPath"}, "kind": {"$ref": "#/components/schemas/ModelKind"}
+          "path": {"$ref": "#/components/schemas/AbsoluteWorkerPath"}, "kind": {"$ref": "#/components/schemas/ModelKind"},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$", "description": "SHA-256 from an accepted output receipt. This is not a live hash."},
+          "bytes": {"type": "integer", "minimum": 0, "description": "Size in bytes from the same receipt, or from the worker's file check if no receipt is available."},
+          "available": {"type": ["boolean", "null"], "description": "Cached path availability on the owning worker. False means the worker is disabled or not configured, or the path is missing or outside its allowed model roots. Null means the controller has no current answer, including when the ordinary worker cannot check access on a separate weight editor. Availability does not verify the current file hash."},
+          "reason": {"type": "string", "description": "Why availability is unknown or false."},
+          "job_id": {"$ref": "#/components/schemas/Id", "description": "Job that produced the registered output."}
         }
       },
       "NewPrompt": {
@@ -879,6 +962,34 @@
         "type": "object", "required": ["id", "label"], "additionalProperties": false,
         "properties": {"id": {"$ref": "#/components/schemas/ConfiguredToken"}, "label": {"anyOf": [{"$ref": "#/components/schemas/Name"}, {"type": "null"}]}}
       },
+      "FixReason": {
+        "type": "object", "additionalProperties": false, "required": ["text", "fix_anchor"],
+        "properties": {"text": {"type": "string"}, "fix_anchor": {"type": "string", "description": "Workbench fragment for the setting or form that can resolve this blocker."}}
+      },
+      "EligibilityEntry": {
+        "type": "object", "additionalProperties": false, "required": ["eligible", "reasons"],
+        "properties": {"eligible": {"type": "boolean"}, "reasons": {"type": "array", "items": {"$ref": "#/components/schemas/FixReason"}}}
+      },
+      "WorkflowEligibility": {
+        "type": "object", "additionalProperties": false, "required": ["global", "hosts"],
+        "description": "Computed from host settings and policy. Does not check live worker status, current inventory or release qualification. Use checkConversionEligibility for the selected inputs, profile and backend options.",
+        "properties": {
+          "global": {"type": "object", "description": "Workflow names. A workflow is eligible if any host supports it.", "additionalProperties": {"$ref": "#/components/schemas/EligibilityEntry"}},
+          "hosts": {"type": "object", "description": "Keyed by worker ID. GGUF input kinds are checked on the source worker. Pool entries use a source on that worker; check the full request to test other input locations.", "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "gguf_output_by_kind": {"$ref": "#/components/schemas/GgufSourceEligibility"},
+              "gguf_rocmfpx_by_kind": {"$ref": "#/components/schemas/GgufSourceEligibility"}
+            },
+            "additionalProperties": {"$ref": "#/components/schemas/EligibilityEntry"}
+          }}
+        }
+      },
+      "GgufSourceEligibility": {
+        "type": "object", "required": ["gguf", "hf", "safetensors"],
+        "propertyNames": {"enum": ["gguf", "hf", "safetensors"]},
+        "additionalProperties": {"$ref": "#/components/schemas/EligibilityEntry"}
+      },
       "Host": {
         "type": "object", "additionalProperties": false,
         "required": ["id", "name", "capabilities", "reasons", "baseline_sources", "benchmark_targets", "benchmarks", "quantization_pool", "quantization_backends"],
@@ -887,6 +998,7 @@
           "capabilities": {"$ref": "#/components/schemas/HostCapabilityMap"},
           "component_cpu_only": {"type": "boolean", "description": "If true, this worker accepts only the cpu backend for inspect, plan, convert and verify, including the decode_backend of a conversion workflow. Default false."},
           "reasons": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Configured capability diagnostics, keyed by capability name."},
+          "capability_reasons": {"type": "object", "additionalProperties": {"$ref": "#/components/schemas/FixReason"}, "description": "Setup blockers for disabled capabilities, keyed by capability name."},
           "baseline_sources": {"type": "array", "items": {"$ref": "#/components/schemas/BaselineSource"}},
           "benchmark_targets": {"type": "array", "items": {"$ref": "#/components/schemas/BenchmarkChoice"}},
           "benchmarks": {"type": "array", "items": {"$ref": "#/components/schemas/BenchmarkChoice"}},
@@ -901,13 +1013,14 @@
         }
       },
       "WorkbenchState": {
-        "type": "object", "required": ["hosts", "models", "prompts", "jobs", "capabilities", "event_cursor"], "additionalProperties": false,
+        "type": "object", "required": ["hosts", "models", "prompts", "jobs", "capabilities", "eligibility", "event_cursor"], "additionalProperties": false,
         "properties": {
           "hosts": {"type": "array", "items": {"$ref": "#/components/schemas/Host"}},
           "models": {"type": "array", "items": {"$ref": "#/components/schemas/Model"}},
           "prompts": {"type": "array", "items": {"$ref": "#/components/schemas/Prompt"}},
           "jobs": {"type": "array", "items": {"$ref": "#/components/schemas/Job"}},
           "capabilities": {"$ref": "#/components/schemas/CapabilityMap", "description": "A capability is true when at least one configured worker supports it."},
+          "eligibility": {"$ref": "#/components/schemas/WorkflowEligibility"},
           "event_cursor": {"$ref": "#/components/schemas/EventCursor"}
         }
       },
@@ -915,7 +1028,7 @@
         "type": "object", "required": ["id", "kind", "entity_id"], "additionalProperties": false,
         "properties": {
           "id": {"$ref": "#/components/schemas/EventCursor"}, "entity_id": {"$ref": "#/components/schemas/Id"},
-          "kind": {"enum": ["job.created", "job.updated", "model.created", "model.deleted", "prompt.created"]},
+          "kind": {"enum": ["job.created", "job.updated", "model.created", "model.updated", "model.deleted", "prompt.created", "prompt.updated", "prompt.deleted"]},
           "state": {"$ref": "#/components/schemas/JobState"}
         },
         "if": {"properties": {"kind": {"enum": ["job.created", "job.updated"]}}},
@@ -980,8 +1093,9 @@
       },
       "JobDetail": {
         "allOf": [{"$ref": "#/components/schemas/Job"}, {
-          "type": "object", "required": ["events"],
+          "type": "object", "required": ["events", "prompt_text"],
           "properties": {
+            "prompt_text": {"type": ["string", "null"], "description": "The text sent to the worker at submission, whether typed or resolved from prompt_id. Null if the job has no recorded prompt."},
             "events": {"type": "array", "items": {"$ref": "#/components/schemas/JobEvent"}},
             "result": {"$ref": "#/components/schemas/JobResult"}
           }
@@ -1148,7 +1262,7 @@
       },
       "HostSettings": {
         "type": "object",
-        "required": ["id", "name", "management", "evaluation", "managed", "ready", "approved_ports", "evaluation_allowed", "baseline_allowed", "approved_suites", "revision", "benchmark_targets", "enabled_suites", "baseline_endpoints", "evaluation_enabled"],
+        "required": ["id", "name", "management", "evaluation", "managed", "ready", "readiness", "approved_ports", "evaluation_allowed", "baseline_allowed", "approved_suites", "revision", "benchmark_targets", "enabled_suites", "baseline_endpoints", "evaluation_enabled"],
         "properties": {
           "id": {"$ref": "#/components/schemas/HostId"}, "name": {"type": "string"},
           "management": {
@@ -1162,12 +1276,20 @@
           },
           "evaluation": {
             "type": "object", "required": ["status"],
-            "properties": {"status": {"enum": ["managed", "profile_only", "unavailable"]}, "reason": {"type": "string"}}
+            "properties": {"status": {"enum": ["managed", "profile_only", "unavailable"]}, "reason": {"type": "string"}, "reason_detail": {"$ref": "#/components/schemas/FixReason"}}
           },
           "profile_binding": {"type": "string", "description": "Opaque binding for the selected controller-stored profile."},
           "saved_profile": {"$ref": "#/components/schemas/NewSettings", "description": "Previously saved controller profile available for review. Not automatically applied to a worker."},
           "managed": {"type": "boolean", "description": "Compatibility field. Use evaluation.status to distinguish saved profiles from active worker settings."},
-          "ready": {"type": "boolean", "description": "True if evaluation policy, suite catalog and saved evaluation settings are valid. Not a check of any endpoint."},
+          "ready": {"type": "boolean", "description": "True if the worker allows at least one of benchmark, baseline, evaluate, or generate, through either static configuration or a managed policy. Not a check of any endpoint."},
+          "readiness": {
+            "type": "object", "required": ["benchmark", "baseline", "evaluate", "generate"],
+            "propertyNames": {"enum": ["benchmark", "baseline", "evaluate", "generate"]},
+            "additionalProperties": {
+              "type": "object", "additionalProperties": false, "required": ["ready"],
+              "properties": {"ready": {"type": "boolean"}, "reason": {"$ref": "#/components/schemas/FixReason"}}
+            }
+          },
           "reason": {"type": "string", "description": "Evaluation configuration status, not a host-wide restriction."},
           "approved_ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "description": "Loopback ports that the operator approved for this worker."},
           "evaluation_allowed": {"type": "boolean", "description": "True only if worker policy, GPU load permission and the pinned image allow generate and evaluate. Set by the operator, not by this API."},
@@ -1611,6 +1733,7 @@
         "type": "object", "required": ["id", "host", "state", "stage", "job_ids", "cancel_requested", "created_at", "updated_at"],
         "properties": {
           "id": {"$ref": "#/components/schemas/Id"},
+          "duplicate_of": {"const": true, "description": "Present only when a submission matches an existing conversion by body."},
           "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}], "description": "Concrete worker ID, or auto before assignment of a pool worker."},
           "requested_host": {"const": "auto", "description": "Present if auto routing was requested."},
           "format": {"const": "gguf", "description": "Present only for a GGUF conversion. Absent means HGN."},

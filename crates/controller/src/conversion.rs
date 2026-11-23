@@ -1,4 +1,7 @@
-use crate::domain::{Envelope, Host, Job, Model, NewJob, NewModel, State, candidates, id, now};
+use crate::domain::{
+    Envelope, Host, Job, Model, NewJob, NewModel, Reason, State, conversion_candidate_blocker,
+    cpu_conversion_reason, id, input_blocker, now,
+};
 use crate::gguf::{Format, Selection};
 use crate::profiles::Profile;
 use brewery_worker::hgn_recipe;
@@ -53,6 +56,29 @@ pub struct Conversion {
     profile_name: Option<String>,
 }
 
+pub enum StartError {
+    Invalid(String),
+    Blocked(Reason),
+}
+
+fn custom_profile_blocker(
+    source: &Model,
+    decode_backend: Option<&str>,
+    options: &Map<String, Value>,
+) -> Option<Reason> {
+    (source.kind != "hf"
+        || decode_backend.is_some_and(|b| b != "cpu")
+        || ["ht_backend", "i4r_backend", "q4cp_backend"]
+            .iter()
+            .any(|key| options.get(*key).is_some_and(|backend| backend != "cpu")))
+    .then(|| {
+        Reason::link(
+            "Select an HF source and CPU backends to use a custom profile.",
+            "#/convert",
+        )
+    })
+}
+
 impl Conversion {
     pub fn start(
         request: NewConversion,
@@ -60,7 +86,90 @@ impl Conversion {
         hosts: &[Host],
         active: &[Job],
         profile: Option<&Profile>,
-    ) -> Result<Option<(Self, Job, Envelope)>, String> {
+    ) -> Result<(Self, Job, Envelope), StartError> {
+        let (mut row, convert, envelope, recipe) =
+            Self::prepare(request, inputs, profile).map_err(StartError::Invalid)?;
+        let mut destinations: Vec<_> = hosts
+            .iter()
+            .filter(|host| row.host == "auto" || host.id == row.host)
+            .collect();
+        if row.host == "auto" {
+            destinations.sort_by_key(|host| host.id != envelope.inputs[0].host);
+        }
+        let mut blocked = None;
+        let eligible = destinations
+            .into_iter()
+            .filter(|host| {
+                let reasons = Self::host_blockers(
+                    host,
+                    &convert,
+                    &envelope,
+                    row.decode_backend.as_deref(),
+                    hosts,
+                );
+                if let Some(reason) = reasons.into_iter().next() {
+                    blocked.get_or_insert(reason);
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect::<Vec<_>>();
+        let host = eligible
+            .iter()
+            .find(|host| active.iter().all(|job| job.host != host.id))
+            .or_else(|| eligible.first())
+            .ok_or_else(|| {
+                StartError::Blocked(blocked.unwrap_or_else(|| {
+                    Reason::link(
+                        "Activate a worker in Settings > Hosts.",
+                        "#/settings/infrastructure",
+                    )
+                }))
+            })?;
+        row.host = host.id.clone();
+        let (job, envelope) = row
+            .build("inspect", envelope.inputs, None, recipe.as_ref())
+            .map_err(StartError::Invalid)?;
+        row.job_ids.insert(row.stage.clone(), job.id.clone());
+        Ok((row, job, envelope))
+    }
+
+    pub(crate) fn host_blockers(
+        host: &Host,
+        convert: &Job,
+        envelope: &Envelope,
+        decode_backend: Option<&str>,
+        hosts: &[Host],
+    ) -> Vec<Reason> {
+        if let Some(reason) = input_blocker(convert, envelope, hosts) {
+            return vec![reason];
+        }
+        if host.scheduling_paused {
+            return vec![Reason::settings(host, "policy", "Resume job scheduling")];
+        }
+        let stages: Vec<_> = STAGES
+            .iter()
+            .filter(|&&stage| !host.capabilities[stage])
+            .map(|stage| host.capability_reason(stage))
+            .collect();
+        if !stages.is_empty() {
+            return stages;
+        }
+        if let Some(reason) = conversion_candidate_blocker(host, convert, envelope, hosts) {
+            return vec![reason];
+        }
+        if host.component_cpu_only && decode_backend.is_some_and(|b| b != "cpu") {
+            return vec![cpu_conversion_reason(host)];
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn prepare(
+        request: NewConversion,
+        inputs: Vec<Model>,
+        profile: Option<&Profile>,
+    ) -> Result<(Self, Job, Envelope, Option<Value>), String> {
         if request
             .decode_backend
             .as_deref()
@@ -142,22 +251,16 @@ impl Conversion {
             if request.options.contains_key("profile") {
                 return Err("profile_revision cannot be combined with options.profile".into());
             }
-            if source.kind != "hf"
-                || request
-                    .decode_backend
-                    .as_deref()
-                    .is_some_and(|b| b != "cpu")
-                || ["ht_backend", "i4r_backend", "q4cp_backend"]
-                    .iter()
-                    .any(|key| request.options.get(*key).is_some_and(|b| b != "cpu"))
+            if let Some(reason) =
+                custom_profile_blocker(source, request.decode_backend.as_deref(), &request.options)
             {
-                return Err("custom profiles require an HF source and CPU backends".into());
+                return Err(reason.text);
             }
         }
         let host = request.host.unwrap_or_else(|| source.host.clone());
         let requested_host = (host == "auto").then(|| host.clone());
         let created_at = now();
-        let mut row = Self {
+        let row = Self {
             format: request.format,
             id: id(),
             host,
@@ -185,24 +288,7 @@ impl Conversion {
             profile.and_then(Profile::recipe)
         };
         let (convert, envelope) = row.build("convert", inputs, None, recipe.as_ref())?;
-        let eligible = candidates(&convert, &envelope, hosts)
-            .into_iter()
-            .filter(|host| {
-                !host.component_cpu_only || row.decode_backend.as_deref().is_none_or(|b| b == "cpu")
-            })
-            .filter(|host| STAGES.iter().all(|stage| host.capabilities[*stage]))
-            .collect::<Vec<_>>();
-        let Some(host) = eligible
-            .iter()
-            .find(|host| active.iter().all(|job| job.host != host.id))
-            .or_else(|| eligible.first())
-        else {
-            return Ok(None);
-        };
-        row.host = host.id.clone();
-        let (job, envelope) = row.build("inspect", envelope.inputs, None, recipe.as_ref())?;
-        row.job_ids.insert(row.stage.clone(), job.id.clone());
-        Ok(Some((row, job, envelope)))
+        Ok((row, convert, envelope, recipe))
     }
 
     pub fn build(

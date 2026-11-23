@@ -4,16 +4,22 @@
   // and one job per 2-D tile, never one per cell. Earlier reads with equal
   // options are reused. Every read and proposal carries the source fingerprint
   // from the inventory, so a changed file is refused.
+  import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
+  import { errorText } from '../../lib/api';
   import TensorMap from './TensorMap.svelte';
   import HeatGrid from './HeatGrid.svelte';
   import Submit from '../Submit.svelte';
+  import SubmitStatus from '../SubmitStatus.svelte';
   import JobState from '../JobState.svelte';
   import { brewery } from '../../lib/store.svelte';
-  import { Submitter } from '../../lib/submit.svelte';
+  import { acceptedJobSummary, guardReadLink, jobRequestKey, ReadVisit, Submitter } from '../../lib/submit.svelte';
+  import type { PlainAttempt } from '../../lib/submission-key';
+  import { route } from '../../lib/route.svelte';
   import { theme } from '../../lib/theme.svelte';
   import { isSafeSource, hostName, isActive, shortHash } from '../../lib/format';
-  import { MAX_COORDINATES, MAX_EDITS, coord, exact, percent, relChange, signed, proposeJob, tuneJob, parseValue, parseMaxUpdate } from '../../lib/weights';
+  import { MAX_COORDINATES, MAX_EDITS, coord, exact, percent, relChange, signed, tuneJob, parseValue, parseMaxUpdate } from '../../lib/weights';
+  import { editKey, type DraftEdit } from '../../lib/weight-draft';
   import {
     isDtype, isPacked, type Neighbors,
     findRead,
@@ -27,9 +33,10 @@
     roundTo,
     short,
     step,
+    supersededInventory,
     tileJob,
     tileRequest,
-
+    type InventoryPage,
     type TensorInfo,
     type Tile,
   } from '../../lib/weightmap';
@@ -38,67 +45,133 @@
   let {
     source,
     canVisual,
-    canPropose,
+    canChange,
     canTune,
     calibrationId,
     heldOutId,
-    proposeReason,
     tuneReason,
     mode = $bindable('manual'),
     onproposal,
+    pending,
+    readAttempts,
+    acceptedReads,
+    restarts,
   }: {
     source: Model;
     canVisual: boolean;
-    canPropose: boolean;
+    canChange: boolean;
     canTune: boolean;
     calibrationId: string;
     heldOutId: string;
-    proposeReason: string | null;
     tuneReason: string | null;
     mode?: 'manual' | 'auto';
     onproposal: (jobId: string) => void;
+    pending: SvelteMap<string, DraftEdit>;
+    readAttempts: PlainAttempt;
+    acceptedReads: SvelteMap<string, JobSummary>;
+    restarts: SvelteMap<string, Set<string>>;
   } = $props();
 
-  const jobs = $derived(brewery.state?.jobs ?? []);
+  const stateJobs = $derived(brewery.state?.jobs ?? []);
+  const submitted = $derived([...acceptedReads.values()]
+    .filter(job => job.host === source.host && job.input_ids[0] === source.id).reverse());
+  const readVisit = new ReadVisit();
+  const jobs = $derived([...stateJobs, ...submitted.filter(j => !stateJobs.some(row => row.id === j.id))
+    .map(job => brewery.details[job.id] ?? job)].filter(job => readVisit.shows(job)));
   const models = $derived(brewery.state?.models ?? []);
 
-  // Jobs the user chose to read again are ignored; requests sent from this page are not repeated.
+  // Ignore old reports only when the user asks the worker to read again.
   let ignored = $state<Set<string>>(new Set());
-  const requested = new Set<string>();
   const packedHost = $derived(!isSafeSource(source.kind) && brewery.state?.hosts.find(h => h.id === source.host)?.capabilities?.weight_packed === true);
-  const usable = $derived(jobs.filter((j) => !ignored.has(j.id)));
-  const reads = new Submitter();
+  const usable = $derived(jobs.filter((j) => !ignored.has(j.id) && !restarts.get(source.id)?.has(j.id)));
+  const sourceHost = $derived(hostName(brewery.state?.hosts ?? [], source.host));
+  const tileLauncher = 'weights.visual.tile';
+  const inventoryLauncher = 'weights.visual.inventory';
+  const readLauncher = (job: ReturnType<typeof inventoryJob>) => job.options?.mode === 'tile' ? tileLauncher : inventoryLauncher;
+  const reads = new Submitter(readLauncher, untrack(() => readAttempts));
+  let readKey = $state('');
+  let acceptedReadMode = $state<'inventory' | 'tile'>();
+  let inventoryLink: HTMLAnchorElement | undefined = $state();
+  let tileLink: HTMLAnchorElement | undefined = $state();
+  let receiptError = $state<string | null>(null);
 
-  function want(job: JobSummary | null): void {
-    if (job?.state === 'succeeded' && !brewery.details[job.id]) void brewery.loadJob(job.id).catch(() => {});
+  const detailErrors = new SvelteMap<string, string>();
+  const attempted = new Map<string, Date | null>();
+  function want(snapshot: Date | null, job?: JobSummary | null): void {
+    readVisit.observe(job);
+    if (job?.state !== 'succeeded' || brewery.details[job.id] || attempted.get(job.id) === snapshot) return;
+    attempted.set(job.id, snapshot);
+    void brewery.loadJob(job.id).then(
+      () => detailErrors.delete(job.id),
+      error => detailErrors.set(job.id, errorText(error)),
+    );
   }
-  function request(options: Record<string, unknown>, build: () => ReturnType<typeof inventoryJob>) {
-    const k = JSON.stringify(options);
-    if (requested.has(k) || reads.busy) return;
-    requested.add(k);
-    void reads.submit(build());
+  function read(job: ReturnType<typeof inventoryJob>, event: MouseEvent, replace?: (id: string) => void, restart = false) {
+    const key = jobRequestKey(readLauncher(job), job);
+    void reads.submit(job, event, false, () => {
+      readKey = key;
+      receiptError = null;
+    }, (created, focus) => {
+      const id = created.id;
+      const summary = acceptedJobSummary(created, job);
+      if (!findRead([summary], job.input_ids[0], job.options!, job.host)) {
+        receiptError = 'The read job does not match this request.';
+        return;
+      }
+      acceptedReadMode = job.options?.mode === 'tile' ? 'tile' : 'inventory';
+      function record(summary: JobSummary) {
+        if (summary.id !== id || !findRead([summary], job.input_ids[0], job.options!, job.host)) return;
+        readVisit.remember(id);
+        acceptedReads.delete(key);
+        acceptedReads.set(key, summary);
+      }
+      if (!('duplicate_of' in created)) replace?.(id);
+      record(summary);
+      void focus?.(() => job.options?.mode === 'tile' ? tileLink : inventoryLink);
+      if (!('state' in created)) void brewery.loadJob(id).then(detail => {
+        if (acceptedReads.get(key)?.id === id) record(detail);
+      }).catch(() => {});
+    }, restart);
   }
-  function readAgain(match: (o: Record<string, unknown>) => boolean) {
+  function ignoreReads(keep: string, match: (job: JobSummary) => boolean) {
     const next = new Set(ignored);
-    for (const j of jobs) if (j.kind === 'weight_inspect' && j.input_ids[0] === source.id && match((j.options ?? {}) as Record<string, unknown>) && !isActive(j.state)) next.add(j.id);
+    for (const j of jobs) if (j.kind === 'weight_inspect' && j.input_ids[0] === source.id && !isActive(j.state) && match(j)) next.add(j.id);
+    next.delete(keep);
     ignored = next;
-    requested.clear();
   }
 
   // ---- Inventory, page by page. ----
   const inv = $derived(walkInventory(source, usable, brewery.details, { packed: packedHost, format: isSafeSource(source.kind) ? source.kind : undefined }));
-  const sha = $derived(inv.pages[0]?.source_sha256 ?? null);
-  const total = $derived(inv.pages[0]?.total ?? 0);
-  const tensors = $derived(inv.pages.flatMap((p) => p.tensors.map(t => isPacked(t.dtype) && (!packedHost || (source.kind === 'hgn') !== (t.dtype === 'Q8G64')) ? {...t, reason: t.reason ?? 'Packed editing is not enabled for this source and worker.'} : t)));
+  let previousPages = $state.raw<InventoryPage[]>([]);
+  const shownPages = $derived(inv.pages.length ? inv.pages : previousPages);
+  const sha = $derived(shownPages[0]?.source_sha256 ?? null);
+  const total = $derived(shownPages[0]?.total ?? 0);
+  const tensors = $derived(shownPages.flatMap((p) => p.tensors.map(t => isPacked(t.dtype) && (!packedHost || (source.kind === 'hgn') !== (t.dtype === 'Q8G64')) ? {...t, reason: t.reason ?? 'Packed editing is not enabled for this source and worker.'} : t)));
+  const inventoryRequest = $derived(inv.need ? inventoryJob(source.id, source.host, inv.need.offset, inv.need.sha, packedHost) : null);
+  const firstPage = $derived(inventoryJob(source.id, source.host, 0, undefined, packedHost));
+  const restartInventory = $derived(!inventoryRequest || (inv.need?.offset === 0 && shownPages.length > 0));
+  const canRestart = $derived(canVisual && inv.pages.length > 0 && (!!inv.need || !!inv.error));
+  const inventoryError = $derived(readKey === jobRequestKey(inventoryLauncher, inventoryRequest ?? firstPage) ||
+    (canRestart && readKey === jobRequestKey(inventoryLauncher, firstPage))
+    ? reads.error ?? receiptError ?? inv.error : inv.error);
+  const lastInventoryRead = $derived(submitted.find(j => j.options?.mode === 'inventory' && usable.some(row => row.id === j.id)));
+  const inventoryJobFound = $derived(inv.job ?? usable.find(j => j.id === lastInventoryRead?.id));
+  const inventoryDetailError = $derived(inv.job && detailErrors.get(inv.job.id));
   $effect(() => {
-    if (!canVisual) return;
-    want(inv.job ?? null);
-    const need = inv.need;
-    if (need) {
-      const options = inventoryJob(source.id, source.host, need.offset, need.sha, packedHost).options!;
-      request(options, () => inventoryJob(source.id, source.host, need.offset, need.sha, packedHost));
-    }
+    if (canVisual) want(brewery.lastUpdated, inv.job);
   });
+  function readInventoryPage(event: MouseEvent, restart = false) {
+    if (!canVisual || (restart ? !canRestart : inv.job && !inv.error)) return;
+    const request = restart ? firstPage : inventoryRequest ?? firstPage;
+    const sourceId = request.input_ids[0];
+    read(request, event, restart ? id => {
+      previousPages = [];
+      restarts.set(sourceId, supersededInventory([...stateJobs, ...acceptedReads.values()], sourceId, id));
+    } : restartInventory ? id => {
+      previousPages = shownPages;
+      ignoreReads(id, j => j.options?.mode === 'inventory');
+    } : undefined, restart);
+  }
 
   // ---- Current tensor and tile. ----
   let tensorName = $state<string | null>(null);
@@ -137,7 +210,8 @@
   });
 
   const req = $derived(p ? tileRequest(p, { lead, tr, tc }) : null);
-  const tileOptions = $derived(tensor && req && sha ? tileJob(source.id, source.host, sha, tensor.name, req, !float).options! : null);
+  const tileRead = $derived(tensor && req && sha ? tileJob(source.id, source.host, sha, tensor.name, req, !float) : null);
+  const tileOptions = $derived(tileRead?.options);
   const tileJobFound = $derived(tileOptions ? findRead(usable, source.id, tileOptions) : null);
   const tile = $derived.by((): Tile | string | null => {
     if (!tensor || !req || !sha || !tileJobFound) return null;
@@ -147,12 +221,18 @@
     return d ? readTile(d.result, { tensor: tensor.name, origin: req.origin, shape: req.shape, sha, dtype: tensor.dtype, full: tensor.shape }) : null;
   });
   const tileOk = $derived(typeof tile === 'object' ? tile : null);
+  const tileError = $derived((tileRead && readKey === jobRequestKey(tileLauncher, tileRead) ? reads.error ?? receiptError : null) ??
+    (typeof tile === 'string' ? tile : null));
   const otherTileActive = $derived(jobs.some((j) => j.kind === 'weight_inspect' && j.input_ids[0] === source.id && (j.options as Record<string, unknown> | undefined)?.mode === 'tile' && isActive(j.state)));
   $effect(() => {
-    if (!canVisual || !tensor || !tileOptions || !sha || !req) return;
-    want(tileJobFound);
-    if (!tileJobFound && !otherTileActive) request(tileOptions, () => tileJob(source.id, source.host, sha, tensor.name, req, !float));
+    if (canVisual) want(brewery.lastUpdated, tileJobFound);
   });
+  function readCurrentTile(event: MouseEvent) {
+    const request = tileRead;
+    const options = request?.options;
+    if (!canVisual || !request || !options || otherTileActive || (tileJobFound && !tileError)) return;
+    void read(request, event, tileJobFound ? id => ignoreReads(id, j => !!findRead([j], source.id, options)) : undefined);
+  }
 
   // Stored values seen in loaded tiles, for edits across tiles.
   const levels = new SvelteMap<string, Neighbors>();
@@ -186,22 +266,17 @@
   const range = (start: number, size: number, n: number) => `${start * size}–${Math.min(n, (start + 1) * size) - 1}`;
 
   // ---- Pending manual edits (all tensors), keyed tensor|index. ----
-  interface Pending {
-    tensor: string;
-    index: number[];
-    dtype: string;
-    before: number;
-    after: number;
-  }
-  const pending = new SvelteMap<string, Pending>();
   let lastSha: string | null = null;
   $effect(() => {
     if (sha && lastSha !== sha) {
-      if (lastSha) { pending.clear(); known.clear(); levels.clear(); selected = new Set(); focusKey = null; }
+      if (lastSha) {
+        for (const [key, edit] of pending) if (edit.observed) pending.delete(key);
+        known.clear(); levels.clear(); selected = new Set(); focusKey = null;
+      }
       lastSha = sha;
     }
   });
-  const pendingHere = $derived(new Map([...pending.values()].filter((e) => e.tensor === tensorName).map((e) => [keyOf(e.index), e.after])));
+  const pendingHere = $derived(new Map([...pending.values()].filter((e) => e.tensor === tensorName && e.observed).map((e) => [keyOf(e.index), e.value])));
   let notice = $state<string | null>(null);
 
   function selectedCells(): { key: string; index: number[]; before: number }[] {
@@ -214,21 +289,24 @@
     return out;
   }
   function setAfter(index: number[], before: number, after: number | null): boolean {
-    if (!tensor || after === null) return false;
-    const id = `${tensor.name}|${keyOf(index)}`;
+    if (!tensor || !sha || after === null) return false;
+    const id = editKey({ tensor: tensor.name, index });
+    const current = pending.get(id);
+    if (current && !current.observed) return false;
     if (after === before) pending.delete(id);
-    else if (!pending.has(id) && pending.size >= MAX_EDITS) return false;
-    else pending.set(id, { tensor: tensor.name, index, dtype: tensor.dtype, before, after });
+    else if (!current && pending.size >= MAX_EDITS) return false;
+    else pending.set(id, { tensor: tensor.name, index, op: 'set', value: after, observed: { before, sha, packed: isPacked(tensor.dtype) } });
     return true;
   }
   function apply(fn: (before: number, current: number) => number | null) {
-    if (mode !== 'manual' || !tensor) return;
+    if (!canChange || mode !== 'manual' || !tensor) return;
     let refused = 0;
     for (const c of selectedCells()) {
-      const cur = pending.get(`${tensor.name}|${c.key}`)?.after ?? c.before;
+      const current = pending.get(`${tensor.name}|${c.key}`);
+      const cur = current?.observed ? current.value : c.before;
       if (!setAfter(c.index, c.before, fn(c.before, cur))) refused++;
     }
-    notice = refused ? `${refused} ${refused === 1 ? 'cell was' : 'cells were'} not changed: the result is outside the finite ${tensor.dtype} range or the ${MAX_EDITS}-edit limit is reached.` : null;
+    notice = refused ? `${refused} ${refused === 1 ? 'cell was' : 'cells were'} not changed. Check the ${tensor.dtype} range, the edit limit, and whether the draft already has a text edit for that cell.` : null;
   }
   function selectTile() {
     const t = tileOk;
@@ -242,13 +320,13 @@
     selected = next;
   }
   function neighbor(direction: keyof Neighbors) {
-    if (!tensor || !tileOk?.steps || mode !== 'manual') return;
+    if (!canChange || !tensor || !tileOk?.steps || mode !== 'manual') return;
     let skipped = 0;
     for (const c of selectedCells()) {
       const value = levels.get(`${tensor.name}|${c.key}`)?.[direction];
       if (value == null || !setAfter(c.index, c.before, value)) skipped++;
     }
-    notice = skipped ? `${skipped} selected cells had no available ${direction} level or exceeded the edit limit.` : null;
+    notice = skipped ? `${skipped} selected cells did not change. Check the ${direction} level, the edit limit, and existing text edits.` : null;
   }
   function nudge(n: number) {
     const dtype = float;
@@ -259,7 +337,7 @@
 
   const sel = $derived(selectedCells());
   const focusBefore = $derived(tensor && focusKey ? known.get(`${tensor.name}|${focusKey}`) : undefined);
-  const focusAfter = $derived(tensor && focusKey ? pending.get(`${tensor.name}|${focusKey}`)?.after : undefined);
+  const focusAfter = $derived(focusKey ? pendingHere.get(focusKey) : undefined);
 
   // Slider: shift from the stored value, applied to every selected cell.
   const ranges = $derived(niceRanges(tileOk?.absMax ?? 0));
@@ -279,25 +357,6 @@
   const exactParsed = $derived(parseValue(exactText));
 
   // ---- Submit. ----
-  const proposeSub = new Submitter();
-  const edits = $derived([...pending.values()]);
-  const proposeBlockers = $derived([
-    ...(canPropose ? [] : [proposeReason ?? 'Manual proposals are not enabled on this worker.']),
-    ...(sha ? [] : ['Read the tensor list first.']),
-    ...(edits.some(e => isPacked(e.dtype)) && !packedHost ? ['Packed editing is not enabled on this host.'] : []),
-    ...(edits.length ? [] : ['Change at least one cell.']),
-  ]);
-  async function propose() {
-    if (!sha || !edits.length) return;
-    const job = proposeJob(source.id, source.host, edits.map((e) => ({ tensor: e.tensor, index: e.index, op: 'set', value: e.after })));
-    job.options = { ...job.options, source_sha256: sha, ...(edits.some(e => isPacked(e.dtype)) ? {packed:true} : {}) };
-    const created = await proposeSub.submit(job);
-    if (created) {
-      pending.clear();
-      onproposal(created.id);
-    }
-  }
-
   const MAX_STEPS = 60;
   let maxIdx = $state(30);
   const maxFromSlider = (i: number) => Number((10 ** (-6 + (i / MAX_STEPS) * 6)).toPrecision(2));
@@ -312,7 +371,7 @@
     return cap;
   });
   const maxUpdate = $derived(maxText.trim() ? parseMaxUpdate(maxText) : ({ ok: true, value: maxFromSlider(maxIdx) } as const));
-  const tuneSub = new Submitter();
+  const tuneSub = new Submitter('weights.visual.tune');
   const sameHost = (id: string) => models.find((m) => m.id === id)?.host === source.host;
   const tuneBlockers = $derived.by(() => {
     const out: string[] = [];
@@ -330,16 +389,21 @@
     if ((calibrationId && !sameHost(calibrationId)) || (heldOutId && !sameHost(heldOutId))) out.push(`Both splits must be on ${hostName(brewery.state?.hosts ?? [], source.host)}.`);
     return out;
   });
-  async function tune() {
-    if (!tensor || !sha || !maxUpdate.ok || tuneBlockers.length) return;
+  const tuneRequest = $derived.by(() => {
+    if (!tensor || !sha || !maxUpdate.ok) return null;
     const indices = [...selected].map((k) => k.split(',').map(Number) as [number, number]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
     const job = tuneJob(source.id, source.host, calibrationId, heldOutId, tensor.name, indices, maxUpdate.value);
     job.options = { ...job.options, source_sha256: sha, ...(!float ? {packed:true} : {}) };
-    const created = await tuneSub.submit(job);
-    if (created) onproposal(created.id);
+    return job;
+  });
+  async function tune(event: MouseEvent) {
+    if (!tuneRequest || tuneBlockers.length) return;
+    const visit = route.capture();
+    const created = await tuneSub.submit(tuneRequest, event);
+    if (created && !tuneSub.replayed && visit.canPresent()) onproposal(created.id);
   }
 
-  const selectable = $derived((index: number[]) => mode === 'manual' || index.length === 2);
+  const selectable = $derived((index: number[]) => canChange && (mode === 'manual' || index.length === 2));
   const scheme = $derived(theme.resolved === 'light' ? 'light' : 'dark');
 </script>
 
@@ -353,22 +417,37 @@
         <h3 class="h" id="vw-map-h">1. Tensor</h3>
         <div class="row xs muted">
           {#if sha}<span>Source <span class="mono" title={sha}>{shortHash(sha)}</span> · {tensors.length} of {total} tensors</span>{/if}
-          {#if inv.job}<JobState job={inv.job} />{/if}
-          <button type="button" class="btn ghost small" onclick={() => readAgain((o) => o.mode === 'inventory')} disabled={!!inv.job && isActive(inv.job.state)}>Read again</button>
         </div>
       </div>
+      {#if inventoryJobFound}
+        <div class="row" role="status">
+          <a bind:this={inventoryLink} href="#/jobs/{encodeURIComponent(inventoryJobFound.id)}" onclick={(event) => guardReadLink(event, inventoryLauncher)}>Tensor list read job</a>
+          <JobState job={inventoryJobFound} />
+        </div>
+      {/if}
+      {#if !inv.job || inv.error}
+        <div class="row">
+          <button type="button" class="btn small" onclick={(event) => readInventoryPage(event)} disabled={reads.busy}>
+            {restartInventory ? 'Read tensor list again' : inv.pages.length ? 'Read next tensors' : 'Read tensor list'}
+          </button>
+          {#if canRestart}<button type="button" class="btn small" onclick={(event) => readInventoryPage(event, true)} disabled={reads.busy}>Read from page 1</button>{/if}
+          <span class="hint">This queues a <code>weight_inspect</code> job on {sourceHost}.</span>
+        </div>
+      {/if}
       {#if source.sha256 && sha && source.sha256 !== sha}
         <p class="note warn small">The Library hash ({shortHash(source.sha256)}) differs from the file the worker read ({shortHash(sha)}). Edits use the file the worker read.</p>
       {/if}
-      {#if inv.error}
-        <p class="note bad" role="alert">{inv.error}</p>
-      {:else if reads.error && inv.need}
-        <p class="note bad" role="alert">{reads.error}</p>
+      {#if inventoryError}<p class="note bad" role="alert">{inventoryError}</p>{/if}
+      {#if inventoryDetailError}<p class="note bad" role="alert">{inventoryDetailError} The workbench will retry the job details.</p>{/if}
+      {#if reads.replayed && acceptedReadMode === 'inventory'}
+        <SubmitStatus s={reads} />
       {/if}
       {#if tensors.length}
         <TensorMap {tensors} selected={tensorName} onopen={openTensor} />
-      {:else if !inv.error}
-        <p class="muted small" aria-live="polite">Reading the tensor list from {hostName(brewery.state?.hosts ?? [], source.host)}… The worker checks the registered file and returns its tensor inventory.</p>
+      {:else if inv.job && !inv.error}
+        <p class="muted small" role="status">Waiting for the tensor list.</p>
+      {:else if !inventoryRequest && !inventoryError}
+        <p class="muted small">No tensors were found.</p>
       {/if}
     </section>
 
@@ -426,17 +505,24 @@
           {/if}
         </div>
 
-        {#if typeof tile === 'string'}
-          <div class="note bad" role="alert">
-            {tile}
-            <button type="button" class="btn small" onclick={() => readAgain((o) => o.mode === 'tile' && o.tensor === tensor.name)}>Read again</button>
+        {#if tileJobFound}
+          <div class="row" role="status">
+            <a bind:this={tileLink} href="#/jobs/{encodeURIComponent(tileJobFound.id)}" onclick={(event) => guardReadLink(event, tileLauncher)}>Tile read job</a>
+            <JobState job={tileJobFound} />
           </div>
-        {:else if !tileOk}
-          <div class="loading" aria-live="polite">
-            {#if tileJobFound}<JobState job={tileJobFound} />{/if}
-            <span class="small muted">{otherTileActive && !tileJobFound ? 'Waiting for the previous tile read…' : 'Reading this tile from the worker…'} One job reads up to {p.rank === 1 ? '1,024' : '32 × 32'} stored values.</span>
+        {/if}
+        {#if tileError}<p class="note bad" role="alert">{tileError}</p>{/if}
+        {#if reads.replayed && acceptedReadMode === 'tile'}
+          <SubmitStatus s={reads} />
+        {/if}
+        {#if !tileJobFound || tileError}
+          <div class="row">
+            <button type="button" class="btn small" onclick={readCurrentTile} disabled={reads.busy || otherTileActive}>{tileError ? 'Read tile again' : 'Read tile'}</button>
+            <span class="hint">This queues a <code>weight_inspect</code> job on {sourceHost}.</span>
           </div>
-        {:else}
+          {#if otherTileActive}<p class="hint" role="status">Wait for the previous tile read to finish.</p>{/if}
+        {/if}
+        {#if tileOk}
           <div class="tile">
             <HeatGrid
               tile={tileOk}
@@ -446,7 +532,7 @@
               {selectable}
               onnudge={nudge}
               onreset={reset}
-              label="Stored values of {tensor.name}, {mode === 'manual' ? 'select cells to edit' : 'select weights to tune'}"
+              label="Stored values of {tensor.name}{canChange ? (mode === 'manual' ? ', select cells to edit' : ', select weights to tune') : ', read-only'}"
             />
             <div class="scale xs" aria-label="Colour scale from {short(-tileOk.absMax)} to {short(tileOk.absMax)}, this tile only">
               <span class="num">{short(-tileOk.absMax)}</span>
@@ -459,7 +545,7 @@
       </section>
 
       <!-- 3. Edit or tune -->
-      <section class="step" aria-labelledby="vw-edit-h">
+      {#if canChange}<section class="step" aria-labelledby="vw-edit-h">
         <div class="row between">
           <h3 class="h" id="vw-edit-h">3. {mode === 'manual' ? 'Change values' : 'Tune selected weights'}</h3>
           <div class="row">
@@ -547,43 +633,12 @@
           </div>
         {/if}
       </section>
+      {/if}
     {/if}
 
-    <!-- 4. Proposal -->
-    {#if mode === 'manual'}
-      <section class="step" aria-labelledby="vw-pend-h">
-        <div class="row between">
-          <h3 class="h" id="vw-pend-h">{tensor ? '4' : '2'}. Proposal <span class="muted num">({edits.length} of {MAX_EDITS} edits)</span></h3>
-          {#if edits.length}<button type="button" class="btn ghost small" onclick={() => pending.clear()}>Discard all</button>{/if}
-        </div>
-        {#if edits.length}
-          <div class="table-wrap pend">
-            <table class="data stackable">
-              <thead><tr><th scope="col">Tensor</th><th scope="col">Coordinate</th><th scope="col">Stored</th><th scope="col">New</th><th scope="col">Change</th><th scope="col"><span class="sr-only">Remove</span></th></tr></thead>
-              <tbody>
-                {#each edits as e (`${e.tensor}|${keyOf(e.index)}`)}
-                  <tr>
-                    <td class="mono xs break" data-label="Tensor">{e.tensor}</td>
-                    <td class="mono num nowrap" data-label="Coordinate">{coord(e.index)}</td>
-                    <td class="mono num" data-label="Stored">{exact(e.before)}</td>
-                    <td class="mono num" data-label="New">{exact(e.after)}</td>
-                    <td class="mono num nowrap" data-label="Change">{signed(Number((e.after - e.before).toPrecision(4)))} <span class="muted">({percent(relChange(e.before, e.after))})</span></td>
-                    <td><button type="button" class="btn ghost small" aria-label="Remove edit {coord(e.index)}" onclick={() => pending.delete(`${e.tensor}|${keyOf(e.index)}`)}>Remove</button></td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-          <p class="xs muted">These targets are representable in the source encoding. The worker checks them again and shows the result for review. Nothing is written before you apply.</p>
-        {:else}
-          <p class="xs muted">No changes yet. Changed cells collect here, across tensors.</p>
-        {/if}
-        {#if proposeSub.error}<p class="note bad" role="alert">{proposeSub.error}</p>{/if}
-        <Submit blockers={proposeBlockers} busy={proposeSub.busy} onclick={propose}>Create proposal</Submit>
-      </section>
-    {:else if tensor}
+    {#if canChange && mode === 'auto' && tensor}
       <section class="step">
-        {#if tuneSub.error}<p class="note bad" role="alert">{tuneSub.error}</p>{/if}
+        <SubmitStatus s={tuneSub} />
         <Submit blockers={tuneBlockers} busy={tuneSub.busy} onclick={tune}>Tune {selected.size || ''} selected {selected.size === 1 ? 'weight' : 'weights'}</Submit>
       </section>
     {/if}
@@ -666,15 +721,6 @@
   .ot.cur {
     outline: 2px solid var(--text);
     outline-offset: 1px;
-  }
-  .loading {
-    display: flex;
-    align-items: center;
-    gap: var(--s-2);
-    min-height: 120px;
-    padding: var(--s-4);
-    border: 1px dashed var(--line);
-    border-radius: var(--r-tile);
   }
   .tile {
     display: flex;
@@ -759,12 +805,6 @@
   }
   .ferr {
     color: var(--bad);
-  }
-  .pend {
-    max-height: 280px;
-    overflow: auto;
-    border: 1px solid var(--line-soft);
-    border-radius: var(--r-tile);
   }
   @media (max-width: 640px) {
     .ctl {

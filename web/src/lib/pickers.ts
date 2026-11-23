@@ -2,31 +2,41 @@
 
 import { disambiguate, normalize, type ComboOption } from './combobox';
 import { basename, capability, hostName, kindLabel, modelLabel } from './format';
-import type { Host, Model } from './types';
+import type { EligibilityEntry, Host, Model } from './types';
 
-/** Hosts; with a job kind, capable hosts first and the controller reason as detail. */
-export function hostOptions(hosts: Host[], kind?: string): ComboOption[] {
+/** Show available hosts first and disable hosts rejected by workflow eligibility. */
+export function hostOptions(hosts: Host[], kind?: string, eligibility?: (host: Host) => EligibilityEntry | undefined): ComboOption[] {
   const rows = hosts.map((h, i) => {
-    const c = kind ? capability(h, kind) : { allowed: true, reason: null };
+    const entry = eligibility?.(h);
+    const c = entry
+      ? { allowed: entry.eligible, reason: entry.reasons.map((r) => r.text).join(' ') || 'This host cannot run this workflow.' }
+      : kind ? capability(h, kind) : { allowed: true, reason: null };
     const name = h.name ?? h.id;
     const detail = [name !== h.id ? h.id : '', c.allowed ? '' : `Unavailable: ${c.reason ?? ''}`].filter(Boolean).join(' · ');
-    return { o: { value: h.id, label: name, detail: detail || undefined, keywords: [h.id] } as ComboOption, ok: c.allowed, i };
+    const o: ComboOption = { value: h.id, label: name, detail: detail || undefined, keywords: [h.id] };
+    if (entry?.eligible === false) o.disabled = true;
+    return { o, ok: c.allowed, i };
   });
   rows.sort((a, b) => Number(b.ok) - Number(a.ok) || a.i - b.i);
   return disambiguate(rows.map((r) => r.o));
 }
 
 /** Library entries of the given kinds; the value is the model ID. */
-export function modelOptions(models: Model[], hosts: Host[], kinds: ReadonlySet<string>, exclude: string[]): ComboOption[] {
+export function modelOptions(models: Model[], hosts: Host[], kinds: ReadonlySet<string>, exclude: string[], unavailable?: (model: Model) => string | null): ComboOption[] {
   return disambiguate(
     models
       .filter((m) => kinds.has(m.kind) && !exclude.includes(m.id))
-      .map((m) => ({
-        value: m.id,
-        label: modelLabel(m),
-        detail: `${kindLabel(m.kind)} · ${hostName(hosts, m.host)} · ${m.path}${m.available === false ? ' · unavailable' : ''}`,
-        keywords: [m.id, m.host, m.kind, m.path],
-      })),
+      .map((m) => {
+        const reason = unavailable?.(m);
+        const status = reason ? ` · Unavailable: ${reason}` : m.available === false ? ' · unavailable' : '';
+        return {
+          value: m.id,
+          label: modelLabel(m),
+          detail: `${kindLabel(m.kind)} · ${hostName(hosts, m.host)} · ${m.path}${status}`,
+          keywords: [m.id, m.host, m.kind, m.path],
+          ...(reason ? { disabled: true } : {}),
+        };
+      }),
   );
 }
 

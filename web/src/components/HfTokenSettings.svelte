@@ -1,6 +1,8 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
+  import { focusAfterRemoval } from '../lib/focus';
 
+  let { confirmRefresh, onDirty }: { confirmRefresh: () => boolean; onDirty: (dirty: boolean) => void } = $props();
   const serviceId = 'backend-hf';
   let configured = $state<boolean | null>(null);
   let field = $state<HTMLInputElement>(null!);
@@ -9,16 +11,18 @@
   let confirming = $state(false);
   let notice = $state('');
   let error = $state('');
+  let removeButton = $state<HTMLButtonElement>();
+  let removeConfirm = $state<HTMLButtonElement>();
   const policy = { cache: 'no-store', credentials: 'same-origin', redirect: 'error', mode: 'same-origin' } as const;
 
   function clear() {
     if (field) field.value = '';
+    onDirty(false);
     confirming = false;
   }
   async function load() {
     loading = true;
     error = '';
-    clear();
     try {
       const r = await fetch('/api/settings/hf-tokens', policy);
       if (!r.ok) throw new Error();
@@ -35,17 +39,24 @@
   onMount(() => { void load(); });
 
   async function change(remove: boolean) {
-    if (configured === null || busy || (remove && !confirming) || (!remove && !field?.value)) return;
+    if (configured === null || busy || (remove && !confirming)) return;
+    const token = remove ? '' : field?.value.trim();
+    if (!remove && !token) {
+      error = 'Enter an access token.';
+      field?.focus();
+      return;
+    }
     busy = true;
     notice = error = '';
     try {
-      // The secret lives only in the uncontrolled field and the outbound request.
+      // Never put the token in reactive state or persistent storage.
       const pending = fetch(`/api/settings/${serviceId}/hf-token`, {
         // Firefox otherwise sends Origin: null under the page's no-referrer policy.
         ...policy, referrerPolicy: 'same-origin', method: remove ? 'DELETE' : 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: remove ? '{}' : JSON.stringify({ token: field.value.trim() }),
+        body: remove ? '{}' : JSON.stringify({ token }),
       });
-      clear();
+      if (remove) await focusAfterRemoval(clear, () => field);
+      else clear();
       const r = await pending;
       if (!r.ok) {
         const advice: Record<number, string> = {
@@ -65,7 +76,17 @@
       configured = data.configured;
       notice = remove ? 'Token removed.' : 'Token saved.';
     } catch { error = 'Could not confirm the change. Refresh the token status.'; }
-    finally { clear(); busy = false; }
+    finally {
+      clear(); busy = false;
+      if (remove && document.activeElement === document.body) {
+        await tick();
+        if (document.activeElement === document.body) field?.focus();
+      }
+    }
+  }
+  async function reviewRemoval() {
+    if (field?.value && !window.confirm('Discard the unsaved token?')) return;
+    await focusAfterRemoval(() => { clear(); confirming = true; notice = error = ''; }, () => removeConfirm);
   }
 </script>
 
@@ -76,32 +97,38 @@
     <p class="small muted">Set a read token so the built-in downloader can access private or gated repositories. The saved token is never shown.</p>
     {#if loading}
       <p role="status">Checking token status…</p>
-    {:else if configured !== null}
+    {/if}
+    {#if configured !== null}
       <p class="small" aria-live="polite">Token status: <strong>{configured ? 'Configured' : 'Not configured'}</strong></p>
       <form class="stack" onsubmit={(e) => { e.preventDefault(); void change(false); }}>
         <div class="field">
           <label for="hf-new-token">New access token</label>
-          <input bind:this={field} class="input" id="hf-new-token" type="password" autocomplete="off" spellcheck="false" autocapitalize="none" required disabled={busy || confirming} />
+          <input bind:this={field} class="input" id="hf-new-token" type="password" autocomplete="off" spellcheck="false" autocapitalize="none" required disabled={busy || confirming} oninput={(e) => onDirty(!!e.currentTarget.value)} />
         </div>
         <div class="row">
           <button class="btn primary" type="submit" disabled={busy || confirming}>{configured ? 'Replace token' : 'Set token'}</button>
           {#if configured && !confirming}
-            <button class="btn" type="button" disabled={busy} onclick={() => { clear(); confirming = true; notice = error = ''; }}>Remove token</button>
+            <button bind:this={removeButton} class="btn" type="button" disabled={busy} onclick={reviewRemoval}>Remove token</button>
           {/if}
         </div>
       </form>
       {#if confirming}
         <p class="small">Remove the saved token? Downloads that need it will no longer have access.</p>
         <div class="row">
-          <button class="btn danger" type="button" onclick={() => change(true)}>Confirm removal</button>
-          <button class="btn" type="button" onclick={() => confirming = false}>Keep token</button>
+          <button bind:this={removeConfirm} class="btn danger" type="button" onclick={() => change(true)}>Confirm removal</button>
+          <button class="btn" type="button" onclick={() => focusAfterRemoval(() => confirming = false, () => removeButton)}>Keep token</button>
         </div>
       {/if}
-    {:else if !error}
+    {:else if !loading && !error}
       <p class="muted small">Token settings for the built-in downloader are unavailable.</p>
     {/if}
     {#if notice}<p role="status" class="small">{notice}</p>{/if}
     {#if error}<p class="note warn" role="alert">{error}</p>{/if}
-    {#if !loading && (error || configured === null)}<div><button class="btn small" type="button" disabled={busy} onclick={load}>Refresh token status</button></div>{/if}
+    {#if !loading && (error || configured === null)}<div><button class="btn small" type="button" disabled={busy} onclick={() => {
+      if (confirmRefresh()) {
+        clear();
+        void load();
+      }
+    }}>Refresh token status</button></div>{/if}
   </div>
 </section>

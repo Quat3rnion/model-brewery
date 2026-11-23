@@ -3,14 +3,15 @@
   import JobProgress from '../components/JobProgress.svelte';
   import { detailLines, readDetail, summarizeHistory } from '../lib/progress';
   import { brewery } from '../lib/store.svelte';
-  import { errorText } from '../lib/api';
-  import { formatTime, hostName, isTerminal, kindLabel, kindTitle, modelLabel, progressText } from '../lib/format';
+  import { ApiError, errorText } from '../lib/api';
+  import { formatTime, hostName, isActive, isCancelling, isTerminal, kindLabel, kindTitle, modelLabel, progressText, stateLabel } from '../lib/format';
   import JobState from '../components/JobState.svelte';
   import CancelButton from '../components/CancelButton.svelte';
   import KeyValues from '../components/KeyValues.svelte';
   import JobResult from '../components/results/JobResult.svelte';
   import { obj } from '../lib/reports';
-  import type { JobDetail } from '../lib/types';
+  import { jobFixHint } from '../lib/job-hint';
+  import type { JobDetail, JobEvent } from '../lib/types';
 
   let { id }: { id: string } = $props();
 
@@ -19,25 +20,35 @@
   const models = $derived(brewery.state?.models ?? []);
   const prompts = $derived(brewery.state?.prompts ?? []);
 
-  let detail = $state<JobDetail | null>(null);
-  let error = $state<string | null>(null);
+  let record = $state<{ id: string; detail?: JobDetail; error?: string; notFound?: boolean }>();
+  const detail = $derived(record?.id === id && record.detail?.id === id ? record.detail : null);
+  const error = $derived(record?.id === id ? record.error : undefined);
+  const notFound = $derived(record?.id === id && record.notFound);
 
   // Reload the full record when the job changes state; poll while it is active.
   $effect(() => {
     const state = summary?.state;
     const jobId = id;
+    const previous = untrack(() => record);
+    if (previous?.id !== jobId) record = { id: jobId };
+    else if (previous.notFound) return;
     let stop = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const load = async () => {
       try {
         // untrack: loadJob reads and writes brewery.details; tracking it here re-ran this effect in a loop.
         const d = await untrack(() => brewery.loadJob(jobId, !isTerminal(state)));
-        if (!stop) {
-          detail = d;
-          error = null;
-        }
+        if (stop) return;
+        if (d.id !== jobId) throw new Error('The controller returned a different job.');
+        record = { id: jobId, detail: d };
+        if (isTerminal(d.state)) return;
       } catch (e) {
-        if (!stop) error = errorText(e);
+        if (stop) return;
+        if (e instanceof ApiError && e.status === 404) {
+          record = { id: jobId, notFound: true, error: 'This job does not exist or was removed.' };
+          return;
+        }
+        record = { id: jobId, detail: record?.detail, error: errorText(e) };
       }
       if (!stop && !isTerminal(state)) timer = setTimeout(load, 3000);
     };
@@ -50,45 +61,55 @@
 
   const history = $derived(summarizeHistory(detail?.events ?? []));
   const job = $derived(detail && summary ? { ...detail, ...summary, result: detail.result, events: detail.events } : (detail ?? summary));
+  const hint = $derived(isTerminal(job?.state) && job?.state !== 'succeeded' ? jobFixHint(job?.error, job?.host) : null);
   const prompt = $derived(job?.prompt_id ? prompts.find((p) => p.id === job.prompt_id) : null);
   const downloadId = $derived(job?.kind === 'hf_download' && job.state === 'succeeded' ? obj(job.result)?.library_model_id : null);
   const download = $derived(typeof downloadId === 'string' ? models.find((m) => m.id === downloadId) : null);
+
+  function eventProgress(event: JobEvent) {
+    const pd = readDetail(event.progress_detail);
+    const labels = [event.state, stateLabel(event.state)].map((label) => label.toLowerCase());
+    const text = pd ? detailLines(pd, event.at).main : progressText(event.progress);
+    return text.split(' · ').filter((part) => part && !labels.includes(part.trim().toLowerCase())).join(' · ');
+  }
 </script>
 
 <div class="stack">
   <p class="small"><a href="#/queue">← All jobs</a></p>
-  {#if !job}
-    <h1 tabindex="-1">Job <span class="mono">{id}</span></h1>
+  <div class="head">
+    <div class="row">
+      <!-- Keep the focus target mounted when the loading title changes. -->
+      <h1 tabindex="-1">{#if notFound || !job}Job <span class="mono">{id}</span>{:else}{kindTitle(job.kind)}{/if}</h1>
+      {#if job && !notFound}<JobState {job} />{/if}
+    </div>
+    {#if job && !notFound}<p class="xs muted mono break">{job.id}</p>{/if}
+  </div>
+  {#if notFound || !job}
     {#if error}<p class="note bad" role="alert">{error}</p>{:else}<p class="muted">Loading…</p>{/if}
   {:else}
-    <div class="head">
-      <div class="row">
-        <h1 tabindex="-1">{kindTitle(job.kind)}</h1>
-        <JobState {job} />
-      </div>
-      <p class="xs muted mono break">{job.id}</p>
-    </div>
-
-    {#if job.state === 'running' || job.state === 'queued'}
+    {#if isActive(job.state)}
       <section class="panel">
         <div class="body stack">
-          {#if job.state === 'queued'}
+          {#if job.state === 'queued' && !isCancelling(job)}
             <p class="small">Waiting in the queue. It starts when the jobs before it end.</p>
           {:else}
             <JobProgress {job} label="Job progress" />
           {/if}
           <div><CancelButton {job} small={false} /></div>
-          <p class="xs muted">Running work is not a result. Results appear here after the job finishes.</p>
+          <p class="xs muted">Results appear here after the job finishes.</p>
         </div>
       </section>
     {/if}
 
     {#if job.error}<p class="note bad" role="alert">{job.error}</p>{/if}
     {#if job.state === 'interrupted' || job.state === 'missing'}
-      <p class="note warn">The controller lost this job (restart or worker loss). Partial outputs are excluded. Submit the job again to retry.</p>
+      <p class="note warn">The controller lost this job (restart or worker loss). Partial outputs are excluded.</p>
     {/if}
     {#if job.state === 'cancelled'}
       <p class="note warn">This job was cancelled. Partial outputs are excluded.</p>
+    {/if}
+    {#if hint}
+      <p class="small muted">{hint.text} <a href={hint.href}>{hint.label}</a></p>
     {/if}
 
     <div class="layout">
@@ -138,10 +159,17 @@
                 </ol>
               </div>
             {/if}
-            {#if prompt || job.prompt}
+            {#if detail && (detail.prompt_text != null || job.prompt_id)}
               <div>
-                <h3 class="h">Prompt{prompt ? `: ${prompt.name}` : ''}</h3>
-                <pre class="block">{prompt?.text ?? job.prompt}</pre>
+                <h3 class="h">Prompt{detail.prompt_text == null && prompt ? `: ${prompt.name}` : ''}</h3>
+                {#if detail.prompt_text != null}
+                  <pre class="block">{detail.prompt_text}</pre>
+                {:else if prompt}
+                  <p class="small muted">Current saved prompt. The text may have changed after this job ran.</p>
+                  <pre class="block">{prompt.text}</pre>
+                {:else}
+                  <p class="small muted">The text used by this job is not available.</p>
+                {/if}
               </div>
             {/if}
             {#if job.options && Object.keys(job.options).length}
@@ -158,10 +186,10 @@
             <header><h2 id="ev-h">Event log</h2></header>
             <ol class="events">
               {#each history as { event: ev, collapsed }, i (i)}
-                {@const pd = readDetail(ev.progress_detail)}
+                {@const progress = eventProgress(ev)}
                 <li>
                   <span class="xs muted num">{formatTime(ev.at)}</span>
-                  <span class="small"><strong>{ev.state}</strong>{#if pd}{' · '}{detailLines(pd, ev.at).main}{:else if ev.progress}{' · '}{progressText(ev.progress)}{/if}</span>
+                  <span class="small"><strong>{stateLabel(ev.state)}</strong>{#if progress}{' · '}{progress}{/if}</span>
                   {#if collapsed}<span class="xs muted">{collapsed} earlier progress update{collapsed === 1 ? '' : 's'} in this phase not listed</span>{/if}
                   {#if ev.error}<span class="xs err break">{ev.error}</span>{/if}
                 </li>

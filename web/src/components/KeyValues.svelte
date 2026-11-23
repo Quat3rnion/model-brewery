@@ -45,4 +45,5 @@
     margin: 0;
     min-width: 0;
   }
+  summary { min-height: 24px; min-width: 24px; }
 </style>
