@@ -134,6 +134,9 @@ print(json.dumps({"state":"succeeded","progress":"done","result":{"kind":"trace"
     if [ -f "$dir/result" ]; then cat "$dir/result"; exit; fi
     hash=$(sha256sum "$dir/converted.gguf" | cut -d' ' -f1)
     tool=$(printf '%064d' 1)
+    if [ -f "${0%/*}/bad-conversion-pin" ]; then
+        printf '%064d\n' 0 > "$dir/input.sha"
+    fi
     printf '{"state":"succeeded","progress":"done","result":{"kind":"convert","gguf_type":"BF16","file_verification":{"status":"passed"},"artifact":{"kind":"gguf","path":"%s","sha256":"%s","bytes":8},"inputs":[{"sha256":"%s","id":"%s"}],"backend_receipt":{"executable_sha256":"%s","hf_exporter_sha256":"%s"}}}\n' "$dir/converted.gguf" "$hash" "$(cat "$dir/input.sha")" "$(cat "$dir/input.id")" "$tool" "$tool"
     ;;
   *) exit 1 ;;
@@ -176,6 +179,38 @@ esac
     let path = format!("/api/scratch/{id}");
     let convert = format!("{path}/gguf");
     let body = json!({"sha256":scratch["sha256"],"assets_id":assets["id"]});
+    let bad_pin = t.root.path().join("bad-conversion-pin");
+    fs::write(&bad_pin, "").unwrap();
+    let (202, bad_job) = t.request(&convert, "", Some(body.clone())) else {
+        panic!("conversion admission")
+    };
+    let bad_job_path = format!("/api/jobs/{}", bad_job["id"].as_str().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (_, detail) = t.request(&bad_job_path, "", None);
+        if !matches!(detail["state"].as_str(), Some("queued" | "running")) {
+            assert_eq!(detail["state"], "failed", "{detail}");
+            assert!(
+                detail["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("pinned revision")
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "{detail}");
+        sleep(Duration::from_millis(25));
+    }
+    assert!(t.request(&path, "", None).1.get("gguf").is_none());
+    assert!(
+        !t.root
+            .path()
+            .join("state/local-edit/existing/worker/jobs")
+            .join(bad_job["id"].as_str().unwrap())
+            .join("work/converted.gguf")
+            .exists()
+    );
+    fs::remove_file(bad_pin).unwrap();
     let (status, job) = t.request(
         &convert,
         "Idempotency-Key: private-gguf\r\n",
