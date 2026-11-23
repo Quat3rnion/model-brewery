@@ -17,6 +17,7 @@
   import Blockers from '../components/Blockers.svelte';
   import FieldError from '../components/FieldError.svelte';
   import SubmitStatus from '../components/SubmitStatus.svelte';
+  import RetryRecovery from '../components/RetryRecovery.svelte';
   import RecentJobs from '../components/RecentJobs.svelte';
   import Badge from '../components/Badge.svelte';
   import type { Host, JobDetail, JobSummary, Workflow } from '../lib/types';
@@ -80,6 +81,7 @@
   let gText = $state('');
   let submittedText = $state('');
   let gMaxTokens = $state<number>();
+  const invalidMax = $derived(gMaxTokens !== undefined && (!Number.isInteger(gMaxTokens) || gMaxTokens < 1 || gMaxTokens > 512));
   unsavedChanges(() => gText !== '' && gText !== submittedText);
   const gen = new Submitter('evaluate.generate');
   const gHostBlockers = $derived(hostBlockers('generate', hostOf(gBundle, gHost)));
@@ -87,6 +89,7 @@
     ...(!bundles.some((b) => b.id === gBundle && b.available !== false) ? [{ field: 'g-bundle', text: 'Select an available bundle.' }] : []),
     ...(gMode === 'saved' && !prompts.some((p) => p.id === gPromptId) ? [{ field: 'g-prompt', text: 'Select a saved prompt.' }] : []),
     ...(gMode === 'text' && !gText.trim() ? [{ field: 'g-text', text: 'Enter a prompt.' }] : []),
+    ...(invalidMax ? [{ field: 'g-max-tokens', text: 'Enter a whole number from 1 to 512.' }] : []),
   ]);
   async function generate() {
     const text = gMode === 'text' ? gText : undefined;
@@ -209,7 +212,7 @@
       Score a bundle on the pinned GSM8K split. To measure a difference, compare it with another model’s results from the same protocol. File verification and generated text are separate checks.
     </p>
   </div>
-  {#if retry.failed}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
+  {#if retry.failed}<RetryRecovery reason={retry.failure} reload={retry.reload} startNew={retry.startNew} />{/if}
   {#if retry.loadingReason}<p class="hint" role="status">{retry.loadingReason}</p>{/if}
   {#if retry.offered && retry.pending?.kind !== 'generate'}<RetryOffer apply={retry.usePrevious} />{/if}
 
@@ -374,7 +377,12 @@
             </div>
           {/if}
         </fieldset>
-        {#if gMaxTokens !== undefined}<p class="hint">Maximum output tokens from previous request: {gMaxTokens}.</p>{/if}
+        <div class="field">
+          <label for="g-max-tokens">Maximum output tokens</label>
+          <input id="g-max-tokens" class="input num" type="number" min="1" max="512" step="1" bind:value={gMaxTokens}
+            aria-invalid={invalidMax || undefined} aria-describedby="g-max-tokens-hint" />
+          <span id="g-max-tokens-hint" class="hint">{invalidMax ? 'Enter a whole number from 1 to 512.' : 'Leave blank to use the default.'}</span>
+        </div>
         {@render queue('Queue generation', 'generate', gFields, gHostBlockers, gen, generate)}
       </div>
     </WorkflowGate>

@@ -1,12 +1,14 @@
 <script lang="ts">
   import { brewery } from '../lib/store.svelte';
-  import { Submitter } from '../lib/submit.svelte';
+  import { stripEmpty, Submitter } from '../lib/submit.svelte';
+  import { bodyKey, resultOfPreviousSubmission } from '../lib/retry-keys';
   import type { RetrySubmission } from '../lib/retry-prefill.svelte';
-  import JobLink from './JobLink.svelte';
+  import type { NewJob } from '../lib/types';
   import ModelSelect from './ModelSelect.svelte';
   import Submit from './Submit.svelte';
+  import SubmitStatus from './SubmitStatus.svelte';
 
-  let { sourceId = $bindable(''), encode, restored, retry, loading }: {
+  let { sourceId = $bindable(''), encode = $bindable(false), restored, retry, loading }: {
     sourceId?: string; encode: boolean; restored: boolean; retry?: RetrySubmission; loading: boolean;
   } = $props();
   let open = $state(false);
@@ -24,11 +26,12 @@
     : host?.capabilities?.[encode ? 'convert' : 'plan'] !== true ? `Enable ${encode ? 'Convert' : 'Plan'} on the source host.`
     : host?.capabilities?.[capability] !== true ? `Select a copy on a worker that supports this Hy4 ${action}. ${host?.reasons?.[capability] ?? ''}` : '');
   const submission = new Submitter(job => job.kind === 'convert' ? 'convert.hy4.encode' : 'convert.hy4.plan');
+  const request = $derived<NewJob | null>(source ? { kind: encode ? 'convert' : 'plan', host: source.host,
+    input_ids: [source.id], options: { hy4_overrides: { [tensor]: 'Q8_0' } } } : null);
 
   async function queue() {
-    if (loading || retry?.blocked || submission.busy || problem || !source) return;
-    await submission.submit({ kind: encode ? 'convert' : 'plan', host: source.host, input_ids: [source.id],
-      options: { hy4_overrides: { [tensor]: 'Q8_0' } } }, retry);
+    if (loading || retry?.blocked || submission.busy || problem || !request) return;
+    await submission.submit(request, retry);
   }
 </script>
 
@@ -36,6 +39,13 @@
   <summary><strong>{encode ? 'Hy4 gate conversion' : 'Hy4 metadata plan'}</strong> <span class="xs muted">Text-only GGUF layout</span></summary>
   <div class="body stack">
     <p class="small">Target: <strong>tencent/Hy4-flash</strong>, revision <code>b2498eba6a1a3f9bbcab4190bc1313a3c7010c2f</code>. The worker checks the pinned metadata, not the Library name.</p>
+    <label class="field">
+      Hy4 operation
+      <select class="input" bind:value={encode}>
+        <option value={false}>Metadata plan</option>
+        <option value={true}>Gate conversion</option>
+      </select>
+    </label>
     <ModelSelect id="hy4-source" bind:value={sourceId} kinds={['hf']} label="Hy4 source" hint="Choose the registered HF directory on a worker that supports this job." />
     {#if source?.kind === 'hf'}<p class="xs muted">Source: <code>{source.path}</code> on <strong>{source.host}</strong>.</p>{/if}
     <p class="small">Fixed override: <code>{tensor}</code> to <strong>Q8_0</strong>.</p>
@@ -46,14 +56,9 @@
       <p class="xs muted">Reads metadata only. Does not read or verify weight payloads, write a GGUF file, or test runtime support or quality.</p>
     {/if}
     <Submit blockers={problem ? [problem] : []} busy={submission.busy} disabled={loading || retry?.blocked} onclick={queue}>Queue Hy4 {action}</Submit>
-    <div aria-live="polite">
-      {#if submission.error}
-        <p class="note bad" role="alert">{submission.error}</p>
-      {:else if submission.job}
-        <p class="muted">{submission.replayed ? 'This request was already queued as job' : 'Queued as job'}
-          <JobLink id={submission.job.id} label={'View job result: ' + submission.job.id} />.</p>
-      {/if}
-    </div>
+    <SubmitStatus s={submission}
+      previous={resultOfPreviousSubmission(bodyKey(submission.acceptedBody), request && stripEmpty(request))}
+      resultLinkLabel={submission.job ? 'View job result: ' + submission.job.id : undefined} />
   </div>
 </details>
 

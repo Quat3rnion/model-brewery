@@ -131,7 +131,7 @@
     {/if}
     {#if retry || managedRetry}
       <div class="row">
-        {#if retry}<a class="btn" href={retry.href}>{retry.label}</a>{/if}
+        {#if retry && !(managedRetry && job.profile_revision)}<a class="btn" href={retry.href}>{retry.label}</a>{/if}
         {#if managedRetry}<a class="btn" href={managedRetryHref(managedRetry)}>Run again</a>{/if}
         {#if hint}<p class="small muted">{hint}</p>{/if}
       </div>

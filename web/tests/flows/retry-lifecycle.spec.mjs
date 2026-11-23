@@ -75,10 +75,10 @@ test('plain Generate never inherits the retry token limit', async ({ page, contr
     state: 'failed', input_ids: ['bundle-a'], prompt_text: 'Old prompt.', options: { max_tokens: 1 },
   })), 'Evaluate');
   const form = page.getByRole('region', { name: 'Generate', exact: true });
-  const cap = form.getByText('Maximum output tokens from previous request: 1.');
-  await expect(cap).toBeVisible();
+  const cap = form.getByRole('spinbutton', { name: 'Maximum output tokens' });
+  await expect(cap).toHaveValue('1');
   await nav(page, 'Evaluate').click();
-  await expect(cap).toHaveCount(0);
+  await expect(cap).toHaveValue('');
   await form.getByRole('combobox', { name: 'Bundle' }).click();
   await form.getByRole('option', { name: /Fixture bundle/ }).click();
   await form.getByRole('radio', { name: 'Type a prompt' }).check();

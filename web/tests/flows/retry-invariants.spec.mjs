@@ -178,7 +178,7 @@ test('edited partial transfer still requires acknowledgment on the plain route',
   expect(posts(c)).toHaveLength(0);
   await page.getByRole('checkbox', { name: 'Continue without these entries' }).check();
   await button(page, 'Transfer').click();
-  await expect.poll(() => posts(c).map(r => r.body.input_ids)).toEqual([['source-a', 'gguf-a']]);
+  await expect.poll(() => posts(c).map(r => r.body.input_ids)).toEqual([['gguf-a', 'source-a']]);
 });
 
 for (const d of [

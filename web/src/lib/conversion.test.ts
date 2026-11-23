@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildConversion, parseConversion, parseConversions, stageRows, isActiveConversion, ConversionSubmitter, STAGES } from './conversion';
+import { buildConversion, parseConversion, parseConversions, stageRows, isActiveConversion, newerConversion, ConversionSubmitter, STAGES } from './conversion';
 
 it('uses a new key for an identical plain conversion after retry query removal', async () => {
   const sent: string[] = [];
@@ -29,6 +29,15 @@ const form = (over: Partial<ConvertForm> = {}): ConvertForm => ({
 const wf = (over: Record<string, unknown> = {}) => ({
   id: 'c1', host: 'frame', state: 'running', stage: 'plan', job_ids: { inspect: 'j-i', plan: 'j-p' }, cancel_requested: false,
   created_at: 1, updated_at: 2, input_ids: ['src'], options: { profile: 'ht43' }, ...over,
+});
+
+it('never replaces newer conversion progress with a delayed match', () => {
+  const old = parseConversion(wf({ stage: 'inspect', updated_at: 10 }))!;
+  const active = parseConversion(wf({ stage: 'verify', updated_at: 11 }))!;
+  const done = parseConversion(wf({ state: 'succeeded', stage: 'verify', updated_at: 11 }))!;
+  expect(newerConversion(active, old)).toBe(active);
+  expect(newerConversion(done, { ...active, updatedAt: 11 })).toBe(done);
+  expect(newerConversion(active, done)).toBe(done);
 });
 
 describe('conversion request', () => {

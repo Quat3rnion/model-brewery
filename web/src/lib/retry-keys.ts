@@ -43,6 +43,14 @@ export async function retryKey(failedId: string, launcher: string, body: object)
 export interface RetrySubmission {
   blocked: boolean;
   failedId?: string;
+  /** Canonical launcher when several controls submit the same failed operation. */
+  launcher?: string;
+  /** Capture the draft now; open the plain form only on a later explicit press. */
+  preparePlain?: () => () => boolean;
+}
+
+export function resultOfPreviousSubmission(accepted: string | undefined, current: unknown): boolean {
+  return accepted !== undefined && accepted !== bodyKey(current);
 }
 
 /** Keep only a plain launcher’s unconfirmed request in the current visit.

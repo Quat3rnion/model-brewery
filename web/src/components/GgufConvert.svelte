@@ -24,6 +24,7 @@
   import ComponentPicker from './ComponentPicker.svelte';
   import Blockers from './Blockers.svelte';
   import Submit from './Submit.svelte';
+  import NewRun from './NewRun.svelte';
   import RetryWarnings from './RetryWarnings.svelte';
   import type { RetryOmission, RetrySubmission } from '../lib/retry-prefill.svelte';
 
@@ -161,6 +162,7 @@
     {#if starter.error}<p class="note bad" role="alert">{starter.error} Pressing Start again retries the same request.</p>
     {:else if starter.last}<p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a href={conversionRunHref(starter.last.id, 'gguf')}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : ''}</p>{/if}
   </div>
+  {#if !starter.error && starter.replayed && starter.newRun}<NewRun prepare={starter.newRun} disabled={starter.busy} />{/if}
 </div>
 
 <style>

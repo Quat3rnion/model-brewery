@@ -188,6 +188,49 @@ describe('retry prefill', () => {
     expect(t.retry.action('queue').failedId).toBe('job');
     expect(t.retry.action('unrelated').failedId).toBeUndefined();
   });
+
+  it('binds a retry to the operation ID, not the selector in the link', async () => {
+    const t = setup();
+    const retry = new RetryPrefill({
+      ...t.form,
+      restore: name => ({ ...t.restore(name), failedId: 'parent-run' }),
+    });
+    retry.enter('entry', 'failed-stage');
+    retry.setReady(true);
+    t.resolve('prior');
+    await vi.waitFor(() => expect(retry.action('queue').failedId).toBe('parent-run'));
+    expect(retry.action('unrelated').failedId).toBeUndefined();
+  });
+
+  it('does not allow a plain submission on a retry route when loading history fails', async () => {
+    const t = setup();
+    t.load.mockRejectedValueOnce(new Error('History unavailable'));
+    t.retry.enter('entry', 'job');
+    t.retry.setReady(true);
+    await vi.waitFor(() => expect(t.retry.failed).toBe(true));
+    expect(t.retry.action('queue').blocked).toBe(true);
+    t.retry.reload();
+    expect(t.retry.loading).toBe(true);
+    t.resolve('prior');
+    await vi.waitFor(() => expect(t.retry.action('queue')).toMatchObject({ blocked: false, failedId: 'job' }));
+  });
+
+  it('opens the plain form with the submitted snapshot, not the later edit', async () => {
+    const t = setup();
+    const openPlain = vi.fn();
+    const retry = new RetryPrefill({ ...t.form, openPlain });
+    retry.enter('entry', 'job');
+    retry.setReady(true);
+    t.resolve('prior');
+    await vi.waitFor(() => expect(t.draft().limit).toBe(7));
+    const prepare = retry.action('queue').preparePlain!();
+    t.draft().limit = 9;
+    expect(prepare()).toBe(true);
+    expect(openPlain).toHaveBeenCalledOnce();
+    retry.enter('entry', null);
+    expect(t.draft().limit).toBe(7);
+    expect(retry.action('queue').failedId).toBeUndefined();
+  });
 });
 
 it('permits stored results but suppresses presentation after interaction or a round trip', () => {

@@ -12,6 +12,8 @@ export class Submitter {
   error = $state<string | null>(null);
   job = $state<AcceptedJob | null>(null);
   replayed = $state(false);
+  acceptedBody = $state.raw<NewJob>();
+  newRun = $state.raw<(() => boolean) | undefined>();
   #plain = new PlainAttempt();
 
   constructor(private launcher: string | ((job: NewJob) => string)) {}
@@ -25,7 +27,8 @@ export class Submitter {
     try {
       // Freeze the actual wire body before yielding to Web Crypto.
       const body: NewJob = JSON.parse(JSON.stringify(stripEmpty(job)));
-      const launcher = typeof this.launcher === 'string' ? this.launcher : this.launcher(body);
+      const prepare = retry?.preparePlain?.();
+      const launcher = retry?.launcher ?? (typeof this.launcher === 'string' ? this.launcher : this.launcher(body));
       if (!failedId) plain = this.#plain.take(launcher, body, captureSubmissionVisit());
       const key = plain?.key ?? await retryKey(failedId!, launcher, body);
       const created = await api.queueJob(body, key);
@@ -33,6 +36,12 @@ export class Submitter {
       plain?.complete();
       this.job = created;
       this.replayed = !('state' in created);
+      this.acceptedBody = body;
+      this.newRun = this.replayed && prepare ? () => {
+        if (!prepare()) return false;
+        this.newRun = undefined;
+        return true;
+      } : undefined;
       void brewery.refresh();
       return created;
     } catch (e) {
@@ -47,7 +56,8 @@ export class Submitter {
 
 /** Remove empty optional values so the controller applies its own defaults. */
 export function stripEmpty(job: NewJob): NewJob {
-  const out: NewJob = { kind: job.kind, input_ids: job.input_ids };
+  const checklist = job.kind === 'transfer' || job.kind === 'transfer_preview';
+  const out: NewJob = { kind: job.kind, input_ids: checklist ? [...new Set(job.input_ids)].sort() : job.input_ids };
   if (job.host) out.host = job.host;
   if (job.prompt_id) out.prompt_id = job.prompt_id;
   else if (job.prompt) out.prompt = job.prompt;
@@ -57,7 +67,21 @@ export function stripEmpty(job: NewJob): NewJob {
       if (v === undefined || v === null || v === '' || (typeof v === 'number' && Number.isNaN(v))) continue;
       options[k] = v;
     }
+    const coords = options.indices;
+    if (job.kind === 'weight_tune' && Array.isArray(coords) && coords.every(pair =>
+      Array.isArray(pair) && pair.length === 2 && pair.every(Number.isSafeInteger))) {
+      // Coordinate order is not a control in the editor. Preserve each tuple's axes.
+      options.indices = [...coords].sort(([ar, ac], [br, bc]) => ar - br || ac - bc);
+    }
     if (Object.keys(options).length) out.options = options;
   }
   return out;
+}
+
+/** Reserve a matched read's slot until a detail or state snapshot supplies its state. */
+export function acceptedJobSummary(accepted: AcceptedJob, request: NewJob): JobSummary {
+  return 'state' in accepted ? accepted : {
+    id: accepted.id, state: 'queued', kind: request.kind, host: request.host,
+    input_ids: request.input_ids, options: request.options,
+  };
 }

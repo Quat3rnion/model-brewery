@@ -1,6 +1,6 @@
 import { onDestroy, tick, untrack } from 'svelte';
 import { bodyKey, type RetrySubmission } from './retry-keys';
-import { hashParam, route } from './route.svelte';
+import { hashParam, plainRunHref, route } from './route.svelte';
 import { readRetry } from './rerun';
 
 export type { RetrySubmission } from './retry-keys';
@@ -55,8 +55,10 @@ interface Restoration<D, C> {
   actions: readonly string[];
   /** Other actions can share omission checks without using the retry key. */
   retryActions?: readonly string[];
-  /** Use the original run or job ID if the loader needed a prefixed selector. */
+  /** Use the rerun operation ID, not the route selector or a child stage ID. */
   failedId?: string;
+  /** Use the same launcher for aliases that can submit the same body. */
+  retryLauncher?: string;
   patch: Partial<D>;
   context?: C;
   focus?: string;
@@ -75,6 +77,7 @@ interface Prefill<D, R, C> {
   applied?: (patch: Partial<D>) => void;
   focus?: (id: string) => void;
   clear?: (patch: Partial<D>) => void;
+  openPlain?: () => void;
 }
 
 interface HistoryRecord<R> {
@@ -101,14 +104,23 @@ interface Applied<D> {
  *   replacement or explicit acknowledgment before an affected action queues.
  *   Keep the warning on edits and plain routes while the draft still depends
  *   on restored inputs. One acknowledgment covers only the current omissions.
- * - During retry loading, block Queue and show the reason. Discard work from
- *   departed route entries; clean up untouched retry fields on exit.
+ * - Block Queue while retry identity is unknown, including a failed GET.
+ *   Show the reason and let the operator reload history or explicitly leave
+ *   for the plain form. Discard work from departed route entries; clean up
+ *   untouched retry fields on normal exit.
  * - On a retry route, the matching action gets a deterministic key from
- *   the failed ID, launcher and wire body, even if the operator enters the
- *   inputs by hand. Bind the action before enabling Queue. The controller
- *   matches it across visits and reloads and returns the accepted record.
- *   On a plain route, a hand-rebuilt identical body is a new run by design.
- *   Plain keys can only be reused for an unconfirmed submission in its visit.
+ *   the rerun operation ID, launcher and canonical wire body. Aliases for the
+ *   same operation share its ID and launcher (a managed stage uses its run ID
+ *   when it reopens the whole run). Bind even a hand-entered draft before
+ *   enabling Queue. Sort set-valued fields (transfer entries and tuning
+ *   coordinates) on the wire before hashing. Do not sort positional values
+ *   like compare inputs, component inputs or tensor axes. The benchmark
+ *   worker runs suites in wire order: retain historical suite order and
+ *   append new suites in a stable order.
+ * - A match shows the accepted ID and offers Start a new run with the
+ *   submitted inputs. It opens a plain form but does not submit it. Plain
+ *   keys are random and can only be reused for an unconfirmed submission in
+ *   its visit. An accepted result belongs to its submitted body, not later edits.
  * - Async replies may update visible results. Only the visit that started
  *   the request may navigate or move focus, and only before the user moves
  *   on. Returning to the same history entry starts a different visit.
@@ -116,12 +128,14 @@ interface Applied<D> {
 export class RetryPrefill<D extends object, R, C = never> {
   loading = $state(false);
   get loadingReason() { return this.loading ? 'Loading the previous job options.' : ''; }
-  failed = $state(false);
+  failure = $state('');
+  get failed() { return !!this.failure; }
+  get unavailable() { return this.loading || this.failed; }
   context = $state.raw<C | undefined>(undefined);
   pending = $state.raw<R | undefined>(undefined);
   get offered() { return this.pending !== undefined; }
   #id: string | null = null;
-  #binding = $state.raw<{ failedId: string; actions: readonly string[] } | undefined>(undefined);
+  #binding = $state.raw<{ failedId: string; actions: readonly string[]; fields: (keyof D)[]; launcher?: string } | undefined>(undefined);
   #current = $state.raw<Applied<D> | undefined>(undefined);
   #applied = $state.raw<Applied<D>[]>([]);
   #acknowledged = $state.raw(new Map<Applied<D>, string>());
@@ -132,6 +146,7 @@ export class RetryPrefill<D extends object, R, C = never> {
   #isRetry = false;
   #baseline: string | undefined;
   #restored: Partial<D> | undefined;
+  #keepDraft = false;
   #record: HistoryRecord<R> | undefined;
   #visit?: ReturnType<typeof route.capture>;
   #deferredFocus?: { id: string; canPresent: () => boolean };
@@ -177,9 +192,24 @@ export class RetryPrefill<D extends object, R, C = never> {
 
   action(action: string): RetrySubmission {
     const missing = this.omissions(action);
+    const binding = this.#binding?.actions.includes(action) ? this.#binding : undefined;
     return {
-      blocked: this.loading || (missing.length > 0 && (missing.some(item => item.required) || !this.acknowledged(action))),
-      failedId: this.#binding?.actions.includes(action) ? this.#binding.failedId : undefined,
+      blocked: this.unavailable || (missing.length > 0 && (missing.some(item => item.required) || !this.acknowledged(action))),
+      failedId: binding?.failedId,
+      launcher: binding?.launcher,
+      preparePlain: () => {
+        const draft = copy(this.form.read());
+        const fields = binding?.fields;
+        const href = plainRunHref(route.hash);
+        return () => {
+          const next = fields ? copy(this.form.read()) : copy(draft);
+          if (fields) for (const key of fields) next[key] = copy(draft[key]);
+          this.form.write(next);
+          this.#keepDraft = !!this.#id;
+          this.startNew(href);
+          return true;
+        };
+      },
     };
   }
 
@@ -192,14 +222,15 @@ export class RetryPrefill<D extends object, R, C = never> {
     this.#visit = visit;
     this.#route = routeKey;
     this.loading = false;
-    this.failed = false;
+    this.failure = '';
     this.pending = undefined;
     this.#record = undefined;
-    if (this.#restored) {
+    if (this.#restored && !this.#keepDraft) {
       const plain = resetRestored(this.form.read(), this.#restored, this.form.defaults);
       this.form.write(plain);
       this.form.clear?.(this.#restored);
     }
+    this.#keepDraft = false;
     this.#restored = undefined;
     this.context = undefined;
     this.#id = id;
@@ -211,21 +242,41 @@ export class RetryPrefill<D extends object, R, C = never> {
     this.#edited = (edited || wasRetry) && this.#baseline !== bodyKey(this.form.defaults);
     this.#isRetry = !!id;
     if (!id) return;
-    this.loading = true;
-    const abort = new AbortController();
-    this.#abort = abort;
     // Each slot provides one consistent draft and request type.
     const saved = historyRequests.get(routeKey) as HistoryRecord<R> | undefined;
     if (saved) {
+      this.loading = true;
       this.#receive(saved);
-    } else {
-      void this.form.load(id, abort.signal).then(request => {
-        if (abort.signal.aborted || visit?.current() === false) return;
-        const record = { request };
-        historyRequests.set(routeKey, record);
-        this.#receive(record);
-      }).catch(() => { if (!abort.signal.aborted && visit?.current() !== false) this.#fail(); });
-    }
+    } else this.#load(id);
+  }
+
+  reload = () => {
+    if (!this.#id || !this.failed) return;
+    historyRequests.delete(this.#route);
+    this.#load(this.#id);
+  };
+
+  startNew = (href = plainRunHref(route.hash)) => {
+    if (this.form.openPlain) this.form.openPlain();
+    else route.replaceQuery(href);
+  };
+
+  #load(id: string) {
+    this.#abort?.abort();
+    this.#record = undefined;
+    this.#binding = undefined;
+    this.failure = '';
+    this.loading = true;
+    const routeKey = this.#route;
+    const visit = this.#visit;
+    const abort = new AbortController();
+    this.#abort = abort;
+    void this.form.load(id, abort.signal).then(request => {
+      if (abort.signal.aborted || visit?.current() === false) return;
+      const record = { request };
+      historyRequests.set(routeKey, record);
+      this.#receive(record);
+    }).catch(error => { if (!abort.signal.aborted && visit?.current() !== false) this.#fail(error); });
   }
 
   setReady(ready: boolean) {
@@ -288,7 +339,8 @@ export class RetryPrefill<D extends object, R, C = never> {
     const { request } = this.#record;
     const restoration = this.#restore(request);
     if (!restoration) return;
-    this.#binding = { failedId: restoration.failedId ?? this.#id!, actions: restoration.retryActions ?? restoration.actions };
+    this.#binding = { failedId: restoration.failedId ?? this.#id!, actions: restoration.retryActions ?? restoration.actions,
+      fields: Object.keys(restoration.patch) as (keyof D)[], launcher: restoration.retryLauncher };
     if (this.#edited || bodyKey(this.form.read()) !== this.#baseline) this.pending = request;
     else this.#apply(false, restoration);
     this.loading = false;
@@ -297,8 +349,8 @@ export class RetryPrefill<D extends object, R, C = never> {
   #restore(request: R): Restoration<D, C> | undefined {
     try {
       return this.form.restore(request);
-    } catch {
-      this.#fail();
+    } catch (error) {
+      this.#fail(error);
     }
   }
 
@@ -335,10 +387,10 @@ export class RetryPrefill<D extends object, R, C = never> {
     }
   }
 
-  #fail() {
+  #fail(error: unknown) {
     this.loading = false;
     this.pending = undefined;
-    this.failed = true;
+    this.failure = error instanceof Error && error.message ? error.message : 'The previous request is unavailable.';
   }
 }
 

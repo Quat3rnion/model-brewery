@@ -10,10 +10,13 @@
   import { globalJobEligibility, hostWorkflowEligibility } from '../lib/eligibility';
   import { availableId, loadRetryJob, omittedInputs, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
   import RetryOffer from '../components/RetryOffer.svelte';
+  import RetryRecovery from '../components/RetryRecovery.svelte';
   import type { Blocker } from '../lib/blockers';
   import type { Host } from '../lib/types';
   import SubmitStatus from '../components/SubmitStatus.svelte';
   import RecentJobs from '../components/RecentJobs.svelte';
+  import { tick } from 'svelte';
+  import { route } from '../lib/route.svelte';
 
   const models = $derived(brewery.state?.models ?? []);
   const hosts = $derived(brewery.state?.hosts ?? []);
@@ -84,6 +87,8 @@
   let cleanHost = $state('');
   let digest = $state('');
   let confirmClean = $state(false);
+  let confirmation: HTMLElement | undefined = $state();
+  let cleanButton: HTMLButtonElement | undefined = $state();
   const cleaner = new Submitter('transfers.cleanup');
   const digestProblem = $derived(digest.trim() && !/^[0-9a-f]{64}$/.test(digest.trim()) ? 'Use a 64-character lowercase SHA-256 hex digest.' : null);
   const cleanBlockers = $derived.by(() => {
@@ -126,15 +131,33 @@
   const omitted = $derived(retry.omissions('transfer'));
   const copyRetry = $derived(retry.action('transfer'));
   const previewRetry = $derived(retry.action('transfer_preview'));
+  const cleanRetry = $derived(retry.action('cache_cleanup'));
 
   async function runCleanup() {
+    const visit = route.capture();
+    const group = confirmation;
+    let stayed = group?.contains(document.activeElement) ?? false;
+    const observe = (event: Event) => {
+      if (event.target instanceof Node && !group?.contains(event.target)) stayed = false;
+    };
+    document.addEventListener('focusin', observe);
+    document.addEventListener('pointerdown', observe);
     const job = await cleaner.submit({
       kind: 'cache_cleanup',
       host: cleanHost,
       input_ids: [],
       options: digest.trim() ? { bundle_sha256: digest.trim() } : undefined,
-    }, retry.action('cache_cleanup'));
-    if (job) confirmClean = false;
+    }, cleanRetry);
+    document.removeEventListener('focusin', observe);
+    document.removeEventListener('pointerdown', observe);
+    if (job && visit.current() && confirmation === group) {
+      confirmClean = false;
+      await tick();
+      if (stayed && visit.current() && document.activeElement === document.body) {
+        const resultLink = cleanButton?.closest('section')?.querySelector<HTMLElement>('a[href^="#/jobs/"]');
+        (cleanButton?.disabled ? resultLink : cleanButton)?.focus();
+      }
+    }
   }
 </script>
 
@@ -146,9 +169,10 @@
     </p>
   </div>
 
-  {#if retry.loading || retry.failed || retry.context}
-    <p class="small muted" role="status">{retry.loading ? 'Loading the previous job options.' : retry.failed
-      ? 'Could not open the previous job options. Enter the options again.' : 'Review the previous job options before you queue a job.'}</p>
+  {#if retry.failed}
+    <RetryRecovery reason={retry.failure} reload={retry.reload} startNew={retry.startNew} />
+  {:else if retry.loading || retry.context}
+    <p class="small muted" role="status">{retry.loading ? 'Loading the previous job options.' : 'Review the previous job options before you queue a job.'}</p>
   {/if}
   {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
   <section class="panel" aria-labelledby="tx-h">
@@ -226,17 +250,17 @@
         </div>
       </div>
       {#if confirmClean}
-        <div class="note warn" role="group" aria-label="Confirm cleanup">
+        <div class="note warn" role="group" aria-label="Confirm cleanup" bind:this={confirmation}>
           <p class="small">Remove {digest.trim() ? 'this cached bundle' : 'all unused cached copies'} on {hostName(hosts, cleanHost)}? Later jobs copy the files again.</p>
           <div class="row" style="margin-top:8px">
-          <button type="button" class="btn danger" disabled={retry.loading || cleaner.busy || cleanBlockers.length > 0} onclick={runCleanup}>{cleaner.busy ? 'Submitting…' : 'Queue cleanup'}</button>
+          <button type="button" class="btn danger" disabled={cleanRetry.blocked || cleaner.busy || cleanBlockers.length > 0} onclick={runCleanup}>{cleaner.busy ? 'Submitting…' : 'Queue cleanup'}</button>
             <button type="button" class="btn ghost" onclick={() => (confirmClean = false)}>Keep cache</button>
           </div>
         </div>
       {:else}
         <div class="row">
-          <button type="button" class="btn" aria-describedby={cleanBlockers.length ? 'cleanup-blockers' : undefined}
-            disabled={retry.loading || cleanBlockers.length > 0} onclick={() => (confirmClean = true)}>Clean cache…</button>
+          <button type="button" class="btn" bind:this={cleanButton} aria-describedby={cleanBlockers.length ? 'cleanup-blockers' : undefined}
+            disabled={cleanRetry.blocked || cleanBlockers.length > 0} onclick={() => (confirmClean = true)}>Clean cache…</button>
         </div>
       {/if}
       <Blockers id="cleanup-blockers" blockers={cleanBlockers} />

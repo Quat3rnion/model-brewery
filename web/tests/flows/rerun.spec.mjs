@@ -203,9 +203,11 @@ test('Custom HGN stage restores explicit CPU decode without an effect loop', asy
     profile_revision: revision, options: { threads: 8 }, decode_backend: 'cpu',
   });
   controller.respond('GET', '/api/conversions', { json: [parent] });
-  await retry(page, controller, 'verify', 'Convert', {
+  controller.respond('GET', '/api/jobs/retry-verify', { json: detail(job('retry-verify', 'verify', {
+    state: 'failed',
     profile_revision: revision, input_ids: ['source-a', 'bundle-a'], options: { decode_backend: 'cpu' },
-  });
+  })) });
+  await controller.open(page, 'convert?retry=retry-verify');
   await expect(page.locator('#wf-profile')).toHaveValue(`rev:${revision}`);
   await expect(page.locator('#wf-dec')).toHaveValue('cpu');
   await expect.poll(() => controller.requests('POST', '/api/conversions/eligibility').length + errors.length).toBeGreaterThan(0);
