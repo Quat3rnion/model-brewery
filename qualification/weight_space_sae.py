@@ -20,7 +20,7 @@ import numpy as np
 import torch
 from safetensors.torch import load_file, save_file
 
-from weight_space_acceptance import ARB, BASE, LANTERN as W0_PATH, PINS, QUALIFICATION, REPO, require, save, sha
+from weight_space_acceptance import ARB, BASE, LANTERN as W0_PATH, PINS, QUALIFICATION, REPO, W0_LIBS, require, save, sha
 
 
 LAYER, ROLE = 16, "l_out"
@@ -230,7 +230,8 @@ def main():
         worker.mkdir(mode=0o700)
         save(run, "worker", {"root":str(worker), "engine":str(args.bins / "brewery-engine"),
             "source_roots":[str(BASE.parent)], "disk_reserve_bytes":0, "engine_env":{
-                "BREWERY_LANTERNFISH_TRACE":str(LANTERN), "BREWERY_CPU_THREADS":"4"}})
+                "BREWERY_LANTERNFISH_TRACE":str(LANTERN), "BREWERY_LANTERNFISH_TRACE_LIB_DIR":str(W0_LIBS),
+                "BREWERY_CPU_THREADS":"4"}})
         config = run / "worker.json"
         config.chmod(0o600)
         save(run, "dispatch", {"hosts":{"local":{"local":True, "worker":str(args.bins / "brewery-worker"),

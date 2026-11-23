@@ -112,6 +112,11 @@ python3 tools/scratch_checks.py --runner "$WORK/scratch-check-logits" \
   --child-safetensors "$WORK/child.safetensors" > "$WORK/behavior.json"
 ```
 
+For worker jobs, set `BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR` in `engine_env`
+to the directory with the [four pinned CPU libraries](../../OPERATOR.md#cpu-trace-jobs).
+The engine checks private copies of the libraries before it starts the
+runner. It does not load them from the build directory.
+
 `--fetch` gets missing files only. Omit it to use only the local cache. The
 runner checks the full source hashes before it reads rows. It then checks
 the hash of each selected subset and of the held-out corpus.

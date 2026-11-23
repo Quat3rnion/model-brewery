@@ -62,7 +62,7 @@ fn trace_rejects_an_unpinned_executable_before_launch() {
 }
 
 #[test]
-#[ignore = "requires the provisioned CPU Lanternfish and Qwen BF16 GGUF"]
+#[ignore = "requires the provisioned CPU Lanternfish, trace library directory and Qwen BF16 GGUF"]
 fn trace_real_qwen_bf16() {
     let root = tempfile::Builder::new()
         .prefix("brewery-w1-trace-")

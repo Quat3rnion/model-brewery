@@ -1,6 +1,7 @@
 //! A controller-owned CPU worker per configured local source host.
 use crate::{Error, dispatch::read_limited, domain::Host};
 use brewery_worker::locate_edit::{self, Backend};
+use brewery_worker::{scratch_eval, trace};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -271,11 +272,13 @@ impl Lanes {
                 "BREWERY_GGUF_PYTHON",
                 "BREWERY_LLAMA_CPP",
                 "BREWERY_CONVERTER_DISK_RESERVE_BYTES",
-                "BREWERY_SCRATCH_CHECKS_SCRIPT",
-                "BREWERY_SCRATCH_CHECKS_RUNNER",
-                "BREWERY_SCRATCH_CHECKS_RUNNER_SHA256",
-                "BREWERY_SCRATCH_CHECKS_CACHE",
-                "BREWERY_LANTERNFISH_TRACE",
+                scratch_eval::SCRIPT,
+                scratch_eval::RUNNER,
+                scratch_eval::RUNNER_SHA,
+                scratch_eval::RUNNER_LIB_DIR,
+                scratch_eval::CACHE,
+                trace::EXECUTABLE,
+                trace::LIB_DIR,
                 locate_edit::EXECUTABLE,
                 locate_edit::LIB_DIR,
                 "BREWERY_CPU_THREADS",

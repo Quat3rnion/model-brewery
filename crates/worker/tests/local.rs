@@ -130,7 +130,8 @@ fn scratch_grant_is_job_scoped_exact_and_verified_before_use() {
     fs::write(&other, b"abc").unwrap();
     let pin = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
     let mut cfg: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
-    cfg["engine_env"] = json!({"BREWERY_LANTERNFISH_TRACE":"/unused-in-fixture"});
+    cfg["engine_env"] = json!({"BREWERY_LANTERNFISH_TRACE":"/unused-in-fixture",
+        "BREWERY_LANTERNFISH_TRACE_LIB_DIR":"/fixture-libs"});
     cfg["scratch_access"] =
         json!({"job_id":"private-trace","paths":{(model.to_str().unwrap()):pin}});
     fs::write(&t.b, cfg.to_string()).unwrap();
@@ -249,17 +250,19 @@ print(json.dumps(dict(kind="convert", output_format="gguf", gguf_type="BF16",
 fn trace_worker_publishes_slices_rejects_corruption_and_prunes_only_traces() {
     let t = Rig::new();
     let mut cfg: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
-    cfg["engine_env"] = json!({"BREWERY_LANTERNFISH_TRACE":"/unused-in-fixture"});
+    cfg["engine_env"] = json!({"BREWERY_LANTERNFISH_TRACE":"/unused-in-fixture",
+        "BREWERY_LANTERNFISH_TRACE_LIB_DIR":"/fixture-libs"});
     fs::write(&t.b, cfg.to_string()).unwrap();
     fs::write(
         t.root.join("engine"),
         r#"#!/usr/bin/python3
-import hashlib, json, pathlib, struct, sys
+import hashlib, json, os, pathlib, struct, sys
 job = json.load(sys.stdin)
 if job["kind"] != "trace":
     pathlib.Path("unrelated-artifact").write_text("keep")
     print('{"completed":true}')
     sys.exit()
+assert os.environ["BREWERY_LANTERNFISH_TRACE_LIB_DIR"] == "/fixture-libs"
 src = job["inputs"][0]
 spec = {key: job["options"][key] for key in ["layers", "roles", "positions", "top_k", "byte_cap"]}
 path = pathlib.Path("trace/0")

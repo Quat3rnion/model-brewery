@@ -13,6 +13,7 @@ mod recipe;
 mod scratch_checks;
 mod scratch_locate;
 mod trace;
+mod w0_libraries;
 mod weight;
 
 use anyhow::{Context, Result, bail, ensure};

@@ -870,6 +870,20 @@ impl Worker {
                     Reply::error("Invalid scratch access, job, or worker check configuration"),
                 );
             }
+            if job.kind == scratch_eval::CHECKS
+                && !self
+                    .cfg
+                    .engine_env
+                    .get(scratch_eval::RUNNER_LIB_DIR)
+                    .is_some_and(|p| Path::new(p).is_absolute())
+            {
+                return self.record_prepare(
+                    id,
+                    action,
+                    job,
+                    Reply::error("BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR must be an absolute path"),
+                );
+            }
             if job.kind == locate_edit::JOB {
                 let backend = locate_edit::Request::parse(&job.options)?.edit.backend;
                 let pin = backend.pin();
@@ -995,6 +1009,19 @@ impl Worker {
                     action,
                     job,
                     Reply::error("Invalid trace request or unavailable CPU Lanternfish"),
+                );
+            }
+            if !self
+                .cfg
+                .engine_env
+                .get(trace::LIB_DIR)
+                .is_some_and(|p| Path::new(p).is_absolute())
+            {
+                return self.record_prepare(
+                    id,
+                    action,
+                    job,
+                    Reply::error("BREWERY_LANTERNFISH_TRACE_LIB_DIR must be an absolute path"),
                 );
             }
         }

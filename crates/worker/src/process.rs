@@ -449,6 +449,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 scratch_eval::SCRIPT,
                 scratch_eval::RUNNER,
                 scratch_eval::RUNNER_SHA,
+                scratch_eval::RUNNER_LIB_DIR,
                 scratch_eval::CACHE,
             ],
             locate_edit::JOB if cuda_edit => &[
@@ -458,7 +459,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 locate_edit::CUDA_DEVICES,
             ],
             locate_edit::JOB => &[locate_edit::EXECUTABLE, locate_edit::LIB_DIR],
-            _ => &[trace::EXECUTABLE],
+            _ => &[trace::EXECUTABLE, trace::LIB_DIR],
         };
         command.env_clear().envs(
             keys.iter()
