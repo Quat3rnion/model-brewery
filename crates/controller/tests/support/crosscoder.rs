@@ -7,7 +7,8 @@ fn weights() -> Vec<u8> {
     blob.extend([0_u8; 64]);
     blob.extend(
         [
-            1_f32, 0., 0., 0., 0.707, 0., 0.707, 0., 0., 0., 1., 0., 0., 0.707, 0.707, 0.,
+            1_f32, 0., 0., 0., 0.707, 0., 0.8223309, 0.62033206, 0., 0., 1., 0., 0., 0.707,
+            0.9456805, 0.62033206,
         ]
         .into_iter()
         .flat_map(f32::to_le_bytes),
@@ -87,6 +88,13 @@ fn crosscoder_report_is_bound_to_both_trace_revisions_and_readable_with_mcp() {
     assert_eq!(artifact["features"][2]["decoder_cosine"], 0.);
     let path = format!("/api/crosscoders/{}", id(&artifact));
     assert_eq!(t.json("GET", &path, None, 200), artifact);
+    let (_, raw) = t.bytes("GET", &path);
+    assert!(
+        String::from_utf8(raw)
+            .unwrap()
+            .contains("\"child_norm\":1.1309834100386427"),
+        "reading a stored report must preserve the full-precision decoder norm"
+    );
     assert_eq!(t.bytes("GET", &format!("{path}/safetensors")), (200, blob));
     let mcp = super::mcp::call(&t, "crosscoder_diff", json!({"id":artifact["id"]}));
     assert_eq!(mcp["result"]["isError"], false, "{mcp}");

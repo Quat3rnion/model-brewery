@@ -234,7 +234,7 @@ def main():
         p.error(f"Use torch=={TORCH} and a trace spec of at most 32 KiB")
     if args.output.exists():
         p.error("Output directory already exists")
-    torch.set_num_threads(4)
+    torch.set_num_threads(2)
     source = json.loads(args.spec.read_text())
     data, revisions, _ = load_pairs(controller(args.controller), source)
     weights, scale, metrics = fit(data["train"], data["heldout"], features=args.features,

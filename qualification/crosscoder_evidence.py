@@ -67,7 +67,7 @@ def main():
     parser.add_argument("--anchors", type=Path, help="Array of {label, prompt, position}; label edited fact rows 'edited-fact*'")
     args = parser.parse_args()
     get = controller(args.base)
-    torch.set_num_threads(4)
+    torch.set_num_threads(2)
     weights = args.artifact / "crosscoder.safetensors"
     metadata = args.artifact / "metadata.json"
     started = time.monotonic()
@@ -98,6 +98,7 @@ def main():
     summary = {k: report[k] for k in ("id", "qualification", "version", "method", "layer", "role",
                                      "parent", "child", "scratch_revision_sha256", "weights_sha256",
                                      "training", "metrics", "manifests")}
+    summary["features"], summary["k"] = len(report["features"]), report["k"]
     summary["counts"] = dict(Counter(f["classification"] for f in report["features"]))
     summary["rest_mcp_export_parity_seconds"] = time.monotonic() - started
     if args.anchors:
@@ -111,8 +112,9 @@ def main():
             "Held-out explained variance did not exceed 0.5 on both sides")
     if args.anchors:
         targets = [row for row in summary["heldout_positions"] if row["label"].startswith("edited-fact")]
-        require(targets and any(f["classification"] in DIFFERENT for row in targets for f in row["top_features"][:5]),
-                "No changed or unique crosscoder feature among the five strongest positive target contributions")
+        require(any(f["classification"] in DIFFERENT and f["measured_delta_fraction"] >= 0.05
+                    for row in targets for f in row["top_features"][:5]),
+                "No top-five changed or unique feature projects at least 5% of the measured target delta")
     print(json.dumps({"id": artifact_id, "metrics": summary["metrics"], "counts": summary["counts"]}))
 
 

@@ -534,7 +534,8 @@ This method follows the shared features and model-specific decoders in
 Anthropic's 2024 [Sparse Crosscoders for Cross-Layer Features and Model Diffing](https://transformer-circuits.pub/2024/crosscoders/index.html).
 The trainer uses W11 TopK instead of the paper's sparsity penalty. It
 uses one code for both sides and normalizes each pair of decoder
-directions together. `--difference-weight` puts more weight on the
+directions together. It uses the W11 seed and Adam settings and two CPU
+threads. `--difference-weight` puts more weight on the
 reconstruction error in the child-minus-parent direction. Its default
 value of 1 uses ordinary reconstruction loss.
 
@@ -577,8 +578,9 @@ and `b_enc[features]`. It multiplies rows by `scale`, subtracts
 values. Each side reconstructs with its own `W_dec[2,features,width]`
 slice and bias, then divides by `scale`.
 
-Read the parent and child held-out MSE, explained variance, and mean
-active feature count (L0). A side counts a feature only if its decoder
+Read the parent and child held-out MSE, explained variance
+(`1 - MSE / centered variance`), and mean active feature count (L0).
+A side counts a feature only if its decoder
 norm exceeds `1e-8`. Dead counts use this rule and training activity.
 The child norm ratio is the child norm divided by the sum of both norms.
 A live feature is parent-only at a ratio of 0.10 or less, or child-only
