@@ -1245,16 +1245,15 @@ the client (example for Claude Code):
 }
 ```
 
-For LAN or tailnet access, use the workbench HTTPS URL with `/mcp`. Use a
-client that can send the gateway's HTTP Basic credentials for the `brewery`
-login. Set the credentials in the client's secret store. Do not put them
-in the URL or a shared configuration file.
+For LAN or tailnet access, use the workbench HTTPS URL with `/mcp`. The
+gateway has no login. The client must trust the gateway certificate.
 
 **Accepted access risk:** MCP has the same access as the workbench and has
 no separate token. The controller checks the exact Host, Origin (if sent),
 and `Sec-Fetch-Site` (if sent) on the same loopback listener. The optional
-gateway also checks source CIDR, Host, Origin, and the `brewery` login.
-Any client with workbench access can drive the agent tools. It can create,
+gateway also checks source CIDR, Host, and Origin. It has no login and
+no token. Every client in an allowed LAN or tailnet CIDR can reach `/mcp`
+and drive the agent tools. It can create,
 edit, or discard scratch revisions, run traces and checks, and request
 publication. MCP cannot approve a publication, change settings, administer
 workers, or deploy. The separate operator API uses the same workbench trust
