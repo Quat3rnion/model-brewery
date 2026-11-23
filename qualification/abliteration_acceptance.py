@@ -173,7 +173,8 @@ class Mcp:
         request = Request(self.url + "/mcp", json.dumps({
             "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
         }).encode(), {"Accept": "application/json, text/event-stream",
-                     "Content-Type": "application/json", "Origin": self.url})
+                     "Content-Type": "application/json", "Origin": self.url,
+                     "MCP-Protocol-Version": "2025-06-18"})
         with build_opener(ProxyHandler({})).open(request, timeout=180) as result:
             return json.load(result)["result"]
 
@@ -202,12 +203,17 @@ class Mcp:
 
 
 def run_flow(mcp, run, pins, previous):
+    init = mcp.rpc("initialize", {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "brewery-a7-acceptance", "version": "1"},
+    })
+    require(init["protocolVersion"] == "2025-06-18", "MCP protocol mismatch")
     catalog = {row["name"] for row in mcp.rpc("tools/list", {})["tools"]}
     require({"compute_direction", "get_direction", "create_direction_intervention",
              "ablate_direction", "search_ablation", "run_heretic", "reproduce_heretic",
              "run_checks", "get_checks"}.issubset(catalog)
             and not any("approve" in name for name in catalog), "MCP workflow catalog changed")
-    save(mcp.evidence, "tools", sorted(catalog))
+    save(mcp.evidence, "mcp-session", {"initialize": init, "tools": sorted(catalog)})
     require(not mcp.call("list_models")["models"], "expected empty Library")
     req = Request(mcp.url + "/api/admin/actions", json.dumps({
         "action": "set_weight_editor", "worker": "local", "revision": 0, "enabled": True,
@@ -336,7 +342,8 @@ def main():
     pins = {**native_pins, "slop": a6_pins["slop"]}
     slop_groups = load(cache / (pins["slop"] + ".json"))["rows"]
     require(not excluded.intersection(hashlib.sha256(
-        " ".join(row["positive"]["user"].casefold().split()).encode()).hexdigest() for row in slop_groups),
+        " ".join(row["positive"]["user"].casefold().split()).encode()).hexdigest()
+        for row in slop_groups if row["split"] == "held_out"),
         "Heretic optimization and common slop holdout overlap")
     previous = load(A5 / "report.json")
     require(previous["safetensors"] == PINS[SAFE] and previous["prompt_sets"] == native_pins

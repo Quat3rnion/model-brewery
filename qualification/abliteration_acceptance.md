@@ -68,3 +68,26 @@ Do not use that artifact as the scored Heretic child.
   the pinned Python environment with `python -m unittest discover -s
   tools/heretic -p test_run.py`. Run the Rust MCP, OpenAPI, hosted-agent,
   scratch and Heretic receipt tests inside the exclusive build gate.
+
+## What the results show
+
+The native fit selected L10 (held-out Cohen's d 24.369, margin 1.330).
+The three screen trials matched A5. The trial 0 fitted direction reduced
+the first-token agreement margin by 0.02140 logits against a matched
+random reduction of -0.00098. It beat the control on 5/8 prompts. This
+is a small change in the signed stock margin (0.48216 logits), despite
+the large separation score. A3 and A5 did not show significant flips
+in generated replies.
+
+Heretic's optimization scorer found slop on 0/4 stock prompts and 0/4
+prompts for each trial. Trial KL was 15.02032 and 0.04216 nats. Heretic
+selected the second trial, and the imported SafeTensors and private BF16
+GGUF matched the A6 CUDA run. These trial metrics are not the held-out
+A2 measurements. The A6 held-out run found stock slop on only 2/32
+prompts, and did not establish a reliable reduction.
+
+The acceptance stack based on `cc1b124` ran the paired checks. A separate
+GPU-queued MCP import used the updated launcher and validated the persisted
+trial journal. It produced the exact same SafeTensors SHA-256. See
+`final-journal/child.json` and `final-bin.sha256` in the evidence directory.
+No CPU checks were repeated for an identical Heretic export.
