@@ -162,14 +162,14 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
         }
         Ok(value)
     });
-    if job.kind == trace::JOB
+    if (job.kind == trace::JOB || scratch_eval::private_output(&job.kind))
         && created_work
         && (r.cancel || result.is_err())
         && let Err(error) =
             fs::remove_dir_all(base.join("work")).and_then(|()| File::open(&base)?.sync_all())
     {
-        eprintln!("Trace work directory cleanup failed: {error}");
-        r.reply = Reply::error("Trace work directory cleanup failed");
+        eprintln!("Private work directory cleanup failed: {error}");
+        r.reply = Reply::error("Private work directory cleanup failed");
         return w.put(id, &r);
     }
     r.reply = if r.cancel {
@@ -284,6 +284,39 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         (job.kind == "hf_download") == download.is_some(),
         "Worker is not configured for this operation"
     );
+    let scratch_job = scratch_eval::private_output(&job.kind)
+        || job.inputs.iter().any(scratch_eval::granted);
+    ensure!(
+        scratch_job || w.cfg.scratch_access.is_none(),
+        "scratch worker config is scoped to one job"
+    );
+    if scratch_job {
+        let access = w
+            .cfg
+            .scratch_access
+            .as_ref()
+            .filter(|a| a.job_id == id && a.permits("start", job))
+            .context("Scratch access does not match the job")?;
+        for (index, input) in job.inputs.iter().enumerate() {
+            if let Some(pin) = access.paths.get(&input.path) {
+                ensure!(
+                    scratch_eval::granted(input)
+                        && input.extra.get("sha256").and_then(Value::as_str) == Some(pin),
+                    "Scratch input was not resolved with its current pin"
+                );
+                let mut emit = w.progress_callback(id)?;
+                let bundle = w.scratch_bundle(
+                    &input.path,
+                    pin,
+                    &mut progress::Reporter::new(&mut emit, Some((index, job.inputs.len()))),
+                )?;
+                ensure!(
+                    input.extra.get("bundle_sha256").and_then(Value::as_str) == Some(&bundle.digest),
+                    "Scratch input manifest changed"
+                );
+            }
+        }
+    }
     // Resolve and supervise are different processes. Do not hand off a newly
     // replaced grant root just because the earlier resolution succeeded.
     let _source_guard = if !w.cfg.source_grants.is_empty()
@@ -351,16 +384,47 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .env("OMP_NUM_THREADS", "1");
         }
         c
-    } else if let Some(wrapper) = w.cfg.admission.as_ref().filter(|_| job.kind != trace::JOB) {
+    } else if let Some(wrapper) = w
+        .cfg
+        .admission
+        .as_ref()
+        .filter(|_| job.kind != trace::JOB && !scratch_job)
+    {
         let mut c = Command::new(wrapper);
         c.args(["--wait", "--"]).arg(&w.cfg.engine);
         c
     } else {
         Command::new(&w.cfg.engine)
     };
+    if scratch_job {
+        let keys: &[&str] = match job.kind.as_str() {
+            scratch_eval::GGUF => &[
+                "BREWERY_GGUF_SAFETENSORS",
+                "BREWERY_GGUF_QUANTIZER",
+                "BREWERY_GGUF_HF_EXPORTER",
+                "BREWERY_GGUF_PYTHON",
+                "BREWERY_LLAMA_CPP",
+                "BREWERY_CONVERTER_DISK_RESERVE_BYTES",
+            ],
+            scratch_eval::CHECKS => &[
+                scratch_eval::SCRIPT,
+                scratch_eval::RUNNER,
+                scratch_eval::RUNNER_SHA,
+                scratch_eval::CACHE,
+            ],
+            _ => &[trace::EXECUTABLE],
+        };
+        command.env_clear().envs(
+            keys.iter()
+                .copied()
+                .chain(["BREWERY_CPU_THREADS"])
+                .filter_map(|key| w.cfg.engine_env.get(key).map(|value| (key, value))),
+        );
+    } else {
+        command.envs(&w.cfg.engine_env);
+    }
     command
         .current_dir(&work)
-        .envs(&w.cfg.engine_env)
         .stdin(File::open(jobfile)?)
         .stdout(File::create(&output)?)
         .stderr(File::create(stderr)?);
@@ -376,11 +440,16 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .engine_env
                 .get("BREWERY_CPU_THREADS")
                 .cloned()
-                .or_else(|| env::var("BREWERY_CPU_THREADS").ok());
+                .or_else(|| {
+                    if scratch_job { None } else { env::var("BREWERY_CPU_THREADS").ok() }
+                });
             let ceiling = bounds.cpu_threads.map_or(64, |range| range.max);
             resources::cap_cpu(&mut command, requested.min(ceiling), configured.as_deref())?;
         }
-        if matches!(job.kind.as_str(), "inspect" | "plan" | "convert" | "verify") {
+        if matches!(
+            job.kind.as_str(),
+            "inspect" | "plan" | "convert" | "verify" | scratch_eval::GGUF
+        ) {
             let reserve = if bounds.disk_reserve_bytes.is_some()
                 || job.resources.disk_reserve_bytes.is_some()
             {
@@ -575,6 +644,28 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         value.is_object(),
         "Engine output is not a JSON object; check private engine-output.json"
     );
+    if job.kind == scratch_eval::CHECKS {
+        let hashes = std::array::from_fn(|i| {
+            job.inputs[i].extra.get("sha256").and_then(Value::as_str).unwrap_or_default()
+        });
+        let runner = w.cfg.engine_env.get(scratch_eval::RUNNER_SHA)
+            .context("scratch checks runner pin is missing")?;
+        scratch_eval::check_report(&value, hashes, runner)?;
+        return Ok(value);
+    }
+    if job.kind == scratch_eval::GGUF {
+        ensure!(
+            value["kind"] == "convert"
+                && value["output_format"] == "gguf"
+                && value["gguf_type"] == "BF16"
+                && value["file_verification"]["status"] == "passed"
+                && value["inputs"][0]["sha256"] == job.inputs[0].extra["sha256"]
+                && value["artifact"]["path"].as_str().map(Path::new)
+                    == Some(work.join("converted.gguf").as_path())
+                && value["artifact"]["kind"] == "gguf",
+            "Scratch GGUF did not return a verified conversion receipt"
+        );
+    }
     if job.kind == trace::JOB {
         let request = trace::Request::worker(&job.options, job.prompt.as_deref())?;
         ensure!(value["kind"] == trace::JOB && value["schema_version"] == 1

@@ -150,6 +150,23 @@ pub fn describe_bounded(
     progress: &mut Notify,
     max_bytes: u64,
 ) -> Result<Description> {
+    describe_inner(p, kind, boundary, phase, progress, max_bytes, false)
+}
+
+pub fn describe_exact_file(p: &Path, progress: &mut Notify) -> Result<Description> {
+    let boundary = p.parent().context("source has no parent")?;
+    describe_inner(p, "", boundary, "hash_input", progress, u64::MAX, true)
+}
+
+fn describe_inner(
+    p: &Path,
+    kind: &str,
+    boundary: &Path,
+    phase: &str,
+    progress: &mut Notify,
+    max_bytes: u64,
+    exact_file: bool,
+) -> Result<Description> {
     progress.phase(
         if phase == "verify_output" {
             "inventory_output"
@@ -163,6 +180,7 @@ pub fn describe_bounded(
     let root;
     let entry;
     if no_symlink_open(p, libc::O_PATH)?.metadata()?.is_dir() {
+        ensure!(!exact_file, "scratch input must be a regular file");
         root = p.to_owned();
         entry = ".".into();
         ensure!(
@@ -240,7 +258,7 @@ pub fn describe_bounded(
     Ok(Description { root, bundle })
 }
 
-fn split_gguf(name: &str) -> Option<(&str, usize, usize)> {
+pub(crate) fn split_gguf(name: &str) -> Option<(&str, usize, usize)> {
     let (left, right) = name.strip_suffix(".gguf")?.rsplit_once("-of-")?;
     let (stem, n) = left.rsplit_once('-')?;
     (right.len() == 5 && n.len() == 5).then_some(())?;

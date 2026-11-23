@@ -29,6 +29,7 @@ struct Config {
     source_grant_host: Option<String>,
     #[serde(default)]
     source_grant_protected: Vec<PathBuf>,
+    scratch_access: Option<ScratchAccess>,
     engine: PathBuf,
     admission: Option<PathBuf>,
     exl3_gpu_queue: Option<PathBuf>,
@@ -44,6 +45,43 @@ struct Config {
     resource_bounds: Option<resources::Bounds>,
     hy4_plan: Option<Hy4Plan>,
     weight_editor_host: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScratchAccess {
+    job_id: String,
+    paths: BTreeMap<PathBuf, String>,
+}
+
+impl ScratchAccess {
+    fn permits(&self, action: &str, job: &Job) -> bool {
+        if action != "start" {
+            return false;
+        }
+        let kinds = || job.inputs.iter().map(|i| i.kind.as_str());
+        let pinned = match job.kind.as_str() {
+            scratch_eval::GGUF
+                if job.prompt.is_none()
+                    && scratch_eval::gguf_options(&job.options)
+                    && kinds().eq(["safetensors", "assets"]) =>
+            {
+                &job.inputs[..1]
+            }
+            scratch_eval::CHECKS
+                if job.prompt.is_none()
+                    && job.options.as_object().is_some_and(|v| v.is_empty())
+                    && kinds().eq(scratch_eval::CHECK_INPUTS) =>
+            {
+                &job.inputs[..]
+            }
+            trace::JOB if kinds().eq(["gguf"]) => &job.inputs[..],
+            _ => return false,
+        };
+        job.inputs.iter().all(|i| i.host == pinned[0].host)
+            && self.paths.keys().all(|p| pinned.iter().any(|i| i.path == *p))
+            && pinned.iter().all(|i| self.paths.contains_key(&i.path))
+    }
 }
 
 #[derive(Deserialize)]
@@ -96,6 +134,37 @@ impl Config {
             .context("set BREWERY_WORKER_CONFIG")?
             .canonicalize()?;
         let cfg: Config = load(&path)?;
+        if let Some(access) = &cfg.scratch_access {
+            token(&access.job_id)?;
+            let md = fs::symlink_metadata(&path)?;
+            ensure!(
+                md.is_file()
+                    && md.uid() == unsafe { libc::geteuid() }
+                    && md.mode() & 0o077 == 0
+                    && (1..=4).contains(&access.paths.len())
+                    && cfg.source_grants.is_empty()
+                    && cfg.admission.is_none()
+                    && cfg.pinned_publication.is_none()
+                    && cfg.managed_settings.is_none()
+                    && cfg.hf_download.is_none()
+                    && cfg.backend_weight_download_root.is_none()
+                    && cfg.backend_weight_calibration_root.is_none()
+                    && cfg.hy4_plan.is_none()
+                    && cfg.weight_editor_host.is_none(),
+                "Scratch access requires a private local worker config without other execution policies"
+            );
+            for (input, digest) in &access.paths {
+                absolute(input)?;
+                ensure!(
+                    is_digest(digest) && !input.starts_with(&cfg.root)
+                        && input != &path && input != &cfg.engine,
+                    "Invalid scratch input pin"
+                );
+                let name = input.file_name().and_then(|n| n.to_str())
+                    .context("Invalid scratch input pin")?;
+                ensure!(cache::split_gguf(name).is_none(), "Scratch inputs must be single files");
+            }
+        }
         if !cfg.source_grants.is_empty() {
             let host = cfg
                 .source_grant_host
@@ -295,7 +364,7 @@ impl Worker {
     }
 
     fn conversion_slot(&self, job: &Job) -> Result<bool> {
-        if job.kind != "convert" || !self.resource_enabled() {
+        if !matches!(job.kind.as_str(), "convert" | scratch_eval::GGUF) || !self.resource_enabled() {
             return Ok(true);
         }
         let ceiling = self.resource_bounds().concurrency.map_or(1, |r| r.max);
@@ -412,6 +481,12 @@ impl Worker {
             self.cfg.backend_weight_download_root.is_none(),
             "backend editing requires an exact verified publication"
         );
+        ensure!(
+            !self.cfg.scratch_access.as_ref().is_some_and(|access| {
+                access.paths.keys().any(|pin| pin.starts_with(p) || p.starts_with(pin))
+            }),
+            "scratch input requires a job-scoped grant"
+        );
         if let Ok(p) = cache::authorized(p, &self.cfg.source_roots) {
             let root = self
                 .cfg
@@ -433,7 +508,10 @@ impl Worker {
                 let root = if is_job {
                     let r = self.require(id)?;
                     ensure!(
-                        r.reply.state == "succeeded" && r.action == "start",
+                        r.reply.state == "succeeded"
+                            && r.action == "start"
+                            && r.job.as_ref().is_none_or(|job| !scratch_eval::private_output(&job.kind))
+                            && !r.inputs.values().any(scratch_eval::granted),
                         "job output is not published"
                     );
                     let work = base.join(id).join("work");
@@ -450,6 +528,33 @@ impl Worker {
             }
         }
         bail!("input outside allowed source roots")
+    }
+
+    fn scratch_pin(&self, id: &str, job: &Job, index: usize) -> Option<&str> {
+        let access = self.cfg.scratch_access.as_ref().filter(|a| a.job_id == id)?;
+        if job.kind == scratch_eval::GGUF && index != 0 {
+            return None;
+        }
+        access.paths.get(&job.inputs.get(index)?.path).map(String::as_str)
+    }
+
+    fn scratch_bundle(
+        &self,
+        path: &Path,
+        pin: &str,
+        progress: &mut progress::Notify<'_>,
+    ) -> Result<Bundle> {
+        let p = path.canonicalize().context("Scratch input unavailable")?;
+        ensure!(
+            p.as_os_str() == path.as_os_str(),
+            "Scratch input must be canonical"
+        );
+        let d = cache::describe_exact_file(path, progress).context("Scratch input unavailable")?;
+        ensure!(
+            d.bundle.files[0].sha256 == pin,
+            "scratch input SHA-256 mismatch"
+        );
+        Ok(d.bundle)
     }
 
     // Grants are separate from regular roots on purpose. Do not let Describe,
@@ -626,6 +731,10 @@ impl Worker {
             job.options.is_object() && job.inputs.len() <= 128,
             "invalid job envelope"
         );
+        ensure!(
+            self.cfg.scratch_access.as_ref().is_none_or(|access| access.job_id == id),
+            "scratch worker config is scoped to one job"
+        );
         for input in &job.inputs {
             token(&input.host)?;
             token(&input.kind)?;
@@ -655,6 +764,17 @@ impl Worker {
                 );
             }
             return Ok(r.reply);
+        }
+        let access = self.cfg.scratch_access.as_ref().filter(|access| access.job_id == id);
+        if scratch_eval::private_output(&job.kind) || access.is_some() {
+            let valid = access.is_some_and(|access| access.permits(&action, &job))
+                && (job.kind != scratch_eval::CHECKS
+                    || [scratch_eval::SCRIPT, scratch_eval::RUNNER, scratch_eval::CACHE]
+                        .iter().all(|key| self.cfg.engine_env.get(*key).is_some_and(|p| Path::new(p).is_absolute()))
+                        && self.cfg.engine_env.get(scratch_eval::RUNNER_SHA).is_some_and(|sha| is_digest(sha)));
+            if !valid {
+                return self.record_prepare(id, action, job, Reply::error("Invalid scratch access, job, or worker check configuration"));
+            }
         }
         if !job.resources.is_empty() {
             let accepted = self.resource_enabled()
@@ -843,7 +963,7 @@ impl Worker {
                     }) {
                 Some("standalone SafeTensors GGUF is not configured on this worker")
             } else if action != "start"
-                || !matches!(job.kind.as_str(), "inspect" | "plan" | "convert" | "verify")
+                || !matches!(job.kind.as_str(), "inspect" | "plan" | "convert" | "verify" | scratch_eval::GGUF)
                 || job.prompt.is_some()
                 || job.inputs.len() != matrix + usize::from(has_matrix)
                 || job.inputs[assets].kind != "assets"
@@ -1074,6 +1194,10 @@ impl Worker {
         guard: File,
     ) -> Result<Value> {
         let mut guard = Some(guard);
+        ensure!(
+            self.cfg.scratch_access.as_ref().is_none_or(|access| access.job_id == id),
+            "scratch worker config is scoped to one job"
+        );
         let mut r = self.pending(id)?;
         let original = r
             .job
@@ -1083,6 +1207,13 @@ impl Worker {
             .clone();
         ensure!(input.kind == original.kind, "resolved input kind changed");
         let job = r.job.as_ref().unwrap();
+        let scratch_pin = self.scratch_pin(id, job, index);
+        let private_job = scratch_eval::private_output(&job.kind) || scratch_pin.is_some();
+        ensure!(!private_job || provided.is_none(), "Scratch jobs do not accept staged inputs");
+        ensure!(
+            !private_job || self.cfg.scratch_access.as_ref().is_some_and(|access| access.job_id == id && access.permits(&r.action, job)),
+            "Scratch access does not match the job"
+        );
         if let Some(plan) = &self.cfg.hy4_plan {
             ensure!(
                 plan.validate(&r.action, job)
@@ -1162,7 +1293,7 @@ impl Worker {
             let count = job.inputs.len();
             // Static roots retain their original policy, including where they
             // overlap a managed grant. Only consult grants as a fallback.
-            let static_source = if self.cfg.backend_weight_download_root.is_none() && pin.is_none()
+            let static_source = if self.cfg.backend_weight_download_root.is_none() && pin.is_none() && scratch_pin.is_none()
             {
                 self.source(&input.path).ok()
             } else {
@@ -1171,12 +1302,22 @@ impl Worker {
             let grant = if static_source.is_none()
                 && self.cfg.backend_weight_download_root.is_none()
                 && pin.is_none()
+                && scratch_pin.is_none()
             {
                 self.editor_grant(&r.action, job, index, &input)?
             } else {
                 None
             };
-            let bundle = if let Some(pin) = pin {
+            let bundle = if let Some(pin) = scratch_pin {
+                drop(guard.take());
+                let mut emit = self.progress_callback(id)?;
+                let bundle = self.scratch_bundle(
+                    &input.path, pin, &mut progress::Reporter::new(&mut emit, Some((index, count))),
+                )?;
+                ensure!(input.path.extension().and_then(|ext| ext.to_str()) == Some(input.kind.as_str()),
+                    "Scratch file extension does not match input kind");
+                bundle
+            } else if let Some(pin) = pin {
                 ensure!(
                     input.path.as_os_str() == pin.source.as_os_str(),
                     "invalid direct pinned input path"
@@ -1364,6 +1505,7 @@ impl Worker {
             "cached",
             "source_host",
             "integrity_basis",
+            scratch_eval::GRANT,
         ] {
             input.extra.remove(k);
         }
@@ -1388,6 +1530,9 @@ impl Worker {
             input
                 .extra
                 .insert("integrity_basis".into(), json!("pinned_publication"));
+        }
+        if scratch_pin.is_some() {
+            input.extra.insert(scratch_eval::GRANT.into(), json!(true));
         }
         r.inputs.insert(index, input.clone());
         self.put(id, &r)?;
@@ -1452,6 +1597,14 @@ impl Worker {
     }
 
     fn handle(&self, request: Rpc) -> Result<Value> {
+        ensure!(
+            self.cfg.scratch_access.is_none() || matches!(&request,
+                Rpc::Prepare { .. } | Rpc::Resolve { .. } | Rpc::Start { .. } |
+                Rpc::Status { .. } | Rpc::Cancel { .. } | Rpc::Finish { .. } |
+                Rpc::TraceRead { .. }
+            ),
+            "scratch worker config does not allow source or cache RPCs"
+        );
         ensure!(
             self.cfg.weight_editor_host.is_none()
                 || !matches!(&request,
@@ -1571,7 +1724,7 @@ impl Worker {
                 let admission = if job.kind == exl3_layer::JOB {
                     exl3_layer::Spec::parse(&job.options)
                         .is_ok_and(|spec| spec.backend != exl3_layer::Backend::Cpu)
-                } else if job.kind == trace::JOB {
+                } else if job.kind == trace::JOB || scratch_eval::private_output(&job.kind) {
                     false
                 } else {
                     self.cfg.admission.is_some()
@@ -1793,6 +1946,7 @@ fn main() {
                             w.cfg.hy4_plan.is_none(),
                             "Hy4 metadata worker does not describe bundles"
                         );
+                        ensure!(w.cfg.scratch_access.is_none(), "scratch worker config does not describe bundles");
                         let (p, root) =
                             w.source(&input.path).context("Source input unavailable")?;
                         let mut emit = |detail: &ProgressDetail| -> Result<()> {
