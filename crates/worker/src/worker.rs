@@ -1370,6 +1370,13 @@ impl Worker {
         if let Some(f) = bundle.files.iter().find(|f| f.path == bundle.entry) {
             input.extra.insert("sha256".into(), json!(f.sha256));
         }
+        let job = r.job.as_ref().unwrap();
+        if job.kind == trace::JOB {
+            trace::check_model_revision(
+                &job.options,
+                input.extra["sha256"].as_str().unwrap_or_default(),
+            )?;
+        }
         input.extra.extend([
             ("bundle_sha256".into(), json!(bundle.digest)),
             ("bytes".into(), json!(bundle.bytes()?)),

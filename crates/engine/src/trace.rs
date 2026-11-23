@@ -35,6 +35,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     )?;
     let ids = integrity::check_inputs(&job.inputs, progress)?;
     let id = &ids[0];
+    trace::check_model_revision(&job.options, &id.sha256)?;
     ensure!(
         id.files.len() == 1 && input.path.is_file(),
         "trace needs a single-file GGUF"
@@ -43,12 +44,9 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let staging = private.path().join("export");
     fs::create_dir(&staging)?;
     let intervention = private.path().join("interventions.json");
-    let has_intervention = request
-        .interventions
-        .as_array()
-        .is_some_and(|rules| !rules.is_empty());
+    let has_intervention = !request.interventions.is_empty();
     if has_intervention {
-        write_json(&intervention, &request.interventions)?;
+        write_json(&intervention, &serde_json::to_value(&request.interventions)?)?;
     }
     let mut capture = request.capture;
     let mut receipts = Vec::new();

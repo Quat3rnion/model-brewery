@@ -87,6 +87,23 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/jobs/{id}/trace/tensor", "getTraceTensor"),
         ("get", "/api/jobs/{id}/trace/logit-lens", "getTraceLogitLens"),
         ("get", "/api/jobs/{id}/trace/model-logits", "getTraceModelLogits"),
+        ("get", "/api/interventions", "listInterventions"),
+        ("post", "/api/interventions", "createIntervention"),
+        (
+            "post",
+            "/api/interventions/{id}/versions",
+            "createInterventionVersion",
+        ),
+        (
+            "get",
+            "/api/interventions/{id}/versions/{version}",
+            "getInterventionVersion",
+        ),
+        (
+            "get",
+            "/api/interventions/{id}/versions/{version}/gguf",
+            "exportInterventionGguf",
+        ),
         ("post", "/api/jobs/{id}/cancel", "cancelJob"),
         ("post", "/api/conversions", "createConversion"),
         ("get", "/api/conversions", "listConversions"),

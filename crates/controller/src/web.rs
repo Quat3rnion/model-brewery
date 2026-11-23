@@ -1,7 +1,7 @@
 use crate::{
     App,
     conversion::{Conversion, NewConversion},
-    domain::{KINDS, NewJob, NewModel, NewPrompt, State as JobState, candidates},
+    domain::{Envelope, Job, KINDS, NewJob, NewModel, NewPrompt, State as JobState, candidates},
     feed, hf_tokens,
     idempotency::{self, Replay, Submission},
     store::Store,
@@ -98,6 +98,7 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
             }),
         )
         .merge(crate::admin::router())
+        .merge(crate::interventions::router())
         .merge(crate::scratch::router())
         .merge(crate::diff::router())
         .merge(crate::infra_hosts::router())
@@ -555,10 +556,42 @@ async fn add_job(
     payload: std::result::Result<Json<NewJob>, JsonRejection>,
 ) -> Result<Response> {
     let (request, submission) = read_submission(&headers, "jobs", payload)?;
+    let (job, mut envelope, intervention) = {
+        let mut store = app.store.lock().map_err(ApiError::storage)?;
+        if let Some(response) = replay(&store, submission.as_ref())? {
+            return Ok(response);
+        }
+        let (mut job, mut envelope) = prepare_job(&app, &store, request)?;
+        let intervention = if job.kind == trace::JOB {
+            crate::interventions::TracePlan::prepare(
+                &store, &mut job, &mut envelope, app.trace_policy,
+            )?
+        } else {
+            None
+        };
+        let Some(intervention) = intervention else {
+            return enqueue_job(&app, &mut store, job, envelope, submission.as_ref());
+        };
+        (job, envelope, intervention)
+    };
+    // A patch read can wait on a remote worker. Do not hold the Store lock.
+    let resolved = intervention.resolve(&app, &mut envelope).await;
     let mut store = app.store.lock().map_err(ApiError::storage)?;
     if let Some(response) = replay(&store, submission.as_ref())? {
         return Ok(response);
     }
+    resolved?;
+    if store
+        .model(&envelope.inputs[0].id)
+        .map_err(ApiError::storage)?
+        .is_none()
+    {
+        return Err(ApiError::bad("unknown model ID"));
+    }
+    enqueue_job(&app, &mut store, job, envelope, submission.as_ref())
+}
+
+fn prepare_job(app: &App, store: &Store, request: NewJob) -> Result<(Job, Envelope)> {
     if request.input_ids.len() > 32 || !KINDS.contains(&request.kind.as_str()) {
         return Err(ApiError::bad("unknown job kind or too many inputs"));
     }
@@ -693,15 +726,16 @@ async fn add_job(
         ),
         (None, prompt) => prompt.clone(),
     };
-    let (mut job, mut envelope) = request.build(host, inputs, prompt).map_err(ApiError::bad)?;
-    if job.kind == trace::JOB {
-        let request = trace::Request::controller(
-            &Value::Object(envelope.options.clone()), envelope.prompt.as_deref(), app.trace_policy,
-        ).map_err(|e| ApiError::bad(e.to_string()))?;
-        job.options.insert("byte_cap".into(), json!(request.capture.byte_cap));
-        envelope.options = job.options.clone();
-        envelope.options.insert("retain_jobs".into(), json!(request.retain_jobs));
-    }
+    request.build(host, inputs, prompt).map_err(ApiError::bad)
+}
+
+fn enqueue_job(
+    app: &App,
+    store: &mut Store,
+    mut job: Job,
+    mut envelope: Envelope,
+    submission: Option<&Submission<'_>>,
+) -> Result<Response> {
     let hosts = app.effective_hosts().map_err(ApiError::storage)?;
     if crate::weights::is_kind(&job.kind)
         && let Some(entry) = hosts.iter().find(|entry| entry.id == job.host)
@@ -750,12 +784,12 @@ async fn add_job(
             .revision;
     }
     store
-        .enqueue(&job, &envelope, submission.as_ref())
+        .enqueue(&job, &envelope, submission)
         .map_err(ApiError::storage)?;
     Ok((StatusCode::CREATED, Json(job)).into_response())
 }
 
-fn read_submission<'a, T: serde::Serialize>(
+pub(crate) fn read_submission<'a, T: serde::Serialize>(
     headers: &'a HeaderMap,
     scope: &'static str,
     payload: std::result::Result<Json<T>, JsonRejection>,

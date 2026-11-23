@@ -465,6 +465,8 @@ pub fn staging_error(detail: &str) -> &'static str {
         || detail.contains("No space left on device")
     {
         "Target disk space is insufficient; check free space and the configured reserve"
+    } else if detail.contains("trace model SHA-256 mismatch") {
+        "Trace model SHA-256 mismatch; use the model revision bound to the intervention"
     } else if detail.contains("hash mismatch")
         || detail.contains("content mismatch")
         || detail.contains("changed while hashing")

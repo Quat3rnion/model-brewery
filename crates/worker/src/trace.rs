@@ -88,27 +88,55 @@ struct Options {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Rule {
-    layer: usize,
-    role: Role,
-    positions: BTreeSet<usize>,
+pub struct Rule {
+    pub layer: usize,
+    pub role: Role,
+    pub positions: BTreeSet<usize>,
     #[serde(flatten)]
-    op: Operation,
+    pub op: Operation,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-enum Operation {
+pub enum Operation {
     Zero,
     Scale { factor: f32 },
     Add { vector: Vec<f32> },
     Replace { vector: Vec<f32> },
 }
 
+impl Rule {
+    pub fn check_all(rules: &[Self]) -> Result<()> {
+        let mut edited = BTreeSet::new();
+        ensure!(rules.len() <= 64, "too many trace interventions");
+        for rule in rules {
+            ensure!(
+                rule.layer < 4096
+                    && rule.role != Role::KqSoftMax
+                    && !rule.positions.is_empty()
+                    && rule
+                        .positions
+                        .iter()
+                        .all(|&p| p < MAX_POSITIONS && edited.insert((rule.layer, rule.role, p))),
+                "invalid or overlapping trace intervention"
+            );
+            match &rule.op {
+                Operation::Scale { factor } => ensure!(factor.is_finite(), "invalid trace factor"),
+                Operation::Add { vector } | Operation::Replace { vector } => ensure!(
+                    (1..=16384).contains(&vector.len()) && vector.iter().all(|v| v.is_finite()),
+                    "invalid trace intervention vector"
+                ),
+                Operation::Zero => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 pub struct Request {
     pub prompts: Vec<String>,
     pub capture: Capture,
-    pub interventions: Value,
+    pub interventions: Vec<Rule>,
     pub retain_jobs: usize,
 }
 
@@ -158,28 +186,7 @@ impl Request {
             (entries as u64) * (prompts.len() as u64) <= byte_cap,
             "trace selection cannot fit byte_cap"
         );
-        let mut edited = BTreeSet::new();
-        ensure!(o.interventions.len() <= 64, "too many trace interventions");
-        for rule in &o.interventions {
-            ensure!(
-                rule.layer < 4096
-                    && rule.role != Role::KqSoftMax
-                    && !rule.positions.is_empty()
-                    && rule
-                        .positions
-                        .iter()
-                        .all(|&p| p < MAX_POSITIONS && edited.insert((rule.layer, rule.role, p))),
-                "invalid or overlapping trace intervention"
-            );
-            match &rule.op {
-                Operation::Scale { factor } => ensure!(factor.is_finite(), "invalid trace factor"),
-                Operation::Add { vector } | Operation::Replace { vector } => ensure!(
-                    (1..=16384).contains(&vector.len()) && vector.iter().all(|v| v.is_finite()),
-                    "invalid trace intervention vector"
-                ),
-                Operation::Zero => {}
-            }
-        }
+        Rule::check_all(&o.interventions)?;
         Ok(Self {
             prompts,
             capture: Capture {
@@ -189,7 +196,7 @@ impl Request {
                 top_k: o.top_k,
                 byte_cap,
             },
-            interventions: serde_json::to_value(o.interventions)?,
+            interventions: o.interventions,
             retain_jobs: policy.retain_jobs,
         })
     }
@@ -204,6 +211,12 @@ impl Request {
                 .remove("retain_jobs")
                 .context("missing trace retention")?,
         )?;
+        if let Some(expected) = options.remove("expected_model_sha256") {
+            ensure!(
+                expected.as_str().is_some_and(crate::is_digest),
+                "invalid expected trace model SHA-256"
+            );
+        }
         ensure!(
             options.get("byte_cap").is_some_and(Value::is_u64),
             "missing trace byte cap"
@@ -218,6 +231,16 @@ impl Request {
             },
         )
     }
+}
+
+pub fn check_model_revision(options: &Value, actual: &str) -> Result<()> {
+    ensure!(
+        options
+            .get("expected_model_sha256")
+            .is_none_or(|expected| expected.as_str() == Some(actual)),
+        "trace model SHA-256 mismatch"
+    );
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
