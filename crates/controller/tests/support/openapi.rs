@@ -57,6 +57,9 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/state", "getState"),
         ("get", "/api/events", "streamEvents"),
         ("post", "/api/suggestions/paths", "suggestPaths"),
+        ("get", "/mcp", "getMcpStream"),
+        ("post", "/mcp", "sendMcpMessage"),
+        ("get", "/api/models", "listModels"),
         ("post", "/api/models", "createModel"),
         (
             "post",
@@ -69,6 +72,7 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/diff/traces", "diffTraces"),
         ("get", "/api/diff/behavior", "diffBehavior"),
         ("post", "/api/scratch", "createScratch"),
+        ("get", "/api/scratch/{id}", "getScratch"),
         ("post", "/api/scratch/{id}/edits", "editScratch"),
         ("get", "/api/scratch/{id}/delta", "getScratchDelta"),
         ("get", "/api/scratch/{id}/checks", "getScratchChecks"),

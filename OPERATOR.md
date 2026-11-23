@@ -1229,6 +1229,63 @@ Agents can operate the workbench without driving the browser. Start with
 serves its [OpenAPI contract](api/openapi.json) at `GET /api/openapi.json`.
 Use the same loopback address and worker permissions as the web UI.
 
+### MCP for weight-space work
+
+Use an MCP client that supports Streamable HTTP. Set this configuration in
+the client (example for Claude Code):
+
+```json
+{
+  "mcpServers": {
+    "model-brewery": {
+      "type": "http",
+      "url": "http://127.0.0.1:4141/mcp"
+    }
+  }
+}
+```
+
+For LAN or tailnet access, use the workbench HTTPS URL with `/mcp`. Use a
+client that can send the gateway's HTTP Basic credentials for the `brewery`
+login. Set the credentials in the client's secret store. Do not put them
+in the URL or a shared configuration file.
+
+**Accepted access risk:** MCP has the same access as the workbench and has
+no separate token. The controller checks the exact Host, Origin (if sent),
+and `Sec-Fetch-Site` (if sent) on the same loopback listener. The optional
+gateway also checks source CIDR, Host, Origin, and the `brewery` login.
+Any client with workbench access can drive the agent tools. It can create,
+edit, or discard scratch revisions, run traces and checks, and request
+publication. MCP cannot approve a publication, change settings, administer
+workers, or deploy. The separate operator API uses the same workbench trust
+boundary. Give workbench access only to trusted clients.
+
+1. Use `tools/list` to get the input schemas. Use `list_models` and
+   `list_scratch` to find Library inputs and scratch revisions.
+2. Use `start_trace` for a Library GGUF. Use `get_job` to poll progress
+   (`wait_ms` can wait up to 5000 ms per call). Use `read_trace` with
+   `manifest`, `tensor`, `logit_lens`, or `model_logits`. Use
+   `create_intervention` and `new_intervention_version` to save rules.
+   `export_control_vector` returns a relative URL for the same workbench.
+3. Use `create_scratch`, `apply_edit`, and `run_checks` for a SafeTensors
+   edit. Use the tensor, trace, and behavior diff tools to compare results.
+4. Use `request_publish` with the exact revision hash and check bundle
+   acknowledgement if it is necessary. The operator reviews the request
+   separately. Results are not release-qualified.
+
+For every write tool, set `idempotency_key` before the call. Use a new key
+for each intended write. Use the same key and arguments for a retry.
+The controller uses its normal admission, validation, and replay rules.
+
+The server uses MCP protocol `2025-06-18`. It accepts one JSON-RPC message
+per POST. It does not keep sessions, open an MCP event stream, or offer a
+stdio transport. POST bodies are limited to 256 KiB. Tool data is limited
+to 4 MiB from the controller and 8 MiB for the whole MCP response. Use a
+smaller trace slice or read the [controller API](api/openapi.json) directly
+if a result is too large.
+
+### JSON command-line client
+
 ```sh
 tools/brewery-agent describe
 tools/brewery-agent state

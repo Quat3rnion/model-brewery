@@ -52,7 +52,7 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
             "/suggestions/paths",
             post(suggest_paths).layer(DefaultBodyLimit::max(32 * 1024)),
         )
-        .route("/models", post(add_model))
+        .route("/models", get(list_models).post(add_model))
         .route(
             "/models/weight-calibration",
             post(crate::backend_calibration::register),
@@ -109,11 +109,12 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
                 "HTTP method not allowed".into(),
             )
         })
-        .layer(DefaultBodyLimit::max(256 * 1024));
+        .layer(DefaultBodyLimit::max(256 * 1024))
+        .with_state(app);
     Router::new()
-        .nest("/api", api)
+        .nest("/api", api.clone())
+        .merge(crate::mcp::router(api))
         .fallback_service(ServeDir::new(dist))
-        .with_state(app)
         .layer(middleware::from_fn_with_state(listen, guard))
 }
 
@@ -144,7 +145,8 @@ async fn guard(State(listen): State<SocketAddr>, req: Request, next: Next) -> Re
         Ok(value) if value.is_none_or(|value| value.strip_prefix("http://") == Some(host)) => value,
         _ => return rejected(),
     };
-    let api = req.uri().path() == "/api" || req.uri().path().starts_with("/api/");
+    let path = req.uri().path();
+    let api = path == "/mcp" || path == "/api" || path.starts_with("/api/");
     if api {
         let fetch = match single(headers, "sec-fetch-site") {
             Ok(value @ (Some("same-origin" | "none") | None)) => value,
@@ -201,12 +203,17 @@ pub(crate) fn single<'a>(
     Ok(value)
 }
 
-fn has_json(headers: &HeaderMap) -> bool {
+pub(crate) fn has_json(headers: &HeaderMap) -> bool {
     single(headers, "content-type")
         .ok()
         .flatten()
         .and_then(|s| s.split(';').next())
         .is_some_and(|s| s.trim().eq_ignore_ascii_case("application/json"))
+}
+
+async fn list_models(State(app): State<Shared>) -> Result<Json<Vec<crate::domain::Model>>> {
+    let store = app.store.lock().map_err(ApiError::storage)?;
+    Ok(Json(store.models().map_err(ApiError::storage)?))
 }
 
 async fn suggest_paths(

@@ -92,6 +92,15 @@ if action == "trace-read":
                                         layer=query["layer"], role=query["role"], prompt=0)))
     elif query["view"] == "manifest":
         out({"status": "ok", "data": {"schema_version": 1}})
+    elif query["view"] in ("logit_lens", "model_logits"):
+        assert query["prompt"] == 0 and query["start"] == 0 and query["end"] == 1
+        row = {"position": 0, "top": [{"token_id": 1, "logit": 2.0}]}
+        if query["view"] == "logit_lens":
+            assert query["layer"] == 0
+            row["layer"] = 0
+        else:
+            assert query["layer"] is None
+        out({"status": "ok", "data": {"rows": [row]}})
     elif query["view"] == "diff_input":
         options = prior["result"]["envelope"]["options"]
         spec = {k: options[k] for k in ("positions", "roles", "layers", "top_k", "byte_cap")}

@@ -13,6 +13,7 @@ mod idempotency;
 mod interventions;
 mod infra_hosts;
 mod local_edit;
+mod mcp;
 mod profiles;
 mod remote_edit;
 mod scratch;

@@ -119,6 +119,7 @@ struct Discard {}
 pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/scratch", get(list).post(create))
+        .route("/scratch/{id}", get(get_revision))
         .route("/scratch/{id}/edits", post(edit))
         .route("/scratch/{id}/delta", get(delta))
         .route("/scratch/{id}/checks", get(checks::get).post(checks::run))
@@ -130,6 +131,14 @@ pub fn router() -> Router<Arc<App>> {
 async fn list(State(app): State<Arc<App>>) -> Result<Json<Vec<Revision>>> {
     let store = app.store.lock().map_err(ApiError::storage)?;
     Ok(Json(store.scratches().map_err(ApiError::storage)?))
+}
+
+async fn get_revision(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+) -> Result<Json<Revision>> {
+    let store = app.store.lock().map_err(ApiError::storage)?;
+    Ok(Json(visible(&store, &id)?))
 }
 
 async fn delta(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Summary>> {

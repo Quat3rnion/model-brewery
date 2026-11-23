@@ -61,6 +61,192 @@ fn sha(bytes: &[u8]) -> String {
 }
 
 #[test]
+fn mcp_scratch_workflow_stops_at_publish_request() {
+    let mut t = Test::new();
+    let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
+    let hash = sha(&fs::read(&source).unwrap());
+    t.launch();
+    let (status, parent) = t.request(
+        "/api/models",
+        "",
+        Some(json!({"host":"existing","kind":"safetensors","path":source})),
+    );
+    assert_eq!(status, 201, "{parent}");
+
+    let rpc = |method, params| {
+        let (status, response) = t.request(
+            "/mcp",
+            "Accept: application/json, text/event-stream\r\n",
+            Some(json!({"jsonrpc":"2.0","id":1,"method":method,"params":params})),
+        );
+        assert_eq!(status, 200, "{method}: {response}");
+        assert_eq!(response["id"], 1);
+        response
+    };
+    let init = rpc(
+        "initialize",
+        json!({"protocolVersion":"2025-06-18","capabilities":{},
+        "clientInfo":{"name":"mock test","version":"1"}}),
+    );
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+    assert!(init["result"]["capabilities"]["tools"].is_object());
+    let list = rpc("tools/list", json!({}));
+    let listed = list["result"]["tools"].as_array().unwrap();
+    let mut names: Vec<_> = listed
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "apply_edit",
+            "create_intervention",
+            "create_scratch",
+            "diff_behavior",
+            "diff_tensors",
+            "diff_traces",
+            "discard_scratch",
+            "export_control_vector",
+            "get_checks",
+            "get_intervention",
+            "get_job",
+            "get_scratch",
+            "list_interventions",
+            "list_models",
+            "list_scratch",
+            "new_intervention_version",
+            "read_trace",
+            "request_publish",
+            "run_checks",
+            "start_trace",
+        ]
+    );
+    for tool in listed {
+        assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
+    }
+    let apply = listed
+        .iter()
+        .find(|tool| tool["name"] == "apply_edit")
+        .unwrap();
+    assert!(apply["inputSchema"]["properties"]["operations"]["items"]["oneOf"].is_array());
+    assert!(
+        apply["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("idempotency_key"))
+    );
+    assert!(!list.to_string().contains("#/components/"));
+
+    let call = |name, arguments| rpc("tools/call", json!({"name":name,"arguments":arguments}));
+    let ok = |name, arguments| {
+        let reply = call(name, arguments);
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+        let result = &reply["result"];
+        let text: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text, result["structuredContent"]);
+        text
+    };
+    assert_eq!(ok("list_models", json!({}))["models"], json!([parent]));
+    let mut create = json!({"parent_id":parent["id"],"parent_sha256":hash});
+    assert_eq!(
+        call("create_scratch", create.clone())["error"]["code"],
+        -32602
+    );
+    create["idempotency_key"] = json!("mcp-create");
+    assert_eq!(
+        call("create_scratch", create.clone())["result"]["structuredContent"]["status"],
+        409
+    );
+    assert_eq!(
+        t.admin(Some(
+            json!({"action":"set_weight_editor","worker":"existing",
+            "revision":0,"enabled":true})
+        ))
+        .0,
+        200
+    );
+    let scratch = ok("create_scratch", create.clone());
+    assert_eq!(ok("create_scratch", create.clone()), scratch);
+    create["parent_sha256"] = json!("0".repeat(64));
+    assert_eq!(
+        call("create_scratch", create)["result"]["structuredContent"]["status"],
+        409
+    );
+
+    let edit = ok(
+        "apply_edit",
+        json!({"id":scratch["id"],"idempotency_key":"mcp-edit",
+        "operations":[{"op":"add","tensor":"w","origin":[0,1],"shape":[1,1],"values":[6.]}]}),
+    );
+    let check = ok(
+        "run_checks",
+        json!({"id":edit["id"],"idempotency_key":"mcp-check","sha256":edit["sha256"]}),
+    );
+    assert_eq!(check["check_bundle"]["integrity"]["status"], "passed");
+    assert_eq!(
+        ok("get_checks", json!({"id":edit["id"]})),
+        check["check_bundle"]
+    );
+    let detail = ok("get_scratch", json!({"id":edit["id"]}));
+    assert_eq!(detail["delta"]["changed_tensors"], 1);
+    assert_eq!(detail["provenance"]["parent_id"], scratch["id"]);
+    assert_eq!(detail["check_bundle"]["id"], check["check_bundle"]["id"]);
+
+    let pair = json!({"a":scratch["id"],"b":edit["id"]});
+    let diff = ok("diff_tensors", pair.clone());
+    assert_eq!(diff["tensors"][0]["changed_elements"], 1);
+    assert_eq!(diff["qualification"], "not release-qualified");
+    assert_eq!(
+        ok("diff_behavior", pair)["qualification"],
+        "not release-qualified"
+    );
+    let request = ok(
+        "request_publish",
+        json!({"id":edit["id"],"idempotency_key":"mcp-publish",
+        "sha256":edit["sha256"],"acknowledge_bundle":check["check_bundle"]["id"]}),
+    );
+    assert_eq!(request["state"], "publish_requested");
+    for name in [
+        "approve",
+        "approve_scratch",
+        "apply_admin_action",
+        "set_settings",
+        "deploy",
+        "unknown",
+    ] {
+        assert_eq!(
+            call(name, json!({"id":edit["id"],"sha256":edit["sha256"]}))["error"]["code"],
+            -32602
+        );
+    }
+    assert_eq!(ok("list_models", json!({}))["models"], json!([parent]));
+
+    let leaf = ok(
+        "create_scratch",
+        json!({"parent_id":scratch["id"],"parent_sha256":scratch["sha256"],"idempotency_key":"mcp-leaf"}),
+    );
+    assert_eq!(
+        ok("list_scratch", json!({}))["revisions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    let discard = json!({"id":leaf["id"],"idempotency_key":"mcp-discard"});
+    assert_eq!(ok("discard_scratch", discard.clone())["state"], "discarded");
+    assert_eq!(ok("discard_scratch", discard)["state"], "discarded");
+    assert_eq!(
+        ok("list_scratch", json!({}))["revisions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn diff_scratch_tensors_and_behavior() {
     let mut t = Test::new();
     let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
