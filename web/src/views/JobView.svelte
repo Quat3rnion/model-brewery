@@ -61,7 +61,7 @@
 
   const history = $derived(summarizeHistory(detail?.events ?? []));
   const job = $derived(detail && summary ? { ...detail, ...summary, result: detail.result, events: detail.events } : (detail ?? summary));
-  const hint = $derived(isTerminal(job?.state) && job?.state !== 'succeeded' ? jobFixHint(job?.error) : null);
+  const hint = $derived(isTerminal(job?.state) && job?.state !== 'succeeded' ? jobFixHint(job?.error, job?.host) : null);
   const prompt = $derived(job?.prompt_id ? prompts.find((p) => p.id === job.prompt_id) : null);
   const downloadId = $derived(job?.kind === 'hf_download' && job.state === 'succeeded' ? obj(job.result)?.library_model_id : null);
   const download = $derived(typeof downloadId === 'string' ? models.find((m) => m.id === downloadId) : null);

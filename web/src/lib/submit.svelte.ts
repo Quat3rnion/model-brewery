@@ -3,6 +3,7 @@ import { brewery } from './store.svelte';
 import type { JobSummary, NewJob } from './types';
 import { PlainAttempt } from './submission-key';
 import { captureSubmissionVisit } from './route.svelte';
+import { captureResultFocus } from './focus';
 
 type AcceptedJob = JobSummary | Pick<JobSummary, 'id'>;
 
@@ -12,12 +13,15 @@ export class Submitter {
   error = $state<string | null>(null);
   job = $state<AcceptedJob | null>(null);
   replayed = $state(false);
+  statusElement?: HTMLElement;
   #plain = new PlainAttempt();
 
   constructor(private launcher: string | ((job: NewJob) => string)) {}
 
-  async submit(job: NewJob): Promise<AcceptedJob | null> {
-    if (this.busy) return null;
+  async submit(job: NewJob, event: MouseEvent, focusStatus = true): Promise<AcceptedJob | null> {
+    // A fast reply can re-enable the button before the second native click.
+    if (this.busy || event.detail > 1) return null;
+    const focus = focusStatus ? captureResultFocus(event) : undefined;
     this.busy = true;
     this.error = null;
     let plain: ReturnType<PlainAttempt['take']> | undefined;
@@ -31,6 +35,7 @@ export class Submitter {
       plain.complete();
       this.job = created;
       this.replayed = !('state' in created);
+      void focus?.(() => this.statusElement?.querySelector('a'));
       void brewery.refresh();
       return created;
     } catch (e) {

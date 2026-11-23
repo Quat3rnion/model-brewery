@@ -25,6 +25,8 @@
   import HostSelect from '../components/HostSelect.svelte';
   import Combobox from '../components/Combobox.svelte';
   import { idOptions, visibleChecklist } from '../lib/pickers';
+  import { Checklist } from '../lib/checklist';
+  import SelectionReview from '../components/SelectionReview.svelte';
   import WorkflowGate from '../components/WorkflowGate.svelte';
   import Blockers from '../components/Blockers.svelte';
   import FieldError from '../components/FieldError.svelte';
@@ -44,15 +46,12 @@
   // ---- Launcher ----
   let hostId = $state('');
   let target = $state('');
-  let picked = $state<string[]>([]);
+  const selection = new Checklist();
   const host = $derived(hosts.find((h) => h.id === hostId));
   const offer = $derived(benchmarkChoices(host));
-  // Drop selections that the newly selected host does not advertise.
+  const missing = $derived(selection.missing(offer.suites));
+  const picked = $derived(selection.ids.filter(id => !missing.some(item => item.id === id)));
   $effect(() => {
-    const ids = new Set(offer.suites.map((s) => s.id));
-    if (picked.some((p) => !ids.has(p))) {
-      picked = picked.filter(id => ids.has(id));
-    }
     if (target && !offer.targets.some((t) => t.id === target)) target = '';
   });
   let suiteFilter = $state('');
@@ -65,9 +64,9 @@
   const touched = $state({ host: false, target: false, suites: false });
   const visible = $derived(visibleBlockers(built.blockers, touched));
   const error = (field: string) => fieldError(visible, field);
-  function queueBenchmark() {
-    if (!built.job || run.busy) return;
-    void run.submit(built.job);
+  function queueBenchmark(event: MouseEvent) {
+    if (!built.job || run.busy || missing.length) return;
+    void run.submit(built.job, event);
   }
 
   // ---- Scorecard selection ----
@@ -196,7 +195,7 @@
             {#each suitesShown as s (s.id)}
               {@const on = picked.includes(s.id)}
               <label class="check" class:off={!on && picked.length >= MAX_SUITES}>
-                <input type="checkbox" checked={on} disabled={!on && picked.length >= MAX_SUITES} onblur={() => { touched.suites = true; }} onchange={(e) => (picked = toggle(picked, s.id, e.currentTarget.checked))} />
+                <input type="checkbox" checked={on} disabled={!on && picked.length >= MAX_SUITES} onblur={() => { touched.suites = true; }} onchange={(e) => selection.set(s.id, s.label ?? s.id, e.currentTarget.checked)} />
                 <span>{s.label ?? s.id}{#if s.label && s.label !== s.id}{' '}<span class="mono xs muted">{s.id}</span>{/if}</span>
               </label>
             {/each}
@@ -208,7 +207,8 @@
         {/if}
       </fieldset>
 
-      <div><button type="button" class="btn primary" disabled={!built.job || run.busy} aria-busy={run.busy} onclick={queueBenchmark}>{run.busy ? 'Submitting…' : 'Queue benchmark run'}</button></div>
+      <SelectionReview {missing} acknowledge={() => selection.remove(missing)} />
+      <div><button type="button" class="btn primary" disabled={!built.job || run.busy || missing.length > 0} aria-busy={run.busy} onclick={queueBenchmark}>{run.busy ? 'Submitting…' : 'Queue benchmark run'}</button></div>
       <SubmitStatus s={run} />
     </div>
     </WorkflowGate>

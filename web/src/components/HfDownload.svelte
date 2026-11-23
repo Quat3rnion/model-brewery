@@ -34,11 +34,11 @@
     kind: 'hf_download', input_ids: [],
     options: { repo_id: repo.trim(), revision: revision.trim(), filename: scope === 'file' ? filename.trim() : undefined },
   });
-  async function start() {
+  async function start(event: MouseEvent) {
     if (submitter.busy || blockers.length) return;
     const visit = route.capture();
     const submitted = draft();
-    const job = await submitter.submit(request);
+    const job = await submitter.submit(request, event);
     if (job && visit.current()) {
       savedDraft = submitted;
       if (!submitter.replayed && visit.canPresent()) location.hash = `#/jobs/${encodeURIComponent(job.id)}`;

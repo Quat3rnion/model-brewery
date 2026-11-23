@@ -326,7 +326,17 @@
                 <td class="actions">
                   {#if removing === m.id}
                     <div class="confirm" role="group" aria-label="Confirm removal">
-                      <span class="xs">This removes only the entry. The files stay on the host.{#if m.host === 'backend-hf'} You cannot register it again by hand. To add the source again, start a verified download or submit the job from its view.{/if}</span>
+                      <span class="xs">
+                        This removes only the entry. The files stay on the host.
+                        {#if m.host === 'backend-hf'}
+                          You cannot register it again by hand.
+                          {#if jobs.some((j) => j.id === m.job_id && j.kind === 'weight_apply')}
+                            To restore this revision through the workbench, review a new weight edit proposal and apply it.
+                          {:else}
+                            To add the source again, start a verified download.
+                          {/if}
+                        {/if}
+                      </span>
                       <div class="row">
                         <button type="button" class="btn danger small" aria-disabled={removeBusy || busyJobs.length > 0} onclick={() => remove(m)}>{removeBusy ? 'Removing…' : 'Remove entry'}</button>
                         <button id="keep-entry" type="button" class="btn ghost small" aria-disabled={removeBusy} onclick={() => {

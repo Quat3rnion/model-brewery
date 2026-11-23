@@ -90,9 +90,9 @@
   const generationJob = $derived<NewJob>({ kind: 'generate', host: gHost || undefined, input_ids: [gBundle],
     prompt_id: gMode === 'saved' ? gPromptId : undefined, prompt: gMode === 'text' ? gText : undefined,
     options: gMaxTokens === undefined ? undefined : { max_tokens: gMaxTokens } });
-  async function generate() {
+  async function generate(event: MouseEvent) {
     const request = generationJob;
-    const job = await gen.submit(request);
+    const job = await gen.submit(request, event);
     if (job && request.prompt !== undefined) submittedText = request.prompt;
   }
 
@@ -222,8 +222,8 @@
             </div>
           {/if}
         </fieldset>
-        {@render queue('Queue full GSM8K evaluation', eFields, eHostBlockers, ev, () =>
-          ev.submit(evaluationJob))}
+        {@render queue('Queue full GSM8K evaluation', eFields, eHostBlockers, ev, (e) =>
+          ev.submit(evaluationJob, e))}
       </div>
     </WorkflowGate>
   </section>
@@ -259,8 +259,8 @@
             </div>
           {/if}
         </div>
-        {@render queue('Queue reference results', bFields, bHostBlockers, base, () =>
-          base.submit(baselineJob))}
+        {@render queue('Queue reference results', bFields, bHostBlockers, base, (e) =>
+          base.submit(baselineJob, e))}
       </div>
     </WorkflowGate>
   </section>
@@ -307,7 +307,7 @@
   <RecentJobs kinds={['generate', 'evaluate', 'baseline']} title="Recent generation, evaluation and reference jobs" limit={8} />
 </div>
 
-{#snippet queue(label: string, fields: Blocker[], hosts: Blocker[], s: Submitter, submit: () => Promise<unknown>)}
+{#snippet queue(label: string, fields: Blocker[], hosts: Blocker[], s: Submitter, submit: (event: MouseEvent) => Promise<unknown>)}
   <div>
     <button type="button" class="btn primary" disabled={s.busy || fields.length > 0 || hosts.length > 0} aria-busy={s.busy} onclick={submit}>{s.busy ? 'Submitting…' : label}</button>
   </div>

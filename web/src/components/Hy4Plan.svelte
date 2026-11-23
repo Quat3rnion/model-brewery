@@ -23,9 +23,9 @@
   const request = $derived<NewJob | null>(source ? { kind: encode ? 'convert' : 'plan', host: source.host,
     input_ids: [source.id], options: { hy4_overrides: { [tensor]: 'Q8_0' } } } : null);
 
-  async function queue() {
+  async function queue(event: MouseEvent) {
     if (submission.busy || problem || !request) return;
-    await submission.submit(request);
+    await submission.submit(request, event);
   }
 </script>
 

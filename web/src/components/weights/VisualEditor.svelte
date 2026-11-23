@@ -12,6 +12,7 @@
   import JobState from '../JobState.svelte';
   import { brewery } from '../../lib/store.svelte';
   import { acceptedJobSummary, Submitter } from '../../lib/submit.svelte';
+  import { captureResultFocus } from '../../lib/focus';
   import { route } from '../../lib/route.svelte';
   import { theme } from '../../lib/theme.svelte';
   import { isSafeSource, hostName, isActive, shortHash } from '../../lib/format';
@@ -74,14 +75,17 @@
   const reads = new Submitter(job => job.options?.mode === 'tile' ? 'weights.visual.tile' : 'weights.visual.inventory');
   let readKey = $state('');
   let acceptedReadMode = $state<'inventory' | 'tile'>();
+  let inventoryLink: HTMLAnchorElement | undefined = $state();
+  let tileLink: HTMLAnchorElement | undefined = $state();
 
   function want(job: JobSummary | null): void {
     if (job?.state === 'succeeded' && !brewery.details[job.id]) void brewery.loadJob(job.id).catch(() => {});
   }
-  async function read(job: ReturnType<typeof inventoryJob>) {
+  async function read(job: ReturnType<typeof inventoryJob>, event: MouseEvent) {
     if (reads.busy) return;
     readKey = JSON.stringify(job.options);
-    const created = await reads.submit(job);
+    const focus = captureResultFocus(event);
+    const created = await reads.submit(job, event, false);
     if (!created) return;
     acceptedReadMode = job.options?.mode === 'tile' ? 'tile' : 'inventory';
     function record(summary: JobSummary) {
@@ -89,6 +93,7 @@
       submitted = [summary, ...submitted.filter(item => item.id !== summary.id)];
     }
     record(acceptedJobSummary(created, job));
+    void focus?.(() => job.options?.mode === 'tile' ? tileLink : inventoryLink);
     if (!('state' in created)) void brewery.loadJob(created.id).then(record).catch(() => {});
   }
   function ignoreReads(match: (job: JobSummary) => boolean) {
@@ -110,12 +115,12 @@
     void brewery.lastUpdated;
     if (canVisual) want(inv.job ?? null);
   });
-  function readInventoryPage() {
-    if (!canVisual || reads.busy || (inv.job && !inv.error)) return;
+  function readInventoryPage(event: MouseEvent) {
+    if (!canVisual || reads.busy || (inv.job && !inv.error) || event.detail > 1) return;
     if (!inventoryRequest) {
       ignoreReads(j => j.options?.mode === 'inventory');
-      void read(inventoryJob(source.id, source.host, 0, undefined, packedHost));
-    } else void read(inventoryRequest);
+      void read(inventoryJob(source.id, source.host, 0, undefined, packedHost), event);
+    } else void read(inventoryRequest, event);
   }
 
   // ---- Current tensor and tile. ----
@@ -172,12 +177,12 @@
     void brewery.lastUpdated;
     if (canVisual) want(tileJobFound);
   });
-  function readCurrentTile() {
+  function readCurrentTile(event: MouseEvent) {
     const request = tileRead;
     const options = request?.options;
-    if (!canVisual || !request || !options || reads.busy || otherTileActive || (tileJobFound && !tileError)) return;
+    if (!canVisual || !request || !options || reads.busy || otherTileActive || (tileJobFound && !tileError) || event.detail > 1) return;
     if (tileJobFound) ignoreReads(j => !!findRead([j], source.id, options));
-    void read(request);
+    void read(request, event);
   }
 
   // Stored values seen in loaded tiles, for edits across tiles.
@@ -342,10 +347,10 @@
     job.options = { ...job.options, source_sha256: sha, ...(!float ? {packed:true} : {}) };
     return job;
   });
-  async function tune() {
+  async function tune(event: MouseEvent) {
     if (!tuneRequest || tuneBlockers.length) return;
     const visit = route.capture();
-    const created = await tuneSub.submit(tuneRequest);
+    const created = await tuneSub.submit(tuneRequest, event);
     if (created && !tuneSub.replayed && visit.canPresent()) onproposal(created.id);
   }
 
@@ -367,7 +372,7 @@
       </div>
       {#if inventoryJobFound}
         <div class="row" role="status">
-          <a href="#/jobs/{encodeURIComponent(inventoryJobFound.id)}">Tensor list read job</a>
+          <a bind:this={inventoryLink} href="#/jobs/{encodeURIComponent(inventoryJobFound.id)}">Tensor list read job</a>
           <JobState job={inventoryJobFound} />
         </div>
       {/if}
@@ -451,7 +456,7 @@
 
         {#if tileJobFound}
           <div class="row" role="status">
-            <a href="#/jobs/{encodeURIComponent(tileJobFound.id)}">Tile read job</a>
+            <a bind:this={tileLink} href="#/jobs/{encodeURIComponent(tileJobFound.id)}">Tile read job</a>
             <JobState job={tileJobFound} />
           </div>
         {/if}
