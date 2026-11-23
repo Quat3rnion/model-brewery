@@ -157,7 +157,7 @@ def dense(agent, run):
 def experts(agent, run):
     """Plan on the existing tiny writer fixture, then check private-apply refusal."""
     require(agent.call("list_models")["models"] == [], "expected a new Library")
-    source = run / "assets" / "tiny-qwen2moe.gguf"
+    source = run / "moe-fixtures" / "tiny-qwen2moe.gguf"
     source.write_bytes(fixture_bytes(*fixture()))
     digest = sha(source)
     model = agent.write("register_model", "moe-library", host="local", kind="gguf", path=str(source))
@@ -222,12 +222,15 @@ def main():
     with tempfile.TemporaryDirectory(prefix="isolated-", dir=args.root) as tmp:
         run = Path(tmp)
         env = setup(args, run)
+        config = run / "worker.json"
+        worker = json.loads(config.read_text())
+        fixture_dir = run / "moe-fixtures"
+        fixture_dir.mkdir()
+        worker["source_roots"].append(str(fixture_dir))
         if args.lanternfish != LANTERN:
-            config = run / "worker.json"
-            worker = json.loads(config.read_text())
             worker["engine_env"]["BREWERY_LANTERNFISH_TRACE"] = str(args.lanternfish)
-            save(run, "worker", worker)
-            config.chmod(0o600)
+        save(run, "worker", worker)
+        config.chmod(0o600)
         log_path = args.root / "controller.log"
         with log_path.open("w") as log, subprocess.Popen(
             [args.bins / "brewery"], env=env, cwd=REPO, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
