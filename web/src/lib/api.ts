@@ -101,6 +101,9 @@ export const api = {
   interventions: (signal?: AbortSignal) => request<unknown>('GET', '/api/interventions', undefined, signal),
   scratch: (signal?: AbortSignal) => request<unknown>('GET', '/api/scratch', undefined, signal),
   diff: (kind: 'tensors' | 'traces' | 'behavior', query: string, signal?: AbortSignal) => request<unknown>('GET', `/api/diff/${kind}?${query}`, undefined, signal),
+  // Spectral weight health (X2). The controller answers 202 with the job ID.
+  weightSpectra: (body: import('./spectra').SpectraRequest, key: string) =>
+    request<{ id: string }>('POST', '/api/weight-spectra', body, undefined, { 'Idempotency-Key': key }),
   // Built-in agent (W15). The provider API key has its own write-only calls in AgentProviderSettings.
   agentProvider: (signal?: AbortSignal) => request<unknown>('GET', '/api/settings/agent-provider', undefined, signal),
   saveAgentProvider: (body: unknown) => request<unknown>('PUT', '/api/settings/agent-provider', body),

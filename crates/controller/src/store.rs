@@ -148,10 +148,11 @@ impl Store {
     pub fn scratch_has_jobs(&self, id: &str, kind: Option<&str>) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM jobs j WHERE j.state IN ('queued','running')
-             AND json_extract(j.body,'$.scratch_job') = 1
+             AND (json_extract(j.body,'$.scratch_job') = 1
+                  OR json_extract(j.body,'$.kind') = ?3)
              AND (?2 IS NULL OR json_extract(j.body,'$.kind') = ?2)
              AND EXISTS(SELECT 1 FROM json_each(j.body,'$.input_ids') WHERE value = ?1))",
-            params![id, kind],
+            params![id, kind, brewery_worker::weight_spectra::JOB],
             |row| row.get(0),
         )?)
     }

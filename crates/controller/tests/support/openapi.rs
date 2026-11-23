@@ -88,6 +88,7 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ),
         ("delete", "/api/models/{id}", "deleteModel"),
         ("get", "/api/scratch", "listScratch"),
+        ("post", "/api/weight-spectra", "queueWeightSpectra"),
         ("get", "/api/diff/tensors", "diffTensors"),
         ("get", "/api/diff/traces", "diffTraces"),
         ("get", "/api/diff/behavior", "diffBehavior"),

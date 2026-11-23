@@ -254,6 +254,24 @@
         }
       }
     },
+    "/api/weight-spectra": {
+      "post": {
+        "operationId": "queueWeightSpectra",
+        "summary": "Queue spectral analysis of SafeTensors or supported GGUF weights",
+        "description": "Use an approved local Library ID or a scratch ID. A scratch input defaults to its parent for comparison. Use an explicit comparison ID for another revision or quantization level on the same host. Results are not release-qualified. Poll get_job with the returned ID.",
+        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WeightSpectraRequest"}}}},
+        "responses": {
+          "200": {"description": "The same submission was accepted before.", "content": {"application/json": {"schema": {"type":"object","required":["id"],"properties":{"id":{"$ref":"#/components/schemas/Id"}}}}}},
+          "202": {"description": "Spectral job queued.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"description": "The source is not approved, the local editor is unavailable, or the idempotency key conflicts.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
     "/api/diff/tensors": {
       "get": {
         "operationId": "diffTensors",
@@ -2212,7 +2230,7 @@
         "type": "object",
         "required": ["id", "kind", "host", "pool_slot", "state", "progress", "input_ids", "options", "cancel_requested", "has_result", "created_at", "updated_at"],
         "properties": {
-          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf","scratch_checks","scratch_locate_edit"]}]},
+          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf","scratch_checks","scratch_locate_edit","weight_spectra"]}]},
           "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}], "description": "Concrete worker ID, or auto before assignment of a pool conversion."},
           "requested_host": {"const": "auto", "description": "Present if auto conversion routing was requested."},
           "pool_slot": {"type": "boolean"}, "state": {"$ref": "#/components/schemas/JobState"}, "progress": {"type": "string"},
@@ -2227,7 +2245,8 @@
               {"$ref": "#/components/schemas/CacheCleanupOptions"}, {"$ref": "#/components/schemas/EmptyOptions"},
               {"$ref": "#/components/schemas/GgufLayerRecipeOptions"},
               {"$ref": "#/components/schemas/Exl3LayerOptions"},
-              {"$ref": "#/components/schemas/HgnLayerRecipeOptions"}
+              {"$ref": "#/components/schemas/HgnLayerRecipeOptions"},
+              {"$ref": "#/components/schemas/WeightSpectraFilter"}
             ]
           },
           "prompt_id": {"$ref": "#/components/schemas/Id"},
@@ -3520,6 +3539,73 @@
         "then": {"properties": {"artifact": {"properties": {"kind": {"enum": ["gguf", "safetensors"]}}}}},
         "else": {"properties": {"artifact": {"properties": {"kind": {"const": "hf"}}}}}
       },
+      "WeightSpectraFilter": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "layer": {"type":["integer","null"],"minimum":0,"maximum":4095},
+          "tensor": {"type":["string","null"],"minLength":1,"maxLength":95,"description":"Use an exact SafeTensors or GGUF tensor name."}
+        }
+      },
+      "WeightSpectraRequest": {
+        "type": "object", "additionalProperties": false, "required": ["id"],
+        "properties": {
+          "id": {"$ref": "#/components/schemas/Id"},
+          "compare_id": {"$ref": "#/components/schemas/Id"},
+          "representation": {"enum":["safetensors","gguf"]},
+          "compare_representation": {"enum":["safetensors","gguf"]},
+          "layer": {"type":"integer","minimum":0,"maximum":4095},
+          "tensor": {"type":"string","minLength":1,"maxLength":95,"description":"Use an exact SafeTensors or GGUF tensor name."}
+        }
+      },
+      "WeightSpectraInput": {
+        "type":"object", "required":["id","sha256","format"],
+        "properties":{
+          "id":{"$ref":"#/components/schemas/Id"},
+          "sha256":{"$ref":"#/components/schemas/Sha256"},
+          "format":{"enum":["safetensors","gguf"]},
+          "shards":{"type":"array","items":{"type":"array","minItems":2,"maxItems":2,"prefixItems":[{"type":"string"},{"$ref":"#/components/schemas/Sha256"}]}}
+        }
+      },
+      "WeightSpectraMeasurement": {
+        "type":"object","required":["dtype","shape"],
+        "properties":{
+          "dtype":{"type":"string"},
+          "shape":{"type":"array","items":{"type":"integer","minimum":0}},
+          "reason":{"enum":["unsupported_dtype","not_a_matrix_or_vector","shape_outside_compute_limits"]},
+          "method":{"enum":["exact","randomized_top_32"]},
+          "singular_values":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"number","minimum":0}},
+          "effective_rank":{"type":"number","minimum":0},
+          "stable_rank":{"type":"number","minimum":0},
+          "captured_energy_fraction":{"type":["number","null"],"minimum":0,"maximum":1},
+          "alpha":{"type":["number","null"]},
+          "alpha_tail_count":{"type":["integer","null"],"minimum":8},
+          "alpha_xmin":{"type":["number","null"],"minimum":0},
+          "alpha_ks":{"type":["number","null"],"minimum":0,"maximum":1}
+        }
+      },
+      "WeightSpectraResult": {
+        "type":"object","required":["kind","schema_version","qualification","source","reference","tensors"],
+        "properties":{
+          "kind":{"const":"weight_spectra"},
+          "schema_version":{"const":1},
+          "qualification":{"const":"not release-qualified"},
+          "source":{"$ref":"#/components/schemas/WeightSpectraInput"},
+          "reference":{"anyOf":[{"$ref":"#/components/schemas/WeightSpectraInput"},{"type":"null"}]},
+          "tensors":{"type":"array","maxItems":512,"items":{
+            "type":"object","required":["name","layer","source","reference","delta","status"],
+            "properties":{
+              "name":{"type":"string"},
+              "layer":{"type":["integer","null"]},
+              "source":{"anyOf":[{"$ref":"#/components/schemas/WeightSpectraMeasurement"},{"type":"null"}]},
+              "reference":{"anyOf":[{"$ref":"#/components/schemas/WeightSpectraMeasurement"},{"type":"null"}]},
+              "status":{"enum":["measured","compared","shape_mismatch","missing","unsupported"]},
+              "delta":{"type":["object","null"],"description":"Source minus reference when both tensor shapes match and both measurements exist.","properties":{
+                "sigma_max":{"type":"number"},"effective_rank":{"type":"number"},"stable_rank":{"type":"number"},"alpha":{"type":["number","null"]}
+              }}
+            }
+          }}
+        }
+      },
       "JobResult": {
         "description": "Worker result. Weight apply and Hugging Face download check output identity and register a Library model only on verified success. A job result is not a release verdict.",
         "oneOf": [
@@ -3534,12 +3620,13 @@
           {"$ref": "#/components/schemas/HfDownloadResult"},
           {"$ref": "#/components/schemas/Exl3LayerResult"},
           {"$ref": "#/components/schemas/TraceResult"},
+          {"$ref": "#/components/schemas/WeightSpectraResult"},
           {"type": "object", "not": {"anyOf": [
             {"$ref": "#/components/schemas/CompareResult"}, {"$ref": "#/components/schemas/ConversionResult"},
             {"$ref": "#/components/schemas/GenerateResult"}, {"$ref": "#/components/schemas/Gsm8kResult"},
             {"$ref": "#/components/schemas/BenchmarkResult"}, {"$ref": "#/components/schemas/TransferResult"},
              {"$ref": "#/components/schemas/CacheCleanupResult"}, {"$ref": "#/components/schemas/WeightApplyResult"},
-             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace"]}}}
+             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace", "weight_spectra"]}}}
           ]}}
         ]
       },

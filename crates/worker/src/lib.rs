@@ -10,6 +10,7 @@ pub mod resources;
 pub mod scratch_eval;
 pub mod source_grants;
 pub mod trace;
+pub mod weight_spectra;
 pub mod weight_source;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

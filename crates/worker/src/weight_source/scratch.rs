@@ -462,7 +462,7 @@ fn editable_width(dtype: &str) -> Result<usize> {
     }
 }
 
-fn decode(dtype: &str, bytes: &[u8]) -> f64 {
+pub(crate) fn decode(dtype: &str, bytes: &[u8]) -> f64 {
     if dtype == "F32" {
         return f32::from_le_bytes(bytes.try_into().unwrap()).into();
     }

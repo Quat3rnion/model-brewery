@@ -22,6 +22,7 @@ mod profiles;
 mod remote_edit;
 mod sae;
 mod scratch;
+mod spectra;
 mod settings;
 mod store;
 mod suggestions;
