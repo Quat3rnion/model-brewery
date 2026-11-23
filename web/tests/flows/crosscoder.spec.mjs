@@ -1,5 +1,4 @@
 import AxeBuilder from '@axe-core/playwright';
-import { mkdirSync } from 'node:fs';
 import { test, expect } from './fixtures.mjs';
 
 const wcagAA = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22a', 'wcag22aa'];
@@ -8,7 +7,6 @@ const SHA_P = 'a'.repeat(64);
 const XC = 'c0ffee'.padEnd(64, '0');
 const PARENT = 'model-parent';
 const CHILD = '00000000-0000-4000-8000-000000000021';
-const SHOTS = process.env.X6_SHOTS ?? '/arboretum/tmp/x6-shots';
 
 const scratchRev = {
   id: CHILD, kind: 'scratch', state: 'scratch', sha256: SHA, qualification: 'not release-qualified', library_model_id: null,
@@ -113,8 +111,7 @@ test('Edits opens a crosscoder report for the revision and the report reads only
 
   expect(controller.requests().filter((r) => r.method !== 'GET')).toEqual([]);
   await scan(page, info);
-  mkdirSync(SHOTS, { recursive: true });
-  await page.screenshot({ path: `${SHOTS}/report-${info.project.name}.png`, fullPage: true });
+  await page.screenshot({ path: info.outputPath('report.png'), fullPage: true });
 });
 
 test('crosscoder report shows a missing report, a bad schema and a child that is not the revision', async ({ page, controller }, info) => {
