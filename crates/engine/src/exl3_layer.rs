@@ -6,10 +6,8 @@ use brewery_worker::{
     exl3_layer::{self as wire, Codebook, Spec, DIM},
     weight_source,
 };
-use serde::{de, Deserialize, Deserializer};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
     env, fs,
     io::{self, Read, Seek},
     os::unix::{fs::PermissionsExt, process::CommandExt},
@@ -19,111 +17,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Tensor {
-    dtype: String,
-    shape: Vec<u64>,
-    data_offsets: [u64; 2],
-}
-
-// Deserialize tensor records directly to reject duplicate fields, and
-// reject repeated names rather than retaining the last extent.
-fn deserialize_header(bytes: &[u8]) -> Result<BTreeMap<String, Tensor>> {
-    struct Header;
-    impl<'de> de::Visitor<'de> for Header {
-        type Value = BTreeMap<String, Tensor>;
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("a SafeTensors header object")
-        }
-        fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-            let mut entries = BTreeMap::new();
-            let mut metadata = false;
-            while let Some(name) = map.next_key::<String>()? {
-                if name == "__metadata__" && !metadata {
-                    map.next_value::<BTreeMap<String, String>>()?;
-                    metadata = true;
-                } else if weight_source::native_tensor_name(&name) && !entries.contains_key(&name) {
-                    entries.insert(name, map.next_value::<Tensor>()?);
-                    if entries.len() > 100_000 {
-                        return Err(de::Error::custom("too many SafeTensors tensors"));
-                    }
-                } else {
-                    return Err(de::Error::custom(
-                        "invalid or duplicate SafeTensors tensor name",
-                    ));
-                }
-            }
-            Ok(entries)
-        }
-    }
-    let mut json = serde_json::Deserializer::from_slice(bytes);
-    let entries = json.deserialize_map(Header)?;
-    json.end()?;
-    Ok(entries)
-}
-
 struct Safetensors<'a> {
     payload: &'a [u8],
-    entries: BTreeMap<String, Tensor>,
+    header: weight_source::Header,
 }
 
 impl<'a> Safetensors<'a> {
     fn parse(bytes: &'a [u8], limit: u64) -> Result<Self> {
-        let (size, rest) = bytes
-            .split_first_chunk::<8>()
-            .context("missing SafeTensors header length")?;
-        let size = u64::from_le_bytes(*size);
-        ensure!(
-            (2..=limit.min(rest.len() as u64)).contains(&size),
-            "SafeTensors header exceeds bounded extent"
-        );
-        let (header, payload) = rest.split_at(size as usize);
-        ensure!(
-            header.first() == Some(&b'{'),
-            "invalid SafeTensors header start"
-        );
-        let entries = deserialize_header(header)?;
-        ensure!(!entries.is_empty(), "missing SafeTensors tensors");
-        let capacity = payload.len() as u64;
-        let mut ranges = Vec::with_capacity(entries.len());
-        for tensor in entries.values() {
-            let width = match tensor.dtype.as_str() {
-                "BOOL" | "I8" | "U8" | "F8_E4M3" | "F8_E5M2" | "F8_E8M0" => 1,
-                "I16" | "U16" | "F16" | "BF16" => 2,
-                "I32" | "U32" | "F32" => 4,
-                "I64" | "U64" | "F64" | "C64" => 8,
-                _ => bail!("unsupported SafeTensors dtype"),
-            };
-            let [start, end] = tensor.data_offsets;
-            ensure!(
-                tensor.shape.len() <= 8 && start <= end && end <= capacity,
-                "invalid SafeTensors shape or offset"
-            );
-            let bytes = if tensor.shape.contains(&0) {
-                0
-            } else {
-                tensor
-                    .shape
-                    .iter()
-                    .try_fold(width, |n: u64, axis| n.checked_mul(*axis))
-                    .context("SafeTensors shape overflow")?
-            };
-            ensure!(end - start == bytes, "SafeTensors tensor extent mismatch");
-            ranges.push((start, end));
-        }
-        ranges.sort_unstable();
-        let mut end = 0;
-        for (start, next) in ranges {
-            ensure!(start == end, "SafeTensors payload has a gap or overlap");
-            end = next;
-        }
-        ensure!(end == capacity, "unindexed SafeTensors payload bytes");
-        Ok(Self { payload, entries })
+        let header = weight_source::Header::read(bytes, bytes.len() as u64, limit)?;
+        let payload = &bytes[header.payload_start as usize..];
+        Ok(Self { payload, header })
     }
 
     fn tensor(&self, name: &str, shape: &[u64], dtypes: &[&str]) -> Result<(&str, &'a [u8])> {
         let t = self
+            .header
             .entries
             .get(name)
             .with_context(|| format!("missing tensor {name:?}"))?;
@@ -291,7 +199,7 @@ fn reconstruct(path: &Path, spec: &Spec) -> Result<Vec<f64>> {
     );
     let sf = Safetensors::parse(&bytes, 4096)?;
     ensure!(
-        sf.entries.len() == 3 + usize::from(spec.codebook.marker().is_some()),
+        sf.header.entries.len() == 3 + usize::from(spec.codebook.marker().is_some()),
         "EXL3 artifact must contain only one bias-free layer group"
     );
     if let Some(marker) = spec.codebook.marker() {

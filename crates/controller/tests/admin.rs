@@ -10,6 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "support/scratch.rs"]
+mod scratch;
+
 struct Test {
     root: tempfile::TempDir,
     child: Option<Child>,
@@ -79,6 +82,9 @@ impl Test {
                 root.join(format!("editor-{name}")),
             );
         }
+        command
+            .env("BREWERY_COMPILED_PROGRAM_PYTHON", "/usr/bin/python3")
+            .env("BREWERY_COMPILED_PROGRAM_SCRIPT", root.join("program.py"));
         let mut child = command.spawn().unwrap();
         let until = Instant::now() + Duration::from_secs(4);
         self.addr = loop {
@@ -106,6 +112,16 @@ impl Test {
         body: Option<Value>,
     ) -> (u16, Value) {
         let method = if body.is_some() { "POST" } else { "GET" };
+        self.request_method(method, path, headers, media_type, body)
+    }
+    fn request_method(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &str,
+        media_type: &str,
+        body: Option<Value>,
+    ) -> (u16, Value) {
         let body = body.map(|b| b.to_string()).unwrap_or_default();
         let mut stream = TcpStream::connect(&self.addr).unwrap();
         stream
@@ -390,10 +406,7 @@ printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","w
     wait("worker progress");
     assert_eq!(t.admin(Some(toggle(0, false))).0, 409);
     assert_eq!(t.admin(Some(toggle(1, false))).0, 200);
-    assert_eq!(
-        t.request("/api/jobs", NEW_WORK, Some(req.clone())).0,
-        409
-    );
+    assert_eq!(t.request("/api/jobs", NEW_WORK, Some(req.clone())).0, 409);
     fs::remove_file(t.root.path().join("hold")).unwrap();
     assert_eq!(wait("succeeded")["result"]["source_format"], "hf");
     assert_eq!(
@@ -406,10 +419,7 @@ printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","w
         t.admin(None).1["hosts"][0]["weight_editor"]["enabled"],
         false
     );
-    assert_eq!(
-        t.request("/api/jobs", NEW_WORK, Some(req)).0,
-        409
-    );
+    assert_eq!(t.request("/api/jobs", NEW_WORK, Some(req)).0, 409);
 
     let grant = |action, revision, path: &std::path::Path| {
         t.request(

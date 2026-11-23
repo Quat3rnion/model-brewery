@@ -1,10 +1,11 @@
 use crate::{Config, cache};
 use anyhow::{Result, ensure};
 use brewery_worker::{
-    LIMIT, PathState, SUGGEST_PREFIX_BYTES, absolute, decode_limited, is_digest, token,
+    Input, LIMIT, PathState, SUGGEST_PREFIX_BYTES, absolute, decode_limited, is_digest,
+    scratch_eval, token,
 };
 use serde::Deserialize;
-use std::{fs::File, io::ErrorKind, os::unix::fs::MetadataExt, path::Path};
+use std::{collections::BTreeMap, fs::File, io::ErrorKind, os::unix::fs::MetadataExt, path::Path};
 
 pub fn get(path: &str) -> Result<PathState> {
     if path.len() > SUGGEST_PREFIX_BYTES
@@ -24,6 +25,9 @@ pub fn get(path: &str) -> Result<PathState> {
         };
     let path = Path::new(path);
     let (cfg, _) = Config::load()?;
+    if cfg.scratch_access.is_some() {
+        return Ok(PathState::OutsideRoots);
+    }
     if cfg.configured_source_root(path).is_none()
         && !(cfg.cache_source_root(path).is_some() && private_root(&cfg.root)?.is_some())
         && !cfg
@@ -94,6 +98,13 @@ fn published(root: &Path, path: &Path) -> Result<bool> {
     struct Record {
         action: String,
         reply: Reply,
+        job: Option<Job>,
+        #[serde(default)]
+        inputs: BTreeMap<usize, Input>,
+    }
+    #[derive(Deserialize)]
+    struct Job {
+        kind: String,
     }
     #[derive(Deserialize)]
     struct Reply {
@@ -111,6 +122,10 @@ fn published(root: &Path, path: &Path) -> Result<bool> {
     let record: Record = decode_limited(record, LIMIT)?;
     Ok(record.action == "start"
         && record.reply.state == "succeeded"
+        && record
+            .job
+            .is_none_or(|job| !scratch_eval::private_output(&job.kind))
+        && !record.inputs.values().any(scratch_eval::granted)
         && record
             .reply
             .result

@@ -576,6 +576,28 @@ impl Admin {
 }
 
 impl App {
+    pub(crate) fn scratch_source_allowed(&self, worker: &str, path: &Path) -> Result<bool, Error> {
+        let lane = self
+            .local_edit
+            .get(worker)
+            .ok_or("local editor unavailable")?;
+        if lane.configured.iter().any(|root| path.starts_with(root)) {
+            return Ok(true);
+        }
+        let admin = self.admin.as_ref().ok_or("administration unavailable")?;
+        let db = admin.db.lock().map_err(|_| "admin storage unavailable")?;
+        let policy = infra_policy::Policy::load(&db, worker)?;
+        Ok(policy.model_directories.iter().any(|grant| {
+            path.starts_with(&grant.path)
+                && brewery_worker::source_grants::revalidate(
+                    worker,
+                    grant,
+                    &self.local_edit.protected,
+                )
+                .is_ok()
+        }))
+    }
+
     pub(crate) fn editor_grants(
         &self,
         job: &crate::domain::Job,

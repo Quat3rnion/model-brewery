@@ -11,7 +11,7 @@ const model={id:'local-sample',name:'Private sample',path:'/models/'+'x'.repeat(
 const host={id:'frame',name:'Frame',capabilities:{convert:true}};
 const policy={...host,revision:1,paused:false,draining:false,installed_jobs:['convert'],allowed_jobs:['convert'],disabled_jobs:[],weight_editor:{available:true,enabled:false,capabilities:{}}};
 const routes=[
-  ['library','Library'],['queue','Jobs'],['transfers','Transfers'],['compare','Compare'],['convert','Convert'],
+  ['library','Library'],['queue','Jobs'],['transfers','Transfers'],['compare','Compare'],['trace','Trace'],['edits','Edit sessions'],['trace?job=missing','Trace','trace'],['edits?rev=missing','Edit sessions','edits'],['convert','Convert'],
   ['evaluate','Evaluate'],['benchmarks','Benchmarks'],['calibration','Calibration inputs'],['settings','Settings'],
   [`jobs/${job.id}`,'Convert step','queue'],['profiles?format=gguf','Conversion profiles','convert'],
   ['weights?source=local-sample','Weight edits','library'],['library?entry=local-sample','Library','library'],

@@ -268,10 +268,10 @@ impl Config {
             return Err(Error::Transport(e.into()));
         }
         drop(stdin);
-        let limit = if matches!(request, Rpc::SuggestPaths(_) | Rpc::Stat(_)) {
-            SUGGEST_JSON_LIMIT
-        } else {
-            LIMIT
+        let limit = match request {
+            Rpc::SuggestPaths(_) | Rpc::Stat(_) => SUGGEST_JSON_LIMIT,
+            Rpc::TraceRead { .. } => trace::RESPONSE_CAP as u64 + 128,
+            _ => LIMIT,
         };
         let value = decode_limited::<Value>(child.stdout.take().unwrap(), limit);
         if value.is_err() {
@@ -562,6 +562,13 @@ fn run() -> Wire<Value> {
             validate_suggest_prefix(&request.prefix)?;
             let reply: PathSuggestions = cfg.rpc(dest, Rpc::SuggestPaths(request))?;
             Ok(serde_json::to_value(reply).context("serialize path suggestions")?)
+        }
+        [action, dest, id] if action == "trace-read" => {
+            token(id)?;
+            let cfg = config(dest)?;
+            let slice: trace::Slice = decode_limited(std::io::stdin().lock(), 2048)?;
+            slice.check()?;
+            cfg.rpc(dest, Rpc::TraceRead { id: id.into(), slice })
         }
         [action, dest] if action == "stat" => {
             let cfg = config(dest)?;

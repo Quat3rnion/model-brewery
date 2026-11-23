@@ -1,11 +1,15 @@
 use anyhow::{Context, Result, ensure};
+pub mod compiled_program;
 pub mod exl3_layer;
 pub mod hf_download;
 pub mod hgn_recipe;
 pub mod hy4;
+pub mod locate_edit;
 pub mod operational;
 pub mod resources;
+pub mod scratch_eval;
 pub mod source_grants;
+pub mod trace;
 pub mod weight_source;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -338,6 +342,10 @@ pub enum Rpc {
         detail: ProgressDetail,
     },
     SuggestPaths(SuggestRequest),
+    TraceRead {
+        id: String,
+        slice: trace::Slice,
+    },
     Stat(StatRequest),
     Read {
         root: PathBuf,
@@ -476,7 +484,10 @@ pub fn staging_error(detail: &str) -> &'static str {
         || detail.contains("No space left on device")
     {
         "Target disk space is insufficient; check free space and the configured reserve"
-    } else if detail.contains("hash mismatch")
+    } else if detail.contains("trace model SHA-256 mismatch") {
+        "Trace model SHA-256 mismatch; use the model revision bound to the intervention"
+    } else if detail.contains("scratch input SHA-256 mismatch")
+        || detail.contains("hash mismatch")
         || detail.contains("content mismatch")
         || detail.contains("changed while hashing")
     {

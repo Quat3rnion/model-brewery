@@ -9,6 +9,15 @@ mod hf_tokens;
 #[path = "support/infra_hosts.rs"]
 mod infra_hosts;
 
+#[path = "support/interventions.rs"]
+mod interventions;
+
+#[path = "support/mcp.rs"]
+mod mcp;
+
+#[path = "support/sae.rs"]
+mod sae;
+
 #[path = "support/weights.rs"]
 mod weights;
 
@@ -157,6 +166,18 @@ impl Fixture {
         (
             head.split_whitespace().nth(1).unwrap().parse().unwrap(),
             body.to_owned(),
+        )
+    }
+
+    fn bytes(&self, method: &str, path: &str) -> (u16, Vec<u8>) {
+        let mut conn = self.open_request(method, path, None, "");
+        let mut data = Vec::new();
+        conn.read_to_end(&mut data).unwrap();
+        let split = data.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = std::str::from_utf8(&data[..split]).unwrap();
+        (
+            head.split_whitespace().nth(1).unwrap().parse().unwrap(),
+            data.split_off(split + 4),
         )
     }
 
@@ -416,14 +437,27 @@ fn suggestions_validate_same_origin_json_and_forward_space_preserving_prefix() {
 #[test]
 fn hy4_gate_encode_requires_the_exact_same_worker_opt_in() {
     let mut app = Fixture::new();
-    fs::write(app.path("dispatch.json"), json!({"hosts":{
-        "alpha":{"local":true,"capabilities":{"hy4_encode":true}},
-        "beta":{"local":true,"capabilities":{"hy4_plan":true}}
-    }}).to_string()).unwrap();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts":{
+            "alpha":{"local":true,"capabilities":{"hy4_encode":true}},
+            "beta":{"local":true,"capabilities":{"hy4_plan":true}}
+        }})
+        .to_string(),
+    )
+    .unwrap();
     app.launch();
-    let model = |host| app.json("POST", "/api/models", Some(json!({
-        "name":"Pinned Hy4","host":host,"kind":"hf","path":"/models/hy4"
-    })), 201)["id"].clone();
+    let model = |host| {
+        app.json(
+            "POST",
+            "/api/models",
+            Some(json!({
+                "name":"Pinned Hy4","host":host,"kind":"hf","path":"/models/hy4"
+            })),
+            201,
+        )["id"]
+            .clone()
+    };
     let source = model("alpha");
     let other = model("beta");
     let body = json!({"kind":"convert","host":"alpha","input_ids":[source],
@@ -433,29 +467,207 @@ fn hy4_gate_encode_requires_the_exact_same_worker_opt_in() {
         ("kind", json!("plan"), 409),
         ("host", json!("auto"), 400),
         ("input_ids", json!([other]), 400),
-        ("options", json!({"hy4_overrides":{"blk.1.ffn_down_exps.weight":"Q8_0"}}), 400),
-        ("options", json!({"hy4_overrides":{"blk.1.attn_gate.weight":"Q8_0"},"threads":1}), 400),
+        (
+            "options",
+            json!({"hy4_overrides":{"blk.1.ffn_down_exps.weight":"Q8_0"}}),
+            400,
+        ),
+        (
+            "options",
+            json!({"hy4_overrides":{"blk.1.attn_gate.weight":"Q8_0"},"threads":1}),
+            400,
+        ),
         ("options", json!({}), 409),
     ] {
         let mut bad = body.clone();
         bad[key] = value;
         app.json("POST", "/api/jobs", Some(bad), status);
     }
-    app.json("POST", "/api/conversions", Some(json!({"host":"alpha","input_ids":[source],
-        "options":body["options"]})), 400);
+    app.json(
+        "POST",
+        "/api/conversions",
+        Some(json!({"host":"alpha","input_ids":[source],
+        "options":body["options"]})),
+        400,
+    );
+}
+
+#[test]
+fn diff_traces_matches_prompts_and_tokens() {
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({
+            "hosts":{"alpha":{"local":true,"capabilities":{"trace":true}}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let model = app.register("alpha", "gguf", "/models/trace.gguf");
+    let request = json!({"kind":"trace","host":"alpha","input_ids":[model],"prompt":"one two",
+        "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":3}});
+    let run = |body| {
+        let id = app.enqueue(body);
+        app.await_job(&id, |job| job["state"] == "succeeded");
+        id
+    };
+    let a = run(request.clone());
+    let mut edited = request.clone();
+    edited["options"]["interventions"] =
+        json!([{"layer":0,"role":"l_out","positions":[0],"op":"zero"}]);
+    let b = run(edited);
+    let path = format!("/api/diff/traces?a={a}&b={b}");
+    let result = app.json("GET", &path, None, 200);
+    assert_eq!(app.json("GET", &path, None, 200), result);
+    app.json("GET", &format!("{path}&start=2&end=1"), None, 400);
+    let row = &result["activations"][0];
+    assert_eq!(row["layer"], 0);
+    assert_eq!(row["role"], "l_out");
+    assert_eq!(row["position"], 0);
+    assert_eq!(row["l2"], 1.);
+    assert_eq!(row["linf"], 1.);
+    assert!(row["cosine"].is_null());
+    for key in ["model_logits", "logit_lens"] {
+        let logits = &result[key][0];
+        assert_eq!(logits["entered"], json!([8]));
+        assert_eq!(logits["exited"], json!([7]));
+        assert_eq!(logits["shared_count"], 2);
+        assert_eq!(logits["linf"], 1.);
+        assert!((logits["kl_a_to_b_shared"].as_f64().unwrap() - 0.08260774489474476).abs() < 1e-12);
+    }
+    let mut other = request.clone();
+    other["prompt"] = json!("different text");
+    let different = run(other);
+    app.json(
+        "GET",
+        &format!("/api/diff/traces?a={a}&b={different}"),
+        None,
+        422,
+    );
+    let mut other = request;
+    other["options"]["top_k"] = json!(2);
+    let different = run(other);
+    app.json(
+        "GET",
+        &format!("/api/diff/traces?a={a}&b={different}"),
+        None,
+        422,
+    );
+    fs::write(app.path("trace-token-mismatch"), &b).unwrap();
+    app.json("GET", &format!("{path}&start=0&end=1"), None, 422);
+    fs::write(app.path("trace-pruned"), "").unwrap();
+    app.json("GET", &path, None, 404);
+}
+
+#[test]
+fn trace_admission_and_reads_are_bounded() {
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({
+            "hosts": {"alpha":{"local":true,"capabilities":{"trace":true}}, "beta":{"local":true}},
+            "trace":{"default_byte_cap":65536,"max_byte_cap":131072,"retain_jobs":2}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let model = app.register("alpha", "gguf", "/models/trace.gguf");
+    let body = json!({"kind":"trace","host":"alpha","input_ids":[model],"prompt":"one two",
+        "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":2}});
+    for (key, value) in [
+        ("byte_cap", json!(131073)),
+        ("roles", json!(["../weights"])),
+        ("positions", json!([4096])),
+        ("prompts", json!(["conflicts with prompt"])),
+        ("layers", json!((0..65).collect::<Vec<_>>())),
+        ("retain_jobs", json!(10)),
+        (
+            "interventions",
+            json!([{"op":"zero","layer":0,"role":"kq_soft_max","positions":[0]}]),
+        ),
+    ] {
+        let mut bad = body.clone();
+        bad["options"][key] = value;
+        app.json("POST", "/api/jobs", Some(bad), 400);
+    }
+    let mut off = body.clone();
+    off["host"] = json!("beta");
+    app.json("POST", "/api/jobs", Some(off), 409);
+    assert!(app.launches().is_empty());
+    assert_eq!(
+        app.json("GET", "/api/settings", None, 200)["trace"],
+        json!({"default_byte_cap":65536,"max_byte_cap":131072,"retain_jobs":2})
+    );
+    let id = app.enqueue(body);
+    let job = app.await_job(&id, |job| job["state"] == "succeeded");
+    assert_eq!(job["result"]["envelope"]["options"]["byte_cap"], 65536);
+    assert_eq!(job["result"]["envelope"]["options"]["retain_jobs"], 2);
+    let path = format!("/api/jobs/{id}/trace");
+    assert_eq!(app.json("GET", &path, None, 200)["schema_version"], 1);
+    app.json(
+        "GET",
+        &format!("{path}/tensor?layer=0&role=l_out&start=2&end=1"),
+        None,
+        400,
+    );
+    assert_eq!(
+        app.json(
+            "GET",
+            &format!("{path}/tensor?layer=0&role=l_out&start=0&end=1"),
+            None,
+            200
+        )["rows"][0]["data_base64"],
+        "AACAPw=="
+    );
+    app.json(
+        "GET",
+        &format!("{path}/tensor?layer=0&role=l_out"),
+        None,
+        413,
+    );
+    fs::write(app.path("trace-pruned"), "").unwrap();
+    app.json("GET", &path, None, 404);
+
+    let mut large = json!({"kind":"trace","input_ids":[model],
+        "options":{"layers":(0..65).collect::<Vec<_>>(),"roles":["l_out"],"positions":[0],"top_k":0,
+            "full_dump":true,"byte_cap":33554433,"prompts":["one","two"],
+            "interventions":[{"op":"scale","factor":0.5,"layer":0,"role":"l_out","positions":[0]}]}});
+    app.json("POST", "/api/jobs", Some(large.clone()), 400);
+    large["options"]["byte_cap"] = json!(131072);
+    let multi = app.enqueue(large);
+    let done = app.await_job(&multi, |job| job["state"] == "succeeded");
+    assert_eq!(
+        done["result"]["envelope"]["options"]["prompts"],
+        json!(["one", "two"])
+    );
 }
 
 #[test]
 fn hy4_plan_requires_an_opted_in_source_host_and_exact_override() {
     let mut app = Fixture::new();
-    fs::write(app.path("dispatch.json"), json!({"hosts":{
-        "alpha":{"local":true,"capabilities":{"hy4_plan":true}},
-        "beta":{"local":true}
-    }}).to_string()).unwrap();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts":{
+            "alpha":{"local":true,"capabilities":{"hy4_plan":true}},
+            "beta":{"local":true}
+        }})
+        .to_string(),
+    )
+    .unwrap();
     app.launch();
-    let model = |host| app.json("POST", "/api/models", Some(json!({
-        "name":"Pinned Hy4","host":host,"kind":"hf","path":"/models/hy4"
-    })), 201)["id"].clone();
+    let model = |host| {
+        app.json(
+            "POST",
+            "/api/models",
+            Some(json!({
+                "name":"Pinned Hy4","host":host,"kind":"hf","path":"/models/hy4"
+            })),
+            201,
+        )["id"]
+            .clone()
+    };
     let source = model("alpha");
     let other = model("beta");
     let body = json!({"kind":"plan","host":"alpha","input_ids":[source],
@@ -464,8 +676,16 @@ fn hy4_plan_requires_an_opted_in_source_host_and_exact_override() {
     for (key, value, status) in [
         ("kind", json!("convert"), 409),
         ("input_ids", json!([other]), 400),
-        ("options", json!({"hy4_overrides":{"blk.1.ffn_up_exps.weight":"Q8_0"}}), 400),
-        ("options", json!({"hy4_overrides":{"blk.1.ffn_down_exps.weight":"Q8_0"},"threads":1}), 400),
+        (
+            "options",
+            json!({"hy4_overrides":{"blk.1.ffn_up_exps.weight":"Q8_0"}}),
+            400,
+        ),
+        (
+            "options",
+            json!({"hy4_overrides":{"blk.1.ffn_down_exps.weight":"Q8_0"},"threads":1}),
+            400,
+        ),
     ] {
         let mut bad = body.clone();
         bad[key] = value;
@@ -783,7 +1003,8 @@ fn library_checks_models_asynchronously_and_caches_worker_replies() {
     let state = wait_for(|| {
         let state = app.json("GET", "/api/state", None, 200);
         (state["models"][0]["reason"] == "The controller could not check this path on the worker."
-            && state["models"][4]["reason"] == "Worker does not report file state. Update the worker."
+            && state["models"][4]["reason"]
+                == "Worker does not report file state. Update the worker."
             && state["models"][1]["available"] == true
             && state["models"][2]["available"] == false
             && state["models"][3]["available"] == false)
@@ -836,7 +1057,11 @@ fn library_preserves_directory_suffix_when_checking_safetensors_paths() {
     assert_eq!(state["models"][0]["available"], true);
     assert_eq!(state["models"][1]["available"], false);
     let calls = fs::read_to_string(app.path("model-stat-calls")).unwrap();
-    assert!(calls.lines().any(|path| path == "/models/current.safetensors/."));
+    assert!(
+        calls
+            .lines()
+            .any(|path| path == "/models/current.safetensors/.")
+    );
 }
 
 #[test]
@@ -1010,7 +1235,10 @@ fn saved_prompt_delete_refuses_active_jobs_and_preserves_history() {
     blocked(&path, &running);
     let other_path = format!("/api/prompts/{}", id(&other));
     blocked(&other_path, &queued);
-    assert_eq!(app.request("DELETE", &path, None, "Origin: null\r\n").0, 403);
+    assert_eq!(
+        app.request("DELETE", &path, None, "Origin: null\r\n").0,
+        403
+    );
     app.remove("hold");
     let completed = app.await_job(&running, |job| job["state"] == "succeeded");
     app.await_job(&queued, |job| job["state"] == "succeeded");

@@ -1,6 +1,7 @@
 use crate::conversion::{self, Conversion};
 use crate::domain::{Envelope, Event, Job, Model, NewModel, Prompt, State, now};
 use crate::idempotency::{self, Replay, Submission};
+use crate::scratch::{Revision, RevisionState};
 use brewery_worker::hgn_recipe;
 use brewery_worker::operational::Settings;
 use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
@@ -9,14 +10,19 @@ use serde_json::{Value, json};
 use std::{
     fs::{File, OpenOptions},
     os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _},
-    path::Path,
+    path::{Path, PathBuf},
 };
+
+pub(crate) mod agent;
+mod interventions;
+mod sae;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 pub struct Store {
     conn: Connection,
     _lock: File,
+    scratch: PathBuf,
 }
 
 pub enum PromptDeletion {
@@ -68,7 +74,10 @@ impl Store {
         )?;
         crate::feed::install(&conn)?;
         idempotency::install(&conn)?;
+        interventions::install(&conn)?;
+        sae::install(&conn)?;
         crate::dedupe::install(&conn)?;
+        agent::install(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS profile_revisions(revision TEXT PRIMARY KEY, body TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS host_evaluation_profiles(
@@ -82,8 +91,147 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS conversions_active ON conversions(state);",
         )?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS scratch_revisions(
+                id TEXT PRIMARY KEY, parent_id TEXT NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS scratch_parent ON scratch_revisions(parent_id, state);",
+        )?;
         backfill_model_metadata(&mut conn)?;
-        Ok(Self { conn, _lock: lock })
+        Ok(Self {
+            conn,
+            _lock: lock,
+            scratch: directory.canonicalize()?.join("scratch"),
+        })
+    }
+
+    pub fn scratch_root(&self) -> &Path {
+        &self.scratch
+    }
+
+    pub fn is_scratch_path(&self, path: &Path) -> bool {
+        path.starts_with(&self.scratch)
+            || path
+                .canonicalize()
+                .is_ok_and(|path| path.starts_with(&self.scratch))
+    }
+
+    pub fn is_private_editor_path(&self, path: &Path) -> Result<bool> {
+        let lanes = self.scratch.with_file_name("local-edit");
+        let candidate = |path: &Path| -> Result<bool> {
+            // Do not admit an enclosing directory as an HF or bundle source.
+            let Ok(relative) = path.strip_prefix(&lanes) else {
+                return Ok(lanes.starts_with(path));
+            };
+            if relative.components().count() <= 3 {
+                return Ok(true);
+            }
+            let mut parts = relative.iter();
+            parts.next(); // worker host
+            if parts.next().and_then(|p| p.to_str()) != Some("worker")
+                || parts.next().and_then(|p| p.to_str()) != Some("jobs")
+            {
+                return Ok(false);
+            }
+            let Some(id) = parts.next().and_then(|p| p.to_str()) else {
+                return Ok(true);
+            };
+            Ok(self.job(id)?.is_some_and(|job| job.scratch_job))
+        };
+        Ok(candidate(path)?
+            || match path.canonicalize() {
+                Ok(path) => candidate(&path)?,
+                Err(_) => false,
+            })
+    }
+
+    pub fn scratch_has_jobs(&self, id: &str, kind: Option<&str>) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM jobs j WHERE j.state IN ('queued','running')
+             AND json_extract(j.body,'$.scratch_job') = 1
+             AND (?2 IS NULL OR json_extract(j.body,'$.kind') = ?2)
+             AND EXISTS(SELECT 1 FROM json_each(j.body,'$.input_ids') WHERE value = ?1))",
+            params![id, kind],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn scratch(&self, id: &str) -> Result<Option<Revision>> {
+        read_one(
+            &self.conn,
+            "SELECT body FROM scratch_revisions WHERE id=?",
+            id,
+        )
+    }
+
+    pub fn scratches(&self) -> Result<Vec<Revision>> {
+        read_list(
+            &self.conn,
+            "SELECT body FROM scratch_revisions WHERE state <> 'discarded' ORDER BY rowid",
+            [],
+        )
+    }
+
+    pub fn scratch_count(&self) -> Result<u32> {
+        Ok(self.conn.query_row(
+            "SELECT count(*) FROM scratch_revisions WHERE state <> 'discarded'",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn has_scratch_children(&self, id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM scratch_revisions WHERE parent_id=? AND state <> 'discarded')",
+            [id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn insert_scratch(
+        &mut self,
+        row: &Revision,
+        submission: Option<&Submission<'_>>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO scratch_revisions(id,parent_id,state,body) VALUES(?,?,?,?)",
+            params![
+                row.id,
+                row.provenance.parent_id,
+                row.state.key(),
+                encode(row)?
+            ],
+        )?;
+        idempotency::record(&tx, submission, &row.id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn update_scratch(
+        &mut self,
+        row: &Revision,
+        old: RevisionState,
+        library: Option<&Model>,
+        submission: Option<&Submission<'_>>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        if tx.execute(
+            "UPDATE scratch_revisions SET state=?, body=? WHERE id=? AND state=?",
+            params![row.state.key(), encode(row)?, row.id, old.key()],
+        )? != 1
+        {
+            return Err("scratch state changed before commit".into());
+        }
+        if let Some(model) = library {
+            tx.execute(
+                "INSERT INTO models(id, body) VALUES (?, ?)",
+                params![model.id, encode(model)?],
+            )?;
+        }
+        idempotency::record(&tx, submission, &row.id)?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn feed_cursor(&self) -> rusqlite::Result<i64> {
@@ -827,6 +975,42 @@ impl Store {
     }
     pub fn update(&mut self, job: &mut Job, mut result: Option<Value>) -> Result<()> {
         // One transaction: no reader can see a terminal success without its immutable result.
+        let mut scratch = None;
+        let mut scratch_guard = None;
+        if job.scratch_job && job.state == State::Succeeded {
+            let verified = if job.cancel_requested {
+                job.state = State::Cancelled;
+                job.progress = "Scratch job cancelled".into();
+                Err("cancelled".into())
+            } else if job.kind == brewery_worker::locate_edit::JOB {
+                crate::scratch::locate::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
+                    .map(|(revision, safe_result, guard)| {
+                        scratch_guard = Some(guard);
+                        Some((revision, safe_result))
+                    })
+            } else {
+                crate::scratch::jobs::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
+            };
+            match verified {
+                Ok(Some((revision, safe_result))) => {
+                    scratch = Some(revision);
+                    result = Some(safe_result);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    if job.state != State::Cancelled {
+                        job.state = State::Failed;
+                        job.progress = "Scratch job result was not accepted".into();
+                        job.error = Some(error.to_string());
+                    }
+                    job.has_result = false;
+                    result = None;
+                }
+            }
+        }
+        if job.scratch_job && matches!(job.state, State::Failed | State::Cancelled) {
+            crate::scratch::jobs::clean_failed_conversion(self, job);
+        }
         if job.state == State::Succeeded && job.kind == brewery_worker::exl3_layer::JOB {
             let receipt = result.as_ref().unwrap_or(&Value::Null);
             let envelope = self.envelope(&job.id)?;
@@ -939,6 +1123,24 @@ impl Store {
             None
         };
         let tx = self.conn.transaction()?;
+        if let Some(row) = scratch {
+            if scratch_guard.is_some() {
+                tx.execute(
+                    "INSERT INTO scratch_revisions(id,parent_id,state,body) VALUES(?,?,?,?)",
+                    params![
+                        row.id,
+                        row.provenance.parent_id,
+                        row.state.key(),
+                        encode(&row)?
+                    ],
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE scratch_revisions SET body=? WHERE id=? AND state='scratch'",
+                    params![encode(&row)?, row.id],
+                )?;
+            }
+        }
         if let Some(mut model) = artifact {
             model.job_id = Some(job.id.clone());
             if let Some(receipt) = &result {
@@ -951,6 +1153,9 @@ impl Store {
         }
         update_job(&tx, job, result)?;
         tx.commit()?;
+        if let Some(guard) = scratch_guard {
+            guard.keep();
+        }
         Ok(())
     }
 }

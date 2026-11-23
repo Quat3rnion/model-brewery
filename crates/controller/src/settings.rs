@@ -8,6 +8,20 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 pub const KINDS: &[&str] = &["benchmark", "baseline", "evaluate", "generate"];
 
+pub(crate) fn trace_policy(
+    config: Option<&Value>,
+) -> Result<brewery_worker::trace::Policy, crate::Error> {
+    let policy: brewery_worker::trace::Policy = config
+        .and_then(|v| v.get("trace"))
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()?
+        .unwrap_or_default();
+    policy
+        .check()
+        .map_err(|e| -> crate::Error { e.to_string().into() })?;
+    Ok(policy)
+}
+
 #[derive(Default)]
 pub struct Managed {
     entries: BTreeMap<String, Value>,

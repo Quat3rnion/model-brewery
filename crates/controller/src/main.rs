@@ -1,8 +1,10 @@
 mod admin;
+mod agent;
 mod backend_calibration;
 mod backend_hf;
 mod conversion;
 mod dedupe;
+mod diff;
 mod dispatch;
 mod domain;
 mod eligibility;
@@ -12,10 +14,14 @@ mod hf_download;
 mod hf_tokens;
 mod idempotency;
 mod infra_hosts;
+mod interventions;
 mod local_edit;
+mod mcp;
 mod model_availability;
 mod profiles;
 mod remote_edit;
+mod sae;
+mod scratch;
 mod settings;
 mod store;
 mod suggestions;
@@ -41,7 +47,10 @@ struct App {
     store: Mutex<Store>,
     hosts: Vec<Host>,
     settings: settings::Managed,
+    trace_policy: brewery_worker::trace::Policy,
+    dispatcher: Arc<Dispatcher>,
     hf_tokens: hf_tokens::Store,
+    agent: agent::Service,
     backend_download: bool,
     backend_calibration: Option<PathBuf>,
     backend_edit_formats: std::collections::BTreeSet<String>,
@@ -52,6 +61,8 @@ struct App {
     suggestions: suggestions::PathSuggestions,
     model_availability: Arc<model_availability::ModelAvailability>,
     feed_subscribers: Arc<tokio::sync::Semaphore>,
+    scratch_slots: Arc<tokio::sync::Semaphore>,
+    diffs: diff::Service,
 }
 
 impl App {
@@ -132,11 +143,15 @@ async fn main() -> Result<(), Error> {
         Ok(None) => {}
         Err(_) => eprintln!("Backend download storage is unavailable"),
     }
+    let dispatcher = Arc::new(dispatcher);
     let app = Arc::new(App {
         store: Mutex::new(store),
         hosts,
         settings: settings::Managed::from_config(config_value.as_ref()),
+        trace_policy: settings::trace_policy(config_value.as_ref())?,
+        dispatcher: dispatcher.clone(),
         hf_tokens,
+        agent: agent::Service::new(&data, &dist)?,
         backend_download: dispatcher.backend.is_some(),
         backend_calibration: dispatcher
             .backend
@@ -154,6 +169,8 @@ async fn main() -> Result<(), Error> {
         suggestions: suggestions::PathSuggestions::new(dispatcher.command.clone()),
         model_availability: Arc::new(model_availability::ModelAvailability::new(&dispatcher)),
         feed_subscribers: Arc::new(tokio::sync::Semaphore::new(feed::SUBSCRIBERS)),
+        scratch_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+        diffs: diff::Service::default(),
     });
     let listener = TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;

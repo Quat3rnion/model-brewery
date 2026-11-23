@@ -43,9 +43,14 @@ fn native_layer_recipe_queues_only_on_its_configured_local_worker() {
     app.launch();
     let source = app.register("alpha", "hf", "/source/base");
     let other = app.register("beta", "hf", "/source/other");
-    app.json("POST", "/api/models", Some(json!({
-        "host":"alpha","path":"/source/not-verified","kind":"hgn-archive"
-    })), 400);
+    app.json(
+        "POST",
+        "/api/models",
+        Some(json!({
+            "host":"alpha","path":"/source/not-verified","kind":"hgn-archive"
+        })),
+        400,
+    );
     let policy = json!({"schema":"brewery.layer-quant.v1","source_sha256":"1".repeat(64),
                         "default_type":"BF16","layers":{"0":"HT3","1":"HT4"}});
     let request = json!({"format":"hgn","input_ids":[source],"options":{"layer_recipe":policy}});

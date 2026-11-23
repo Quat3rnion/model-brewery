@@ -8,6 +8,7 @@ use std::{
 
 pub const KINDS: &[&str] = &[
     "compare",
+    brewery_worker::trace::JOB,
     "inspect",
     "plan",
     "convert",
@@ -216,6 +217,8 @@ pub struct Job {
     pub remote_editor: Option<uuid::Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scratch_job: bool,
     pub state: State,
     pub progress: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -335,6 +338,8 @@ pub struct Envelope {
     pub options: Map<String, Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scratch_pins: BTreeMap<String, String>,
 }
 
 fn serialize_worker_inputs<S: serde::Serializer>(
@@ -660,6 +665,7 @@ impl Host {
                     | "baseline"
                     | "benchmark"
                     | "hf_download"
+                    | brewery_worker::trace::JOB
                     | brewery_worker::exl3_layer::JOB
             ) || crate::weights::is_kind(kind);
             let enabled = options.remove(kind).unwrap_or(!opt_in)
@@ -671,6 +677,8 @@ impl Host {
                         "Configure benchmark targets and suites and opt in on this worker"
                     } else if kind == "hf_download" {
                         "Configure Hugging Face downloads and opt in on this worker"
+                    } else if kind == brewery_worker::trace::JOB {
+                        "Configure pinned CPU Lanternfish and opt in on this worker"
                     } else if kind == brewery_worker::exl3_layer::JOB {
                         "Configure a native EXL3 helper and opt in on this worker"
                     } else if crate::weights::is_kind(kind) {
@@ -1059,6 +1067,20 @@ pub fn manual_registration_blocker(host: &str, kind: &str) -> Option<Reason> {
 // Prefer the source host if eligible, avoiding a transfer. Selection of an
 // *idle* host occurs in the scheduler, not during POST.
 pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<&'a Host> {
+    if job.scratch_job {
+        return hosts
+            .iter()
+            .filter(|host| {
+                host.id == job.host
+                    && host.local_edit
+                    && !host.scheduling_paused
+                    && host.capabilities["weight_apply"]
+                    && host.capabilities["weight_safetensors"]
+                    && (job.kind != brewery_worker::trace::JOB
+                        || host.capabilities[brewery_worker::trace::JOB])
+            })
+            .collect();
+    }
     if input_blocker(job, envelope, hosts).is_some() {
         return Vec::new();
     }
@@ -1218,6 +1240,7 @@ impl NewJob {
         } else {
             match self.kind.as_str() {
                 "compare" => n == 2 && main == "gguf" && second == "gguf" && prompt.is_some(),
+                brewery_worker::trace::JOB => n == 1 && main == "gguf" && host == inputs[0].host,
                 "inspect" | "plan" | "convert" => (1..=5).contains(&n) && source,
                 "verify" => (2..=6).contains(&n) && source && second == "hgn",
                 "generate" => n == 1 && hgn(main) && prompt.is_some(),
@@ -1249,7 +1272,12 @@ impl NewJob {
                 self.kind
             ));
         }
-        if prompt.is_some() && !matches!(self.kind.as_str(), "compare" | "generate") {
+        if prompt.is_some()
+            && !matches!(
+                self.kind.as_str(),
+                "compare" | "generate" | brewery_worker::trace::JOB
+            )
+        {
             return Err("this workflow does not accept a prompt".into());
         }
         if self.options.contains_key(brewery_worker::hy4::OPTION) {
@@ -1284,6 +1312,16 @@ impl NewJob {
                 check_options(&self.kind, &self.options, &inputs)?;
             }
         }
+        Ok(self.records(host, inputs, prompt, format))
+    }
+
+    pub(crate) fn records(
+        self,
+        host: String,
+        inputs: Vec<Model>,
+        prompt: Option<String>,
+        format: crate::gguf::Format,
+    ) -> (Job, Envelope) {
         let at = now();
         let envelope_kind = if self.kind == "cache_cleanup" {
             "cache-cleanup".into()
@@ -1295,6 +1333,7 @@ impl NewJob {
             inputs,
             options: self.options.clone(),
             prompt,
+            scratch_pins: Default::default(),
         };
         let requested_host = (host == "auto").then(|| host.clone());
         let job = Job {
@@ -1313,6 +1352,7 @@ impl NewJob {
             local_edit: false,
             remote_editor: None,
             directory_revision: None,
+            scratch_job: false,
             input_ids: self.input_ids,
             options: self.options,
             prompt_id: self.prompt_id,
@@ -1322,14 +1362,14 @@ impl NewJob {
             created_at: at,
             updated_at: at,
         };
-        Ok((job, envelope))
+        (job, envelope)
     }
 }
 
 fn check_options(job: &str, options: &Map<String, Value>, inputs: &[Model]) -> Result<(), String> {
     // Benchmark options are validated as a whole against the selected host
     // before enqueue and again by the scheduler before dispatch.
-    if job == "benchmark" {
+    if matches!(job, "benchmark" | brewery_worker::trace::JOB) {
         return Ok(());
     }
     if job == "hf_download" {

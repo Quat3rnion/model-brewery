@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{self, Write as _},
+    io::{self, Read as _, Write as _},
     os::{
         fd::AsRawFd as _,
         unix::fs::{MetadataExt as _, OpenOptionsExt as _},
@@ -211,5 +211,32 @@ impl PrivateFile {
             self.directory.sync_all()?;
         }
         Ok(token.is_some())
+    }
+
+    pub fn read(&self, limit: u64) -> io::Result<Option<String>> {
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&self.path)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let m = file.metadata()?;
+        if !m.is_file()
+            || m.uid() != unsafe { libc::geteuid() }
+            || m.mode() & 0o7777 != 0o600
+            || m.nlink() != 1
+            || m.len() > limit
+        {
+            return Err(unsafe_path());
+        }
+        let mut data = String::new();
+        file.take(limit + 1).read_to_string(&mut data)?;
+        if data.len() as u64 > limit {
+            return Err(unsafe_path());
+        }
+        Ok(Some(data))
     }
 }

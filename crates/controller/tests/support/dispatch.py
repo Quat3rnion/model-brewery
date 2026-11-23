@@ -92,7 +92,58 @@ if (root / "offline").exists():
     sys.exit(255)
 
 prior = json.loads(job.read_text()) if job.exists() else None
-if action == "status":
+if action == "trace-read":
+    query = json.load(sys.stdin)
+    assert prior and prior["state"] == "succeeded"
+    if (root / "trace-pruned").exists():
+        out({"status": "missing"})
+    elif (root / "trace-interventions").exists():
+        import base64
+        import struct
+        assert query["view"] == "tensor" and query["prompt"] == 0
+        rows = []
+        for pos, val in enumerate([1.0, -2.0]):
+            if query["start"] <= pos < query["end"]:
+                data = struct.pack("<f", val)
+                rows.append(dict(position=pos, shape=[1], sha256=hashlib.sha256(data).hexdigest(),
+                                 data_base64=base64.b64encode(data).decode(), node="l_out-0"))
+        if (root / "trace-corrupt").exists() and rows:
+            rows[0]["data_base64"] = "AAAAAA=="
+        out(dict(status="ok", data=dict(dtype="f32_le", rows=rows, missing_positions=[],
+                                        layer=query["layer"], role=query["role"], prompt=0)))
+    elif query["view"] == "manifest":
+        out({"status": "ok", "data": {"schema_version": 1}})
+    elif query["view"] in ("logit_lens", "model_logits"):
+        assert query["prompt"] == 0 and query["start"] == 0 and query["end"] == 1
+        row = {"position": 0, "top": [{"token_id": 1, "logit": 2.0}]}
+        if query["view"] == "logit_lens":
+            assert query["layer"] == 0
+            row["layer"] = 0
+        else:
+            assert query["layer"] is None
+        out({"status": "ok", "data": {"rows": [row]}})
+    elif query["view"] == "diff_input":
+        options = prior["result"]["envelope"]["options"]
+        spec = {k: options[k] for k in ("positions", "roles", "layers", "top_k", "byte_cap")}
+        edited = bool(options.get("interventions"))
+        mismatch = root / "trace-token-mismatch"
+        token = 12 if mismatch.exists() and mismatch.read_text() == job_id else 11
+        top = [{"token_id": i, "logit": logit} for i, logit in
+               ([(1, 3.), (2, 1.), (8, 0.)] if edited else [(1, 2.), (2, 1.), (7, 0.)])]
+        out({"status": "ok", "data": {
+            "spec": spec, "tokens": [{"position": 0, "token_id": token}], "missing": [],
+            "tensors": [{"layer": 0, "role": "l_out", "position": 0, "shape": [1],
+                         "data_base64": "AAAAAA==" if edited else "AACAPw=="}],
+            "logit_lens": [{"position": 0, "layer": 0, "top": top[:spec["top_k"]]}],
+            "model_logits": [{"position": 0, "top": top[:spec["top_k"]]}],
+        }})
+    elif query["end"] is None:
+        out({"status": "too_large"})
+    else:
+        assert query == {"view": "tensor", "prompt": 0, "layer": 0,
+                         "role": "l_out", "start": 0, "end": 1}
+        out({"status": "ok", "data": {"rows": [{"data_base64": "AACAPw=="}]}})
+elif action == "status":
     sampling = root / f"{job_id}.sampling"
     if sampling.exists() and prior and prior["state"] == "queued":
         polls = root / f"{job_id}.polls"
@@ -147,6 +198,9 @@ else:
         print("test interrupted launch", file=sys.stderr)
         sys.exit(1)
     result = {"action": action, "host": host, "envelope": envelope}
+    if envelope["kind"] == "trace" and (root / "trace-interventions").exists():
+        result.update(kind="trace", schema_version=1, model_id=envelope["inputs"][0]["id"],
+                      model_sha256="a" * 64, prompts=[{}])
     if action == "start" and envelope["kind"] == "hf_download":
         assert envelope["inputs"] == [] and "prompt" not in envelope
         options = envelope["options"]

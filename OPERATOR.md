@@ -318,6 +318,239 @@ generic `admission` wrapper; CPU EXL3 does not use either GPU gate.
 The worker owns its cache. The workbench never changes or deletes an original
 model file. Unregistering a library entry removes only the entry.
 
+## CPU trace jobs
+
+Use `trace` to record selected activations and top logits for a single-file
+Library GGUF or a scratch revision with private GGUF.
+The worker runs the Lanternfish CLI on the CPU. It reads files from the CLI.
+It does not start a Lanternfish service or use a Lanternfish HTTP API.
+It does not change the model or qualify a release.
+
+1. Install the headless binary from Lanternfish commit
+   `0ea30b37729a136a76b8412e7ad1ec91bd7de9b5`. Check its SHA-256:
+   `0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f`.
+   The engine rejects other binaries.
+2. Install the matching CPU libraries from llama.cpp `184f653` with
+   Lanternfish patches `0001` and `0002`. This binary uses
+   `/arboretum/llama-w0/build/bin` as its library search path. Keep that path
+   and its libraries under operator control. Use `readelf -d` and `ldd` to
+   check the library paths before you enable the worker. The engine runs a
+   verified copy of the binary with no inherited `LD_LIBRARY_PATH`.
+3. Add `"BREWERY_LANTERNFISH_TRACE": "/absolute/path/to/lanternfish"` to the
+   worker JSON `engine_env`. Add `"trace": true` to the host `capabilities`
+   in dispatch JSON. The capability is off by default. Use a regular worker
+   with access to the registered GGUF. For scratch, the controller uses its
+   local CPU worker. Dedicated download and remote weight editor workers do
+   not run traces. The existing GPU `compare` job still uses
+   `BREWERY_LANTERNFISH` and its `run` command.
+
+To set the limits, add this top-level object to the controller dispatch JSON:
+
+```json
+{"trace":{"default_byte_cap":2097152,"max_byte_cap":16777216,"retain_jobs":8}}
+```
+
+These are the defaults. `GET /api/settings` shows the active values under
+`trace`. Restart the controller to apply changes. The job cap includes all
+manifests and tensor files for all prompts. It cannot exceed 33554432 bytes.
+The cap does not limit model memory. Retention keeps 1 to 64 trace results
+per worker. After a new result, the worker removes the oldest trace results
+over the limit. It does not remove job records, inputs, or other artifacts.
+An old job can show success after its trace files are removed. The trace
+endpoints then return 404.
+
+Submit one Library GGUF or scratch revision ID in `input_ids` to
+`POST /api/jobs` with `kind: "trace"`. Supply `prompt`, `prompt_id`, or an `options.prompts` array
+with 1 to 4 entries. This example shows `options` for one prompt:
+
+```json
+{"layers":[0,11],"roles":["l_out","attn_out"],"positions":[0,1],"top_k":5}
+```
+
+Layers and token positions start at zero. The CLI does not use a chat
+template or generate tokens. It accepts at most 4096 prompt tokens. An
+optional `byte_cap` can override the default within the configured maximum.
+Set `full_dump: true` to pass larger explicit selections. This flag does not
+select more data or raise the cap. Save the request to repeat the run.
+
+Use job events to follow progress. After success, use
+`GET /api/jobs/{id}/trace` for the summary. Use `/tensor` for F32 rows,
+`/logit-lens` for layer logits, or `/model-logits` for native logits. All
+four routes take the optional zero-based `prompt` index. Slice routes use
+the half-open token position range `start` and `end`. Tensor reads also
+require `layer` and `role`; logit lens reads can filter by `layer`. Narrow
+the range if a response exceeds 4 MiB (HTTP 413).
+
+## Compare revisions and traces
+
+Use these `GET` routes with `a=<baseline ID>&b=<comparison ID>`.
+The routes do not change the inputs. A diff does not qualify a release.
+
+- `/api/diff/tensors`: Use two scratch IDs from the same source, or one
+  scratch ID and its original SafeTensors Library ID. Each file must be at
+  most 4 GiB. The report lists changed tensors and counts elements with
+  different stored bits. The bounds start at zero. The start is inclusive
+  and the end is exclusive. The relative Frobenius norm uses the full
+  baseline tensor as the denominator. A zero baseline gives `null`.
+  For a matrix, the report shows up to eight singular values from a sample
+  of at most 32 rows and 32 columns in the bounds. A sample can miss changes.
+  Its rank counts sample values above one millionth of the largest value.
+  It is not the rank of the full tensor.
+- `/api/diff/traces`: Use two successful trace job IDs with the same prompt
+  text, capture spec, and token IDs. Select one `prompt` index per request
+  (default `0`). Use `layer`, `start`, or `end` to narrow the slice. The
+  `layer` filter does not change the model logit rows. The report gives
+  activation shifts and cosine similarity. It lists the ranked top-k for
+  each side, plus token IDs that enter or leave. It calculates logit
+  shifts and KL(A || B) only for shared top-k token IDs. This is not
+  full-vocabulary KL. Without shared IDs, these values are `null`. Use
+  worker and dispatch binaries that support trace diff reads.
+- `/api/diff/behavior`: Use a scratch ID for `b` and its immediate parent
+  for `a`. The controller reads `scratch/<b>/behavior.v1.json` under
+  `BREWERY_DATA`. The file is at most 256 KiB and has at most 256 metrics.
+  A producer must compare results from the same test inputs and settings.
+  The producer writes the `BehaviorDiffInputV1` artifact from OpenAPI.
+  Until it writes that file, the route returns 404.
+
+Example behavior input (`parent_id` and `child_id` must be actual IDs):
+
+```json
+{"schema_version":1,"parent_id":"34868afe-7dbc-4f80-ba42-600481fd50e6","child_id":"0dcb24c4-bc87-4a7a-95d4-79c28b941446","metrics":[{"name":"locality.accuracy","parent":0.95,"child":0.93,"better":"higher","threshold":0.01}]}
+```
+
+Metric results can be numbers, Boolean values, strings, or `null`. A
+numeric delta is the child value minus the parent value. A nonzero delta
+with an absolute value at or below `threshold` gives `within_threshold`.
+Other numeric changes give `improved` or `regressed` if `better` is
+`higher` or `lower`.
+The defaults are `threshold: 0` and `better: "neither"`. A missing value
+gives `missing`. Other changes give `changed`.
+
+The controller holds at most eight ordered reports in memory. It checks
+trace retention before it returns a cached report. Report size is limited
+to 4 MiB. Try a smaller trace slice on 413. Only one diff can run at a
+time. On 429, wait and retry.
+
+### Trace interventions
+
+Use `options.interventions` for inline rules. Each rule specifies a `layer`,
+`role`, and list of `positions`. Use `op: "add"` with a `vector` to add a
+steering direction, `op: "replace"` with a `vector` to set the row,
+`op: "scale"` with a `factor` to scale the row, or `op: "zero"` to set the
+row to zero. The runtime applies rules before later nodes use the row.
+Trace capture records the new values. Valid roles are `l_out`, `attn_out`,
+`ffn_inp`, and `ffn_out`. A rule can target a row outside the capture
+selection. Positions refer to the raw token sequence, not words.
+
+To copy rows, set `options.activation_patches`. Each entry has
+`source_job_id`, optional `source_prompt` (default `0`), `layer`, `role`,
+and `positions`. For example:
+
+```json
+[{"source_job_id":"<trace-job-id>","source_prompt":0,"layer":1,"role":"l_out","positions":[0,1]}]
+```
+
+The controller reads the selected rows from a successful trace before it
+queues the job. The source trace must still have the rows. Each source row
+must be a verified, finite F32 vector. The controller copies each row to the
+same layer, role, and position in every target prompt. It does not align
+different token sequences. The source and target must have the same Library
+or scratch model ID and GGUF SHA-256. The worker checks the target file before
+the run.
+
+You can combine inline rules, one saved artifact version, and up to eight
+patch selectors. Do not target a row more than once. The combined limit
+is 64 rules, with one rule per copied row, and 262144 vector values.
+For HTTP 413 on a patch source read, split the selected positions into
+smaller ranges. If retention removed a row, run the source trace again.
+
+### Sparse autoencoders (SAEs)
+
+Save an SAE with `POST /api/saes`. Send `multipart/form-data` with one
+`metadata` JSON part and one `weights` SafeTensors part. A CLI client must
+send `Origin` equal to the controller URL. Use an `Idempotency-Key` for
+retries. The controller accepts at most 32 KiB of metadata and 128 MiB of
+weights per version. It stores both in the controller database.
+
+Bind the metadata to the Library GGUF or scratch `model_id`, the GGUF
+SHA-256, a zero-based `layer`, and one vector `role`. The trace worker
+checks the GGUF hash. Use `GET /api/saes` to list the latest versions.
+Use `POST /api/saes/{id}/versions` to save a new version at the same binding.
+Read metadata at `GET /api/saes/{id}/versions/{version}`. Append
+`/safetensors` to download the weights. On HTTP 503, wait and retry.
+
+Schema version 1 uses F32 tensors `W_enc[d_in,d_sae]`,
+`W_dec[d_sae,d_in]`, `b_enc[d_sae]`, and `b_dec[d_in]`. For `jump_relu`,
+also include a nonnegative `threshold[d_sae]`. The encoder scales the
+input by `normalization.scale`, optionally subtracts `b_dec`, then applies
+the encoder weights and bias. `relu` keeps positive values. `top_k`
+keeps up to `k` positive values. `jump_relu` keeps values strictly above
+each feature threshold. Record the source or training method in
+`provenance`. Do not use pickle files.
+
+To read features, set `options.sae` to `{"id":"<sae-id>","version":1,"top_k":5}`
+in a trace request. Capture the SAE layer and role. After the job
+succeeds, use `GET /api/jobs/{id}/trace/features?prompt=0&start=0&end=16`
+or MCP `read_feature_trace`. Select 1 to 16 token positions per read.
+In the Trace view, select a token position under **Top SAE features**.
+Feature reads depend on the same retention settings as tensor reads.
+
+To steer a feature, use MCP `steer_feature` or add
+`options.feature_steering` to a trace request:
+
+```json
+{"id":"<sae-id>","version":1,"feature":0,"alpha":8.0,"positions":[3]}
+```
+
+The trace adds `alpha` times the stored decoder row at each selected
+position. If the SAE uses a scale other than 1, choose `alpha` in units of
+the stored decoder direction. This rule must not overlap another
+intervention. This operation does not change model weights. Compare it
+with a trace of the same prompts and positions without steering. Results
+are **not release-qualified**.
+
+Use [the CPU SAE procedure](qualification/weight_space_sae.md) to train a
+small TopK SAE from trace rows or to load the pinned public ReLU example.
+
+### Library intervention artifacts
+
+Use `POST /api/interventions` to save an artifact. Give it a name, the
+Library GGUF or scratch `model_id`, the GGUF SHA-256, and the inline rules:
+
+```json
+{
+  "name":"Residual direction",
+  "model_id":"<library-model-id>",
+  "model_sha256":"<64 lowercase hex digits>",
+  "interventions":[{"layer":1,"role":"l_out","positions":[0],"op":"add","vector":[0.25,-0.5]}]
+}
+```
+
+Use one vector value per hidden dimension. The two values above show the
+format only. `GET /api/interventions` lists the artifact IDs and latest
+versions. `GET /api/interventions/{id}/versions/{version}` reads the rules
+for one version. To save new rules, send `{"interventions":[...]}` to
+`POST /api/interventions/{id}/versions`. Versions start at 1. A new version
+does not change an earlier version or its model binding. Use an
+`Idempotency-Key` to retry a write without creating another version.
+
+In a trace request, set `options.intervention_artifact` to
+`{"id":"<artifact-id>","version":1}`. The controller rejects a different
+model ID. If the registered file has a different SHA-256, the worker
+rejects it before it runs Lanternfish. A saved artifact does not change
+model weights or qualify the model for release.
+
+Use `GET /api/interventions/{id}/versions/{version}/gguf` to download a
+GGUF v3 control vector. Pass the file to llama.cpp with `--control-vector`.
+Export requires one `add` rule per `l_out` layer and the same vector width
+for all layers. It does not support layer 0, which the llama.cpp adapter
+does not use. For layer `N`, the F32 tensor name is `direction.N`. The file
+has `general.architecture: "controlvector"`, `controlvector.model_hint`
+with the Library model name, and `controlvector.layer_count` with the
+number of tensors. GGUF does not store token positions or enforce the
+Brewery model binding. Use the bound model. llama.cpp applies the
+direction to all tokens at that layer.
+
 ## Operator paths and environment
 
 The operator sets these variables. The controller uses the first group. The
@@ -333,7 +566,12 @@ worker environment applies to jobs that run on that worker.
 | `BREWERY_WORKER_CONFIG` | worker | Worker JSON path. Default `~/.config/model-brewery/worker.json`. |
 | `BREWERY_CPU_THREADS` | worker, engine, native tools | CPU work budget per process. Default `4`; range `1`–`64`. Set this on each worker host. Available CPUs and the number of independent work items can lower the effective count. |
 | `BREWERY_HASH_THREADS` | worker, engine | Optional limit for concurrent file hashes (`1`–`16`). Hashing uses the CPU budget by default, up to `16` files at a time. |
-| `BREWERY_LANTERNFISH` | engine | Pinned Lanternfish binary for `compare`. |
+| `BREWERY_LANTERNFISH` | engine | Configured Lanternfish `run` binary for `compare`. This lookup does not check the trace pin. |
+| `BREWERY_LANTERNFISH_TRACE` | engine | Absolute path to the pinned CPU Lanternfish binary for `trace`. |
+| `BREWERY_LANTERNFISH_EDIT` | engine | Absolute path to the pinned CPU Lanternfish binary for locate-then-edit jobs. |
+| `BREWERY_LANTERNFISH_EDIT_LIB_DIR` | engine | Absolute path to the directory with the four pinned llama.cpp and ggml libraries. |
+| `BREWERY_LANTERNFISH_EDIT_CUDA` | engine | Absolute path to the pinned W14b Lanternfish binary for CUDA locate-then-edit jobs. |
+| `BREWERY_LANTERNFISH_EDIT_CUDA_LIB_DIR` | engine | Absolute path to the directory with the five pinned W14b libraries. |
 | `BREWERY_CONVERTER` | engine | Pinned bf16-to-hgn converter for `inspect`, `plan`, `convert`, and `verify`. |
 | `BREWERY_COMPONENT_CONVERTER` | engine | Separate role-overlay converter build for HF jobs that replace a component. See [Conversion components](#conversion-components). |
 | `BREWERY_COMPONENT_CPU_ONLY` | engine | Set to `1` to refuse non-CPU backends for those jobs. |
@@ -1052,6 +1290,150 @@ Agents can operate the workbench without driving the browser. Start with
 serves its [OpenAPI contract](api/openapi.json) at `GET /api/openapi.json`.
 Use the same loopback address and worker permissions as the web UI.
 
+### MCP for weight-space work
+
+Use an MCP client that supports Streamable HTTP. Set this configuration in
+the client (example for Claude Code):
+
+```json
+{
+  "mcpServers": {
+    "model-brewery": {
+      "type": "http",
+      "url": "http://127.0.0.1:4141/mcp"
+    }
+  }
+}
+```
+
+For LAN or tailnet access, use the workbench HTTPS URL with `/mcp`. The
+client must trust the gateway certificate. See the access risk under
+[Web settings](#web-settings).
+
+MCP uses the workbench trust boundary and has no separate token. The
+controller checks the exact Host, Origin (if sent),
+and `Sec-Fetch-Site` (if sent) on the same loopback listener. The optional
+gateway also checks source CIDR, Host, and Origin. Every client in an
+allowed LAN or tailnet CIDR can reach `/mcp`. It can create,
+edit, or discard scratch revisions, run traces and checks, and request
+publication. MCP cannot approve a publication, change settings, administer
+workers, or deploy.
+
+1. Use `tools/list` to get the input schemas. Use `register_model` to add a
+   worker-side file to the Library. Use `list_models` and `list_scratch` to
+   find inputs and scratch revisions.
+2. Use `start_trace` for a Library GGUF or a scratch revision with private
+   GGUF. Put its ID in `input_ids`. Use `get_job` to poll progress
+   (`wait_ms` can wait up to 5000 ms per call). Use `read_trace` with
+   `manifest`, `tensor`, `logit_lens`, or `model_logits`. Use
+   `create_intervention` and `new_intervention_version` to save rules.
+   `export_control_vector` returns a relative URL for the same workbench.
+3. Use `create_scratch` and `apply_edit` for a SafeTensors edit. Use
+   `merge_models` to merge pinned revisions in a new scratch child. Use
+   `convert_scratch_gguf` on the parent and child. Run `run_checks` on the
+   child and use `get_job` to see the result. Use the tensor, trace, and
+   behavior diff tools to compare results.
+4. Use `request_publish` with the exact revision hash and check bundle
+   acknowledgement if it is necessary. The operator reviews the request
+   separately. Results are not release-qualified.
+
+For every write tool, set `idempotency_key` before the call. Use a new key
+for each intended write. Use the same key and arguments for a retry.
+The controller uses its normal admission, validation, and replay rules.
+
+Tools that submit to `/api/jobs` or `/api/conversions`, including
+`start_trace` and `steer_feature`, accept the optional boolean
+`allow_duplicate`. The default is `false`. If the controller finds
+matching work, the tool returns the existing `id` and `duplicate_of: true`.
+No new job starts. To submit the same work again on purpose, set
+`allow_duplicate` to `true` and use a new `idempotency_key`. The tool sends
+`Brewery-Allow-Duplicate: 1`. The controller still applies the admission
+and same-key replay rules.
+
+Use `prune_model` with a scratch ID, its exact hash, and a `pruning` plan.
+The result is a new scratch child with a reversible delta. Rates use basis
+points: 1000 means 10%. The rate applies to each selected tensor or set of
+groups. It does not specify model-wide sparsity. The total size of the
+edited tensors cannot exceed 32 MiB.
+
+- `unstructured` ranks each listed matrix by absolute weight.
+- `mlp_neurons` ranks Qwen2 down-projection input columns by the sum of
+  absolute weights across each column. The mask zeros entire columns.
+- `attention_heads` ranks groups of columns in the Qwen2 attention output
+  projection by the sum of absolute weights. Set `heads` to
+  `num_attention_heads` from the source configuration. The mask zeros each
+  selected query head's contribution without changing shared key/value
+  heads.
+- `wanda_mlp` ranks Qwen2 neurons with a Wanda-style score. First convert
+  the parent to private GGUF. Run a trace of that exact parent with no
+  interventions. Select 1 to 64 consecutive `ffn_inp` positions from one
+  prompt at the requested layer. Set `rms_eps` to `rms_norm_eps` from the
+  source configuration. The editor applies RMS normalization to those
+  rows before using the activation norms to scale the absolute gate and
+  up weights. It zeros the selected down-projection columns.
+
+Dense masks do not reduce the model dimensions, file size, or compute cost
+in a dense runtime. Use the same private conversion, checks, and diffs as
+for a direct edit.
+
+Use `plan_experts` with a registered local GGUF and two independent
+`brewery.expert-activations.v1` JSON observations to generate a REAP map.
+The planner needs Python 3 at `/usr/bin/python3` on the controller. It
+checks the GGUF hash and does not run inference or write model weights.
+The plan is not proof of quality. Keep the exact map text and SHA-256.
+`prune_experts` accepts a reviewed map but returns 503 until a verified
+private scratch writer is available. It does not fall back to an operation
+that adds an unapproved revision to the Library.
+
+The server uses MCP protocol `2025-06-18`. It accepts one JSON-RPC message
+per POST. It does not keep sessions, open an MCP event stream, or offer a
+stdio transport. POST bodies are limited to 256 KiB. Tool data is limited
+to 4 MiB from the controller and 8 MiB for the whole MCP response. Use a
+smaller trace slice or read the [controller API](api/openapi.json) directly
+if a result is too large.
+
+### Hosted workbench agent
+
+1. In Settings, select Anthropic or an OpenAI-compatible provider. Set the
+   model ID and API base URL. For example, use `https://api.anthropic.com/v1`
+   or `https://api.openai.com/v1`. Do not include `/messages` or
+   `/chat/completions`. Use HTTPS. The controller accepts HTTP only on a
+   numeric loopback address for local providers and tests.
+2. Save the settings, then set the API key. Settings shows only whether a
+   key is set. Use the same control to replace or remove it. A change to
+   the provider kind or base URL removes the key. The controller does not
+   test the key when you save it, use a proxy, or follow redirects.
+3. Open Agent, select the Library model, and enter the goal. The controller
+   sends the goal, model ID, MCP tool schemas, and conversation to the
+   selected provider. Tool results can include model paths, prompts, and
+   trace or check data. Use a provider that may receive this data. Do not
+   put secrets in goals, prompts, or model records.
+4. Follow the transcript and open scratch revisions in Edits. The agent
+   uses the same tools and admission rules as `/mcp`. It can request
+   publication, but only an operator can approve it in Edits. Results are
+   not release-qualified.
+
+Only one session can run at a time. Settings limits the number of hosted
+requests, tool calls, and output tokens per request. The session token
+limit uses the input and output counts that the provider reports. A
+request can exceed the remaining budget because input token use is known
+only after the reply. If this occurs, the controller does not execute
+tools from that reply. The request timeout and the session time limit
+also stop the loop. Cancel stops new requests and tool calls. A tool
+already admitted can finish, and queued jobs continue. Cancel those jobs
+separately when necessary.
+
+The controller keeps the session transcript and tool results in its
+database. Agent shows the most recent 100 sessions. A restart does not
+resume an interrupted session. The provider key is in a separate
+owner-only file, not the database. Do not serve the controller data
+directory or include private credential files in exports. Provider
+settings and sessions use the same trust boundary as the workbench.
+Every client with workbench access can use the configured provider and
+read session transcripts.
+
+### JSON command-line client
+
 ```sh
 tools/brewery-agent describe
 tools/brewery-agent state
@@ -1205,6 +1587,290 @@ Other routes: `GET /api/jobs/{id}`, `POST /api/jobs/{id}/cancel`,
 `GET /api/conversions`, `GET /api/conversions/{id}`,
 `POST /api/conversions/{id}/cancel`, and `DELETE /api/models/{id}`. Errors
 use `{"error": "..."}`.
+
+### Scratch weight revisions
+
+Enable the local CPU weight editor for the worker that owns the source.
+Register a standalone `.safetensors` file in an approved model directory.
+Use its Library ID and SHA-256 to create a scratch revision. You can also
+use the ID and SHA-256 of a scratch revision as the parent. Each edit makes
+a new child. To roll back, select the parent ID in `provenance.parent_id`.
+Do not delete the Library entry if you need to select that parent later.
+
+| Method and path | JSON request | Result |
+| --- | --- | --- |
+| `POST /api/scratch` | `{"parent_id":"<id>","parent_sha256":"<hash>"}` | New scratch record with an empty delta (`201`). |
+| `POST /api/scratch/{id}/edits` | `{"operations":[...]}` | New scratch child of `{id}` (`201`). |
+| `POST /api/scratch/{id}/rome`, `/memit`, `/alphaedit` | Parent `sha256`, `layers`, `facts`, optional `steps` and `backend` (`cpu` or `cuda`). | Queued edit (`202`). Read `result.scratch_id` when it succeeds. |
+| `GET /api/scratch` | None | List of scratch records with provenance (`200`). |
+| `GET /api/scratch/{id}/delta` | None | Parent and child hashes, delta hash and size, and counts of changed tensors and bytes (`200`). |
+| `POST /api/scratch/{id}/gguf` | `{"sha256":"<hash>","assets_id":"<Library assets ID>"}` | Private BF16 conversion job (`202`). |
+| `POST /api/scratch/{id}/checks` | `{"sha256":"<hash>"}` | Worker check job (`202`), or an integrity-only result (`200`). |
+| `GET /api/scratch/{id}/checks` | None | Current check bundle (`200`), or `404` if there is none. |
+| `POST /api/scratch/{id}/discard` | `{}` | Record with state `discarded` (`200`). The controller removes the files and omits the record from the list. Discard unapproved children before their parent. You cannot discard an approved revision. |
+| `POST /api/scratch/{id}/publish-request` | `{"sha256":"<hash>","acknowledge_bundle":"<bundle-id>"}` | Record with state `publish_requested` (`200`). The Library does not change. |
+| `POST /api/admin/scratch/{id}/approve` | `{"sha256":"<hash>"}` | Record with state `approved` and `library_model_id` (`200`). |
+
+Send an `Idempotency-Key` with each POST. If the response does not arrive,
+send the same request with the same key. A matching retry returns the current
+record with status `200`; a different body or target with the same key returns
+`409`. The controller runs one scratch write at a time. On `503`, wait and
+retry with the same key.
+
+Send operations in order. `set` and `add` use zero-based `origin` and `shape`
+for a rectangular slice. Give exactly one value per cell in row-major order.
+`low_rank` adds the outer product of `u` and `v`, multiplied by `scale`, to a
+matrix. `low_rank_batch` takes lists of paired `u` and `v` vectors. It adds
+their outer products in F32, then writes the matrix once in F32 or BF16.
+For `orthogonalize`, use `rows`
+to remove the projection from each row, or `columns` to remove it from each
+column. Give a nonzero `direction` with one value per element of a row or
+column, respectively. The result rounds to the stored dtype after each
+operation. The editor rejects non-finite results and batches with no stored
+change. For example:
+
+```json
+{"operations":[
+  {"op":"set","tensor":"w","origin":[0,1],"shape":[1,2],"values":[8,9]},
+  {"op":"add","tensor":"w","origin":[1,0],"shape":[1,2],"values":[1,2]},
+  {"op":"low_rank","tensor":"w","u":[2,1],"v":[3,0,2],"scale":0.5},
+  {"op":"orthogonalize","tensor":"w","axis":"rows","direction":[1,0,0]}
+]}
+```
+
+The source limit is 4 GiB. One request can edit up to 32 MiB of tensors
+in up to 32 operations. Editable dtypes are F32, F16 and BF16. The controller
+keeps at most 64 scratch revisions that are not discarded. It copies the full
+file for each child and checks the local editor's disk reserve. Indexed HF
+directories and SSH workers are not supported by this API.
+
+#### Merge revisions
+
+Use `POST /api/scratch/merge` or the `merge_models` MCP tool. Set
+`base_id`, `base_sha256`, `algorithm`, and `inputs`. Each of the 1 to 16
+ordered inputs has an `id`, `sha256`, and `weight`. Use scratch revisions
+or standalone SafeTensors Library entries on the same enabled local editor.
+Tensor names, shapes, and dtypes must match. The 4 GiB source limit applies.
+Each file can have at most 4096 tensors. The editor uses F32 math and saves
+the result in the base dtypes (BF16, F16, or F32).
+
+- `{"method":"linear"}`: Weighted average (model soup). Use nonnegative
+  weights with a positive sum. Include the base in `inputs` to give it a
+  weight in the average.
+- `{"method":"task_arithmetic"}`: Add the weighted input deltas to the base.
+- `{"method":"ties","density":0.4}`: Keep the largest magnitudes in each
+  input tensor delta before weighting. Use the first flat index at a
+  magnitude tie. Elect the sign of the weighted sum (positive on a tie).
+  Add the weighted mean of the deltas with the elected sign to the base.
+- `{"method":"dare_linear","drop_rate":0.5,"seed":2026}`: Drop delta
+  elements at random and scale the survivors by `1 / (1 - drop_rate)`.
+  Add the weighted sum to the base. `dare_ties` also elects a sign and
+  adds only the weighted deltas with that sign.
+
+DARE uses SplitMix64. It gives the same output for the same base layout,
+ordered inputs, weights, and seed. It does not use the PyTorch RNG or its
+observed-norm rescale. Keep the input order and hashes for a replay.
+The merge reserves space for the full child and a delta as large as its
+payload. To run paired checks, use a scratch base with its private BF16
+GGUF. The output remains scratch and **not release-qualified**.
+
+#### Locate and edit a fact
+
+Convert the parent to private BF16 GGUF first. Configure the two
+`BREWERY_LANTERNFISH_EDIT` settings on the local worker for the default CPU
+backend. The engine checks the binary and the four shared libraries against
+the compiled pins before launch. The W0 trace pin is separate.
+The private converter supports Qwen2 and bounded dense Llama models with
+local BPE tokenizer JSON and unscaled RoPE. Larger models and other Llama
+variants may exceed the conversion or tensor limits.
+
+Use `rome_edit`, `memit_edit`, or `alphaedit_edit` in MCP. Put one `{}` slot
+in each `prompt`. Enter increasing, zero-based `layers`. ROME takes one
+fact and one layer. MEMIT takes up to eight facts and two or three layers.
+AlphaEdit takes up to eight facts and one to three layers. The optional
+`steps` parameter is 1 to 32 (default 16). The 32 MiB tensor limit also
+applies to these jobs. Success makes a child without changing the parent
+or the Library. Use the normal private conversion and check tools on it.
+
+To use CUDA, set `backend` to `cuda` in the API or MCP request. Configure
+the original local worker as follows:
+
+- Set `admission` to the absolute path of the GPU admission wrapper. Use
+  the same lock as other GPU jobs on this host.
+- In `engine_env`, set `BREWERY_ALLOW_GPU_LOAD` to `"1"`. Optionally set
+  `CUDA_VISIBLE_DEVICES` to restrict the available devices.
+- In `engine_env`, set `BREWERY_LANTERNFISH_EDIT_CUDA` to the absolute path
+  of the W14b executable and `BREWERY_LANTERNFISH_EDIT_CUDA_LIB_DIR` to the
+  absolute directory of its five pinned libraries. See the
+  [W14b pin](qualification/lanternfish-w14b-cuda.md).
+
+Only the CUDA edit uses this GPU configuration. The engine verifies the
+executable and all five library hashes before launch. The runtime requires
+GPU placement for forward and backward compute and disables TF32. It does
+not fall back to CPU if CUDA is unavailable. The scratch provenance gives
+the backend and device.
+
+The worker expands BF16 GGUF to F32 for ggml backward. The W3 editor writes
+the update in the original SafeTensors dtype. The private forward pass
+rounds each step to the private GGUF dtype before it solves for the next
+layer. ROME uses a rank-one update, MEMIT updates several layers in
+sequence, and AlphaEdit projects the update away from the sampled
+preserved keys. The sample does not represent all facts. Read the measured
+checks before you use an edit. See [Stage 2 acceptance](qualification/weight_space_stage2.md).
+
+#### Checks before a publish request
+
+Register a Library `assets` directory with the approved local worker. It must
+contain the model configuration and tokenizer files, not a copy of the weights.
+Use the same assets for both conversions. Poll each conversion with
+`GET /api/jobs/{id}`. Read the GGUF SHA-256, SafeTensors SHA-256, and converter
+version in the scratch record. The GGUF is not a Library file. Ordinary jobs
+cannot use it. Only the assigned scratch job gets access. Discard removes the
+private file after the scratch jobs complete.
+
+Enable `trace` on that worker to trace a scratch revision. Use its ID in
+`input_ids`, as for a Library model. Bind a saved intervention to that scratch ID
+and its GGUF SHA-256. Patches from another trace must have the same ID and
+GGUF SHA-256. To compare traces, capture the same prompts and token positions
+with the same capture options.
+
+Run checks before you send a publish request. The controller checks the
+parent and child hashes, tensor names, shapes, dtypes, offsets, and finite
+values against the immediate parent and edit record. Read `integrity.status`.
+You cannot waive a failed integrity check.
+
+If integrity passes and both GGUF files are ready, the worker loads both
+models and generates text. It measures target, paraphrase and locality
+results on fixed CounterFact and zsRE subsets. It measures perplexity on a
+separate corpus. Poll the job ID, then read `GET /api/scratch/{id}/checks`.
+The measured report identifies both SafeTensors and GGUF files by SHA-256.
+Use `GET /api/diff/behavior` to compare the metrics. If a GGUF is not ready,
+the controller saves an integrity-only bundle. Do not send a behavior report
+or benchmark references in a check request. GSM8K is separate; see
+[GSM8K protocol](#gsm8k-protocol).
+
+For conversion, set the local worker's `engine_env` as shown in
+[GGUF output](#gguf-output). Private
+BF16 conversion also accepts tied Qwen2 models and up to 1100 MiB of input.
+This limit does not change ordinary conversion. For checks, build the
+[CPU runner](crates/eval/README.md#scratch-behavior-checks). Put the two
+pinned dataset files in a local cache. Set these keys in the worker's
+`engine_env`:
+
+- `BREWERY_SCRATCH_CHECKS_SCRIPT`: Absolute path of `tools/scratch_checks.py`.
+- `BREWERY_SCRATCH_CHECKS_RUNNER`: Absolute path of the CPU runner.
+- `BREWERY_SCRATCH_CHECKS_RUNNER_SHA256`: SHA-256 of the runner.
+- `BREWERY_SCRATCH_CHECKS_CACHE`: Absolute path of the local dataset cache.
+
+The worker does not download data during a check. Restart the controller
+after a change to the local worker's runtime configuration.
+
+Review `check_bundle` for the exact `sha256`. If smoke or behavior did not
+pass, put the current bundle `id` in `acknowledge_bundle` to confirm that you
+reviewed the incomplete results. A new check replaces the bundle and clears
+its acknowledgement. The controller checks the file hash again before it
+accepts the publish request. You cannot change the bundle after the request.
+Discard and recreate a pending scratch revision if it has no bundle.
+
+**Operator only:** Approve a pending request only after you review the
+selected revision, its SHA-256, and its check bundle. Do not expose the
+approval endpoint in agent tools. The endpoint uses the same network and
+origin checks as Settings.
+The controller has no separate operator identity. A trusted client with
+direct workbench access on loopback, LAN, or tailnet can call this endpoint
+without using the UI. This is an accepted risk. Give direct access only to
+trusted clients.
+
+Approval checks the selected file hash and registers one normal SafeTensors
+Library model. The result is **not release-qualified**. Approval does not
+deploy the model or change release checks. Normal worker source-access rules
+still apply to the approved file. An unapproved scratch ID is not a
+conversion source. Use the existing conversion workflow after approval if
+the worker can read the file and supports the source and target formats.
+
+#### Compiled programs
+
+Run `sh tools/provision_compiled_program.sh fetch` to fetch the pinned CPU
+compiler sources and Python wheels. Use `offline` in place of `fetch` to
+sync the environment from the local cache. The environment uses Python
+3.12.15 under `/arboretum/tmp/brewery-w13`; it does not modify the system
+Python. Tracr and ALTA both use the Apache-2.0 license. The ALTA compiler uses
+its pinned source tree; its training and data packages are not required.
+
+Set these controller environment variables before startup:
+
+- `BREWERY_COMPILED_PROGRAM_PYTHON`: `/arboretum/tmp/brewery-w13/.venv/bin/python`.
+- `BREWERY_COMPILED_PROGRAM_SCRIPT`: Absolute path of `tools/compiled_program.py`.
+
+Enable a local SafeTensors editor. Use MCP `compile_program` with `worker`
+and `program`, or `POST /api/scratch/compile_program` with the same fields.
+The available programs are `sort`, `histogram`, `reverse`, `frac_prevs`,
+`alta_parity_relative`, and `alta_parity_absolute`. The endpoint accepts only
+these names. It does not accept code or paths.
+
+Use MCP `run_program` with `id`, `sha256`, and `tokens`, or send `sha256`
+and `tokens` to `POST /api/scratch/{id}/run_program`. Use one to four
+integer tokens. Use tokens `0` to `3` for Tracr and `0` to `1` for ALTA.
+`frac_prevs` returns the fraction of `1` tokens up to and including the
+current position. Both ALTA programs return parity at each position. Each
+run loads the compiled weights. It does not save the inputs or output.
+
+Use the same scratch check and publish routes. The compiled revision is a
+root, not an edit of a model. Its parent ID is the nil UUID and
+`parent_sha256` is the SHA-256 of zero bytes. It has no `delta.bin`. The
+compiler stores `config.json` with `model.safetensors`. The provenance
+records the compiler commit, program name, config hash, and runner hash.
+The local CPU runner checks every valid input sequence and compares the
+decoded outputs with the program specification. Review
+`program_correctness` and `program_cases` in the check bundle. You cannot
+waive a failure. Language-model behavior checks do not apply; acknowledge
+the bundle before you request publication. An operator still must approve.
+
+These models do not support GGUF, llama.cpp traces, or edit deltas. They run
+only in the CPU reference runner. Brewery does not inject a compiled
+program into the residual stream of another model.
+
+To use the tools without the controller, make an empty artifact directory
+and use the pinned Python:
+
+```sh
+PYTHON=/arboretum/tmp/brewery-w13/.venv/bin/python
+"$PYTHON" tools/compiled_program.py compile sort "$artifact"
+"$PYTHON" tools/compiled_program.py run "$artifact" '[2,0,2,1]'
+"$PYTHON" tools/compiled_program.py check "$artifact"
+```
+
+The compile result includes the SHA-256 of the weights and config. The same
+program produces the same hashes on the verified platform with the pinned
+environment.
+
+#### Scratch files
+
+The controller stores these files in its private
+`BREWERY_DATA/scratch/{id}/` directory:
+
+- `model.safetensors`: Full child checkpoint, with the original header and
+  all unedited bytes.
+- `model.gguf`: Private BF16 output, if conversion completed. The scratch
+  record contains its hash and converter version.
+- `provenance.json`: `brewery.scratch-provenance.v1`. It contains the parent
+  and child IDs and SHA-256 hashes, worker ID, timestamp, tool and runtime
+  versions, method, and the names, shapes, and dtypes of affected tensors.
+  A direct edit records its ordered operations. A merge records its
+  algorithm, parameters, and the ordered input IDs, hashes, and weights.
+- `behavior.v1.json`: A file for comparisons with the immediate parent.
+  It contains the parent and child IDs and the measured metrics.
+  The metrics list is empty if the bundle has no behavior report.
+- `delta.bin`: Reversible XOR delta (`brewery.weight-delta.v1`). It starts
+  with ASCII `BWDELTA1`, then two 64-byte lowercase ASCII SHA-256 hashes
+  (parent first), the full file size (`u64`), and a record count (`u32`).
+  Each record contains an absolute file offset (`u64`), a nonzero byte
+  count (`u64`), and that many XOR bytes. Records do not overlap and are in
+  offset order. All integers are little-endian. A copy has no records.
+
+To reconstruct the parent, verify the child hash, then XOR each record into
+a separate copy of the child. The result must match the parent hash. Never
+apply the delta in place. The HTTP API returns the summary, not the file.
 
 ## Limits and behavior on failure
 

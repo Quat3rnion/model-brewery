@@ -56,7 +56,30 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/openapi.json", "getOpenApi"),
         ("get", "/api/state", "getState"),
         ("get", "/api/events", "streamEvents"),
+        ("get", "/api/settings/agent-provider", "getAgentProvider"),
+        ("put", "/api/settings/agent-provider", "putAgentProvider"),
+        (
+            "put",
+            "/api/settings/agent-provider/key",
+            "setAgentProviderKey",
+        ),
+        (
+            "delete",
+            "/api/settings/agent-provider/key",
+            "removeAgentProviderKey",
+        ),
+        ("get", "/api/agent/sessions", "listAgentSessions"),
+        ("post", "/api/agent/sessions", "startAgentSession"),
+        ("get", "/api/agent/sessions/{id}", "getAgentSession"),
+        (
+            "post",
+            "/api/agent/sessions/{id}/cancel",
+            "cancelAgentSession",
+        ),
         ("post", "/api/suggestions/paths", "suggestPaths"),
+        ("get", "/mcp", "getMcpStream"),
+        ("post", "/mcp", "sendMcpMessage"),
+        ("get", "/api/models", "listModels"),
         ("post", "/api/models", "createModel"),
         (
             "post",
@@ -64,11 +87,85 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
             "registerWeightCalibration",
         ),
         ("delete", "/api/models/{id}", "deleteModel"),
+        ("get", "/api/scratch", "listScratch"),
+        ("get", "/api/diff/tensors", "diffTensors"),
+        ("get", "/api/diff/traces", "diffTraces"),
+        ("get", "/api/diff/behavior", "diffBehavior"),
+        ("post", "/api/scratch", "createScratch"),
+        ("post", "/api/scratch/merge", "mergeModels"),
+        ("post", "/api/scratch/compile_program", "compileProgram"),
+        ("post", "/api/scratch/{id}/run_program", "runProgram"),
+        ("get", "/api/scratch/{id}", "getScratch"),
+        ("post", "/api/scratch/{id}/edits", "editScratch"),
+        ("post", "/api/scratch/{id}/rome", "romeEdit"),
+        ("post", "/api/scratch/{id}/memit", "memitEdit"),
+        ("post", "/api/scratch/{id}/alphaedit", "alphaEdit"),
+        ("post", "/api/scratch/{id}/prune", "pruneScratch"),
+        (
+            "post",
+            "/api/scratch/experts/{id}/plan",
+            "planScratchExperts",
+        ),
+        (
+            "post",
+            "/api/scratch/experts/{id}/prune",
+            "pruneScratchExperts",
+        ),
+        ("get", "/api/scratch/{id}/delta", "getScratchDelta"),
+        ("post", "/api/scratch/{id}/gguf", "convertScratchGguf"),
+        ("get", "/api/scratch/{id}/checks", "getScratchChecks"),
+        ("post", "/api/scratch/{id}/checks", "runScratchChecks"),
+        ("post", "/api/scratch/{id}/discard", "discardScratch"),
+        (
+            "post",
+            "/api/scratch/{id}/publish-request",
+            "requestScratchPublish",
+        ),
+        ("post", "/api/admin/scratch/{id}/approve", "approveScratch"),
         ("post", "/api/prompts", "createPrompt"),
         ("put", "/api/prompts/{id}", "updatePrompt"),
         ("delete", "/api/prompts/{id}", "deletePrompt"),
         ("post", "/api/jobs", "createJob"),
         ("get", "/api/jobs/{id}", "getJob"),
+        ("get", "/api/jobs/{id}/trace", "getTraceManifest"),
+        ("get", "/api/jobs/{id}/trace/tensor", "getTraceTensor"),
+        ("get", "/api/jobs/{id}/trace/features", "readFeatureTrace"),
+        (
+            "get",
+            "/api/jobs/{id}/trace/logit-lens",
+            "getTraceLogitLens",
+        ),
+        (
+            "get",
+            "/api/jobs/{id}/trace/model-logits",
+            "getTraceModelLogits",
+        ),
+        ("get", "/api/interventions", "listInterventions"),
+        ("get", "/api/saes", "listSaes"),
+        ("post", "/api/saes", "createSae"),
+        ("post", "/api/saes/{id}/versions", "createSaeVersion"),
+        ("get", "/api/saes/{id}/versions/{version}", "getSaeVersion"),
+        (
+            "get",
+            "/api/saes/{id}/versions/{version}/safetensors",
+            "exportSaeWeights",
+        ),
+        ("post", "/api/interventions", "createIntervention"),
+        (
+            "post",
+            "/api/interventions/{id}/versions",
+            "createInterventionVersion",
+        ),
+        (
+            "get",
+            "/api/interventions/{id}/versions/{version}",
+            "getInterventionVersion",
+        ),
+        (
+            "get",
+            "/api/interventions/{id}/versions/{version}/gguf",
+            "exportInterventionGguf",
+        ),
         ("post", "/api/jobs/{id}/cancel", "cancelJob"),
         ("post", "/api/conversions", "createConversion"),
         (
@@ -189,12 +286,12 @@ fn every_live_job_kind_has_one_typed_create_variant() {
                     || options["oneOf"]
                         .as_array()
                         .is_some_and(|variants| !variants.is_empty()
-                            && variants
-                                .iter()
-                                .all(|variant| {
-                                    let variant = variant.get("$ref").map_or(variant, |r| resolve(&contract, r));
-                                    variant["additionalProperties"] == false
-                                }))
+                            && variants.iter().all(|variant| {
+                                let variant = variant
+                                    .get("$ref")
+                                    .map_or(variant, |r| resolve(&contract, r));
+                                variant["additionalProperties"] == false
+                            }))
                     || options["allOf"].is_array(),
                 "{kind} options are not constrained"
             );
@@ -330,7 +427,10 @@ fn managed_gguf_layer_recipe_is_discoverable_and_round_trips() {
         &request_schema["then"]["then"]["properties"]["options"]["$ref"],
     );
     assert_closed_fields(recipe_options, &request["options"]);
-    let recipe = resolve(&contract, &recipe_options["properties"]["layer_recipe"]["$ref"]);
+    let recipe = resolve(
+        &contract,
+        &recipe_options["properties"]["layer_recipe"]["$ref"],
+    );
     assert_closed_fields(recipe, &request["options"]["layer_recipe"]);
     let source = app.register("alpha", "hf", "/source/base");
     request["input_ids"] = json!([source]);

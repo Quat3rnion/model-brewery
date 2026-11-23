@@ -534,7 +534,9 @@ mod tests {
             store: Mutex::new(store),
             hosts: vec![],
             settings: Default::default(),
+            trace_policy: Default::default(),
             hf_tokens: crate::hf_tokens::Store::from_config(None, &data),
+            agent: crate::agent::Service::new(&data, &dir.path().join("dist")).unwrap(),
             backend_download: false,
             backend_calibration: None,
             backend_edit_formats: Default::default(),
@@ -547,6 +549,9 @@ mod tests {
                 &dispatcher,
             )),
             feed_subscribers: Arc::new(Semaphore::new(crate::feed::SUBSCRIBERS)),
+            dispatcher: Arc::new(dispatcher),
+            scratch_slots: Arc::new(Semaphore::new(1)),
+            diffs: Default::default(),
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

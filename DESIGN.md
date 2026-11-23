@@ -4,7 +4,7 @@ This guide records the current Model Brewery web interface. It is not a redesign
 
 ## Surface and routes
 
-`web/src/App.svelte` owns the shared header, section links, connection status, and active-job strip. The visible sections are Library, Jobs, Transfers, Compare, Convert, Evaluate, Benchmarks, Calibration, and Settings.
+`web/src/App.svelte` owns the shared header, section links, connection status, and active-job strip. The visible sections are Library, Jobs, Transfers, Compare, Trace, Edits, Convert, Evaluate, Benchmarks, Calibration, and Settings.
 
 Keep nested routes under their parent section. Profiles uses Convert in the header. Weight edits uses Library. Job details use Jobs. Infrastructure settings stay under Settings. `App.svelte` marks the parent link with `aria-current="page"`.
 
@@ -53,7 +53,9 @@ Keep requested values separate from reported values. `web/src/components/Compone
 
 Keep workflow stages and result types distinct. `web/src/components/ConversionRun.svelte` lists Inspect, Plan, Convert, and Verify with links to their jobs. `web/src/components/results/JobResult.svelte` keeps file verification separate from hardware proof.
 
-Preserve provenance in reports. Keep the host, target, model, job ID, hashes, protocol, and reported metrics near the result when the view provides them. Label endpoint benchmark results and GSM8K scores as not release-qualified. This also applies to scores on the full pinned split. Do not present a requested option or a single score as proof.
+Preserve provenance in reports. Keep the host, target, model, job ID, hashes, protocol, and reported metrics near the result when the view provides them. Label endpoint benchmark results, GSM8K scores (including the full pinned split), scratch revisions, and scratch diffs as not release-qualified.
+
+Only the operator approves a scratch publish request. `web/src/components/trace/ApproveScratch.svelte` shows the exact SHA-256 and the check results in a confirmation dialog before it sends the approval. Do not present a requested option or a single score as proof.
 
 ## Accessibility and responsive layout
 
@@ -75,7 +77,7 @@ Pair status color with words and shapes. `web/src/components/Badge.svelte` gives
 
 At 760 px, the header stops being sticky and the section links wrap. Shared two- and three-column grids become one column. At 640 px, `stackable` tables use a block layout. Cells with `data-label` show their labels. Put wide tables in `.table-wrap`.
 
-Keep wide data views inside local scroll areas. `web/src/components/weights/HeatGrid.svelte` uses a scroll wrapper and keyboard grid semantics. Use `.break` for long paths, hashes, and IDs so they do not widen the page.
+Keep wide data views inside local scroll areas. `web/src/components/weights/HeatGrid.svelte` and `web/src/components/trace/MatrixHeat.svelte` use a scroll wrapper and keyboard grid semantics. `MatrixHeat.svelte` also gives the values as a table. Use `.break` for long paths, hashes, and IDs so they do not widen the page.
 
 ## Workbench flow tests
 

@@ -59,15 +59,30 @@ impl Dispatcher {
         };
         let payload = envelope
             .map(|envelope| {
-                if job.dispatch_resources.is_empty() {
+                if job.dispatch_resources.is_empty() && !job.scratch_job {
                     serde_json::to_vec(envelope)
                 } else {
                     let mut wire = serde_json::to_value(envelope)?;
-                    wire["resources"] = serde_json::to_value(job.dispatch_resources)?;
+                    wire.as_object_mut().unwrap().remove("scratch_pins");
+                    if !job.dispatch_resources.is_empty() {
+                        wire["resources"] = serde_json::to_value(job.dispatch_resources)?;
+                    }
                     serde_json::to_vec(&wire)
                 }
             })
             .transpose()?;
+        self.invoke(action, job, envelope, payload, duration, RESULT_LIMIT).await
+    }
+
+    pub async fn trace_read(&self, job: &Job, slice: &brewery_worker::trace::Slice) -> Result<brewery_worker::trace::ReadReply, Error> {
+        self.invoke("trace-read", job, None, Some(serde_json::to_vec(slice)?),
+            SHORT_RPC, brewery_worker::trace::RESPONSE_CAP + 128).await
+    }
+
+    async fn invoke<T: serde::de::DeserializeOwned>(
+        &self, action: &str, job: &Job, envelope: Option<&Envelope>,
+        payload: Option<Vec<u8>>, duration: Duration, limit: usize,
+    ) -> Result<T, Error> {
         let backend = if job.host == backend_hf::ID {
             Some(
                 self.backend
@@ -92,7 +107,9 @@ impl Dispatcher {
             backend.map_or(&self.command, |lane| &lane.dispatch)
         });
         if let Some(lane) = local {
-            let config = if job.directory_revision.is_some() {
+            let config = if job.scratch_job {
+                lane.scratch_config(&job.id)
+            } else if job.directory_revision.is_some() {
                 lane.job_config(&job.id)
             } else {
                 lane.config.clone()
@@ -148,7 +165,7 @@ impl Dispatcher {
             };
             tokio::try_join!(
                 write,
-                read_limited(stdout, RESULT_LIMIT),
+                read_limited(stdout, limit),
                 read_limited(stderr, 1024 * 1024),
                 child.wait()
             )
@@ -189,8 +206,7 @@ pub(crate) async fn read_limited(
     Ok(bytes)
 }
 
-pub async fn run(app: Arc<App>, dispatch: Dispatcher) -> Result<(), Error> {
-    let dispatch = Arc::new(dispatch);
+pub async fn run(app: Arc<App>, dispatch: Arc<Dispatcher>) -> Result<(), Error> {
     let mut jobs = JoinSet::new();
     let recovered = {
         let mut store = app.store.lock().expect("store lock");
@@ -299,7 +315,7 @@ fn allocate(app: &App) -> Result<Vec<Job>, Error> {
             continue;
         };
         job.host = host.id.clone();
-        if job.local_edit {
+        if job.local_edit && !job.scratch_job {
             let Some(access) = app
                 .editor_grants(&job, &envelope)?
                 .filter(|access| access.revision == job.directory_revision)

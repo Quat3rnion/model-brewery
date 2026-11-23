@@ -1,5 +1,6 @@
 //! A controller-owned CPU worker per configured local source host.
 use crate::{Error, dispatch::read_limited, domain::Host};
+use brewery_worker::locate_edit::{self, Backend};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -40,6 +41,9 @@ pub struct Lane {
     pub root: PathBuf,
     worker: PathBuf,
     worker_config: Value,
+    scratch_env: BTreeMap<String, Value>,
+    scratch_gpu_admission: Option<PathBuf>,
+    scratch_gpu_env: BTreeMap<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -107,6 +111,7 @@ impl Lanes {
             None
         };
         let dir = data.canonicalize()?.join("local-edit");
+        let state = dir.parent().ok_or("local editor has no state directory")?;
         let assets = dist.canonicalize().or_else(|_| std::path::absolute(dist))?;
         result.protected = vec![
             data.canonicalize()?,
@@ -182,7 +187,7 @@ impl Lanes {
                 );
                 continue;
             };
-            let Some(roots) = source_roots(&original, &dir) else {
+            let Some(roots) = source_roots(&original, state) else {
                 let reason = if original["source_roots"].is_null()
                     || original["source_roots"]
                         .as_array()
@@ -259,6 +264,48 @@ impl Lanes {
                 "root":root,"engine":engine,"source_roots":roots,"engine_env":engine_env,
                 "disk_reserve_bytes":original["disk_reserve_bytes"].as_u64().unwrap_or(1 << 30)
             });
+            let scratch_env = [
+                "BREWERY_GGUF_SAFETENSORS",
+                "BREWERY_GGUF_QUANTIZER",
+                "BREWERY_GGUF_HF_EXPORTER",
+                "BREWERY_GGUF_PYTHON",
+                "BREWERY_LLAMA_CPP",
+                "BREWERY_CONVERTER_DISK_RESERVE_BYTES",
+                "BREWERY_SCRATCH_CHECKS_SCRIPT",
+                "BREWERY_SCRATCH_CHECKS_RUNNER",
+                "BREWERY_SCRATCH_CHECKS_RUNNER_SHA256",
+                "BREWERY_SCRATCH_CHECKS_CACHE",
+                "BREWERY_LANTERNFISH_TRACE",
+                locate_edit::EXECUTABLE,
+                locate_edit::LIB_DIR,
+                "BREWERY_CPU_THREADS",
+            ]
+            .into_iter()
+            .filter_map(|name| {
+                original["engine_env"][name]
+                    .as_str()
+                    .map(|v| (name.into(), json!(v)))
+            })
+            .collect();
+            let scratch_gpu_admission =
+                original["admission"]
+                    .as_str()
+                    .map(PathBuf::from)
+                    .filter(|path| {
+                        path.is_absolute() && original["engine_env"][locate_edit::GPU_GATE] == "1"
+                    });
+            let scratch_gpu_env = [
+                locate_edit::CUDA_EXECUTABLE,
+                locate_edit::CUDA_LIB_DIR,
+                locate_edit::CUDA_DEVICES,
+            ]
+            .into_iter()
+            .filter_map(|key| {
+                original["engine_env"][key]
+                    .as_str()
+                    .map(|value| (key.into(), json!(value)))
+            })
+            .collect();
             brewery_worker::atomic(&config, &worker_config)?;
             let dispatch = lane_dir.join("dispatch.json");
             brewery_worker::atomic(
@@ -292,6 +339,9 @@ impl Lanes {
                     root,
                     worker: worker.clone(),
                     worker_config,
+                    scratch_env,
+                    scratch_gpu_admission,
+                    scratch_gpu_env,
                 },
             );
         }
@@ -313,6 +363,29 @@ impl Lanes {
 }
 
 impl Lane {
+    pub fn locate_edit_configured(&self, backend: Backend) -> bool {
+        let pin = backend.pin();
+        let env = match backend {
+            Backend::Cpu => &self.scratch_env,
+            Backend::Cuda => &self.scratch_gpu_env,
+        };
+        [pin.executable, pin.lib_dir].iter().all(|k| {
+            env.get(*k)
+                .and_then(Value::as_str)
+                .is_some_and(|p| Path::new(p).is_absolute())
+        })
+    }
+
+    pub fn scratch_gpu_allowed(&self) -> bool {
+        self.scratch_gpu_admission.is_some()
+    }
+
+    pub fn scratch_disk_reserve(&self) -> u64 {
+        self.worker_config["disk_reserve_bytes"]
+            .as_u64()
+            .unwrap_or(1 << 30)
+    }
+
     pub fn job_config(&self, id: &str) -> PathBuf {
         self.config
             .with_file_name(format!("grant-{id}-dispatch.json"))
@@ -338,6 +411,51 @@ impl Lane {
             &json!({
                 "hosts":{host:{"local":true,"worker":self.worker,"config":config}}
             }),
+        )?;
+        Ok(())
+    }
+
+    pub fn scratch_config(&self, id: &str) -> PathBuf {
+        self.config
+            .with_file_name(format!("scratch-{id}-dispatch.json"))
+    }
+
+    pub fn snapshot_scratch(
+        &self,
+        host: &str,
+        id: &str,
+        pins: &BTreeMap<String, String>,
+        cuda: bool,
+    ) -> Result<(), Error> {
+        use std::io::Write as _;
+        let config = self
+            .config
+            .with_file_name(format!("scratch-{id}-worker.json"));
+        let mut worker_config = self.worker_config.clone();
+        let env = worker_config["engine_env"].as_object_mut().unwrap();
+        env.extend(self.scratch_env.clone());
+        if cuda {
+            env.remove(locate_edit::CUDA_DEVICES);
+            env.extend(self.scratch_gpu_env.clone());
+            env.insert(locate_edit::GPU_GATE.into(), json!("1"));
+            worker_config["admission"] = json!(
+                self.scratch_gpu_admission
+                    .as_ref()
+                    .ok_or("Missing scratch GPU admission")?
+            );
+        }
+        worker_config["scratch_access"] = json!({"job_id":id,"paths":pins});
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&config)?;
+        serde_json::to_writer(&mut file, &worker_config)?;
+        file.flush()?;
+        file.sync_all()?;
+        brewery_worker::atomic(
+            &self.scratch_config(id),
+            &json!({"hosts":{host:{"local":true,"worker":self.worker,"config":config}}}),
         )?;
         Ok(())
     }

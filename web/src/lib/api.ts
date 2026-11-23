@@ -95,6 +95,23 @@ export const api = {
   profiles: (signal?: AbortSignal) => request<unknown>('GET', '/api/profiles', undefined, signal),
   saveProfile: (body: unknown) => request<unknown>('POST', '/api/profiles', body),
   cancelJob: (id: string) => request<JobSummary>('POST', `/api/jobs/${encodeURIComponent(id)}/cancel`, {}),
+  // Weight-space programming: trace slices, scratch revisions, diffs.
+  trace: (id: string, query: Record<string, string | number>, view: '' | 'tensor' | 'logit-lens' | 'model-logits' | 'features' = '', signal?: AbortSignal) =>
+    request<unknown>('GET', `/api/jobs/${encodeURIComponent(id)}/trace${view ? `/${view}` : ''}?${new URLSearchParams(Object.entries(query).map(([k, v]) => [k, String(v)]))}`, undefined, signal),
+  interventions: (signal?: AbortSignal) => request<unknown>('GET', '/api/interventions', undefined, signal),
+  scratch: (signal?: AbortSignal) => request<unknown>('GET', '/api/scratch', undefined, signal),
+  diff: (kind: 'tensors' | 'traces' | 'behavior', query: string, signal?: AbortSignal) => request<unknown>('GET', `/api/diff/${kind}?${query}`, undefined, signal),
+  // Built-in agent (W15). The provider API key has its own write-only calls in AgentProviderSettings.
+  agentProvider: (signal?: AbortSignal) => request<unknown>('GET', '/api/settings/agent-provider', undefined, signal),
+  saveAgentProvider: (body: unknown) => request<unknown>('PUT', '/api/settings/agent-provider', body),
+  agentSessions: (signal?: AbortSignal) => request<unknown>('GET', '/api/agent/sessions', undefined, signal),
+  agentSession: (id: string, signal?: AbortSignal) => request<unknown>('GET', `/api/agent/sessions/${encodeURIComponent(id)}`, undefined, signal),
+  startAgentSession: (body: { goal: string; model_id: string }, key: string) =>
+    request<unknown>('POST', '/api/agent/sessions', body, undefined, { 'Idempotency-Key': key }),
+  cancelAgentSession: (id: string) => request<unknown>('POST', `/api/agent/sessions/${encodeURIComponent(id)}/cancel`, {}),
+  // Operator only. The agent MCP interface has no route to this action.
+  approveScratch: (id: string, sha256: string, key: string) =>
+    request<unknown>('POST', `/api/admin/scratch/${encodeURIComponent(id)}/approve`, { sha256 }, undefined, { 'Idempotency-Key': key }),
 };
 
 export function errorText(error: unknown): string {
