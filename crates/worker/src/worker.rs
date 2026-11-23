@@ -582,7 +582,7 @@ impl Worker {
                     && r.action == "start"
                     && r.job
                         .as_ref()
-                        .is_none_or(|job| job.kind != sensitivity::JOB && !scratch_eval::private_output(&job.kind))
+                        .is_none_or(|job| !matches!(job.kind.as_str(), sensitivity::JOB | circuit::JOB) && !scratch_eval::private_output(&job.kind))
                     && !r.inputs.values().any(scratch_eval::granted),
                 "job output is not published"
             );
@@ -1048,6 +1048,21 @@ impl Worker {
                 );
             }
         }
+        if job.kind == circuit::JOB {
+            let allowed = action == "start"
+                && access.is_none()
+                && job.prompt.is_none()
+                && job.inputs.len() == 1
+                && job.inputs[0].kind == "gguf"
+                && circuit::Request::parse(&job.options).is_ok()
+                && sensitivity::configured(&self.cfg.engine_env, locate_edit::Backend::Cpu, None);
+            if !allowed {
+                return self.record_prepare(
+                    id, action, job,
+                    Reply::error("Invalid circuit request or unavailable pinned CPU runtime"),
+                );
+            }
+        }
         if job.options["output_format"] == hgn_recipe::FORMAT {
             if self.cfg.pinned_publication.is_some()
                 || self
@@ -1466,8 +1481,9 @@ impl Worker {
         );
         let mut pinned = false;
         ensure!(
-            job.kind != sensitivity::JOB || (provided.is_none() && input.host == original.host),
-            "sensitivity requires a direct source"
+            !matches!(job.kind.as_str(), sensitivity::JOB | circuit::JOB)
+                || (provided.is_none() && input.host == original.host),
+            "sensitivity and circuit jobs require a direct source"
         );
         let (bundle, cached) = if let Some(b) = provided {
             b.validate()?;
@@ -1745,6 +1761,10 @@ impl Worker {
             sensitivity::Request::resolved(&job.options)?.0
                 .check_model(input.extra["sha256"].as_str().unwrap_or_default())?;
         }
+        if job.kind == circuit::JOB {
+            circuit::Request::parse(&job.options)?
+                .check_model(input.extra["sha256"].as_str().unwrap_or_default())?;
+        }
         input.extra.extend([
             ("bundle_sha256".into(), json!(bundle.digest)),
             ("bytes".into(), json!(bundle.bytes()?)),
@@ -1969,7 +1989,7 @@ impl Worker {
                         .is_ok_and(|request| request.edit.backend.is_gpu())
                 } else if job.kind == sensitivity::JOB {
                     sensitivity::Request::resolved(&job.options).is_ok_and(|(request, _)| request.backend.is_gpu())
-                } else if job.kind == trace::JOB || scratch_eval::private_output(&job.kind) {
+                } else if matches!(job.kind.as_str(), trace::JOB | circuit::JOB) || scratch_eval::private_output(&job.kind) {
                     false
                 } else {
                     self.cfg.admission.is_some()

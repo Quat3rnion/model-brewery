@@ -2,6 +2,7 @@ mod admin;
 mod agent;
 mod backend_calibration;
 mod backend_hf;
+mod circuit;
 mod conversion;
 mod dedupe;
 mod diff;

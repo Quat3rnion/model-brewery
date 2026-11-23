@@ -212,6 +212,21 @@ else:
                       executable_sha256="a" * 64, manifest_sha256="a" * 64,
                       tensors=[dict(name="blk.0.attn_q.weight", layer=0, shape=[2, 2], fisher=0.25)],
                       layers=[dict(layer=0, elements=4, fisher=0.25)])
+    if action == "start" and envelope["kind"] == "circuit":
+        options = envelope["options"]
+        result = {key: options[key] for key in
+                  ("model_sha256", "clean_prompt", "corrupt_prompt", "target_id", "contrast_id")}
+        result.update(kind="circuit", schema_version=1, qualification="not release-qualified",
+                      backend="cpu", model_id=envelope["inputs"][0]["id"],
+                      clean_tokens=[1], corrupt_tokens=[2], clean_metric=10, corrupt_metric=0,
+                      sites=[
+                          dict(layer=0, position=0, role="attn_out", attribution=-4, patched_delta=-5),
+                          dict(layer=0, position=0, role="l_out", attribution=2, patched_delta=2),
+                      ],
+                      top_k=options["top_k"], sample_lower=options.get("sample_lower", 0),
+                      pearson_r=-1 if (root / "circuit-wrong-correlation").exists() else 1,
+                      spearman_rho=1,
+                      executable_sha256="a" * 64, manifest_sha256="a" * 64)
     if action == "start" and envelope["kind"] == "hf_download":
         assert envelope["inputs"] == [] and "prompt" not in envelope
         options = envelope["options"]

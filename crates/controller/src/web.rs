@@ -70,6 +70,7 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
         .route("/jobs/{id}", get(job))
         .route("/jobs/{id}/trace", get(trace_manifest))
         .route("/jobs/{id}/sensitivity", get(crate::sensitivity::get))
+        .route("/jobs/{id}/circuit", get(crate::circuit::get))
         .route("/jobs/{id}/trace/tensor", get(trace_tensor))
         .route("/jobs/{id}/trace/logit-lens", get(trace_logit_lens))
         .route("/jobs/{id}/trace/model-logits", get(trace_model_logits))

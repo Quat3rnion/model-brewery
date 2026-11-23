@@ -918,6 +918,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "diff_traces",
             "discard_scratch",
             "export_control_vector",
+            "find_circuit",
             "get_checks",
             "get_intervention",
             "get_job",
@@ -960,7 +961,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
                     .contains(&json!("backend"))
             );
         }
-        if matches!(tool["name"].as_str(), Some("start_trace" | "steer_feature" | "tensor_sensitivity")) {
+        if matches!(tool["name"].as_str(), Some("start_trace" | "steer_feature" | "tensor_sensitivity" | "find_circuit")) {
             let flag = &schema["properties"]["allow_duplicate"];
             assert_eq!(flag["type"], "boolean");
             assert_eq!(flag["default"], false);

@@ -162,7 +162,7 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
         }
         Ok(value)
     });
-    if (matches!(job.kind.as_str(), trace::JOB | sensitivity::JOB) || scratch_eval::private_output(&job.kind))
+    if (matches!(job.kind.as_str(), trace::JOB | sensitivity::JOB | circuit::JOB) || scratch_eval::private_output(&job.kind))
         && created_work
         && (r.cancel || result.is_err())
         && let Err(error) =
@@ -346,11 +346,15 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .context("trace disk reserve overflow")?,
         )?;
     }
-    let sensitivity_backend = if job.kind == sensitivity::JOB {
-        let (req, _) = sensitivity::Request::resolved(&job.options)?;
+    let gradient_backend = if matches!(job.kind.as_str(), sensitivity::JOB | circuit::JOB) {
+        let backend = if job.kind == circuit::JOB {
+            locate_edit::Backend::Cpu
+        } else {
+            sensitivity::Request::resolved(&job.options)?.0.backend
+        };
         ensure!(
-            sensitivity::configured(&w.cfg.engine_env, req.backend, w.cfg.admission.as_deref()),
-            "pinned sensitivity backend is unavailable"
+            sensitivity::configured(&w.cfg.engine_env, backend, w.cfg.admission.as_deref()),
+            "pinned Lanternfish gradient backend is unavailable"
         );
         // The native runtime may expand BF16 weights to a private F32 GGUF.
         let model_bytes = weight_source::open_regular(&job.inputs[0].path)?.metadata()?.len();
@@ -360,7 +364,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .saturating_add(sensitivity::RUNTIME_RESERVE + sensitivity::MAX_GRADIENT_BYTES)
                 .saturating_add(model_bytes.saturating_mul(2)),
         )?;
-        Some(req.backend)
+        Some(backend)
     } else {
         None
     };
@@ -449,7 +453,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         .admission
         .as_ref()
         .filter(|_| {
-            sensitivity_backend.map_or(gpu_edit || (job.kind != trace::JOB && !scratch_job), |b| b.is_gpu())
+            gradient_backend.map_or(gpu_edit || (job.kind != trace::JOB && !scratch_job), |b| b.is_gpu())
         })
     {
         let mut c = Command::new(wrapper);
@@ -458,7 +462,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     } else {
         Command::new(&w.cfg.engine)
     };
-    if scratch_job || sensitivity_backend.is_some() {
+    if scratch_job || gradient_backend.is_some() {
         let keys: &[&str] = match job.kind.as_str() {
             scratch_eval::GGUF => &[
                 "BREWERY_GGUF_SAFETENSORS",
@@ -477,6 +481,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             ],
             locate_edit::JOB => &[],
             sensitivity::JOB => &[sensitivity::PIN, sensitivity::MANIFEST_SHA, locate_edit::GPU_GATE],
+            circuit::JOB => &[sensitivity::PIN, sensitivity::MANIFEST_SHA],
             _ => &[trace::EXECUTABLE, trace::LIB_DIR],
         };
         command.env_clear().envs(
@@ -489,10 +494,10 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                         .flatten(),
                 )
                 .chain(["BREWERY_CPU_THREADS"])
-                .chain(sensitivity_backend.into_iter().flat_map(|b| b.visibility_vars().iter().copied()))
+                .chain(gradient_backend.into_iter().flat_map(|b| b.visibility_vars().iter().copied()))
                 .filter_map(|key| w.cfg.engine_env.get(key).map(|value| (key, value))),
         );
-        if gpu_edit || sensitivity_backend.is_some_and(locate_edit::Backend::is_gpu) {
+        if gpu_edit || gradient_backend.is_some_and(locate_edit::Backend::is_gpu) {
             command.env("PATH", "/usr/bin:/bin");
         }
     } else {
@@ -815,6 +820,19 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         ensure!(
             w.cfg.engine_env.get(sensitivity::MANIFEST_SHA) == Some(&artifact.manifest_sha256),
             "sensitivity artifact runtime SHA-256 does not match worker pin"
+        );
+        return Ok(serde_json::to_value(artifact)?);
+    }
+    if job.kind == circuit::JOB {
+        let request = circuit::Request::parse(&job.options)?;
+        let input = &job.inputs[0];
+        request.check_model(input.extra["sha256"].as_str().unwrap_or_default())?;
+        let model_id = input.extra["id"].as_str().context("missing circuit source ID")?;
+        let artifact: circuit::Artifact = serde_json::from_value(value)?;
+        artifact.check(&request, model_id)?;
+        ensure!(
+            w.cfg.engine_env.get(sensitivity::MANIFEST_SHA) == Some(&artifact.manifest_sha256),
+            "circuit artifact runtime SHA-256 does not match worker pin"
         );
         return Ok(serde_json::to_value(artifact)?);
     }

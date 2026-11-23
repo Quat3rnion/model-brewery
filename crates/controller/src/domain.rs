@@ -10,6 +10,7 @@ pub const KINDS: &[&str] = &[
     "compare",
     brewery_worker::trace::JOB,
     brewery_worker::sensitivity::JOB,
+    brewery_worker::circuit::JOB,
     "inspect",
     "plan",
     "convert",
@@ -668,6 +669,7 @@ impl Host {
                     | "hf_download"
                     | brewery_worker::trace::JOB
                     | brewery_worker::sensitivity::JOB
+                    | brewery_worker::circuit::JOB
                     | brewery_worker::exl3_layer::JOB
             ) || crate::weights::is_kind(kind);
             let enabled = options.remove(kind).unwrap_or(!opt_in)
@@ -683,6 +685,8 @@ impl Host {
                         "Configure pinned CPU Lanternfish and opt in on this worker"
                     } else if kind == brewery_worker::sensitivity::JOB {
                         "Configure pinned Lanternfish sensitivity and opt in on this worker"
+                    } else if kind == brewery_worker::circuit::JOB {
+                        "Configure the pinned CPU Lanternfish gradient runtime and opt in on this worker"
                     } else if kind == brewery_worker::exl3_layer::JOB {
                         "Configure a native EXL3 helper and opt in on this worker"
                     } else if crate::weights::is_kind(kind) {
@@ -1244,7 +1248,9 @@ impl NewJob {
         } else {
             match self.kind.as_str() {
                 "compare" => n == 2 && main == "gguf" && second == "gguf" && prompt.is_some(),
-                brewery_worker::trace::JOB | brewery_worker::sensitivity::JOB => {
+                brewery_worker::trace::JOB
+                | brewery_worker::sensitivity::JOB
+                | brewery_worker::circuit::JOB => {
                     n == 1 && main == "gguf" && host == inputs[0].host
                 }
                 "inspect" | "plan" | "convert" => (1..=5).contains(&n) && source,
@@ -1381,6 +1387,16 @@ fn check_options(job: &str, options: &Map<String, Value>, inputs: &[Model]) -> R
     if job == brewery_worker::sensitivity::JOB {
         return brewery_worker::sensitivity::Request::parse(&Value::Object(options.clone()))
             .map(|_| ())
+            .map_err(|err| format!("{err:#}"));
+    }
+    if job == brewery_worker::circuit::JOB {
+        return brewery_worker::circuit::Request::parse(&Value::Object(options.clone()))
+            .and_then(|req| {
+                inputs
+                    .first()
+                    .and_then(|m| m.sha256.as_deref())
+                    .map_or(Ok(()), |sha| req.check_model(sha))
+            })
             .map_err(|err| format!("{err:#}"));
     }
     if job == "hf_download" {

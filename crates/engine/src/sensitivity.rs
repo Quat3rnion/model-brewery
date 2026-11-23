@@ -37,14 +37,14 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-struct Pin {
+pub(crate) struct Pin {
     root: PathBuf,
-    sha: String,
+    pub(crate) sha: String,
     members: BTreeMap<String, String>,
 }
 
 impl Pin {
-    fn load() -> Result<Self> {
+    pub(crate) fn load() -> Result<Self> {
         let root =
             PathBuf::from(env::var_os(wire::PIN).context("missing sensitivity runtime pin")?);
         ensure!(
@@ -82,7 +82,7 @@ impl Pin {
         })
     }
 
-    fn stage(&self, backend: Backend, work: &Path) -> Result<(Tool, PathBuf)> {
+    pub(crate) fn stage(&self, backend: Backend, work: &Path) -> Result<(Tool, PathBuf)> {
         let work = work.join(backend.key());
         fs::create_dir(&work)?;
         let binary = "lanternfish";

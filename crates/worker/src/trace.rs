@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::Read,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
@@ -71,6 +71,20 @@ pub struct Capture {
     positions: BTreeSet<usize>,
     top_k: usize,
     pub byte_cap: u64,
+}
+
+impl Capture {
+    // Internal circuits use either activation-only or final-position logits-only
+    // exports. Unlike the public trace request, the latter reads the whole vocabulary.
+    pub fn circuit(layers: &[usize], roles: &[Role], positions: &[usize], top_k: usize) -> Self {
+        Self {
+            layers: layers.iter().copied().collect(),
+            roles: roles.iter().copied().collect(),
+            positions: positions.iter().copied().collect(),
+            top_k,
+            byte_cap: HARD_BYTE_CAP,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -245,10 +259,10 @@ pub fn check_model_revision(options: &Value, actual: &str) -> Result<()> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
-struct Key {
-    layer: usize,
-    role: Role,
-    position: usize,
+pub struct Key {
+    pub layer: usize,
+    pub role: Role,
+    pub position: usize,
 }
 
 #[derive(Deserialize)]
@@ -343,6 +357,10 @@ fn manifest(dir: &Path, cap: u64) -> Result<(Manifest, Export)> {
 }
 
 pub fn verify(dir: &Path, spec: &Capture) -> Result<Export> {
+    Ok(inspect(dir, spec)?.1)
+}
+
+fn inspect(dir: &Path, spec: &Capture) -> Result<(Manifest, Export)> {
     let (m, mut export) = manifest(dir, spec.byte_cap)?;
     ensure!(
         &m.spec == spec
@@ -424,7 +442,73 @@ pub fn verify(dir: &Path, spec: &Capture) -> Result<Export> {
         );
     }
     ensure!(files.is_empty(), "missing trace payload");
-    Ok(export)
+    Ok((m, export))
+}
+
+pub struct CircuitTrace {
+    pub activations: BTreeMap<Key, Vec<f32>>,
+    pub metric: Option<f64>,
+}
+
+pub fn circuit_trace(
+    dir: &Path,
+    spec: &Capture,
+    tokens: &[i32],
+    width: usize,
+    targets: (i32, Option<i32>),
+    patch: Option<Key>,
+) -> Result<CircuitTrace> {
+    let (m, _) = inspect(dir, spec)?;
+    ensure!(
+        m.tokens.iter().map(|t| t.token_id).eq(tokens.iter().copied())
+            && m.missing.is_empty()
+            && m.interventions.iter().copied().eq(patch)
+            && m.logit_lens.is_empty(),
+        "circuit trace has missing rows, wrong tokens or wrong interventions"
+    );
+    let mut activations = BTreeMap::new();
+    for tensor in m.tensors {
+        ensure!(
+            tensor.shape == [width as u64],
+            "invalid circuit activation width"
+        );
+        let bytes = read_file(&dir.join(tensor.file), tensor.bytes)?;
+        ensure!(
+            format!("{:x}", Sha256::digest(&bytes)) == tensor.sha256,
+            "circuit activation SHA-256 mismatch"
+        );
+        let values: Vec<_> = bytes
+            .chunks_exact(4)
+            .map(|v| f32::from_le_bytes(v.try_into().expect("four bytes")))
+            .collect();
+        ensure!(
+            values.iter().all(|v| v.is_finite()),
+            "non-finite circuit activation"
+        );
+        activations.insert(tensor.key, values);
+    }
+    let metric = if spec.top_k == 0 {
+        None
+    } else {
+        let [row] = m.model_logits.as_slice() else {
+            anyhow::bail!("expected one circuit logit row");
+        };
+        let mut seen = vec![false; spec.top_k];
+        for s in &row.top {
+            ensure!(
+                seen.get_mut(s.token_id as usize)
+                    .is_some_and(|v| !std::mem::replace(v, true)),
+                "invalid circuit vocabulary logits"
+            );
+        }
+        let logit = |id| {
+            row.top.iter().find(|s| s.token_id == id)
+                .map(|s| f64::from(s.logit))
+                .context("circuit objective token missing")
+        };
+        Some(logit(targets.0)? - targets.1.map(logit).transpose()?.unwrap_or(0.))
+    };
+    Ok(CircuitTrace { activations, metric })
 }
 
 fn seen_row_top(top: &[TopLogit], k: usize) -> bool {
