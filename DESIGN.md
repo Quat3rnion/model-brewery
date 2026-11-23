@@ -58,7 +58,7 @@ Preserve provenance in reports. Keep the host, target, model, job ID, hashes, pr
 **Abliteration** is a read-only view of direction, native search and Heretic
 jobs. Select a run with `#/abliteration?job=<id>`. A direction plot marks the
 selected layer. The screen plot uses circles for fitted trials and squares for
-matched random controls. Tables give the exact plot values and paired child
+matched random controls. Tables give the numeric plot values and paired child
 results. Keep Heretic optimization scores separate from the held-out scores
 in **Edits**. Put configs and the reproduce journal in disclosures.
 

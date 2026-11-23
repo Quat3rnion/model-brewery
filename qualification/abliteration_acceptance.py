@@ -19,6 +19,7 @@ from weight_space_acceptance import ARB, PINS, QUANT, REPO, SAFE, W0_LIBS, requi
 from scratch_checks import BENIGN_REFUSAL_SHA256, REFUSAL_PREFIXES, begins, normalized
 
 
+A3 = ARB / "a3-evidence/sweep/report.json"
 A5 = ARB / "a5-evidence"
 A6 = ARB / "brewery-a6-evidence"
 
@@ -88,8 +89,8 @@ def benign_refusal(run, runner, gguf, bundles):
     stock = run / "fit-source/parent.gguf"
     require(sha(stock) == gguf["sha256"], "benign refusal parent GGUF mismatch")
     flags = {}
-    for name, (id, bundle) in bundles.items():
-        model = run / "state/scratch" / id / "model.gguf"
+    for name, (revision_id, bundle) in bundles.items():
+        model = run / "state/scratch" / revision_id / "model.gguf"
         require(sha(model) == bundle["measured_report"]["revision_gguf_sha256"],
                 f"{name}: benign refusal child GGUF mismatch")
         result = subprocess.run([runner.resolve(), stock, "4", "--behavior-v1", model],
@@ -145,10 +146,17 @@ def report(native, heretic, gguf, pins, bins, refusal=None):
     cpu = load(A6 / "journal.json")
     require(cpu["base_sha256"] == PINS[SAFE] and 'device_map = "cpu"' in cpu["effective_config"],
             "A6 CPU smoke pin mismatch")
+    a3 = load(A3)
+    require(a3["parent_gguf"]["revision_sha256"] == PINS[SAFE]
+            and a3["parent_gguf"]["sha256"] == gguf["sha256"], "A3 baseline pin mismatch")
     return {
         "qualification": "not release-qualified", "base_safetensors_sha256": PINS[SAFE],
         "base_gguf_sha256": gguf["sha256"], "prompt_sets": pins, "runner_sha256": A2_RUNNER,
         "bins": bins, "comparisons": compare(native, heretic, pins, reference),
+        "a3_context": {"scope": "same stock model, different edits and holdout; not pooled with A7",
+                       "source_report_sha256": sha(A3),
+                       "paired": {behavior: {name: row["statistics"] for name, row in trials.items()}
+                                  for behavior, trials in a3["trials"].items()}},
         "a6_heretic_cpu_smoke": {"export_sha256": cpu["export_sha256"], "runtime": cpu["runtime"],
                                   "scope": "export only; not the scored GPU child"},
         "benign_refusal": refusal if refusal is not None else "not measured; not a native direction",
