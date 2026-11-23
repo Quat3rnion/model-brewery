@@ -1790,14 +1790,16 @@ workers, or deploy.
    (`wait_ms` can wait up to 5000 ms per call). Use `read_trace` with
    `manifest`, `tensor`, `logit_lens`, or `model_logits`. Use
    `create_intervention` and `new_intervention_version` to save rules.
+   Use `list_interventions` and `get_intervention` to read saved rules.
    Use `create_direction_intervention` to save projection or subtraction
    rules from a verified direction artifact.
    `export_control_vector` returns a relative URL for the same workbench.
 3. Use `create_scratch` and `apply_edit` for a SafeTensors edit. Use
    `merge_models` to merge pinned revisions in a new scratch child. Use
    `convert_scratch_gguf` on the parent and child. Run `run_checks` on the
-   child and use `get_job` to see the result. Use the tensor, trace, and
-   behavior diff tools to compare results.
+   child and use `get_job` to see the result. Use `diff_tensors`,
+   `diff_traces`, and `diff_behavior` to compare results. Use
+   `discard_scratch` to remove a scratch revision that you do not need.
 4. Use `request_publish` with the exact revision hash and check bundle
    acknowledgement if it is necessary. The operator reviews the request
    separately. Results are not release-qualified.
@@ -2643,6 +2645,7 @@ version does not change. The list shows the 100 newest versions.
 4. Use `replay_finding` (`POST /api/findings/{id}/replay`) with the ID and
    SHA-256 of a different model. For a scratch target, convert it first.
    Use `get_finding` (`GET /api/findings/{id}`) to poll the new version.
+   Use `list_findings` (`GET /api/findings`) to list the findings and their versions.
    When it is ready, compare the recorded numbers side by side. Check the
    runtime and fixture pins before you give the replay a verdict.
 
