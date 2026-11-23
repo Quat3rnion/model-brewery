@@ -43,6 +43,23 @@ it('uses the native sequence across touch contacts and changed bodies, but not a
   expect(await other.send('native.copy', changed, post, click(3, 3))).toBe(true);
 });
 
+it('guards a nearby repeat tap when the browser restarts the click count', async () => {
+  const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
+  try {
+    const read = new Submission();
+    const post = async () => true;
+    const first = { offset: 0 };
+    const next = { offset: 128 };
+    const tap = (clientX: number) => ({ detail: 1, pointerType: 'touch', clientX, clientY: 100 });
+    expect(await read.send('paged-read', first, post, tap(42))).toBe(true);
+    clock.mockReturnValue(500);
+    expect(await read.send('paged-read', next, post, tap(43))).toBeNull();
+    expect(await read.send('paged-read', next, post, tap(180))).toBe(true);
+    clock.mockReturnValue(1301);
+    expect(await read.send('paged-read', { offset: 256 }, post, tap(180))).toBe(true);
+  } finally { clock.mockRestore(); }
+});
+
 it('allows a repeat click with a different body when the first click was blocked', async () => {
   const submission = new Submission();
   let finish!: (value: boolean) => void;

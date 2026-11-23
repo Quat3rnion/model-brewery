@@ -111,6 +111,9 @@ fn standalone_inspect_passes_explicit_assets_and_attests_their_bytes() {
     fs::write(&source, b"fixture weights").unwrap();
     fs::write(weights.join("config.json"), b"not selected").unwrap();
     fs::write(assets.join("config.json"), b"selected").unwrap();
+    let quantizer = root.join("quantizer");
+    fs::write(&quantizer, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&quantizer, fs::Permissions::from_mode(0o700)).unwrap();
     let exporter = root.join("exporter");
     fs::write(
         &exporter,
@@ -139,7 +142,7 @@ printf '%s\n' '{"source_format":"safetensors","export_supported":true,"expected_
             "inspect",
             json!({"output_format":"gguf","gguf_type":"Q8_0"}),
             inputs,
-            Path::new("/usr/bin/false"),
+            &quantizer,
         );
         fs::remove_dir_all(root.join("inspect")).unwrap();
         output

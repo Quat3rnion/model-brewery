@@ -175,6 +175,10 @@ for (const [lost, activation] of [[true, 'Enter'], [false, 'Enter'], [false, 'Sp
     await route.fulfill({ status: 502, json: { error: 'Accepted reply lost.' } });
   }, { times: 1 });
   await controller.open(page, 'weights?source=gguf-a');
+  if (activation === 'Space') {
+    // Exercise fractional line bounds without depending on the host's fonts.
+    await page.evaluate(() => { document.body.style.zoom = '1.15'; });
+  }
   await page.getByRole('radio', { name: new RegExp(proposalId) }).check();
   const review = page.getByRole('checkbox', { name: /I reviewed all/ });
   await review.check();

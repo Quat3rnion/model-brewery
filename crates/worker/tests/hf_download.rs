@@ -7,7 +7,7 @@ use std::{
 
 #[test]
 fn ordinary_workers_do_not_accept_network_downloads() {
-    let rig = tempfile::tempdir_in("/arboretum").unwrap();
+    let rig = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let config = rig.path().join("worker.json");
     fs::write(
         &config,
