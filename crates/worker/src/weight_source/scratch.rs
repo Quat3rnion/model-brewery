@@ -41,6 +41,11 @@ pub enum Operation {
         v: Vec<f64>,
         scale: f64,
     },
+    LowRankBatch {
+        tensor: String,
+        u: Vec<Vec<f32>>,
+        v: Vec<Vec<f32>>,
+    },
     Orthogonalize {
         tensor: String,
         axis: Axis,
@@ -85,6 +90,7 @@ impl Operation {
             Self::Set { tensor, .. }
             | Self::Add { tensor, .. }
             | Self::LowRank { tensor, .. }
+            | Self::LowRankBatch { tensor, .. }
             | Self::Orthogonalize { tensor, .. } => tensor,
         }
     }
@@ -146,6 +152,26 @@ impl Operation {
                 for (r, &left) in u.iter().enumerate() {
                     for (c, &right) in v.iter().enumerate() {
                         update(r * v.len() + c, &|old| old + scale * left * right)?;
+                    }
+                }
+            }
+            Self::LowRankBatch { u, v, .. } => {
+                let [rows, cols] = dims.as_slice() else {
+                    bail!("low_rank_batch requires a matrix");
+                };
+                let (rows, cols) = (*rows as usize, *cols as usize);
+                ensure!(
+                    matches!(dtype, "F32" | "BF16")
+                        && (1..=16).contains(&u.len()) && u.len() == v.len()
+                        && u.iter().all(|x| x.len() == rows)
+                        && v.iter().all(|x| x.len() == cols)
+                        && u.iter().chain(v).flatten().all(|x| x.is_finite()),
+                    "invalid F32/BF16 low-rank batch factors"
+                );
+                for r in 0..rows {
+                    for c in 0..cols {
+                        let delta = u.iter().zip(v).fold(0.0, |sum, (u, v)| sum + u[r] * v[c]);
+                        update(r * cols + c, &|old| (old as f32 + delta) as f64)?;
                     }
                 }
             }
@@ -471,6 +497,31 @@ pub fn file_sha256(file: &mut File) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scratch_low_rank_batch_rounds_once_and_restores_bf16_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("source.safetensors");
+        let header = br#"{"w":{"dtype":"BF16","shape":[1,2],"data_offsets":[0,4]}}"#;
+        let mut fixture = (header.len() as u64).to_le_bytes().to_vec();
+        fixture.extend(header);
+        fixture.extend([0x80, 0x3f, 0x80, 0x3f]);
+        std::fs::write(&path, &fixture).unwrap();
+        let pin = format!("{:x}", Sha256::digest(&fixture));
+        let operation: Operation = serde_json::from_str(
+            r#"{"op":"low_rank_batch","tensor":"w","u":[[1],[1]],"v":[[0.00390625,0.00390625],[0.00390625,-0.00390625]]}"#,
+        ).unwrap();
+        let result = build(&path, &pin, &root, &[operation]).unwrap();
+        let child = root.join(MODEL);
+        let data = std::fs::read(&child).unwrap();
+        assert_eq!(&data[data.len() - 4..], &[0x81, 0x3f, 0x80, 0x3f]);
+        assert_eq!(result.tensors[0].dtype, "BF16");
+        let restore = root.join("restore.safetensors");
+        revert(&child, &root.join(DELTA), &restore).unwrap();
+        assert_eq!(std::fs::read(restore).unwrap(), fixture);
+        assert_eq!(std::fs::read(path).unwrap(), fixture);
+    }
 
     #[test]
     fn scratch_half_writes_round_directly_to_the_storage_type() {

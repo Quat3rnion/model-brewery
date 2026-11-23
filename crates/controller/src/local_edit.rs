@@ -273,6 +273,8 @@ impl Lanes {
                 "BREWERY_SCRATCH_CHECKS_RUNNER_SHA256",
                 "BREWERY_SCRATCH_CHECKS_CACHE",
                 "BREWERY_LANTERNFISH_TRACE",
+                brewery_worker::locate_edit::EXECUTABLE,
+                brewery_worker::locate_edit::LIB_DIR,
                 "BREWERY_CPU_THREADS",
             ]
             .into_iter()
@@ -333,6 +335,20 @@ impl Lanes {
 }
 
 impl Lane {
+    pub fn locate_edit_configured(&self) -> bool {
+        [
+            brewery_worker::locate_edit::EXECUTABLE,
+            brewery_worker::locate_edit::LIB_DIR,
+        ]
+        .iter()
+        .all(|k| {
+            self.scratch_env
+                .get(*k)
+                .and_then(Value::as_str)
+                .is_some_and(|p| Path::new(p).is_absolute())
+        })
+    }
+
     pub fn scratch_disk_reserve(&self) -> u64 {
         self.worker_config["disk_reserve_bytes"]
             .as_u64()

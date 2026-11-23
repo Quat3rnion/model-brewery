@@ -11,6 +11,7 @@ mod native_progress;
 mod progress;
 mod recipe;
 mod scratch_checks;
+mod scratch_locate;
 mod trace;
 mod weight;
 
@@ -394,6 +395,7 @@ fn run() -> Result<i32> {
         "compare" => compare::run(&job, &cwd, &progress)?,
         brewery_worker::trace::JOB => trace::run(&job, &cwd, &progress)?,
         brewery_worker::scratch_eval::CHECKS => scratch_checks::run(&job, &cwd, &progress)?,
+        brewery_worker::locate_edit::JOB => scratch_locate::run(&job, &cwd, &progress)?,
         brewery_worker::scratch_eval::GGUF => {
             ensure!(
                 brewery_worker::scratch_eval::gguf_options(&job.options)

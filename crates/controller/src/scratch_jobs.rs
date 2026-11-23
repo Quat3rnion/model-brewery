@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub(crate) use brewery_worker::scratch_eval::{CHECKS as CHECK, GGUF as CONVERT};
-const GGUF: &str = "model.gguf";
+pub(super) const GGUF: &str = "model.gguf";
 const OUTPUT: &str = "converted.gguf";
 
 #[derive(Deserialize, Serialize)]

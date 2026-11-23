@@ -333,6 +333,11 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         resources::disk_check(&w.cfg.root, w.disk_floor(job.resources.disk_reserve_bytes)
             .checked_add(request.capture.byte_cap + (4 << 20)).context("trace disk reserve overflow")?)?;
     }
+    if job.kind == locate_edit::JOB {
+        let bytes = weight_source::open_regular(&job.inputs[0].path)?.metadata()?.len();
+        resources::disk_check(&w.cfg.root, w.disk_floor(job.resources.disk_reserve_bytes)
+            .saturating_add(bytes.saturating_mul(2)).saturating_add(512 << 20))?;
+    }
     fs::create_dir(&work)?;
     *created_work = true;
     let jobfile = base.join("engine-input.json");
@@ -412,6 +417,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 scratch_eval::RUNNER_SHA,
                 scratch_eval::CACHE,
             ],
+            locate_edit::JOB => &[locate_edit::EXECUTABLE, locate_edit::LIB_DIR],
             _ => &[trace::EXECUTABLE],
         };
         command.env_clear().envs(
@@ -651,6 +657,17 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         let runner = w.cfg.engine_env.get(scratch_eval::RUNNER_SHA)
             .context("scratch checks runner pin is missing")?;
         scratch_eval::check_report(&value, hashes, runner)?;
+        return Ok(value);
+    }
+    if job.kind == locate_edit::JOB {
+        let request = locate_edit::Request::parse(&job.options)?;
+        let factors: locate_edit::Factors = serde_json::from_value(value["factors"].clone())?;
+        factors.verify(&request, job.inputs[0].extra["sha256"].as_str().unwrap_or_default())?;
+        ensure!(value["kind"] == locate_edit::JOB
+            && value["parent_sha256"] == job.inputs[1].extra["sha256"]
+            && value["executable_sha256"] == locate_edit::SHA256
+            && value["lanternfish_commit"] == locate_edit::COMMIT,
+            "private edit receipt does not match input or executable pin");
         return Ok(value);
     }
     if job.kind == scratch_eval::GGUF {

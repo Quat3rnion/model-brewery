@@ -906,11 +906,18 @@ impl Store {
     pub fn update(&mut self, job: &mut Job, mut result: Option<Value>) -> Result<()> {
         // One transaction: no reader can see a terminal success without its immutable result.
         let mut scratch = None;
+        let mut scratch_guard = None;
         if job.scratch_job && job.state == State::Succeeded {
             let verified = if job.cancel_requested {
                 job.state = State::Cancelled;
                 job.progress = "Scratch job cancelled".into();
                 Err("cancelled".into())
+            } else if job.kind == brewery_worker::locate_edit::JOB {
+                crate::scratch::locate::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
+                    .map(|(revision, safe_result, guard)| {
+                        scratch_guard = Some(guard);
+                        Some((revision, safe_result))
+                    })
             } else {
                 crate::scratch::jobs::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
             };
@@ -1047,10 +1054,17 @@ impl Store {
         };
         let tx = self.conn.transaction()?;
         if let Some(row) = scratch {
-            tx.execute(
-                "UPDATE scratch_revisions SET body=? WHERE id=? AND state='scratch'",
-                params![encode(&row)?, row.id],
-            )?;
+            if scratch_guard.is_some() {
+                tx.execute(
+                    "INSERT INTO scratch_revisions(id,parent_id,state,body) VALUES(?,?,?,?)",
+                    params![row.id, row.provenance.parent_id, row.state.key(), encode(&row)?],
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE scratch_revisions SET body=? WHERE id=? AND state='scratch'",
+                    params![encode(&row)?, row.id],
+                )?;
+            }
         }
         if let Some(model) = artifact {
             tx.execute(
@@ -1060,6 +1074,9 @@ impl Store {
         }
         update_job(&tx, job, result)?;
         tx.commit()?;
+        if let Some(guard) = scratch_guard {
+            guard.keep();
+        }
         Ok(())
     }
 }

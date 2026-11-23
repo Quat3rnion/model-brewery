@@ -6,6 +6,7 @@ pub mod hy4;
 pub mod operational;
 pub mod resources;
 pub mod scratch_eval;
+pub mod locate_edit;
 pub mod source_grants;
 pub mod trace;
 pub mod weight_source;

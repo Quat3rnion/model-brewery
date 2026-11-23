@@ -76,6 +76,10 @@ impl ScratchAccess {
                 &job.inputs[..]
             }
             trace::JOB if kinds().eq(["gguf"]) => &job.inputs[..],
+            locate_edit::JOB
+                if job.prompt.is_none()
+                    && locate_edit::Request::parse(&job.options).is_ok()
+                    && kinds().eq(locate_edit::INPUTS) => &job.inputs[..],
             _ => return false,
         };
         job.inputs.iter().all(|i| i.host == pinned[0].host)
@@ -768,6 +772,10 @@ impl Worker {
         let access = self.cfg.scratch_access.as_ref().filter(|access| access.job_id == id);
         if scratch_eval::private_output(&job.kind) || access.is_some() {
             let valid = access.is_some_and(|access| access.permits(&action, &job))
+                && (job.kind != locate_edit::JOB
+                    || [locate_edit::EXECUTABLE, locate_edit::LIB_DIR]
+                        .iter().all(|k| self.cfg.engine_env.get(*k)
+                            .is_some_and(|p| Path::new(p).is_absolute())))
                 && (job.kind != scratch_eval::CHECKS
                     || [scratch_eval::SCRIPT, scratch_eval::RUNNER, scratch_eval::CACHE]
                         .iter().all(|key| self.cfg.engine_env.get(*key).is_some_and(|p| Path::new(p).is_absolute()))

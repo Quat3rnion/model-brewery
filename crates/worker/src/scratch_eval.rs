@@ -17,7 +17,7 @@ pub const CHECK_DIGESTS: [&str; 4] = [
 ];
 
 pub fn private_output(kind: &str) -> bool {
-    matches!(kind, GGUF | CHECKS)
+    matches!(kind, GGUF | CHECKS | crate::locate_edit::JOB)
 }
 
 pub fn granted(input: &crate::Input) -> bool {

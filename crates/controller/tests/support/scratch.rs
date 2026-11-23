@@ -491,6 +491,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
     assert_eq!(
         names,
         [
+            "alphaedit_edit",
             "apply_edit",
             "convert_scratch_gguf",
             "create_intervention",
@@ -507,10 +508,12 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "list_interventions",
             "list_models",
             "list_scratch",
+            "memit_edit",
             "new_intervention_version",
             "read_trace",
             "register_model",
             "request_publish",
+            "rome_edit",
             "run_checks",
             "start_trace",
         ]
@@ -579,6 +582,21 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
         call("create_scratch", create)["result"]["structuredContent"]["status"],
         409
     );
+    for (method, layers) in [
+        ("rome_edit", json!([0])),
+        ("memit_edit", json!([0,1])),
+        ("alphaedit_edit", json!([0,1])),
+    ] {
+        let located = json!({"id":scratch["id"],"idempotency_key":format!("mcp-{method}"),
+            "sha256":scratch["sha256"],"layers":layers,
+            "facts":[{"subject":"Alice","prompt":"{} lives in","target":"Paris"}]});
+        let mut invalid = located.clone();
+        invalid["facts"][0]["prompt"] = json!("Alice lives in");
+        let rejected = call(method, invalid);
+        assert_eq!(rejected["result"]["structuredContent"]["status"], 400, "{rejected}");
+        let rejected = call(method, located);
+        assert_eq!(rejected["result"]["structuredContent"]["status"], 409, "{rejected}");
+    }
 
     let edit = ok(
         "apply_edit",
