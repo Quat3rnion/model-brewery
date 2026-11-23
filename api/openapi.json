@@ -344,6 +344,34 @@
         }
       }
     },
+    "/api/scratch/merge": {
+      "post": {
+        "operationId": "mergeModels",
+        "summary": "Merge pinned SafeTensors revisions into a new scratch child of the base",
+        "description": "Use 1 to 16 standalone SafeTensors Library or scratch IDs on the same enabled local editor. All tensor names, shapes, and dtypes must match. Input order matters. For linear merging, include the base in inputs if it must contribute to the weighted average. For the other methods, inputs contribute deltas from the base. Merge does not publish a revision.",
+        "parameters": [{"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false, "required": ["base_id", "base_sha256", "algorithm", "inputs"],
+          "properties": {
+            "base_id": {"$ref": "#/components/schemas/Id"},
+            "base_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "algorithm": {"$ref": "#/components/schemas/ScratchMergeAlgorithm"},
+            "inputs": {"$ref": "#/components/schemas/ScratchMergeInputs"}
+          }
+        }}}},
+        "responses": {
+          "200": {"$ref": "#/components/responses/ScratchRow"},
+          "201": {"$ref": "#/components/responses/ScratchRow"},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "500": {"$ref": "#/components/responses/StorageError"},
+          "503": {"$ref": "#/components/responses/ScratchBusy"}
+        }
+      }
+    },
     "/api/scratch/compile_program": {
       "post": {
         "operationId": "compileProgram",
@@ -1498,13 +1526,38 @@
           "delta_sha256": {"$ref": "#/components/schemas/ScratchHash"}
         }
       },
+      "ScratchMergeAlgorithm": {
+        "oneOf": [
+          {"type": "object", "additionalProperties": false, "required": ["method"], "properties": {"method": {"enum": ["linear", "task_arithmetic"]}}},
+          {"type": "object", "additionalProperties": false, "required": ["method", "density"], "properties": {
+            "method": {"const": "ties"}, "density": {"type": "number", "minimum": 0, "maximum": 1, "description": "Fraction of each input tensor delta to keep by magnitude."}
+          }},
+          {"type": "object", "additionalProperties": false, "required": ["method", "drop_rate", "seed"], "properties": {
+            "method": {"enum": ["dare_linear", "dare_ties"]},
+            "drop_rate": {"type": "number", "minimum": 0, "exclusiveMaximum": 1},
+            "seed": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}
+          }}
+        ]
+      },
+      "ScratchMergeInputs": {
+        "type": "array", "minItems": 1, "maxItems": 16,
+        "items": {"type": "object", "additionalProperties": false, "required": ["id", "sha256", "weight"], "properties": {
+          "id": {"$ref": "#/components/schemas/Id"}, "sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "weight": {"type": "number", "description": "Finite F32 weight. Use nonnegative values for linear, with at least one positive value."}
+        }}
+      },
       "ScratchProvenance": {
         "type": "object", "required": ["schema", "parent_id", "parent_sha256", "revision_id", "revision_sha256", "worker", "method", "operations", "tensors", "tool", "tool_version", "runtime_version", "created_at_ms"],
         "properties": {
           "schema": {"const": "brewery.scratch-provenance.v1"}, "parent_id": {"$ref": "#/components/schemas/Id"},
           "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "revision_id": {"$ref": "#/components/schemas/Id"},
-          "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "worker": {"type": "string"}, "method": {"enum": ["copy", "direct", "compile_program"]},
+          "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "worker": {"type": "string"},
+          "method": {"enum": ["copy", "direct", "compile_program", "linear", "task_arithmetic", "ties", "dare_linear", "dare_ties"]},
           "operations": {"type": "array", "items": {"$ref": "#/components/schemas/ScratchOperation"}},
+          "merge": {"type": "object", "required": ["algorithm", "inputs"], "properties": {
+            "algorithm": {"$ref": "#/components/schemas/ScratchMergeAlgorithm"},
+            "inputs": {"$ref": "#/components/schemas/ScratchMergeInputs"}
+          }},
           "tensors": {"type": "array", "items": {"type": "object", "required": ["name", "shape", "dtype"], "properties": {
             "name": {"type": "string"}, "shape": {"type": "array", "items": {"type": "integer"}}, "dtype": {"enum": ["F64", "F32", "F16", "BF16"]}
           }}},

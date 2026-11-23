@@ -184,6 +184,7 @@ fn build(app: &App, request: Compile, key: Option<&Submission<'_>>) -> Mutation 
         worker: request.worker,
         method: "compile_program".into(),
         operations: Vec::new(),
+        merge: None,
         tensors,
         tool: config.architecture,
         tool_version: config.compiler_commit,

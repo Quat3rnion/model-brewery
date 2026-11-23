@@ -72,6 +72,7 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/diff/traces", "diffTraces"),
         ("get", "/api/diff/behavior", "diffBehavior"),
         ("post", "/api/scratch", "createScratch"),
+        ("post", "/api/scratch/merge", "mergeModels"),
         ("post", "/api/scratch/compile_program", "compileProgram"),
         ("post", "/api/scratch/{id}/run_program", "runProgram"),
         ("get", "/api/scratch/{id}", "getScratch"),
@@ -93,8 +94,16 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/jobs/{id}/trace", "getTraceManifest"),
         ("get", "/api/jobs/{id}/trace/tensor", "getTraceTensor"),
         ("get", "/api/jobs/{id}/trace/features", "readFeatureTrace"),
-        ("get", "/api/jobs/{id}/trace/logit-lens", "getTraceLogitLens"),
-        ("get", "/api/jobs/{id}/trace/model-logits", "getTraceModelLogits"),
+        (
+            "get",
+            "/api/jobs/{id}/trace/logit-lens",
+            "getTraceLogitLens",
+        ),
+        (
+            "get",
+            "/api/jobs/{id}/trace/model-logits",
+            "getTraceModelLogits",
+        ),
         ("get", "/api/interventions", "listInterventions"),
         ("get", "/api/saes", "listSaes"),
         ("post", "/api/saes", "createSae"),
@@ -236,12 +245,12 @@ fn every_live_job_kind_has_one_typed_create_variant() {
                     || options["oneOf"]
                         .as_array()
                         .is_some_and(|variants| !variants.is_empty()
-                            && variants
-                                .iter()
-                                .all(|variant| {
-                                    let variant = variant.get("$ref").map_or(variant, |r| resolve(&contract, r));
-                                    variant["additionalProperties"] == false
-                                }))
+                            && variants.iter().all(|variant| {
+                                let variant = variant
+                                    .get("$ref")
+                                    .map_or(variant, |r| resolve(&contract, r));
+                                variant["additionalProperties"] == false
+                            }))
                     || options["allOf"].is_array(),
                 "{kind} options are not constrained"
             );
@@ -377,7 +386,10 @@ fn managed_gguf_layer_recipe_is_discoverable_and_round_trips() {
         &request_schema["then"]["then"]["properties"]["options"]["$ref"],
     );
     assert_closed_fields(recipe_options, &request["options"]);
-    let recipe = resolve(&contract, &recipe_options["properties"]["layer_recipe"]["$ref"]);
+    let recipe = resolve(
+        &contract,
+        &recipe_options["properties"]["layer_recipe"]["$ref"],
+    );
     assert_closed_fields(recipe, &request["options"]["layer_recipe"]);
     let source = app.register("alpha", "hf", "/source/base");
     request["input_ids"] = json!([source]);

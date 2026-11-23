@@ -1319,6 +1319,7 @@ boundary. Give workbench access only to trusted clients.
    `create_intervention` and `new_intervention_version` to save rules.
    `export_control_vector` returns a relative URL for the same workbench.
 3. Use `create_scratch` and `apply_edit` for a SafeTensors edit. Use
+   `merge_models` to merge pinned revisions in a new scratch child. Use
    `convert_scratch_gguf` on the parent and child. Run `run_checks` on the
    child and use `get_job` to see the result. Use the tensor, trace, and
    behavior diff tools to compare results.
@@ -1510,6 +1511,36 @@ keeps at most 64 scratch revisions that are not discarded. It copies the full
 file for each child and checks the local editor's disk reserve. Indexed HF
 directories and SSH workers are not supported by this API.
 
+#### Merge revisions
+
+Use `POST /api/scratch/merge` or the `merge_models` MCP tool. Set
+`base_id`, `base_sha256`, `algorithm`, and `inputs`. Each of the 1 to 16
+ordered inputs has an `id`, `sha256`, and `weight`. Use scratch revisions
+or standalone SafeTensors Library entries on the same enabled local editor.
+Tensor names, shapes, and dtypes must match. The 4 GiB source limit applies.
+Each file can have at most 4096 tensors. The editor uses F32 math and saves
+the result in the base dtypes (BF16, F16, or F32).
+
+- `{"method":"linear"}`: Weighted average (model soup). Use nonnegative
+  weights with a positive sum. Include the base in `inputs` to give it a
+  weight in the average.
+- `{"method":"task_arithmetic"}`: Add the weighted input deltas to the base.
+- `{"method":"ties","density":0.4}`: Keep the largest magnitudes in each
+  input tensor delta before weighting. Use the first flat index at a
+  magnitude tie. Elect the sign of the weighted sum (positive on a tie).
+  Add the weighted mean of the deltas with the elected sign to the base.
+- `{"method":"dare_linear","drop_rate":0.5,"seed":2026}`: Drop delta
+  elements at random and scale the survivors by `1 / (1 - drop_rate)`.
+  Add the weighted sum to the base. `dare_ties` also elects a sign and
+  adds only the weighted deltas with that sign.
+
+DARE uses SplitMix64. It gives the same output for the same base layout,
+ordered inputs, weights, and seed. It does not use the PyTorch RNG or its
+observed-norm rescale. Keep the input order and hashes for a replay.
+The merge reserves space for the full child and a delta as large as its
+payload. To run paired checks, use a scratch base with its private BF16
+GGUF. The output remains scratch and **not release-qualified**.
+
 #### Checks before a publish request
 
 Register a Library `assets` directory with the approved local worker. It must
@@ -1647,8 +1678,9 @@ The controller stores these files in its private
   record contains its hash and converter version.
 - `provenance.json`: `brewery.scratch-provenance.v1`. It contains the parent
   and child IDs and SHA-256 hashes, worker ID, timestamp, tool and runtime
-  versions, method (`copy` or `direct`), ordered operations with parameters,
-  and the name, shape and dtype of each tensor in those operations.
+  versions, method, and the names, shapes, and dtypes of affected tensors.
+  A direct edit records its ordered operations. A merge records its
+  algorithm, parameters, and the ordered input IDs, hashes, and weights.
 - `behavior.v1.json`: A file for comparisons with the immediate parent.
   It contains the parent and child IDs and the measured metrics.
   The metrics list is empty if the bundle has no behavior report.

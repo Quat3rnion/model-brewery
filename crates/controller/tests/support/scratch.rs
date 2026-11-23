@@ -183,6 +183,94 @@ elif action == "check":
 }
 
 #[test]
+fn merge_pins_inputs_and_reuses_scratch_admission() {
+    let mut t = Test::new();
+    let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
+    let digest = sha(&fs::read(&source).unwrap());
+    t.launch();
+    let (201, library) = t.request(
+        "/api/models",
+        "",
+        Some(json!({
+            "kind":"safetensors","path":source,"host":"existing"
+        })),
+    ) else {
+        panic!("parent registration")
+    };
+    let mut body = json!({
+        "base_id":library["id"],"base_sha256":digest,
+        "algorithm":{"method":"task_arithmetic"},
+        "inputs":[{"id":library["id"],"sha256":digest,"weight":1.}]
+    });
+    let merge = |body: &Value| {
+        t.request(
+            "/api/scratch/merge",
+            "Idempotency-Key: merge-1\r\n",
+            Some(body.clone()),
+        )
+    };
+    assert_eq!(merge(&body).0, 409, "disabled editor");
+    assert_eq!(
+        t.admin(Some(
+            json!({"action":"set_weight_editor","worker":"existing",
+        "revision":0,"enabled":true})
+        ))
+        .0,
+        200
+    );
+    let (201, root) = t.request(
+        "/api/scratch",
+        "",
+        Some(json!({
+            "parent_id":library["id"],"parent_sha256":digest
+        })),
+    ) else {
+        panic!("scratch creation")
+    };
+    let (201, child) = t.request(&format!("/api/scratch/{}/edits", root["id"].as_str().unwrap()),
+        "", Some(json!({"operations":[{"op":"add","tensor":"w","origin":[0,1],"shape":[1,1],"values":[4.]}]})))
+    else { panic!("scratch edit") };
+    body["base_id"] = root["id"].clone();
+    body["inputs"].as_array_mut().unwrap().push(json!({
+        "id":child["id"],"sha256":"0".repeat(64),"weight":0.5
+    }));
+    assert_eq!(merge(&body).0, 400, "wrong merge input pin");
+    body["inputs"][1]["sha256"] = child["sha256"].clone();
+    let (status, output) = merge(&body);
+    assert_eq!(status, 201, "{output}");
+    assert_eq!(output["provenance"]["parent_id"], root["id"]);
+    assert_eq!(output["provenance"]["method"], "task_arithmetic");
+    assert_eq!(output["provenance"]["merge"]["inputs"], body["inputs"]);
+    assert_eq!(output["delta"]["changed_tensors"], 1);
+    assert_eq!(merge(&body), (200, output.clone()));
+    let mut args = body.clone();
+    args["idempotency_key"] = json!("merge-1");
+    let (status, rpc) = t.request(
+        "/mcp",
+        "Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2025-06-18\r\n",
+        Some(json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"merge_models","arguments":args}})),
+    );
+    assert_eq!(status, 200, "{rpc}");
+    assert_eq!(rpc["result"]["isError"], false, "{rpc}");
+    assert_eq!(rpc["result"]["structuredContent"], output);
+    body["inputs"][1]["weight"] = json!(1.);
+    assert_eq!(merge(&body).0, 409, "key cannot be rebound");
+    let (status, diff) = t.request(
+        &format!(
+            "/api/diff/tensors?a={}&b={}",
+            root["id"].as_str().unwrap(),
+            output["id"].as_str().unwrap()
+        ),
+        "",
+        None,
+    );
+    assert_eq!(status, 200, "{diff}");
+    assert_eq!(diff["tensors"][0]["changed_elements"], 1);
+    assert_eq!(diff["tensors"][0]["l2"], 2.);
+}
+
+#[test]
 fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
     let mut t = Test::new();
     let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
@@ -623,6 +711,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "list_interventions",
             "list_models",
             "list_scratch",
+            "merge_models",
             "new_intervention_version",
             "read_feature_trace",
             "read_trace",

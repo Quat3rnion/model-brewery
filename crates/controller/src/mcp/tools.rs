@@ -44,6 +44,7 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ),
     ("create_scratch", "post", "/api/scratch"),
     ("apply_edit", "post", "/api/scratch/{id}/edits"),
+    ("merge_models", "post", "/api/scratch/merge"),
     ("convert_scratch_gguf", "post", "/api/scratch/{id}/gguf"),
     ("discard_scratch", "post", "/api/scratch/{id}/discard"),
     ("run_checks", "post", "/api/scratch/{id}/checks"),
@@ -106,7 +107,9 @@ impl Server {
         for (&name, route) in &routes {
             let mut schema = route.schema.clone();
             let description = match name {
-                "start_trace" => "Queue a CPU trace. Enter one Library GGUF ID or one scratch revision ID with private GGUF in input_ids. Poll its ID with get_job.",
+                "start_trace" => {
+                    "Queue a CPU trace. Enter one Library GGUF ID or one scratch revision ID with private GGUF in input_ids. Poll its ID with get_job."
+                }
                 "steer_feature" => {
                     schema["properties"]["options"]["required"] = json!(["feature_steering"]);
                     "Queue a CPU trace with one SAE decoder direction. Set options.feature_steering. Poll its ID with get_job."
