@@ -14,6 +14,20 @@ from weight_space_acceptance import ARB, PINS, REPO, SAFE, W0_LIBS, require, sav
 from weight_space_pruning_acceptance import Agent, PERCENTAGES
 
 
+def compare_rest_mcp(rest, mcp, path="$"):
+    if isinstance(rest, dict) and isinstance(mcp, dict) and rest.keys() == mcp.keys():
+        for key in rest:
+            compare_rest_mcp(rest[key], mcp[key], f"{path}.{key}")
+    elif isinstance(rest, list) and isinstance(mcp, list) and len(rest) == len(mcp):
+        for index, (left, right) in enumerate(zip(rest, mcp, strict=True)):
+            compare_rest_mcp(left, right, f"{path}[{index}]")
+    elif isinstance(rest, float) and isinstance(mcp, float):
+        # MCP parses and reserializes the REST body. That can round a float.
+        require(math.isclose(rest, mcp, rel_tol=1e-14), f"REST/MCP differ at {path}: {rest} != {mcp}")
+    else:
+        require(rest == mcp, f"REST/MCP differ at {path}: {rest} != {mcp}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for arg in ("bins", "runner", "web-dist", "evidence", "shots", "w12"):
@@ -76,9 +90,12 @@ def main():
                     require(math.isclose(ppl[role], previous[f"{role}_perplexity"], rel_tol=1e-9),
                             f"W12 {role} perplexity mismatch")
                 pair = {"a": parent["id"], "b": child["id"]}
-                diff = agent.call("read_token_loss_diff", **pair)
+                mcp = agent.call("read_token_loss_diff", **pair)
                 with agent.client.open(agent.base + "/api/diff/token-loss?" + urlencode(pair)) as response:
-                    require(json.load(response) == diff, "REST/MCP results differ")
+                    diff = json.load(response)
+                save(args.evidence, "token-loss-diff", diff)
+                save(args.evidence, "token-loss-mcp", mcp)
+                compare_rest_mcp(diff, mcp)
                 digest = sha(run / "state" / "scratch" / child["id"] / "token-loss.v1.json")
                 require(digest == bundle["token_loss"]["sha256"] == diff["artifact_sha256"]
                         and diff["check_bundle_id"] == bundle["id"]
@@ -92,7 +109,6 @@ def main():
                 lead = diff["sentences"][0]
                 require(lead["index"] == diff["sentence"] == 5
                         and round(100 * lead["share_of_net_gain"], 1) == 52.5, "dominant sentence differs")
-                save(args.evidence, "token-loss-diff", diff)
                 save(args.evidence, "report", {
                     "qualification": "not release-qualified", "model": "Qwen2.5-0.5B-Instruct",
                     "pruning": PERCENTAGES["magnitude-30"], "binaries": binaries, "runner_sha256": runner_sha,
