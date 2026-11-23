@@ -71,6 +71,64 @@ fn sha(bytes: &[u8]) -> String {
 }
 
 #[test]
+fn lineage_returns_same_evidence_via_mcp_without_writing_records() {
+    let mut t = Test::new();
+    let base_path = fixture(&t, &[3., 1., -2., 2., 1., 4.]);
+    let edited = base_path.with_file_name("edited.safetensors");
+    let mut bytes = fs::read(&base_path).unwrap();
+    let offset = bytes.len() - 4;
+    bytes[offset..].copy_from_slice(&4.125_f32.to_le_bytes());
+    fs::write(&edited, bytes).unwrap();
+    t.launch();
+    let register = |path| {
+        let (status, body) = t.request(
+            "/api/models",
+            "",
+            Some(json!({"host":"existing","kind":"safetensors","path":path})),
+        );
+        assert_eq!(status, 201, "{body}");
+        body
+    };
+    let base = register(base_path);
+    let target = register(edited);
+    let records = || {
+        let state = t.request("/api/state", "", None).1;
+        let ids = state["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].clone())
+            .collect::<Vec<_>>();
+        (ids, state["jobs"].clone(), state["event_cursor"].clone())
+    };
+    let before = records();
+    let route = format!("/api/models/{}/lineage", target["id"].as_str().unwrap());
+    let (status, answer) = t.request(&route, "", None);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["most_likely"]["base_id"], base["id"], "{answer}");
+    assert_eq!(answer["most_likely"]["kind"], "rank_one_edit", "{answer}");
+    let (_, mcp) = t.request(
+        "/mcp",
+        "Accept: application/json, text/event-stream\r\n",
+        Some(json!({
+            "jsonrpc":"2.0", "id":1, "method":"tools/call", "params": {
+                "name":"lineage", "arguments":{"id":target["id"],"candidate_1":base["id"]}
+            }
+        })),
+    );
+    assert_eq!(mcp["result"]["structuredContent"], answer, "{mcp}");
+    assert_eq!(before, records());
+    let (status, _) = t.request(&format!("{route}?candidate_1=bad"), "", None);
+    assert_eq!(status, 400);
+    let (status, _) = t.request(
+        &format!("{route}?candidate_1={0}&candidate_2={0}", base["id"].as_str().unwrap()),
+        "",
+        None,
+    );
+    assert_eq!(status, 400);
+}
+
+#[test]
 fn weight_spectra_queues_parent_comparison_and_replays_through_mcp() {
     let mut t = Test::new();
     let source = fixture(&t, &[3., 1., -2., 2., 1., 4.]);
@@ -929,6 +987,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "get_intervention",
             "get_job",
             "get_scratch",
+            "lineage",
             "list_interventions",
             "list_models",
             "list_scratch",
@@ -953,6 +1012,10 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
     for tool in listed {
         let schema = &tool["inputSchema"];
         assert_eq!(schema["type"], "object", "{tool}");
+        if tool["name"] == "lineage" {
+            assert_eq!(tool["annotations"]["readOnlyHint"], true);
+            assert_eq!(schema["required"], json!(["id"]));
+        }
         if matches!(
             tool["name"].as_str(),
             Some("rome_edit" | "memit_edit" | "alphaedit_edit")
@@ -1536,6 +1599,13 @@ fn scratch_edits_keep_parents_and_require_separate_publish_approval() {
             .iter()
             .any(|m| m["id"] == approved["library_model_id"] && m["kind"] == "safetensors")
     );
+    let (status, lineage) = t.request(
+        &format!("/api/models/{}/lineage", approved["library_model_id"].as_str().unwrap()),
+        "",
+        None,
+    );
+    assert_eq!(status, 200, "{lineage}");
+    assert_eq!(lineage["target"]["sha256"], approved["sha256"]);
 
     let (_, leaf) = t.request(
         path,

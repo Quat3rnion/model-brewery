@@ -1645,6 +1645,41 @@ with the smallest Kolmogorov-Smirnov distance. The fit needs at least eight
 nonzero tail samples. The fitted exponent alone does not show that a
 tensor has a power-law spectrum. Results are not release-qualified.
 
+### Model lineage
+
+In Library, open Model lineage and select the model to test. Select up to
+three candidates on the same local host. If there are three or fewer
+eligible entries, you can leave the candidates blank. To test a merge,
+select the common base and both possible parent models.
+
+Call MCP `lineage` with the target Library `id` and optional `candidate_1`,
+`candidate_2`, and `candidate_3` Library IDs. The REST route is
+`GET /api/models/{id}/lineage` with the same optional query arguments.
+The read does not create a job, add a record, or change a checkpoint.
+
+Use models in approved local directories or approved scratch models that
+are already in Library. The check accepts F32, F16, and BF16 in standalone
+or sharded SafeTensors and in floating-point GGUF. Compare the same format
+and storage dtype. Matching tensor names, shapes, and types serve as the
+architecture check. This does not compare tokenizers or model configs.
+Each checkpoint can be up to 8 GiB. Only one read can run at a time.
+
+Use `most_likely` for the suggested base and relation. Read `candidates`
+for input hashes, changed fractions, zeroing evidence, and bounding boxes.
+Bounds start at zero and exclude the end. The check uses the X2 spectrum
+of the delta for up to three changed tensors with the most delta energy.
+It does not calculate spectra for unchanged or oversized tensors. A
+merge fit reports parent IDs, weights, agreement of parent directions,
+and the relative residual of the fit. It does not prove which merge tool
+produced the weights.
+
+The confidence score measures agreement with the fingerprint, not a
+calibrated probability. The base is null when no candidate is close
+enough or there is no clear winner. Weight changes alone cannot prove
+causal direction or distinguish every fine-tune from a manual edit.
+Quantized and cross-format comparisons are not supported. Results are not
+release-qualified.
+
 ### Scratch weight revisions
 
 Enable the local CPU weight editor for the worker that owns the source.

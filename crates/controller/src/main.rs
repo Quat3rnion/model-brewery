@@ -15,6 +15,7 @@ mod hf_tokens;
 mod idempotency;
 mod infra_hosts;
 mod interventions;
+mod lineage;
 mod local_edit;
 mod mcp;
 mod model_availability;

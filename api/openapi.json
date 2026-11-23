@@ -254,6 +254,49 @@
         }
       }
     },
+    "/api/models/{id}/lineage": {
+      "get": {
+        "operationId": "readLineage",
+        "summary": "Read likely Library model lineage from delta fingerprints. Select up to three local candidate IDs. Does not change records.",
+        "description": "Uses matching names, shapes and floating-point dtypes. Without explicit candidates, checks up to three other eligible local entries. A merge fit needs a base and two independent parent directions. Results are not release-qualified.",
+        "parameters": [
+          {"$ref": "#/components/parameters/ResourceId"},
+          {"in":"query","name":"candidate_1","description":"First candidate Library model ID.","schema":{"type":"string","format":"uuid"}},
+          {"in":"query","name":"candidate_2","description":"Second candidate Library model ID.","schema":{"type":"string","format":"uuid"}},
+          {"in":"query","name":"candidate_3","description":"Third candidate Library model ID.","schema":{"type":"string","format":"uuid"}}
+        ],
+        "responses": {
+          "200": {
+            "description": "Fingerprint and candidate evidence; most_likely is null when no unique match is found.",
+            "content": {"application/json": {"schema": {
+              "type":"object","required":["schema_version","qualification","target","most_likely","candidates"],
+              "properties":{
+                "schema_version":{"const":1},"qualification":{"const":"not release-qualified"},
+                "target":{"type":"object","required":["id","sha256","format"]},
+                "most_likely":{"type":["object","null"],"required":["base_id","kind","confidence"],"properties":{
+                  "base_id":{"$ref":"#/components/schemas/Id"},
+                  "kind":{"enum":["merge","pruning","rank_one_edit","low_rank_edit","sparse_edit","fine_tune"]},
+                  "confidence":{"type":"number","minimum":0,"maximum":1}
+                }},
+                "candidates":{"type":"array","maxItems":3,"items":{"type":"object","required":["id","status"],"properties":{
+                  "id":{"$ref":"#/components/schemas/Id"},
+                  "status":{"enum":["related","no_match","identical_weights","incompatible_inventory","unreadable_checkpoint"]},
+                  "checkpoint":{"type":"object"},"kind":{"type":["string","null"]},
+                  "confidence":{"type":"number"},"evidence":{"type":"object"}
+                }}}
+              }
+            }}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"description":"A Library source is not approved for local reads."},
+          "422": {"description":"The target cannot be analyzed or the read exceeds its limits."},
+          "429": {"description":"A lineage read is already in progress."},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
     "/api/weight-spectra": {
       "post": {
         "operationId": "queueWeightSpectra",

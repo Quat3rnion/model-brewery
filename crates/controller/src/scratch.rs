@@ -73,7 +73,7 @@ pub struct Revision {
     pub state: RevisionState,
     pub(crate) sha256: String,
     qualification: String,
-    library_model_id: Option<String>,
+    pub(crate) library_model_id: Option<String>,
     pub provenance: Provenance,
     pub(crate) delta: Summary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
