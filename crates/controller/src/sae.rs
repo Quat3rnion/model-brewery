@@ -341,7 +341,7 @@ impl Metadata {
             || self.name.chars().any(char::is_control)
             || !is_digest(&self.model_sha256)
             || self.layer >= 4096
-            || self.role == Role::KqSoftMax
+            || self.role.is_read_only()
             || !(1..=16384).contains(&self.d_in)
             || !(1..=65536).contains(&self.d_sae)
             || !self.normalization.scale.is_finite()

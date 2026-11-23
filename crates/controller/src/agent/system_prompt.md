@@ -114,7 +114,11 @@ Other tool references: `list_models`, `register_model`, `list_scratch`,
 `prune_experts`, and `run_program`.
 
 Stay within the time, token, tool call, and byte limits. Use small trace
-slices and bounded waits for jobs. Retry writes with the same key and
+slices and bounded waits for jobs. For Library Qwen3.8 Flash Next v2 HGN,
+use up to 512 raw prompt tokens. The block output contains four residual
+streams. Read the normalized final mix at the last layer. HGN traces do
+not support interventions or SAE.
+Retry writes with the same key and
 arguments. Stop and report a limit or admission failure instead of
 bypassing it.
 

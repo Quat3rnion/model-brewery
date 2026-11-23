@@ -165,7 +165,7 @@ impl Server {
             let mut schema = route.schema.clone();
             let description = match name {
                 "start_trace" => {
-                    "Queue a CPU trace. Enter one Library GGUF ID or one scratch revision ID with private GGUF in input_ids. Poll its ID with get_job."
+                    "Queue a CPU trace. Enter one Library GGUF or Qwen3.8 Flash Next v2 HGN ID, or one scratch revision ID with private GGUF in input_ids. HGN is limited to 512 tokens and does not support interventions. Poll its ID with get_job."
                 }
                 "steer_feature" => {
                     schema["properties"]["options"]["required"] = json!(["feature_steering"]);

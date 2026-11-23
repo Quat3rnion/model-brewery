@@ -1266,8 +1266,12 @@ impl NewJob {
                         && inputs[0].id != inputs[1].id
                         && prompt.is_none()
                 }
-                brewery_worker::trace::JOB
-                | brewery_worker::sensitivity::JOB
+                brewery_worker::trace::JOB => {
+                    n == 1
+                        && matches!(main, "gguf" | brewery_worker::trace::HGN_KIND)
+                        && host == inputs[0].host
+                }
+                brewery_worker::sensitivity::JOB
                 | brewery_worker::circuit::JOB
                 | brewery_worker::behavior_direction::JOB => {
                     n == 1 && main == "gguf" && host == inputs[0].host

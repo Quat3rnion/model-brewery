@@ -146,13 +146,20 @@ const ROUTING_LIBS: &[(&str, &str)] = &[
     ),
 ];
 
+mod hgn;
+
 pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let request = Request::worker(&job.options, job.prompt.as_deref())?;
     ensure!(
-        job.inputs.len() == 1 && job.inputs[0].kind == "gguf",
-        "trace needs a GGUF input"
+        job.inputs.len() == 1 && matches!(job.inputs[0].kind.as_str(), "gguf" | trace::HGN_KIND),
+        "trace needs a single GGUF or HGN input"
     );
     let input = &job.inputs[0];
+    let is_hgn = input.kind == trace::HGN_KIND;
+    ensure!(
+        !is_hgn || request.interventions.is_empty(),
+        "HGN traces do not support interventions"
+    );
     let model_id = input
         .id
         .as_deref()
@@ -163,23 +170,32 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             .sha256
             .as_deref()
             .is_some_and(brewery_worker::is_digest),
-        "trace needs a resolved GGUF digest"
+        "trace needs a resolved model digest"
     );
     let root = cwd.join(trace::JOB);
     ensure!(!root.exists(), "trace output already exists");
-    let selection = request.lanternfish_runtime()?;
-    let (_, _, sha, commit) = selection.pins();
-    let runtime = Runtime::stage_trace(cwd, selection)?;
+    let selection = if is_hgn { None } else { Some(request.lanternfish_runtime()?) };
+    let runtime = selection.map(|r| Runtime::stage_trace(cwd, r)).transpose()?;
+    let hgn_dir = if is_hgn { Some(tempfile::Builder::new()
+        .prefix(".trace-hgn-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir_in(cwd)?) } else { None };
+    let work = if let Some(hgn_dir) = &hgn_dir {
+        hgn_dir.path()
+    } else {
+        runtime.as_ref().context("missing trace runtime")?.path()
+    };
     let ids = integrity::check_inputs(&job.inputs, progress)?;
     let id = &ids[0];
     trace::check_model_revision(&job.options, &id.sha256)?;
     ensure!(
         id.files.len() == 1 && input.path.is_file(),
-        "trace needs a single-file GGUF"
+        "trace needs a single-file GGUF or HGN checkpoint"
     );
-    let staging = runtime.path().join("export");
+    let hgn = is_hgn.then(|| hgn::Runtime::stage(work, &id.sha256)).transpose()?;
+    let staging = work.join("export");
     fs::create_dir(&staging)?;
-    let intervention = runtime.path().join("interventions.json");
+    let intervention = work.join("interventions.json");
     let has_intervention = !request.interventions.is_empty();
     if has_intervention {
         write_json(
@@ -194,13 +210,26 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         ensure!(capture.byte_cap > 0, "trace byte cap exhausted");
         let out = staging.join(i.to_string());
         id.check()?;
-        let verified = runtime.capture(
-            &input.path,
-            prompt,
-            &capture,
-            &out,
-            has_intervention.then_some(intervention.as_path()),
-        )?;
+        let verified = if let Some(runtime) = &hgn {
+            let spec = work.join("current-spec.json");
+            write_json(&spec, &serde_json::to_value(&capture)?)?;
+            let threads = child_threads(None)?.min(64);
+            let mut command = runtime.command(work, threads);
+            command
+                .arg("--model").arg(&input.path)
+                .arg(format!("--prompt={prompt}"))
+                .arg("--spec").arg(&spec)
+                .arg("--out").arg(&out)
+                .arg("--threads").arg(threads.to_string());
+            runtime.capture(&mut command, work)?;
+            fs::remove_file(&spec)?;
+            trace::verify(&out, &capture)?
+        } else {
+            runtime.as_ref().context("missing Lanternfish runtime")?.capture(
+                &input.path, prompt, &capture, &out,
+                has_intervention.then_some(intervention.as_path()),
+            )?
+        };
         id.check()?;
         trace::verify_interventions(&out, &verified, &request.interventions)?;
         capture.byte_cap -= verified.bytes;
@@ -209,9 +238,17 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     }
     fs::rename(&staging, &root)?;
     phase.finish();
-    Ok(
-        json!({"kind":trace::JOB,"schema_version":1,"model_id":model_id,
-         "model_sha256":id.sha256,"lanternfish_commit":commit,"executable_sha256":sha,
-        "bytes":receipts.iter().map(|p| p.bytes).sum::<u64>(),"prompts":receipts}),
-    )
+    let mut receipt = if let Some(runtime) = hgn {
+        runtime.receipt()
+    } else {
+        let (_, _, sha, commit) = selection.context("missing Lanternfish pin")?.pins();
+        json!({"lanternfish_commit":commit,"executable_sha256":sha})
+    };
+    receipt["kind"] = json!(trace::JOB);
+    receipt["schema_version"] = json!(1);
+    receipt["model_id"] = json!(model_id);
+    receipt["model_sha256"] = json!(id.sha256);
+    receipt["bytes"] = json!(receipts.iter().map(|p| p.bytes).sum::<u64>());
+    receipt["prompts"] = json!(receipts);
+    Ok(receipt)
 }

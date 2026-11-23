@@ -31,7 +31,8 @@
   import TraceResults from '../components/trace/TraceResults.svelte';
   import type { JobDetail } from '../lib/types';
 
-  const GGUF = ['gguf'];
+  const TRACE_KINDS = ['gguf', 'hgn'];
+  const HGN_ROLES: TraceRole[] = ['l_out', 'final_norm'];
   const MIB = 1 << 20;
   const models = $derived(brewery.state?.models ?? []);
   const hosts = $derived(brewery.state?.hosts ?? []);
@@ -65,10 +66,12 @@
 
   // ---- Form ----
   let model = $state('');
+  const hgn = $derived(models.find((m) => m.id === model)?.kind === 'hgn');
   let host = $state('');
   let prompts = $state<string[]>(['']);
   let layers = $state('0-3');
   let roles = $state<TraceRole[]>(['l_out']);
+  const captureRoles = $derived(hgn ? roles.filter((r) => HGN_ROLES.includes(r)) : roles.filter((r) => r !== 'final_norm'));
   let positions = $state('0-7');
   let topK = $state(5);
   let capMiB = $state<number | null>(null);
@@ -103,15 +106,15 @@
       host,
       prompts,
       layers,
-      roles,
+      roles: captureRoles,
       positions,
       topK,
       byteCapMiB: capMiB,
       maxByteCap: caps.max_byte_cap,
       fullDump,
-      artifact: artifact ? { id: artifact.id, version: artifactVersion } : null,
-      patches,
-      ablation: ablate ? { layer: ablationLayer, expert: ablationExpert, positions: ablationPositions } : undefined,
+      artifact: !hgn && artifact ? { id: artifact.id, version: artifactVersion } : null,
+      patches: hgn ? [] : patches,
+      ablation: !hgn && ablate ? { layer: ablationLayer, expert: ablationExpert, positions: ablationPositions } : undefined,
     }),
   );
   const blockers = $derived.by(() => {
@@ -131,18 +134,18 @@
       prompts: prompts.length,
       layers: nl,
       positions: np,
-      roles,
+      roles: captureRoles,
       topK: Number.isInteger(topK) ? topK : 0,
-      hidden,
+      hidden: hgn ? 4 * 2560 : hidden,
       heads,
       keys: parsedPositions.ok && np ? parsedPositions.value[np - 1] + 1 : 1,
     }),
   );
   const ratio = $derived(cap > 0 ? estimate.bytes / cap : 0);
-  const large = $derived(needsFullDump(nl, np, roles.length));
+  const large = $derived(needsFullDump(nl, np, captureRoles.length));
 
   function toggleRole(r: TraceRole, on: boolean) {
-    roles = on ? TRACE_ROLES.filter((x) => x === r || roles.includes(x)) : roles.filter((x) => x !== r);
+    roles = on ? [...roles, r] : roles.filter((x) => x !== r);
   }
   function addPatch() {
     patches = [...patches, { source: patchSources[0]?.id ?? '', prompt: 0, layer: parsedLayers.ok && parsedLayers.value.length ? String(parsedLayers.value[0]) : '0', role: 'l_out', positions: '0' }];
@@ -202,7 +205,7 @@
   <div class="head">
     <h1 tabindex="-1">Trace</h1>
     <p class="muted small">
-      Run prompts through one GGUF model on the CPU and capture activations, logit lens rows and attention. Traces do not generate text and do not change the model. Results are evidence for analysis. They are not release-qualified.
+      Capture activations and logits for one GGUF or supported HGN model on the CPU. Traces do not generate text or change the model. Results are not release-qualified.
     </p>
   </div>
 
@@ -210,7 +213,7 @@
     <header><h2 id="tr-new-h">New trace</h2></header>
     <div class="body stack">
       <div class="grid-2">
-        <ModelSelect bind:value={model} kinds={GGUF} label="Model" hint="A single-file GGUF in the Library." />
+        <ModelSelect bind:value={model} kinds={TRACE_KINDS} label="Model" hint="A single-file GGUF or Qwen3.8 Flash Next v2 HGN in the Library." />
         <HostSelect bind:value={host} kind="trace" label="Run on" optional optionalLabel="Host of the model" />
       </div>
 
@@ -229,7 +232,7 @@
         {/each}
         <div class="row">
           <button type="button" class="btn small" disabled={prompts.length >= MAX_PROMPTS} onclick={() => (prompts = [...prompts, ''])}>Add prompt</button>
-          <span class="xs muted">1 to {MAX_PROMPTS} prompts. The worker reads them raw, with no chat template. Positions include special tokens such as BOS.</span>
+          <span class="xs muted">1 to {MAX_PROMPTS} raw prompts with no chat template. {hgn ? 'Use at most 512 tokens per prompt. HGN adds no special tokens.' : 'Positions include special tokens such as BOS.'}</span>
         </div>
       </fieldset>
 
@@ -252,8 +255,10 @@
             <span class="hint" id="{uid}-topk-h">0 to 100. Above 0 adds model logits and a logit lens for dense Llama and Qwen2.</span>
           </div>
         </div>
+        {#if !hgn}
         <label><input type="checkbox" bind:checked={ablate} /> Zero one MoE expert</label>
-        {#if ablate}
+        {/if}
+        {#if !hgn && ablate}
           <div class="grid-3">
             <label class="field">Ablation layer<input class="input" type="number" min="0" max="4095" bind:value={ablationLayer} /></label>
             <label class="field">Expert ID<input class="input" type="number" min="0" max="4095" bind:value={ablationExpert} /></label>
@@ -262,21 +267,23 @@
           <p class="hint">Use the same model and prompt as the baseline. A position that does not select this expert does not change.</p>
         {/if}
         <div class="checks" role="group" aria-label="Roles">
-          {#each TRACE_ROLES as r (r)}
+          {#each (hgn ? HGN_ROLES : TRACE_ROLES) as r (r)}
             <label><input type="checkbox" checked={roles.includes(r)} onchange={(e) => toggleRole(r, e.currentTarget.checked)} /> {ROLE_LABELS[r]}</label>
           {/each}
         </div>
 
         <div class="estimate">
           <div class="grid-3">
-            <div class="field">
-              <label for="{uid}-hidden">Hidden size <span class="muted">(estimate only)</span></label>
-              <input id="{uid}-hidden" class="input num" type="number" min="1" step="1" bind:value={hidden} inputmode="numeric" placeholder="896…" />
-            </div>
-            <div class="field">
-              <label for="{uid}-heads">Attention heads <span class="muted">(estimate only)</span></label>
-              <input id="{uid}-heads" class="input num" type="number" min="1" step="1" bind:value={heads} inputmode="numeric" placeholder="14…" />
-            </div>
+            {#if !hgn}
+              <div class="field">
+                <label for="{uid}-hidden">Hidden size <span class="muted">(estimate only)</span></label>
+                <input id="{uid}-hidden" class="input num" type="number" min="1" step="1" bind:value={hidden} inputmode="numeric" placeholder="896…" />
+              </div>
+              <div class="field">
+                <label for="{uid}-heads">Attention heads <span class="muted">(estimate only)</span></label>
+                <input id="{uid}-heads" class="input num" type="number" min="1" step="1" bind:value={heads} inputmode="numeric" placeholder="14…" />
+              </div>
+            {/if}
             <div class="field">
               <span>Size estimate</span>
               <div class="meter" role="meter" aria-label="Estimated export size of the byte cap" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.min(100, Math.round(ratio * 100))} aria-valuetext="{formatBytes(estimate.bytes)} of {formatBytes(cap)}">
@@ -313,6 +320,8 @@
             <legend class="small">Interventions</legend>
             {#if !model}
               <p class="xs muted">Select a model to see its saved interventions and source traces.</p>
+            {:else if hgn}
+              <p class="xs muted">HGN traces do not support interventions.</p>
             {:else}
               <div class="grid-2">
                 <div class="field">

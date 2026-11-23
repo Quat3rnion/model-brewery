@@ -1089,39 +1089,43 @@ impl Worker {
                 Reply::error("Configure the pinned CPU ablation runtime and contrast cache"));
         }
         if job.kind == trace::JOB {
-            let runtime = trace::Request::worker(&job.options, job.prompt.as_deref())
-                .and_then(|request| request.lanternfish_runtime());
-            let (executable, lib_dir, _, _) = match runtime {
-                Ok(runtime) => runtime.pins(),
-                Err(error) => return self.record_prepare(id, action, job, Reply::error(error.to_string())),
+            let absolute = |var| {
+                self.cfg
+                    .engine_env
+                    .get(var)
+                    .is_some_and(|p| Path::new(p).is_absolute())
             };
+            let request = trace::Request::worker(&job.options, job.prompt.as_deref());
             let allowed = action == "start"
                 && job.inputs.len() == 1
-                && job.inputs[0].kind == "gguf"
-                && self
-                    .cfg
-                    .engine_env
-                    .get(executable)
-                    .is_some_and(|p| Path::new(p).is_absolute());
+                && request
+                    .as_ref()
+                    .is_ok_and(|request| match job.inputs[0].kind.as_str() {
+                        "gguf" => request.lanternfish_runtime().is_ok_and(|runtime| {
+                             let (executable, lib_dir, _, _) = runtime.pins();
+                             absolute(executable) && absolute(lib_dir)
+                         }),
+                        trace::HGN_KIND => {
+                            Path::new(&job.inputs[0].path)
+                                .extension()
+                                .is_some_and(|e| e == "hgn")
+                                && absolute(trace::HGN_PYTHON)
+                                && absolute(trace::HGN_ASSETS)
+                                && self
+                                    .cfg
+                                    .engine_env
+                                    .get(trace::HGN_PYTHON_SHA256)
+                                    .is_some_and(|s| is_digest(s))
+                                && request.interventions.is_empty()
+                        }
+                        _ => false,
+                    });
             if !allowed {
                 return self.record_prepare(
                     id,
                     action,
                     job,
-                    Reply::error("Invalid trace request or unavailable CPU Lanternfish"),
-                );
-            }
-            if !self
-                .cfg
-                .engine_env
-                .get(lib_dir)
-                .is_some_and(|p| Path::new(p).is_absolute())
-            {
-                return self.record_prepare(
-                    id,
-                    action,
-                    job,
-                    Reply::error(format!("{lib_dir} must be an absolute path")),
+                    Reply::error("Invalid trace request or unavailable pinned CPU trace runtime"),
                 );
             }
         }

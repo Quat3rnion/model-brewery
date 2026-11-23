@@ -1,4 +1,4 @@
-//! Bounded Lanternfish CLI exports and the read-only trace wire format.
+//! Bounded schema v1 exports and the read-only trace wire format.
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,12 @@ pub const ROUTING_EXECUTABLE: &str = "BREWERY_LANTERNFISH_ROUTING";
 pub const ROUTING_LIB_DIR: &str = "BREWERY_LANTERNFISH_ROUTING_LIB_DIR";
 pub const ROUTING_COMMIT: &str = "5699379af18d6428a6589c996f516c07a91e1a86";
 pub const ROUTING_SHA256: &str = "fda55c709a0ef81920daae882147f7f066f506d27d73846785880c424c56a581";
+pub const HGN_KIND: &str = "hgn";
+pub const HGN_PYTHON: &str = "BREWERY_HGN_TRACE_PYTHON";
+pub const HGN_PYTHON_SHA256: &str = "BREWERY_HGN_TRACE_PYTHON_SHA256";
+pub const HGN_ASSETS: &str = "BREWERY_HGN_TRACE_ASSETS";
+pub const HGN_RUNTIME_SHA256: &str = include_str!("../../../tools/hgn_trace/runtime.sha256");
+pub const HGN_RUNTIME: &str = "hgn_cpu";
 pub const HARD_BYTE_CAP: u64 = 32 << 20;
 pub const RESPONSE_CAP: usize = 4 << 20;
 const MAX_POSITIONS: usize = 4096;
@@ -68,6 +74,7 @@ impl Policy {
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     LOut,
+    FinalNorm,
     AttnOut,
     FfnInp,
     FfnOut,
@@ -84,7 +91,11 @@ impl Role {
             Self::FfnMoeLogits | Self::FfnMoeTopk | Self::FfnMoeRouteWeights
         )
     }
+    pub fn is_read_only(self) -> bool {
+        matches!(self, Self::KqSoftMax | Self::FinalNorm)
+    }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capture {
     layers: BTreeSet<usize>,
@@ -167,7 +178,7 @@ impl Rule {
         for rule in rules {
             ensure!(
                 rule.layer < 4096
-                    && rule.role != Role::KqSoftMax
+                    && !rule.role.is_read_only()
                     && !rule.role.routing()
                     && !rule.positions.is_empty()
                     && rule
@@ -905,12 +916,19 @@ pub fn read(root: &Path, slice: &Slice, result: &Value) -> Result<ReadReply> {
                 .as_object_mut()
                 .context("invalid trace model")?
                 .remove("path");
-            json!({"schema_version":1, "prompt":slice.prompt,"model":model,"model_id":result["model_id"],
-                "model_sha256":result["model_sha256"],"lanternfish_commit":result["lanternfish_commit"].as_str().unwrap_or(COMMIT),
+            let mut summary = json!({"schema_version":1, "prompt":slice.prompt,"model":model,"model_id":result["model_id"],
+                "model_sha256":result["model_sha256"],
                 "bytes":expected.bytes,"manifest_sha256":expected.manifest_sha256,
                 "spec":m.spec,"tokens":m.tokens,"tensor_count":m.tensors.len(),
                 "missing_count":m.missing.len(),"intervention_count":m.interventions.len(),
-                "logit_lens_count":m.logit_lens.len(),"model_logits_count":m.model_logits.len()})
+                "logit_lens_count":m.logit_lens.len(),"model_logits_count":m.model_logits.len()});
+            if result["runtime"] == HGN_RUNTIME {
+                summary["runtime"] = json!(HGN_RUNTIME);
+                summary["runtime_sha256"] = result["runtime_sha256"].clone();
+            } else {
+                summary["lanternfish_commit"] = json!(COMMIT);
+            }
+            summary
         }
         View::ModelLogits | View::LogitLens => {
             let rows = match slice.view {

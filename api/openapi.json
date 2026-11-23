@@ -3040,7 +3040,7 @@
       "RequiredHost": {"required": ["host"], "properties": {"host": {"$ref": "#/components/schemas/HostId"}}},
       "TraceLayer": {"type":"integer","minimum":0,"maximum":4095},
       "TracePosition": {"type":"integer","minimum":0,"maximum":4095},
-      "TraceRole": {"type":"string","enum":["l_out","attn_out","ffn_inp","ffn_out","kq_soft_max","ffn_moe_logits","ffn_moe_topk","ffn_moe_route_weights"]},
+      "TraceRole": {"type":"string","enum":["l_out","final_norm","attn_out","ffn_inp","ffn_out","kq_soft_max","ffn_moe_logits","ffn_moe_topk","ffn_moe_route_weights"],"description":"HGN l_out has stream and hidden axes. HGN final_norm is the final normalized mix, available at the last layer only."},
       "RoutingAtlas": {
         "type":"object",
         "required":["schema_version","job_id","model_id","model_sha256","manifest_sha256","prompt","layer","start","end","positions","expert_count","experts_per_token","mean_entropy_nats","experts","coactivation","ablation"],
@@ -3078,12 +3078,12 @@
         }
       },
       "TraceJob": {
-        "description":"Run a CPU trace of one Library GGUF or one scratch revision with private GGUF on its own opted-in worker. Supply exactly one of prompt, prompt_id, or options.prompts. Token positions include special tokens. There is no generation.",
+        "description":"Run a CPU trace of a Library GGUF or Qwen3.8 Flash Next v2 HGN checkpoint, or a scratch revision with private GGUF, on its own opted-in worker. Supply exactly one of prompt, prompt_id, or options.prompts. HGN uses at most 512 raw prompt tokens and does not support interventions or SAE. There is no generation.",
         "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"}],
         "required":["input_ids","options"],
         "properties":{
           "kind":{"const":"trace"},
-          "input_ids":{"description":"The Library GGUF ID or scratch revision ID.","minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
+          "input_ids":{"description":"The Library GGUF or HGN ID, or the scratch revision ID.","minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf","hgn"]]},
           "prompt":{"maxLength":16384,"x-brewery-max-utf8-bytes":16384},
           "options":{"$ref":"#/components/schemas/TraceOptions"}
         },
@@ -3429,11 +3429,13 @@
       "TraceSummary": {
         "type":"object",
         "allOf":[{"$ref":"#/components/schemas/TraceExport"}],
-        "required":["schema_version","prompt","model","model_id","model_sha256","lanternfish_commit","spec","tokens","tensor_count","missing_count","intervention_count","logit_lens_count","model_logits_count"],
+        "required":["schema_version","prompt","model","model_id","model_sha256","spec","tokens","tensor_count","missing_count","intervention_count","logit_lens_count","model_logits_count"],
+        "oneOf":[{"required":["lanternfish_commit"]},{"required":["runtime","runtime_sha256"]}],
         "properties":{
           "schema_version":{"const":1},"prompt":{"type":"integer"},"model":{"type":"object"},
           "model_id":{"$ref":"#/components/schemas/Id"},"model_sha256":{"$ref":"#/components/schemas/Sha256"},
-          "lanternfish_commit":{"type":"string"},"spec":{"$ref":"#/components/schemas/TraceCapture"},
+          "lanternfish_commit":{"type":"string"},"runtime":{"const":"hgn_cpu"},
+          "runtime_sha256":{"$ref":"#/components/schemas/Sha256"},"spec":{"$ref":"#/components/schemas/TraceCapture"},
           "tokens":{"type":"array","items":{"type":"object","required":["position","token_id"],"properties":{"position":{"$ref":"#/components/schemas/TracePosition"},"token_id":{"type":"integer"}}}},
           "tensor_count":{"type":"integer"},"missing_count":{"type":"integer"},"intervention_count":{"type":"integer"},
           "logit_lens_count":{"type":"integer"},"model_logits_count":{"type":"integer"}
@@ -4608,10 +4610,13 @@
         }
       },
       "TraceResult": {
-        "type":"object","required":["kind","schema_version","model_id","model_sha256","lanternfish_commit","executable_sha256","bytes","prompts"],
+        "type":"object","required":["kind","schema_version","model_id","model_sha256","executable_sha256","bytes","prompts"],
+        "oneOf":[{"required":["lanternfish_commit"]},{"required":["runtime","runtime_sha256","assets_sha256"]}],
         "properties":{
           "kind":{"const":"trace"},"schema_version":{"const":1},"model_id":{"$ref":"#/components/schemas/Id"},
           "model_sha256":{"$ref":"#/components/schemas/Sha256"},"lanternfish_commit":{"type":"string"},
+          "runtime":{"const":"hgn_cpu"},"runtime_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "assets_sha256":{"type":"object","required":["sidecar","config","tokenizer"],"additionalProperties":{"$ref":"#/components/schemas/Sha256"}},
           "executable_sha256":{"$ref":"#/components/schemas/Sha256"},"bytes":{"$ref":"#/components/schemas/ByteCount"},
           "prompts":{"type":"array","minItems":1,"maxItems":4,"items":{"$ref":"#/components/schemas/TraceExport"}}
         }
