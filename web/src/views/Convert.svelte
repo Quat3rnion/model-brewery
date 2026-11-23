@@ -141,6 +141,7 @@
   const recipeStarter = new ConversionStarter('convert.recipe');
   const recipeReadAttempts = new PlainAttempt();
   const recipeReads = new SvelteMap<string, JobSummary>();
+  const recipeRestarts = new SvelteMap<string, Set<string>>();
   function selectRecipeSource(id: string) {
     if (id === layerSource) return;
     layerSource = id;
@@ -342,7 +343,7 @@
         {#if recipeSource}
           {#key recipeKey}
             <LayerRecipe source={recipeSource} format={recipeFormat} starter={recipeStarter}
-              readAttempts={recipeReadAttempts} acceptedReads={recipeReads} bind:draft={recipeDraft} />
+              readAttempts={recipeReadAttempts} acceptedReads={recipeReads} restarts={recipeRestarts} bind:draft={recipeDraft} />
           {/key}
         {:else}
           <p class="hint">Select a source to see if it supports a layer recipe.</p>
@@ -450,8 +451,9 @@
       <div aria-live="polite" class="xs">
         {#if starter.error}<p class="note bad" role="alert">{starter.error}</p>
         {:else if starter.last}
-          <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a bind:this={runLink} href={conversionRunHref(starter.last.id)}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : 'The run continues if you leave this page.'}</p>
+          <p class="muted">{starter.matched ? 'This request is already queued as job' : starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a bind:this={runLink} href={conversionRunHref(starter.last.id)}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : 'The run continues if you leave this page.'}</p>
         {/if}
+        {#if starter.repeat}<button type="button" class="btn small" disabled={starter.busy} onclick={starter.repeat}>Queue another</button>{/if}
       </div>
     </div>
     </WorkflowGate>

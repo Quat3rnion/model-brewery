@@ -14,33 +14,34 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
+  import { errorText } from '../lib/api';
   import { conversionRunHref, STAGES, type ConversionBody } from '../lib/conversion';
   import type { Blocker } from '../lib/blockers';
   import { conversions, type ConversionStarter } from '../lib/conversions.svelte';
-  import { capability, hostName, isActive, modelLabel } from '../lib/format';
+  import { capability, hostName, modelLabel } from '../lib/format';
   import { roleLabel } from '../lib/components';
   import { inventoryBlocker, validSha } from '../lib/ggufSource';
   import { obj } from '../lib/reports';
   import { brewery } from '../lib/store.svelte';
   import type { JobDetail, JobSummary, Model } from '../lib/types';
-  import { inventoryJob, readInventory, walkInventory } from '../lib/weightmap';
+  import { inventoryJob, readInventory, supersededInventory, walkInventory } from '../lib/weightmap';
   import JobState from './JobState.svelte';
   import Blockers from './Blockers.svelte';
   import Submit from './Submit.svelte';
   import SubmitStatus from './SubmitStatus.svelte';
   import { acceptedJobSummary, guardReadLink, jobRequestKey, ReadVisit, Submitter } from '../lib/submit.svelte';
-  import { captureResultFocus } from '../lib/focus';
   import { trellisProblem } from '../lib/trellis-layer';
   import { bodyKey, type PlainAttempt } from '../lib/submission-key';
 
-  let { source, format, starter, readAttempts, acceptedReads, draft = $bindable() }: {
+  let { source, format, starter, readAttempts, acceptedReads, restarts, draft = $bindable() }: {
     source: Model; format: 'gguf' | 'hgn'; starter: ConversionStarter; readAttempts: PlainAttempt;
-    acceptedReads: SvelteMap<string, JobSummary>; draft: RecipeDraft;
+    acceptedReads: SvelteMap<string, JobSummary>; restarts: SvelteMap<string, Set<string>>; draft: RecipeDraft;
   } = $props();
 
   const launcher = 'convert.recipe.inventory';
   const loaded = new SvelteMap<string, JobDetail | null>();
   const rejected = new SvelteMap<string, string>();
+  const detailErrors = new SvelteMap<string, string>();
   const attempted = new Map<string, Date | null>();
   const reads = new Submitter(launcher, untrack(() => readAttempts));
   const readVisit = new ReadVisit();
@@ -50,6 +51,7 @@
   const expectedSha = $derived(source.kind === 'hf'
     ? validSha(source.bundle_sha256) ?? validSha(source.sha256)
     : validSha(source.sha256));
+  const ignored = $derived(restarts.get(source.id));
   const currentJobs = $derived([...acceptedReads.values()]
     .filter(job => job.host === source.host && job.input_ids[0] === source.id)
     .map(job => brewery.state?.jobs.find(j => j.id === job.id) ?? brewery.details[job.id] ?? job)
@@ -60,9 +62,9 @@
     ...currentJobs,
     ...(brewery.state?.jobs ?? []).filter(job => job.kind === 'weight_inspect' &&
       job.host === source.host && job.input_ids[0] === source.id &&
-      (isActive(job.state) || (job.state === 'succeeded' && job.has_result !== false)) &&
+      (readVisit.shows(job) && (job.state !== 'succeeded' || job.has_result !== false)) &&
       !currentJobs.some(current => current.id === job.id)),
-  ].filter(job => !rejected.has(job.id)));
+  ].filter(job => !rejected.has(job.id) && !ignored?.has(job.id)));
   const details = $derived(Object.fromEntries([...loaded].filter(([, detail]) => detail)) as Record<string, JobDetail>);
   const inventory = $derived(walkInventory(source, jobs, details, { format: source.kind, sha: expectedSha, matchHost: true }));
   // Physical HF tree digest of the pinned release (qualification/release_matrix.md).
@@ -70,41 +72,44 @@
   const flash = $derived(source.kind === 'hf' &&
     (expectedSha === flashDigest || inventory.pages[0]?.source_sha256 === flashDigest));
 
-  const readPending = $derived(!!inventory.need && reads.busy);
-  const readJob = $derived(inventory.job ?? currentJobs.at(-1));
+  const readPending = $derived(reads.busy);
+  const canRead = $derived(!flash && !blocked && !!inventory.need);
+  const canRestart = $derived(!flash && !blocked && inventory.pages.length > 0 && (!!inventory.need || !!inventory.error));
+  const readJob = $derived(inventory.job ?? currentJobs.filter(job => !ignored?.has(job.id)).at(-1));
   let readLink: HTMLAnchorElement | undefined = $state();
 
-  async function readLayers(event: MouseEvent) {
-    const next = inventory.need;
-    if (flash || blocked || !next) return;
+  function readLayers(event: MouseEvent, restart = false) {
+    if (!(restart ? canRestart : canRead)) return;
+    const next = restart ? { offset: 0, sha: undefined } : inventory.need!;
     const { offset, sha } = next;
     const request = inventoryJob(source.id, source.host, offset, sha);
     const key = jobRequestKey(launcher, request);
-    const focus = captureResultFocus(event);
-    const accepted = await reads.submit(request, event, false, admitted => { if (admitted) receiptError = ''; });
-    if (!accepted) return;
-    const id = accepted.id;
-    function record(job: JobSummary) {
-      if (job.id !== id || job.kind !== request.kind || job.host !== request.host || job.input_ids?.length !== 1 || job.input_ids[0] !== request.input_ids[0]) {
-        receiptError = 'The inventory job does not match the selected source.';
-        return;
+    void reads.submit(request, event, false, admitted => { if (admitted) receiptError = ''; }, (accepted, focus) => {
+      const id = accepted.id;
+      function record(job: JobSummary) {
+        if (job.id !== id || job.kind !== request.kind || job.host !== request.host || job.input_ids?.length !== 1 || job.input_ids[0] !== request.input_ids[0]) {
+          receiptError = 'The inventory job does not match the selected source.';
+          return;
+        }
+        readVisit.remember(id);
+        acceptedReads.set(key, job);
       }
-      readVisit.remember(id);
-      acceptedReads.set(key, job);
-    }
-    record(acceptedJobSummary(accepted, request));
-    void focus?.(() => readLink);
-    // A match can return only the ID. If the detail GET fails, wait for the
-    // state poll to replace the placeholder instead of latching an error.
-    if (!('state' in accepted)) void brewery.loadJob(id).then(detail => {
-      if (acceptedReads.get(key)?.id === id) record(detail);
-    }).catch(() => {});
+      if (restart) restarts.set(request.input_ids[0], supersededInventory(
+        [...(brewery.state?.jobs ?? []), ...acceptedReads.values()], request.input_ids[0], id));
+      record(acceptedJobSummary(accepted, request));
+      void focus?.(() => readLink);
+      // A match can return only the ID. A state poll can replace the placeholder.
+      if (!('state' in accepted)) void brewery.loadJob(id).then(detail => {
+        if (acceptedReads.get(key)?.id === id) record(detail);
+      }).catch(() => {});
+    }, restart);
   }
 
   $effect(() => {
     // Try a transient detail error again after the next successful state poll.
     const snapshot = brewery.lastUpdated;
     const job = inventory.job;
+    readVisit.observe(job);
     if (flash || job?.state !== 'succeeded') return;
     const jobId = job.id;
     function reject(reason: string) {
@@ -129,15 +134,20 @@
         return;
       }
       loaded.set(jobId, detail);
-    }).catch(() => loaded.delete(jobId));
+      detailErrors.delete(jobId);
+    }).catch(error => {
+      detailErrors.set(jobId, errorText(error));
+      loaded.delete(jobId);
+    });
   });
 
   const formatTypes = $derived(recipeTypes(format));
   const complete = $derived(!flash && !inventory.need && !inventory.job && inventory.pages.length > 0);
   const problem = $derived(flash ? 'The layer-recipe exporters do not support this Flash-Next checkpoint.'
-    : source.available === false || (!complete && !inventory.job) ? blocked : null);
+    : source.available === false || (!complete && (!inventory.job || inventory.error)) ? blocked : null);
   const readError = $derived(receiptError || (inventory.job?.state === 'succeeded' ? null : inventory.error) ||
     (readJob && rejected.get(readJob.id)));
+  const detailError = $derived(readJob && detailErrors.get(readJob.id));
   const layers = $derived(complete ? [...new Set(inventory.pages.flatMap(({ tensors }) => tensors.flatMap(t => {
     const match = /^(?:model\.layers|transformer\.h)\.(0|[1-9]\d*)\./.exec(t.name);
     const layer = Number(match?.[1]);
@@ -240,23 +250,24 @@
     <JobState job={readJob} />
   </div>
 {/if}
-{#if reads.error || reads.replayed}<SubmitStatus s={reads} />{/if}
+{#if reads.error || reads.replayed}<SubmitStatus s={reads} allowRepeat={!blocked && !flash} />{/if}
 {#if readError}<p class="note bad" role="alert">{readError}</p>{/if}
-{#if problem}
-  <p class="note bad" role="alert">{problem}</p>
-{:else if inventory.need}
+{#if detailError}<p class="note bad" role="alert">{detailError} The workbench will retry the job details.</p>{/if}
+{#if problem}<p class="note bad" role="alert">{problem}</p>{/if}
+{#if canRead || canRestart}
   <div class="row">
-    <button type="button" class="btn" onclick={readLayers} disabled={readPending}>
+    {#if canRead}<button type="button" class="btn" onclick={(event) => readLayers(event)} disabled={readPending}>
       {inventory.pages.length ? 'Read next layers' : 'Read layers'}
-    </button>
+    </button>{/if}
+    {#if canRestart}<button type="button" class="btn" onclick={(event) => readLayers(event, true)} disabled={readPending}>Read from page 1</button>{/if}
     <span class="hint">This queues a <code>weight_inspect</code> job on {hostName(brewery.state?.hosts ?? [], source.host)}.</span>
   </div>
   {#if readPending}<p class="hint" role="status">Submitting the layer read.</p>{/if}
-{:else if !complete}
+{:else if !problem && !complete}
   <p class="muted small" role="status">Waiting for the source SHA-256 and layers.</p>
-{:else if !layers.length}
+{:else if !problem && !layers.length}
   <p class="note warn small">The source inventory does not list any recognized layer matrices.</p>
-{:else}
+{:else if !problem}
   <p class="small">Source SHA-256: <code class="mono" style="overflow-wrap:anywhere">{sourceSha}</code></p>
   {#if trellisReasons.length}<p class="note warn small" id="recipe-ht-help">HT3 and HT4 are not available for some layers. {trellisReasons.join(' ')}</p>{/if}
   <p class="hint">Choose a default type and optional layer overrides.</p>
@@ -306,6 +317,7 @@
   {#if currentAttempt && starter.error}
     <p class="note bad" role="alert">{starter.error}</p>
   {:else if !starter.busy && starter.last}
-    <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a bind:this={runLink} href={conversionRunHref(starter.last.id, 'recipe')}>{starter.last.id}</a>. {#if starter.replayed}No second conversion was started.{/if}</p>
+    <p class="muted">{starter.matched ? 'This request is already queued as job' : starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a bind:this={runLink} href={conversionRunHref(starter.last.id, 'recipe')}>{starter.last.id}</a>. {#if starter.replayed}No second conversion was started.{/if}</p>
   {/if}
+  {#if currentAttempt && starter.repeat}<button type="button" class="btn small" disabled={starter.busy} onclick={starter.repeat}>Queue another</button>{/if}
 </div>

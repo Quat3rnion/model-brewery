@@ -18,23 +18,38 @@ export async function startController(assets) {
   const log = [];
   const responses = new Map();
   const submissions = new Map();
+  const fingerprints = new Map();
   let data = scenario('live-shaped', hgnCatalog.catalog_sha256);
   let seq = 0;
   const id = (prefix) => `${prefix}-mock-${++seq}`;
   const key = (method, path) => `${method} ${path}`;
   function submit(path, body, headers, create) {
     const header = headers['idempotency-key'];
-    if (header === undefined) return json(create(), 201);
-    if (!header.length || header.length > 128 || /[^A-Za-z0-9._-]/.test(header)) return error(400, 'invalid Idempotency-Key');
+    if (header !== undefined && (!header.length || header.length > 128 || /[^A-Za-z0-9._-]/.test(header))) return error(400, 'invalid Idempotency-Key');
     const scope = key(path, header);
     const fingerprint = canonical(body);
-    const prior = submissions.get(scope);
+    const prior = header === undefined ? undefined : submissions.get(scope);
     if (prior) {
       if (prior.fingerprint !== fingerprint) return error(409, 'Idempotency-Key already used for a different request');
       return json(path === '/api/jobs' ? { id: prior.record.id } : prior.record);
     }
+    const group = path === '/api/jobs' ? data.jobs : data.conversions;
+    const now = Date.now();
+    const groupKey = key(path, fingerprint);
+    const active = id => ['queued', 'running', 'cancelling'].includes(group.find(row => row.id === id)?.state);
+    const candidates = (fingerprints.get(groupKey) ?? []).filter(entry => now - entry.at < 10_000 || active(entry.id));
+    const match = headers['brewery-allow-duplicate'] === '1' ? undefined : candidates[0];
+    if (match) {
+      const record = group.find(row => row.id === match.id);
+      if (header !== undefined) submissions.set(scope, { fingerprint, record });
+      return {
+        ...json({ ...(path === '/api/jobs' ? { id: match.id } : record), duplicate_of: true }),
+        headers: { 'Brewery-Duplicate': match.id },
+      };
+    }
     const record = create();
-    submissions.set(scope, { fingerprint, record });
+    fingerprints.set(groupKey, [...candidates, { id: record.id, at: now }]);
+    if (header !== undefined) submissions.set(scope, { fingerprint, record });
     return json(record, 201);
   }
   const api = async (method, path, body, headers) => {
@@ -154,7 +169,11 @@ export async function startController(assets) {
           : await api(method, path, body, request.headers);
         if (answer.down) req.socket.destroy();
         else if (answer.status === 204) res.writeHead(204).end();
-        else res.writeHead(answer.status ?? 200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        else res.writeHead(answer.status ?? 200, {
+          'Content-Type': 'application/json', 'Cache-Control': 'no-store',
+          ...(typeof answer.json?.error === 'string' ? { 'Brewery-Error': '1' } : {}),
+          ...answer.headers,
+        })
           .end(JSON.stringify(answer.json));
       } catch (cause) {
         res.writeHead(500, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: `Mock error: ${cause.message}` }));
@@ -171,6 +190,7 @@ export async function startController(assets) {
       data = scenario(name, hgnCatalog.catalog_sha256);
       responses.clear();
       submissions.clear();
+      fingerprints.clear();
     },
     respond: (method, path, response) => responses.set(key(method, path), response),
     requests: (method, path) => structuredClone(log.filter((r) => (!method || r.method === method) && (!path || r.path === path))),

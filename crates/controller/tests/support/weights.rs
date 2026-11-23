@@ -205,7 +205,13 @@ fn packed_apply_requires_the_exact_approved_receipt_and_supported_source_codec()
     configure_hgn_weights(&app, true, true);
     app.launch();
     for apply in applies {
-        app.json("POST", "/api/jobs", Some(apply), 409);
+        let (status, reply) = app.request(
+            "POST",
+            "/api/jobs",
+            Some(apply),
+            "Brewery-Allow-Duplicate: 1\r\n",
+        );
+        assert_eq!(status, 409, "{reply}");
     }
 }
 

@@ -58,6 +58,7 @@
   const jobs = $derived(brewery.state?.jobs ?? []);
   const visualReadAttempts = new PlainAttempt();
   const visualReads = new SvelteMap<string, JobSummary>();
+  const visualRestarts = new SvelteMap<string, Set<string>>();
 
   // ---- Source (shared by both modes). ----
   const sourceId = $derived(hashParam(route.hash, 'source') ?? '');
@@ -487,6 +488,7 @@
           {pending}
           readAttempts={visualReadAttempts}
           acceptedReads={visualReads}
+          restarts={visualRestarts}
           onproposal={openReview}
         />
         {/key}

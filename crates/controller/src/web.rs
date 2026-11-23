@@ -1,6 +1,7 @@
 use crate::{
     App,
     conversion::{Conversion, NewConversion, StartError},
+    dedupe,
     domain::{
         Envelope, Job, KINDS, NewJob, NewModel, NewPrompt, Reason, SIMPLE_WORKFLOWS, candidates,
         input_blocker, manual_registration_blocker, standard_job_host_blocker,
@@ -600,9 +601,15 @@ async fn add_job(
     payload: std::result::Result<Json<NewJob>, JsonRejection>,
 ) -> Result<Response> {
     let (request, submission) = read_submission(&headers, "jobs", payload)?;
-    let mut store = app.store.lock().map_err(ApiError::storage)?;
+    let store = app.store.lock().map_err(ApiError::storage)?;
     if let Some(response) = replay(&store, submission.as_ref())? {
         return Ok(response);
+    }
+    let fingerprint = dedupe::Request::new("jobs", &request).map_err(ApiError::storage)?;
+    let tx = store.submission_transaction().map_err(ApiError::storage)?;
+    if let Some(id) = find_duplicate(&headers, &tx, &fingerprint, submission.as_ref())? {
+        tx.commit().map_err(ApiError::storage)?;
+        return Ok(duplicate_reply(&id, json!({"id": id})));
     }
     if request.input_ids.len() > 32 || !KINDS.contains(&request.kind.as_str()) {
         return Err(ApiError::bad("unknown job kind or too many inputs"));
@@ -800,10 +807,35 @@ async fn add_job(
             ))?
             .revision;
     }
-    store
-        .enqueue(&job, &envelope, submission.as_ref())
+    Store::enqueue(&tx, &job, &envelope, submission.as_ref()).map_err(ApiError::storage)?;
+    fingerprint
+        .record(&tx, &job.id)
         .map_err(ApiError::storage)?;
+    tx.commit().map_err(ApiError::storage)?;
     Ok((StatusCode::CREATED, Json(job)).into_response())
+}
+
+fn find_duplicate(
+    headers: &HeaderMap,
+    tx: &rusqlite::Transaction<'_>,
+    fingerprint: &dedupe::Request,
+    submission: Option<&Submission<'_>>,
+) -> Result<Option<String>> {
+    if single(headers, "brewery-allow-duplicate") == Ok(Some("1")) {
+        return Ok(None);
+    }
+    let matched = fingerprint.find(tx).map_err(ApiError::storage)?;
+    if let Some(id) = &matched {
+        // Bind a fresh key even when no new work is queued. A lost match
+        // response can then replay the same ID after the duplicate window.
+        idempotency::record(tx, submission, id).map_err(ApiError::storage)?;
+    }
+    Ok(matched)
+}
+
+fn duplicate_reply(id: &str, mut body: Value) -> Response {
+    body["duplicate_of"] = json!(true);
+    ([("brewery-duplicate", id)], Json(body)).into_response()
 }
 
 fn read_submission<'a, T: serde::Serialize>(
@@ -917,9 +949,9 @@ async fn add_conversion(
     State(app): State<Shared>,
     headers: HeaderMap,
     payload: std::result::Result<Json<NewConversion>, JsonRejection>,
-) -> Result<(StatusCode, Json<Conversion>)> {
+) -> Result<Response> {
     let (request, submission) = read_submission(&headers, "conversions", payload)?;
-    let mut store = app.store.lock().map_err(ApiError::storage)?;
+    let store = app.store.lock().map_err(ApiError::storage)?;
     if let Some(submission) = &submission {
         match store.replay(submission).map_err(ApiError::storage)? {
             Replay::New => {}
@@ -928,7 +960,7 @@ async fn add_conversion(
                     .conversion(&id)
                     .map_err(ApiError::storage)?
                     .ok_or_else(|| ApiError::storage("idempotent conversion is missing"))?;
-                return Ok((StatusCode::OK, Json(row)));
+                return Ok(Json(row).into_response());
             }
             Replay::Conflict => {
                 return Err(ApiError(
@@ -938,15 +970,31 @@ async fn add_conversion(
             }
         }
     }
+    let fingerprint = dedupe::Request::new("conversions", &request).map_err(ApiError::storage)?;
+    let tx = store.submission_transaction().map_err(ApiError::storage)?;
+    if let Some(id) = find_duplicate(&headers, &tx, &fingerprint, submission.as_ref())? {
+        let row = store
+            .conversion(&id)
+            .map_err(ApiError::storage)?
+            .ok_or_else(|| ApiError::storage("duplicate conversion is missing"))?;
+        tx.commit().map_err(ApiError::storage)?;
+        return Ok(duplicate_reply(
+            &id,
+            serde_json::to_value(row).map_err(ApiError::storage)?,
+        ));
+    }
     let active = store
         .by_state(crate::domain::State::Running)
         .map_err(ApiError::storage)?;
     let (row, job, envelope) = admit_conversion(&app, &store, request, &active)?
         .map_err(|reason| ApiError(StatusCode::CONFLICT, reason.text))?;
-    store
-        .create_conversion(&row, &job, &envelope, submission.as_ref())
+    Store::create_conversion(&tx, &row, &job, &envelope, submission.as_ref())
         .map_err(ApiError::storage)?;
-    Ok((StatusCode::CREATED, Json(row)))
+    fingerprint
+        .record(&tx, &row.id)
+        .map_err(ApiError::storage)?;
+    tx.commit().map_err(ApiError::storage)?;
+    Ok((StatusCode::CREATED, Json(row)).into_response())
 }
 
 async fn conversion_eligibility(
@@ -1088,6 +1136,11 @@ impl ApiError {
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({"error":self.1}))).into_response()
+        (
+            self.0,
+            [("brewery-error", "1")],
+            Json(json!({"error":self.1})),
+        )
+            .into_response()
     }
 }

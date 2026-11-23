@@ -169,7 +169,9 @@ it('keeps each unconfirmed wire request key through other sends until acceptance
 it.each([400, 409, 413, 415, 422])('discards the key after a definitive HTTP %d rejection', async (status) => {
   const submission = new Submission();
   const body = { input_ids: ['model-a'] };
-  const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(Response.json({ error: 'Request rejected.' }, { status }));
+  const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(Response.json({ error: 'Request rejected.' }, {
+    status, headers: { 'Brewery-Error': '1' },
+  }));
   try {
     await submission.send('preview', body, (_, key) => api.queueJob({ ...body, kind: 'inspect' }, key));
     expect(submission.error).toBe('Request rejected.');
@@ -179,19 +181,20 @@ it.each([400, 409, 413, 415, 422])('discards the key after a definitive HTTP %d 
 });
 
 it.each([
-  [403, 'text/plain', 'Forbidden'],
-  [403, 'text/plain', '{"error":"Forbidden"}'],
-  [502, 'text/html', '<h1>Bad gateway</h1>'],
-  [503, 'application/json', '{"error":"Unavailable"}'],
-  [504, 'application/json', '{"error":"Timed out"}'],
-  [422, 'application/json', '{"message":"Not the controller error shape"}'],
-] as const)('keeps the original key after an ambiguous HTTP %d reply', async (status, type, text) => {
+  [403, 'text/plain', 'Forbidden', ''],
+  [403, 'text/plain', '{"error":"Forbidden"}', '1'],
+  [502, 'text/html', '<h1>Bad gateway</h1>', ''],
+  [503, 'application/json', '{"error":"Unavailable"}', '1'],
+  [504, 'application/json', '{"error":"Timed out"}', ''],
+  [422, 'application/json', '{"error":"Not the exact controller error shape","extra":true}', '1'],
+  [403, 'application/json', '{"error":"Proxy rejection"}', ''],
+] as const)('keeps the original key after an ambiguous HTTP %d reply', async (status, type, text, marker) => {
   const submission = new Submission();
   const job = { kind: 'generate', input_ids: ['model-a'], prompt: 'Fixture prompt' } as const;
   const body = { ...job, input_ids: [...job.input_ids] };
   const fetch = vi.spyOn(globalThis, 'fetch')
     .mockRejectedValueOnce(new TypeError('Reply lost.'))
-    .mockResolvedValueOnce(new Response(text, { status, headers: { 'content-type': type } }));
+    .mockResolvedValueOnce(new Response(text, { status, headers: { 'content-type': type, 'brewery-error': marker } }));
   const post = (request: typeof body, key: string) => api.queueJob(request, key);
   try {
     await submission.send('generate', body, post);
@@ -203,9 +206,9 @@ it.each([
   } finally { fetch.mockRestore(); }
 });
 
-it.each([64, 4])('rejects a new entry when %d unresolved requests fill the history', async count => {
+it.each([70, 8])('allows new work after %d unresolved requests', async count => {
   const submission = new Submission();
-  const prompt = count === 64 ? 'small' : 'a'.repeat(256 * 1024 - 128);
+  const prompt = count === 70 ? 'small' : 'a'.repeat(256 * 1024 - 128);
   let original = '';
   const lose = async (body: { offset: number }, key: string) => {
     if (!body.offset) original = key;
@@ -213,12 +216,9 @@ it.each([64, 4])('rejects a new entry when %d unresolved requests fill the histo
   };
   for (let offset = 0; offset < count; offset++) await submission.send('generate', { prompt, offset }, lose);
   const post = vi.fn(async (_, key) => key);
-  const newBody = { prompt: count === 64 ? prompt : 'x'.repeat(1024), offset: count };
-  expect(await submission.send('generate', newBody, post)).toBeNull();
-  expect(submission.error).toMatch(/unconfirmed/i);
-  expect(post).not.toHaveBeenCalled();
-  expect(await submission.send('generate', { prompt, offset: 0 }, post)).toBe(original);
+  const newBody = { prompt: 'small', offset: count };
   expect(await submission.send('generate', newBody, post)).toMatch(/^conv-/);
+  expect(await submission.send('generate', { prompt, offset: 0 }, post)).toBe(original);
 });
 
 it.each([

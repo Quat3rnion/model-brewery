@@ -66,23 +66,25 @@ class Conversions {
 
 export const conversions = new Conversions();
 
-type PostConversion = (body: ConversionBody, key: string) => Promise<{ data: unknown; status: number }>;
+type PostConversion = (body: ConversionBody, key: string, allowDuplicate?: boolean) => Promise<{ data: unknown; status: number }>;
 
 export class ConversionSubmitter extends Submission {
   replayed = $state(false);
+  matched = $state(false);
 
   constructor(private launcher: string, private post: PostConversion) { super(); }
 
-  async submit(body: ConversionBody, event?: MouseEvent): Promise<Conversion | null> {
+  async submit(body: ConversionBody, event?: MouseEvent, allowDuplicate = false): Promise<Conversion | null> {
     const snapshot: ConversionBody = JSON.parse(JSON.stringify(body));
     const result = await this.send(this.launcher, snapshot, async (request, key) => {
-      const { data, status } = await this.post(request, key);
+      const { data, status } = await this.post(request, key, allowDuplicate);
       const c = parseConversion(data);
       if (!c?.id) throw new Error('The controller answered without a conversion record.');
-      return { c, status };
-    }, event);
+      return { c, status, matched: (data as { duplicate_of?: unknown }).duplicate_of === true };
+    }, event, undefined, allowDuplicate);
     if (!result) return null;
     this.replayed = result.status === 200;
+    this.matched = result.matched;
     return result.c;
   }
 }
@@ -90,15 +92,18 @@ export class ConversionSubmitter extends Submission {
 /** Present the accepted workflow and update the shared run list. */
 export class ConversionStarter extends ConversionSubmitter {
   last = $state<Conversion | null>(null);
+  repeat = $state<((event: MouseEvent) => void) | null>(null);
 
   constructor(launcher: string) { super(launcher, api.startConversion); }
 
-  async start(body: ConversionBody, event: MouseEvent, result: () => HTMLElement | undefined): Promise<Conversion | null> {
+  async start(body: ConversionBody, event: MouseEvent, result: () => HTMLElement | undefined, allowDuplicate = false): Promise<Conversion | null> {
     const focus = captureResultFocus(event);
     const trigger = event.currentTarget;
-    const c = await this.submit(body, event);
+    const snapshot: ConversionBody = JSON.parse(JSON.stringify(body));
+    const c = await this.submit(snapshot, event, allowDuplicate);
     if (c) {
       this.last = c;
+      this.repeat = this.matched ? event => { void this.start(snapshot, event, result, true); } : null;
       void focus?.(result);
       conversions.upsert(c);
       void conversions.refresh();

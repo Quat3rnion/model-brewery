@@ -298,10 +298,13 @@ test('a failed layer inventory leaves a retry available and is not retained acro
   await choose(page, '#recipe-source', /^Fixture checkpoint/);
   await expect(page.getByText(message)).toHaveCount(0);
   await page.waitForTimeout(850);
-  const [retryStatus, retryId] = await submit(page, 'Read layers');
+  const [matchStatus, matchId] = await submit(page, 'Read layers');
+  expect([matchStatus, matchId]).toEqual([200, id]);
+  const [retryStatus, retryId] = await submit(page, 'Queue another');
   expect(retryStatus).toBe(201);
   expect(retryId).not.toBe(id);
   expect(key(posts(controller)[0])).not.toBe(key(posts(controller)[1]));
+  expect(posts(controller)[2].headers['brewery-allow-duplicate']).toBe('1');
 });
 
 test('Profiles GGUF retries a transient inventory detail error on the next state poll', async ({ page, controller }) => {
@@ -388,11 +391,11 @@ test('Library shows a download accepted after focus moves', async ({ page: p, co
     await expect(p.locator('#hf-revision')).toBeFocused();
     await expect(p).toHaveURL(url);
     expect(posts(c)).toHaveLength(1);
-    await new Promise(resolve => setTimeout(resolve, 850));
+    await p.locator('#hf-filename').fill('second.gguf');
     await button(p, 'Start download').click();
     await expect.poll(() => posts(c).length).toBe(2);
     const [a, b] = posts(c);
-    expect(b.body).toEqual(a.body);
+    expect(b.body.options).toEqual({ ...a.body.options, filename: 'second.gguf' });
     expect(key(b)).not.toBe(key(a));
     await expect(p).toHaveURL(/#\/jobs\/job-mock-2$/);
   } finally { hold.release(); }

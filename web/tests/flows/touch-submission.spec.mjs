@@ -202,7 +202,7 @@ test('separate deliberate touch presses can send the same request again', async 
   await new Promise(resolve => setTimeout(resolve, 850));
   const second = post(page, '/api/jobs');
   await page.touchscreen.tap(x, y);
-  expect((await second).status()).toBe(201);
+  expect((await second).status()).toBe(200);
   const [a, b] = posts(controller);
   expect(a.body).toEqual(b.body);
   expect(a.headers['idempotency-key']).not.toBe(b.headers['idempotency-key']);

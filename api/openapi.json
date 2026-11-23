@@ -277,7 +277,7 @@
         "operationId": "createJob",
         "summary": "Validate and enqueue a controller workflow",
         "description": "This operation does not wait for the worker to start or finish. Each input ID must reference a registered model whose host is still configured. Input order matters. Unless required explicitly, host defaults to the first input's host. Only convert accepts auto. Unsupported workflows or the absence of an eligible worker return 409. For a normal conversion, use createConversion. Use inspect, plan, convert and verify here only to run one stage for diagnosis. See the kind-specific schemas for host, prompt and input constraints; the controller checks their values against the live catalog.",
-        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
+        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}, {"$ref": "#/components/parameters/AllowDuplicate"}],
         "requestBody": {
           "required": true,
           "x-brewery-max-body-bytes": 262144,
@@ -290,7 +290,14 @@
           }}
         },
         "responses": {
-          "200": {"$ref": "#/components/responses/CreateReplay"},
+          "200": {
+            "description": "Same key and body, or a duplicate match. No new job was queued.",
+            "headers": {"Brewery-Duplicate": {"$ref": "#/components/headers/Duplicate"}},
+            "content": {"application/json": {"schema": {
+              "type": "object", "required": ["id"], "additionalProperties": false,
+              "properties": {"id": {"$ref": "#/components/schemas/Id"}, "duplicate_of": {"const": true}}
+            }}}
+          },
           "201": {
             "description": "Newly queued job summary; use its id with getJob to track progress.",
             "content": {"application/json": {
@@ -707,7 +714,7 @@
         "operationId": "createConversion",
         "summary": "Start the default one-submit conversion workflow",
         "description": "Default way to convert a model. One request makes the controller run the child jobs inspect, plan, convert and verify in this order on one worker. The controller stores the workflow, so it continues if the client disconnects, and resumes after a controller restart by using the stored child job IDs. A child job that was running and cannot be checked is not retried. The workflow stops at the first failed or cancelled child job. Later stages are not queued. The call does not wait for the worker. Poll getConversion, or follow the child jobs with getJob and streamEvents. There is no conversion event kind and no conversion key in capabilities; the child jobs use the normal job events. A succeeded workflow means that all four child jobs succeeded. It is not a release qualification, and it does not show model quality. To run an ordinary stage alone for diagnosis, use createJob. A managed GGUF layer recipe is accepted only by createConversion.\n\nHost: omit host to use the source model's host. Set host to auto to use an eligible worker of the configured quantization pool. Set a worker ID to pin that worker. The workflow reports host auto as requested_host. A managed GGUF layer recipe must run on the source worker and does not accept auto.\n\nIdempotency: a new request returns 201. A repeat with the same key and the same typed body returns 200 with the current workflow, not only an ID. A different body for the same key returns 409.",
-        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
+        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}, {"$ref": "#/components/parameters/AllowDuplicate"}],
         "requestBody": {
           "required": true,
           "x-brewery-max-body-bytes": 262144,
@@ -728,7 +735,8 @@
         },
         "responses": {
           "200": {
-            "description": "Same key and same request. The current workflow; no new write.",
+            "description": "Same key and body, or a duplicate match. Returns the current workflow. A duplicate match includes duplicate_of: true. No new workflow was queued.",
+            "headers": {"Brewery-Duplicate": {"$ref": "#/components/headers/Duplicate"}},
             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Conversion"}}}
           },
           "201": {
@@ -815,9 +823,21 @@
       "IdempotencyKey": {
         "name": "Idempotency-Key",
         "in": "header",
-        "description": "Optional single, case-sensitive key scoped to this create operation. A new successful request returns 201 and binds the key to the typed body and generated ID. A matching retry returns 200 with only the original id and no new side effects, even if that object was deleted or the input catalog changed. The exception is createConversion: a matching retry returns 200 with the current conversion workflow. A different typed body for an already bound key returns 409. Malformed or repeated header fields return 400. JSON whitespace and object order do not change the typed body; optional null and omitted values and omitted versus empty default job lists/maps compare equally. Failed creates do not bind keys. Keys have no expiry and persist in the same controller database across restart. Without a key, each successful request creates a new resource.",
+        "description": "Optional single, case-sensitive key scoped to this create operation. A new successful request returns 201 and binds the key to the typed body and generated ID. A matching retry returns 200 with only the original id and no new side effects, even if that object was deleted or the input catalog changed. The exception is createConversion: a matching retry returns 200 with the current conversion workflow. A different typed body for an already bound key returns 409. Malformed or repeated header fields return 400. JSON whitespace and object order do not change the typed body; optional null and omitted values and omitted versus empty default job lists/maps compare equally. Failed creates do not bind keys. Keys have no expiry and persist across restart. Key lookup precedes duplicate detection. A duplicate match binds a supplied new key to the existing ID.",
         "schema": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]{1,128}$"},
         "example": "workbench.plan.001"
+      },
+      "AllowDuplicate": {
+        "name": "Brewery-Allow-Duplicate",
+        "in": "header",
+        "schema": {"const": "1"},
+        "description": "The controller matches the same canonical typed body on this route with or without an idempotency key. It returns the original ID instead of queuing work if the original is active (queued, running, or cancelling) or was accepted less than 10 seconds ago. For a deliberate repeat, including automated clients that repeat identical work, send Brewery-Allow-Duplicate: 1 and a new idempotency key. The normal admission checks and same-key replay rules still apply."
+      }
+    },
+    "headers": {
+      "Duplicate": {
+        "schema": {"$ref": "#/components/schemas/Id"},
+        "description": "Present only on duplicate matches. Contains the existing job or conversion ID."
       }
     },
     "responses": {
@@ -845,6 +865,7 @@
         }
       },
       "Error": {
+        "description": "Controller JSON errors use Content-Type: application/json, Brewery-Error: 1, and exactly one string field named error. A proxy can return a 4xx without confirming that the controller rejected the request.",
         "type": "object", "required": ["error"], "additionalProperties": false,
         "properties": {"error": {"type": "string", "description": "Human-readable diagnostic, not a stable machine code."}}
       },
@@ -1712,6 +1733,7 @@
         "type": "object", "required": ["id", "host", "state", "stage", "job_ids", "cancel_requested", "created_at", "updated_at"],
         "properties": {
           "id": {"$ref": "#/components/schemas/Id"},
+          "duplicate_of": {"const": true, "description": "Present only when a submission matches an existing conversion by body."},
           "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}], "description": "Concrete worker ID, or auto before assignment of a pool worker."},
           "requested_host": {"const": "auto", "description": "Present if auto routing was requested."},
           "format": {"const": "gguf", "description": "Present only for a GGUF conversion. Absent means HGN."},

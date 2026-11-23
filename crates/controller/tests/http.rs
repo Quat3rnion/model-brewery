@@ -192,7 +192,16 @@ impl Fixture {
     }
 
     fn enqueue(&self, body: Value) -> String {
-        id(&self.json("POST", "/api/jobs", Some(body), 201)).into()
+        // Worker tests explicitly queue new work, including identical jobs
+        // under different worker/receipt conditions. Dedupe tests use POST directly.
+        let (status, response) = self.request(
+            "POST",
+            "/api/jobs",
+            Some(body),
+            "Brewery-Allow-Duplicate: 1\r\n",
+        );
+        assert_eq!(status, 201, "{response}");
+        id(&serde_json::from_str(&response).unwrap()).into()
     }
 
     fn detail(&self, id: &str) -> Value {
@@ -259,6 +268,9 @@ mod openapi;
 
 #[path = "support/idempotency.rs"]
 mod idempotency;
+
+#[path = "support/dedupe.rs"]
+mod dedupe;
 
 #[test]
 fn suggestions_bound_dispatch_and_leave_compute_idle() {

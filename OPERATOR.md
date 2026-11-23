@@ -1175,6 +1175,29 @@ curl -s -X POST http://127.0.0.1:4141/api/conversions \
 A new workflow returns `201`. The same key and the same body return `200`
 with the current workflow. A different body for the same key returns `409`.
 
+For `/api/jobs` and `/api/conversions`, the controller checks the
+`Idempotency-Key` first. Then it compares a SHA-256 fingerprint of the
+canonical request body on the same route. It does this with or without a
+key. If matching work is queued, running, or cancelling, or if the
+controller accepted it less than 10 seconds ago, the controller does not
+queue new work. It returns `200`, the existing ID, `duplicate_of: true`,
+and the `Brewery-Duplicate` header with that ID. A new key on a match is
+bound to the existing ID.
+
+SQLite stores the fingerprint in the same transaction that queues the
+work. This check still works after a controller restart. Work queued
+before this feature was installed has no fingerprint. The controller
+removes expired fingerprints for finished work on later submissions.
+To repeat identical work on purpose, select **Queue another** after a
+match, or send `Brewery-Allow-Duplicate: 1` with a new `Idempotency-Key`.
+The normal admission checks still apply.
+
+If a reply is lost, check Jobs or retry with the same inputs. The
+workbench keeps an unconfirmed key during the current visit. It treats
+a `4xx` reply as a controller rejection only if the reply has
+`Brewery-Error: 1`, `Content-Type: application/json`, and exactly one
+string field named `error`.
+
 Settings and administration routes are in
 [Web settings and administration](#web-settings-and-administration).
 

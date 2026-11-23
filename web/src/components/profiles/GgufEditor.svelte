@@ -4,7 +4,6 @@
   import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { api, errorText } from '../../lib/api';
-  import { captureResultFocus } from '../../lib/focus';
   import { acceptedJobSummary, guardReadLink, jobRequestKey, ReadVisit, Submitter } from '../../lib/submit.svelte';
   import { PlainAttempt } from '../../lib/submission-key';
   import { brewery } from '../../lib/store.svelte';
@@ -13,7 +12,7 @@
   import { parseGgufProfiles, shortRev, type SavedGgufProfile } from '../../lib/profiles';
   import { buildGgufProfileBody, imatrixRequired, layerOf, rangeOverrides, tensorBytes, forkSelected, profileMatches, FORK_NOTICE, type GgufCatalog } from '../../lib/gguf';
   import { ggufEvidenceIds, inventoryBlocker, resolveGgufSource, validSha, type ExactInventory } from '../../lib/ggufSource';
-  import { inventoryJob, walkInventory } from '../../lib/weightmap';
+  import { inventoryJob, supersededInventory, walkInventory } from '../../lib/weightmap';
   import type { JobDetail, JobSummary } from '../../lib/types';
   import Badge from '../Badge.svelte';
   import JobState from '../JobState.svelte';
@@ -63,6 +62,7 @@
   const blocked = $derived(source ? inventoryBlocker(source, host) : null);
   const packed = $derived(!!source && !isSafeSource(source.kind) && host?.capabilities?.weight_packed === true);
   const submitted = new SvelteMap<string, JobSummary>();
+  const restarts = new SvelteMap<string, Set<string>>();
   const launcher = 'profiles.gguf.inventory';
   const readAttempts = new PlainAttempt();
   const reads = new SvelteMap<string, Submitter>();
@@ -73,29 +73,36 @@
   } : null);
   const attempted = new Map<string, Date | null>();
   const inventoryJobs = $derived([...jobs, ...[...submitted.values()].filter(j => !jobs.some(row => row.id === j.id))]
-    .filter(job => readVisit?.jobs.shows(job)));
+    .filter(job => readVisit?.jobs.shows(job) && !restarts.get(sourceKey)?.has(job.id)));
   const inv = $derived(source && lookup && !lookup.exact ? walkInventory(source, inventoryJobs, brewery.details, {
     format: source.kind, packed, matchHost: true,
     sha: source.kind === 'hf' ? validSha(source.bundle_sha256) ?? validSha(source.sha256) : validSha(source.sha256),
   }) : null);
   const need = $derived(source && inv?.need ? inventoryJob(source.id, source.host, inv.need.offset, inv.need.sha, packed) : null);
+  const firstPage = $derived(source ? inventoryJob(source.id, source.host, 0, undefined, packed) : null);
+  const firstPageKey = $derived(firstPage ? jobRequestKey(launcher, firstPage) : '');
   const needKey = $derived(need ? jobRequestKey(launcher, need) : '');
   const readPending = $derived(reads.get(needKey)?.busy ?? false);
-  const lastReads = new SvelteMap<string, { job: JobSummary; matched: boolean }>();
+  const restartPending = $derived(reads.get(firstPageKey)?.busy ?? false);
+  const canRestart = $derived(!blocked && !!firstPage && !!inv?.pages.length && (!!need || !!inv.error));
+  const lastReads = new SvelteMap<string, { job: JobSummary; read: Submitter }>();
   const lastRead = $derived(lastReads.get(sourceKey));
   let readLink: HTMLAnchorElement | undefined = $state();
   const lastJob = $derived(jobs.find(j => j.id === lastRead?.job.id) ?? lastRead?.job ?? null);
-  const readJob = $derived(inv?.job ?? (lastJob && readVisit?.jobs.shows(lastJob) ? lastJob : null));
+  const readJob = $derived(inv?.job ?? (lastJob && readVisit?.jobs.shows(lastJob) && !restarts.get(sourceKey)?.has(lastJob.id) ? lastJob : null));
   const invError = $derived.by(() => {
     const read = reads.get(needKey);
     // Keep instructions for resolving an ambiguous POST with its original key.
-    return ((read?.ambiguous || readVisit?.attempts.has(needKey)) && read?.error) ||
-      inv?.error || (inv?.job && readVisit?.detailErrors.get(inv.job.id));
+    const restart = canRestart ? reads.get(firstPageKey) : undefined;
+    return ((restart?.ambiguous || readVisit?.attempts.has(firstPageKey)) && restart?.error) ||
+      ((read?.ambiguous || readVisit?.attempts.has(needKey)) && read?.error) || inv?.error;
   });
+  const detailError = $derived(inv?.job && readVisit?.detailErrors.get(inv.job.id));
   $effect(() => {
     const visit = readVisit;
     const snapshot = brewery.lastUpdated;
     const job = inv?.job;
+    visit?.jobs.observe(job);
     if (job?.state !== 'succeeded' || brewery.details[job.id] || attempted.get(job.id) === snapshot) return;
     attempted.set(job.id, snapshot);
     void loadDetail(job.id).then(
@@ -103,29 +110,30 @@
       error => visit?.detailErrors.set(job.id, errorText(error)),
     );
   });
-  async function readTensors(event: MouseEvent) {
-    const key = needKey;
-    const request = need;
-    if (!key || !request || blocked) return;
+  function readTensors(event: MouseEvent, restart = false) {
+    const key = restart ? firstPageKey : needKey;
+    const request = restart ? firstPage : need;
+    if (!key || !request || blocked || (restart && !canRestart)) return;
     const modelKey = sourceKey;
     const visit = readVisit;
-    const focus = captureResultFocus(event);
     let read = reads.get(key);
     if (!read) {
       read = new Submitter(launcher, readAttempts);
       reads.set(key, read);
     }
-    const accepted = await read.submit(request, event, false, () => visit?.attempts.set(key, true));
-    if (!accepted) return;
-    const job = acceptedJobSummary(accepted, request);
-    visit?.jobs.remember(job.id);
-    submitted.set(key, job);
-    // A slow reply from an earlier page must not replace a newer page's result.
-    const previousOffset = lastReads.get(modelKey)?.job.options?.offset;
-    if (previousOffset === undefined || Number(previousOffset) <= Number(request.options?.offset)) {
-      lastReads.set(modelKey, { job, matched: read.replayed });
-    }
-    if (modelKey === sourceKey) void focus?.(() => readLink);
+    const submitter = read;
+    void read.submit(request, event, false, () => visit?.attempts.set(key, true), (accepted, focus) => {
+      const job = acceptedJobSummary(accepted, request);
+      if (restart) restarts.set(modelKey, supersededInventory([...jobs, ...submitted.values()], request.input_ids[0], job.id));
+      (modelKey === sourceKey ? readVisit : visit)?.jobs.remember(job.id);
+      submitted.set(key, job);
+      // A slow reply from an earlier page must not replace a newer page's result.
+      const previousOffset = lastReads.get(modelKey)?.job.options?.offset;
+      if (restart || previousOffset === undefined || Number(previousOffset) <= Number(request.options?.offset)) {
+        lastReads.set(modelKey, { job, read: submitter });
+      }
+      if (modelKey === sourceKey) void focus?.(() => readLink);
+    }, restart);
   }
   const native = $derived(inv?.pages.flatMap(p => p.tensors) ?? []);
   const nativeNames = $derived(new Set(source?.kind === 'gguf' ? [] : native.map(t => t.name)));
@@ -165,7 +173,7 @@
   const manualProblem = $derived(nativeNames.has(manualName.trim())
     ? 'This is a native source name, not a GGUF override.'
     : manualName && !/^[A-Za-z0-9_.\-]{1,200}$/.test(manualName.trim()) ? 'Use the exact GGUF tensor name, for example blk.12.ffn_down.weight.' : null);
-  const discovering = $derived(!!source && (!lookup || readPending || (!!inv?.job && !blocked && !invError)));
+  const discovering = $derived(!!source && (!lookup || readPending || (!!inv?.job && !blocked && !invError && !detailError)));
   function addManual() {
     const n = manualName.trim();
     if (!n || manualProblem || !manualType || discovering) return;
@@ -291,9 +299,10 @@
       <ModelSelect bind:value={sourceId} kinds={WEIGHT_SOURCES} label="Source model" hint="Choose a Library model. You can also add overrides by exact name without a source." />
       {#if source && !blocked && (need || readJob)}
         <div class="row">
-          <button type="button" class="btn" onclick={readTensors} disabled={!need || readPending}>
+          <button type="button" class="btn" onclick={(event) => readTensors(event)} disabled={!need || readPending}>
             {need && inv?.pages.length ? 'Read next tensors' : 'Read tensor list'}
           </button>
+          {#if canRestart}<button type="button" class="btn" onclick={(event) => readTensors(event, true)} disabled={readPending || restartPending}>Read from page 1</button>{/if}
           <span class="hint">This queues a <code>weight_inspect</code> job on {hostName(brewery.state?.hosts ?? [], source.host)}.</span>
         </div>
       {/if}
@@ -301,8 +310,13 @@
         <div class="row" role="status">
           <a bind:this={readLink} href="#/jobs/{encodeURIComponent(readJob.id)}" onclick={(event) => guardReadLink(event, launcher)}>Tensor list read job</a>
           <JobState job={readJob} />
-          {#if lastRead?.matched && lastRead.job.id === readJob.id}
-            <span class="hint">This request already has a job. No second job was queued.</span>
+          {#if lastRead?.read.replayed && lastRead.job.id === readJob.id}
+            {#if lastRead.read.repeat}
+              <span class="hint">This request is already queued as job <a href="#/jobs/{encodeURIComponent(readJob.id)}">{readJob.id}</a>.</span>
+              {#if !blocked}<button type="button" class="btn small" disabled={lastRead.read.busy} onclick={lastRead.read.repeat}>Queue another</button>{/if}
+            {:else}
+              <span class="hint">This request already has a job. No second job was queued.</span>
+            {/if}
           {/if}
         </div>
       {/if}
@@ -319,6 +333,7 @@
         {/if}
       </span>
       {#if invError}<p class="note bad" role="alert">{invError}</p>{/if}
+      {#if detailError}<p class="note bad" role="alert"><span>{detailError}</span> The workbench will retry the job details.</p>{/if}
     </div>
   </div>
 

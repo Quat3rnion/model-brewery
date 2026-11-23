@@ -17,6 +17,13 @@ export class ApiError extends Error {
   }
 }
 
+export type JobReceipt = JobSummary | { id: string; duplicate_of?: true };
+
+const submitHeaders = (key: string, allowDuplicate: boolean) => ({
+  'Idempotency-Key': key,
+  ...(allowDuplicate ? { 'Brewery-Allow-Duplicate': '1' } : {}),
+});
+
 async function requestWithStatus<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, extra?: Record<string, string>): Promise<{ data: T; status: number }> {
   let response: Response;
   const headers: Record<string, string> = { Accept: 'application/json' };
@@ -50,7 +57,7 @@ async function requestWithStatus<T>(method: string, path: string, body?: unknown
     // Controller ApiError (including JSON extractor errors) is a JSON object
     // with exactly one field. Do not use a proxy's status code as provenance.
     const controllerError = typeof error === 'string' && Object.keys(data as object).length === 1 &&
-      /^\s*application\/json\s*(?:;|$)/i.test(response.headers.get('content-type') ?? '');
+      response.headers.get('content-type') === 'application/json' && response.headers.get('brewery-error') === '1';
     const message = typeof error === 'string' ? error : `Request failed with HTTP ${response.status}.`;
     throw new ApiError(message, response.status, controllerError);
   }
@@ -70,11 +77,11 @@ export const api = {
   addPrompt: (prompt: NewPrompt) => request<Prompt>('POST', '/api/prompts', prompt),
   updatePrompt: (id: string, prompt: NewPrompt) => request<Prompt>('PUT', `/api/prompts/${encodeURIComponent(id)}`, prompt),
   deletePrompt: (id: string) => request<void>('DELETE', `/api/prompts/${encodeURIComponent(id)}`),
-  queueJob: (job: NewJob, key: string) => request<JobSummary | Pick<JobSummary, 'id'>>('POST', '/api/jobs', job, undefined, { 'Idempotency-Key': key }),
+  queueJob: (job: NewJob, key: string, allowDuplicate = false) => request<JobReceipt>('POST', '/api/jobs', job, undefined, submitHeaders(key, allowDuplicate)),
   suggestPaths: (host: string, prefix: string, signal?: AbortSignal) => request<unknown>('POST', '/api/suggestions/paths', { host, prefix }, signal),
   // Durable conversion workflow (controller runs inspect → plan → convert → verify).
   conversionEligibility: (body: unknown, signal?: AbortSignal) => request<EligibilityEntry>('POST', '/api/conversions/eligibility', body, signal),
-  startConversion: (body: unknown, key: string) => requestWithStatus<unknown>('POST', '/api/conversions', body, undefined, { 'Idempotency-Key': key }),
+  startConversion: (body: unknown, key: string, allowDuplicate = false) => requestWithStatus<unknown>('POST', '/api/conversions', body, undefined, submitHeaders(key, allowDuplicate)),
   conversions: (signal?: AbortSignal) => request<unknown>('GET', '/api/conversions', undefined, signal),
   cancelConversion: (id: string) => request<unknown>('POST', `/api/conversions/${encodeURIComponent(id)}/cancel`, {}),
   settings: (signal?: AbortSignal) => request<{ hosts: HostReadiness[] }>('GET', '/api/settings', undefined, signal),
@@ -103,5 +110,5 @@ export function rejectedSubmission(error: unknown): boolean {
 export function submissionError(error: unknown): string {
   const text = errorText(error);
   if (rejectedSubmission(error)) return text;
-  return `${text} Check Jobs, or retry with the same inputs without reloading. Reloading loses duplicate protection.`;
+  return `${text} Check Jobs, or retry with the same inputs without reloading to reuse the key. The controller also checks for active and recent matches.`;
 }
