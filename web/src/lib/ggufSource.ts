@@ -8,9 +8,10 @@ export const validSha = (v: unknown) => typeof v === 'string' && /^[0-9a-f]{64}$
 
 export function inventoryBlocker(source: Model, host: Host | undefined): string | null {
   if (source.available === false) return source.reason ?? 'This source is not available.';
+  if (host?.scheduling_paused) return 'Resume job scheduling for the input worker.';
   for (const key of ['weight_inspect', 'weight_visual', ...(isSafeSource(source.kind) ? ['weight_safetensors'] : source.kind === 'hgn' ? ['weight_hgn'] : [])]) {
     const cap = capability(host, key);
-    if (!cap.allowed) return cap.reason ?? 'Native tensor inventory is not enabled.';
+    if (!cap.allowed) return host?.capability_reasons?.[key]?.text ?? cap.reason ?? 'Native tensor inventory is not enabled.';
   }
   return null;
 }

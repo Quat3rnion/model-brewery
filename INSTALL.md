@@ -4,6 +4,10 @@ This guide installs the controller and web page from a Linux clone. It uses a
 user-level systemd service, keeps state outside the clone, and adds no worker
 hosts by default.
 
+The controller listens on loopback by default. For network access, use the
+[HTTPS gateway](OPERATOR.md#run-the-controller). The gateway does not ask for
+a login. Allow only trusted client networks.
+
 ## Get the source
 
 Clone the repository, then run the remaining commands from its root:

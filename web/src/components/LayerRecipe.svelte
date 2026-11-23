@@ -1,74 +1,126 @@
+<script module lang="ts">
+  const common = ['BF16', 'F16', 'F32'] as const;
+  export const trellis = ['HT3', 'HT4'] as const;
+  export type OutputType = typeof common[number] | 'Q8_0' | 'Q8G64' | typeof trellis[number];
+  export const recipeTypes = (format: 'gguf' | 'hgn'): readonly OutputType[] =>
+    [...common, format === 'gguf' ? 'Q8_0' : 'Q8G64'];
+  export interface RecipeDraft {
+    defaultType: OutputType;
+    overrides: Record<number, OutputType | ''>;
+    assetId: string;
+  }
+</script>
+
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
-  import { api, errorText } from '../lib/api';
-  import { STAGES, type ConversionBody } from '../lib/conversion';
+  import { errorText } from '../lib/api';
+  import { conversionRunHref, STAGES, type ConversionBody } from '../lib/conversion';
+  import type { Blocker } from '../lib/blockers';
   import { conversions, type ConversionStarter } from '../lib/conversions.svelte';
-  import { capability, modelLabel } from '../lib/format';
+  import { capability, hostName, modelLabel } from '../lib/format';
+  import { roleLabel } from '../lib/components';
   import { inventoryBlocker, validSha } from '../lib/ggufSource';
   import { obj } from '../lib/reports';
   import { brewery } from '../lib/store.svelte';
   import type { JobDetail, JobSummary, Model } from '../lib/types';
-  import { inventoryJob, readInventory, walkInventory } from '../lib/weightmap';
+  import { inventoryJob, readInventory, supersededInventory, walkInventory } from '../lib/weightmap';
+  import JobState from './JobState.svelte';
+  import Blockers from './Blockers.svelte';
   import Submit from './Submit.svelte';
+  import SubmitStatus from './SubmitStatus.svelte';
+  import { acceptedJobSummary, guardReadLink, jobRequestKey, ReadVisit, Submitter } from '../lib/submit.svelte';
   import { trellisProblem } from '../lib/trellis-layer';
+  import { bodyKey, type PlainAttempt } from '../lib/submission-key';
 
-  let { source, format, starter }: { source: Model; format: 'gguf' | 'hgn'; starter: ConversionStarter } = $props();
+  let { source, format, starter, readAttempts, acceptedReads, restarts, draft = $bindable() }: {
+    source: Model; format: 'gguf' | 'hgn'; starter: ConversionStarter; readAttempts: PlainAttempt;
+    acceptedReads: SvelteMap<string, JobSummary>; restarts: SvelteMap<string, Set<string>>; draft: RecipeDraft;
+  } = $props();
 
-  const submitted = new SvelteMap<number, JobSummary | null>();
-  const loaded = new SvelteMap<string, JobDetail | 'rejected' | null>();
-  let error = $state('');
+  const launcher = 'convert.recipe.inventory';
+  const loaded = new SvelteMap<string, JobDetail | null>();
+  const rejected = new SvelteMap<string, string>();
+  const detailErrors = new SvelteMap<string, string>();
+  const attempted = new Map<string, Date | null>();
+  const reads = new Submitter(launcher, untrack(() => readAttempts));
+  const readVisit = new ReadVisit();
+  let receiptError = $state('');
   const host = $derived(brewery.state?.hosts.find(h => h.id === source.host));
   const blocked = $derived(inventoryBlocker(source, host));
   const expectedSha = $derived(source.kind === 'hf'
     ? validSha(source.bundle_sha256) ?? validSha(source.sha256)
     : validSha(source.sha256));
-  const currentJobs = $derived([...submitted.values()].flatMap(job =>
-    job ? [brewery.state?.jobs.find(j => j.id === job.id) ?? job] : []));
+  const ignored = $derived(restarts.get(source.id));
+  const currentJobs = $derived([...acceptedReads.values()]
+    .filter(job => job.host === source.host && job.input_ids[0] === source.id)
+    .map(job => brewery.state?.jobs.find(j => j.id === job.id) ?? brewery.details[job.id] ?? job)
+    .filter(job => readVisit.shows(job)));
   // Terminal inventory jobs may be reused only after their receipts have been
   // checked. The exporter verifies those bytes again before it writes.
   const jobs = $derived([
     ...currentJobs,
     ...(brewery.state?.jobs ?? []).filter(job => job.kind === 'weight_inspect' &&
-      job.host === source.host && job.input_ids[0] === source.id && job.state === 'succeeded' &&
-      job.has_result !== false && !currentJobs.some(current => current.id === job.id)),
-  ].filter(job => loaded.get(job.id) !== 'rejected'));
-  const details = $derived(Object.fromEntries([...loaded].filter(([, detail]) => detail && detail !== 'rejected')) as Record<string, JobDetail>);
+      job.host === source.host && job.input_ids[0] === source.id &&
+      (readVisit.shows(job) && (job.state !== 'succeeded' || job.has_result !== false)) &&
+      !currentJobs.some(current => current.id === job.id)),
+  ].filter(job => !rejected.has(job.id) && !ignored?.has(job.id)));
+  const details = $derived(Object.fromEntries([...loaded].filter(([, detail]) => detail)) as Record<string, JobDetail>);
   const inventory = $derived(walkInventory(source, jobs, details, { format: source.kind, sha: expectedSha, matchHost: true }));
   // Physical HF tree digest of the pinned release (qualification/release_matrix.md).
   const flashDigest = '0eb8fb9e3b0f2422297174c880aa2ad8304e77a34d37b15c592ded1c3f9b4cd1';
   const flash = $derived(source.kind === 'hf' &&
     (expectedSha === flashDigest || inventory.pages[0]?.source_sha256 === flashDigest));
 
-  $effect(() => {
-    const next = inventory.need;
-    if (flash || blocked || error || !next || submitted.has(next.offset)) return;
+  const readPending = $derived(reads.busy);
+  const canRead = $derived(!flash && !blocked && !!inventory.need);
+  const canRestart = $derived(!flash && !blocked && inventory.pages.length > 0 && (!!inventory.need || !!inventory.error));
+  const readJob = $derived(inventory.job ?? currentJobs.filter(job => !ignored?.has(job.id)).at(-1));
+  let readLink: HTMLAnchorElement | undefined = $state();
+
+  function readLayers(event: MouseEvent, restart = false) {
+    if (!(restart ? canRestart : canRead)) return;
+    const next = restart ? { offset: 0, sha: undefined } : inventory.need!;
     const { offset, sha } = next;
     const request = inventoryJob(source.id, source.host, offset, sha);
-    submitted.set(offset, null);
-    void api.submitJob(request).then(job => {
-      if (job.kind !== request.kind || job.host !== request.host || job.input_ids?.length !== 1 || job.input_ids[0] !== request.input_ids[0]) {
-        error = 'The inventory job does not match the selected source.';
-        return;
+    const key = jobRequestKey(launcher, request);
+    void reads.submit(request, event, false, admitted => { if (admitted) receiptError = ''; }, (accepted, focus) => {
+      const id = accepted.id;
+      function record(job: JobSummary) {
+        if (job.id !== id || job.kind !== request.kind || job.host !== request.host || job.input_ids?.length !== 1 || job.input_ids[0] !== request.input_ids[0]) {
+          receiptError = 'The inventory job does not match the selected source.';
+          return;
+        }
+        readVisit.remember(id);
+        acceptedReads.set(key, job);
       }
-      submitted.set(offset, job);
-      void brewery.refresh();
-    }).catch(e => { error = errorText(e); });
-  });
+      if (restart) restarts.set(request.input_ids[0], supersededInventory(
+        [...(brewery.state?.jobs ?? []), ...acceptedReads.values()], request.input_ids[0], id));
+      record(acceptedJobSummary(accepted, request));
+      void focus?.(() => readLink);
+      // A match can return only the ID. A state poll can replace the placeholder.
+      if (!('state' in accepted)) void brewery.loadJob(id).then(detail => {
+        if (acceptedReads.get(key)?.id === id) record(detail);
+      }).catch(() => {});
+    }, restart);
+  }
 
   $effect(() => {
+    // Try a transient detail error again after the next successful state poll.
+    const snapshot = brewery.lastUpdated;
     const job = inventory.job;
-    if (flash || error || job?.state !== 'succeeded') return;
+    readVisit.observe(job);
+    if (flash || job?.state !== 'succeeded') return;
     const jobId = job.id;
-    const fresh = currentJobs.some(current => current.id === jobId);
     function reject(reason: string) {
-      if (fresh) error = reason;
-      else loaded.set(jobId, 'rejected');
+      rejected.set(jobId, reason);
     }
     if (inventory.error) {
       reject(inventory.error);
       return;
     }
-    if (loaded.has(jobId)) return;
+    if (loaded.has(jobId) || attempted.get(jobId) === snapshot) return;
+    attempted.set(jobId, snapshot);
     const { id, host, kind } = source;
     loaded.set(jobId, null);
     void brewery.loadJob(jobId).then(detail => {
@@ -82,19 +134,20 @@
         return;
       }
       loaded.set(jobId, detail);
-    }).catch(e => reject(errorText(e)));
+      detailErrors.delete(jobId);
+    }).catch(error => {
+      detailErrors.set(jobId, errorText(error));
+      loaded.delete(jobId);
+    });
   });
 
-  const common = ['BF16', 'F16', 'F32'] as const;
-  const trellis = ['HT3','HT4'] as const;
-  type OutputType = typeof common[number] | 'Q8_0' | 'Q8G64' | typeof trellis[number];
-  const formatTypes = $derived<readonly OutputType[]>([...common, format === 'gguf' ? 'Q8_0' : 'Q8G64']);
-  let defaultType = $state<OutputType>('BF16');
-  let overrides = $state<Record<number, OutputType | ''>>({});
-  const complete = $derived(!flash && !error && !inventory.need && !inventory.job && inventory.pages.length > 0);
-  const problem = $derived(flash ? 'No layer-recipe exporter admits this pinned Flash-Next checkpoint.'
-    : error || (source.available === false || (!complete && !inventory.job) ? blocked : null) ||
-      (inventory.job?.state === 'succeeded' ? null : inventory.error));
+  const formatTypes = $derived(recipeTypes(format));
+  const complete = $derived(!flash && !inventory.need && !inventory.job && inventory.pages.length > 0);
+  const problem = $derived(flash ? 'The layer-recipe exporters do not support this Flash-Next checkpoint.'
+    : source.available === false || (!complete && (!inventory.job || inventory.error)) ? blocked : null);
+  const readError = $derived(receiptError || (inventory.job?.state === 'succeeded' ? null : inventory.error) ||
+    (readJob && rejected.get(readJob.id)));
+  const detailError = $derived(readJob && detailErrors.get(readJob.id));
   const layers = $derived(complete ? [...new Set(inventory.pages.flatMap(({ tensors }) => tensors.flatMap(t => {
     const match = /^(?:model\.layers|transformer\.h)\.(0|[1-9]\d*)\./.exec(t.name);
     const layer = Number(match?.[1]);
@@ -106,34 +159,44 @@
     const byName = new Map(inventory.pages.flatMap(p=>p.tensors.map(t=>[t.name,t] as const)));
     return Object.fromEntries(layers.map(n=>[n,trellisProblem(n,byName)]));
   });
+  const trellisReasons = $derived([...new Set(Object.values(trellisIssues).filter(Boolean))]);
   const incompatible = $derived([...new Set([
-    ...(!formatTypes.includes(defaultType) ? [defaultType] : []),
-    ...layers.map(n=>overrides[n]).filter(type=>type && !formatTypes.includes(type) && !(format==='hgn' && (type==='HT3' || type==='HT4'))),
+    ...(!formatTypes.includes(draft.defaultType) ? [draft.defaultType] : []),
+    ...layers.map(n=>draft.overrides[n]).filter(type=>type && !formatTypes.includes(type) && !(format==='hgn' && (type==='HT3' || type==='HT4'))),
   ])]);
-  const badGeometry = $derived(layers.some(n=>trellisIssues[n] && (overrides[n]==='HT3' || overrides[n]==='HT4')));
-  const layerTypes = $derived(Object.fromEntries(layers.filter(layer => overrides[layer]).map(layer => [layer, overrides[layer]])));
+  const badGeometry = $derived(layers.some(n=>trellisIssues[n] && (draft.overrides[n]==='HT3' || draft.overrides[n]==='HT4')));
+  const layerTypes = $derived(Object.fromEntries(layers.filter(layer => draft.overrides[layer]).map(layer => [layer, draft.overrides[layer]])));
   const tooMany = $derived(Object.keys(layerTypes).length > 256);
   const recipe = $derived(!problem && sourceSha && layers.length && !incompatible.length && !badGeometry && !tooMany ? {
     schema: 'brewery.layer-quant.v1',
     source_sha256: sourceSha,
-    default_type: defaultType,
+    default_type: draft.defaultType,
     layers: layerTypes,
   } : null);
 
   const standalone = $derived(source.kind === 'safetensors');
   const assets = $derived((brewery.state?.models ?? []).filter(m => m.kind === 'assets' && m.host === source.host && m.available !== false));
-  let assetId = $state('');
-  const selectedAsset = $derived(assets.find(asset => asset.id === assetId));
+  const selectedAsset = $derived(assets.find(asset => asset.id === draft.assetId));
   const requirements = $derived(format === 'hgn' ? ['hgn_layer_recipe', ...STAGES]
     : ['gguf_layer_recipe', 'gguf_output', standalone ? 'gguf_safetensors_output' : 'gguf_hf_output', ...STAGES]);
-  const setup = $derived(flash ? '' : !host ? 'The controller did not report a worker for this source.'
-    : [...new Set(requirements.map(kind => capability(host, kind)).flatMap(c => !c.allowed && c.reason ? [c.reason] : []))].join(' '));
+  const setup = $derived.by((): Blocker[] => {
+    const worker = hostName(brewery.state?.hosts ?? [], source.host);
+    const fallback = `#/settings/infrastructure?host=${encodeURIComponent(source.host)}&section=policy`;
+    if (!host) return [{ host: worker, text: 'The controller did not report this host', fixAnchor: fallback }];
+    const reasons = host.scheduling_paused ? [{ text: 'Resume job scheduling', fix_anchor: fallback }] : [];
+    for (const kind of requirements) {
+      const cap = capability(host, kind);
+      const reason = host.capability_reasons?.[kind] ?? { text: cap.reason ?? `Enable ${kind}`, fix_anchor: fallback };
+      if (!cap.allowed && !reasons.some((r) => r.text === reason.text)) reasons.push(reason);
+    }
+    return reasons.map((r) => ({ host: worker, text: r.text, fixAnchor: r.fix_anchor }));
+  });
   const runBlockers = $derived.by(() => {
     if (flash) return ['Select a checkpoint supported by the layer-recipe exporter.'];
     const out: string[] = [];
-    if (setup) out.push(setup);
+    if (setup.length) out.push('Use a host that supports this recipe output.');
     if (conversions.status === 'unavailable') out.push('This controller has no managed conversion workflow.');
-    if (!recipe && !problem) out.push(!complete ? 'Wait for the source inventory.' : !layers.length
+    if (!recipe && !problem) out.push(!complete ? 'Read the source layers first.' : !layers.length
       ? 'Choose a source with recognized layer matrices.' : tooMany ? 'Use at most 256 layer overrides.' : 'Change the incompatible types.');
     if (problem) out.push('Resolve the source inventory problem above.');
     if (format === 'hgn' && recipe && !Object.values(recipe.layers).some(type => type === 'HT3' || type === 'HT4')) {
@@ -148,13 +211,14 @@
     input_ids: selectedAsset && standalone ? [source.id, selectedAsset.id] : [source.id],
     options: { layer_recipe: recipe },
   } : null);
-  let lastBody = $state('');
-  const currentSubmission = $derived(body !== null && lastBody === JSON.stringify(body));
+  let attemptedBody = $state<string>();
+  const currentAttempt = $derived(body !== null && attemptedBody === bodyKey(body));
 
-  async function run() {
-    if (!body || starter.busy) return;
-    lastBody = JSON.stringify(body);
-    await starter.start(body);
+  let runLink: HTMLAnchorElement | undefined = $state();
+  function run(event: MouseEvent) {
+    if (!body) return;
+    attemptedBody = bodyKey(body);
+    void starter.start(body, event, () => runLink);
   }
 
   function download() {
@@ -178,30 +242,49 @@
   {/if}
 {/snippet}
 
-{#if problem}
-  <p class="note bad" role="alert">{problem}</p>
-{:else if !complete}
-  <p class="muted small" role="status">Reading source SHA-256 and layers…</p>
-{:else if !layers.length}
+<Blockers blockers={setup} />
+<p class="hint">Supported architectures: {format === 'gguf' ? 'GPT-2 and Qwen2' : 'dense Llama and Qwen2'}. The exporter checks the architecture and assets before it writes output.</p>
+{#if readJob && !flash}
+  <div class="row" role="status">
+    <a bind:this={readLink} href="#/jobs/{encodeURIComponent(readJob.id)}" onclick={(event) => guardReadLink(event, launcher)}>Layer read job</a>
+    <JobState job={readJob} />
+  </div>
+{/if}
+{#if reads.error || reads.replayed}<SubmitStatus s={reads} allowRepeat={!blocked && !flash} />{/if}
+{#if readError}<p class="note bad" role="alert">{readError}</p>{/if}
+{#if detailError}<p class="note bad" role="alert">{detailError} The workbench will retry the job details.</p>{/if}
+{#if problem}<p class="note bad" role="alert">{problem}</p>{/if}
+{#if canRead || canRestart}
+  <div class="row">
+    {#if canRead}<button type="button" class="btn" onclick={(event) => readLayers(event)} disabled={readPending}>
+      {inventory.pages.length ? 'Read next layers' : 'Read layers'}
+    </button>{/if}
+    {#if canRestart}<button type="button" class="btn" onclick={(event) => readLayers(event, true)} disabled={readPending}>Read from page 1</button>{/if}
+    <span class="hint">This queues a <code>weight_inspect</code> job on {hostName(brewery.state?.hosts ?? [], source.host)}.</span>
+  </div>
+  {#if readPending}<p class="hint" role="status">Submitting the layer read.</p>{/if}
+{:else if !problem && !complete}
+  <p class="muted small" role="status">Waiting for the source SHA-256 and layers.</p>
+{:else if !problem && !layers.length}
   <p class="note warn small">The source inventory does not list any recognized layer matrices.</p>
-{:else}
+{:else if !problem}
   <p class="small">Source SHA-256: <code class="mono" style="overflow-wrap:anywhere">{sourceSha}</code></p>
-  <p class="hint">Choose a default type and optional layer overrides. The exporter checks the architecture, assets and tensor layout before it writes output.</p>
+  {#if trellisReasons.length}<p class="note warn small" id="recipe-ht-help">HT3 and HT4 are not available for some layers. {trellisReasons.join(' ')}</p>{/if}
+  <p class="hint">Choose a default type and optional layer overrides.</p>
   <div class="grid-3">
     <label class="field">
       Default type
-      <select class="input" bind:value={defaultType}>
-        {@render typeOptions(defaultType)}
+      <select class="input" bind:value={draft.defaultType}>
+        {@render typeOptions(draft.defaultType)}
       </select>
     </label>
     {#each layers as layer (layer)}
       <div class="field">
         <label for="recipe-layer-{layer}">Layer {layer} type</label>
-        <select id="recipe-layer-{layer}" class="input" aria-describedby={trellisIssues[layer] ? `ht-help-${layer}` : undefined} bind:value={overrides[layer]}>
-          <option value="">Default ({defaultType})</option>
-          {@render typeOptions(overrides[layer] ?? '', layer)}
+        <select id="recipe-layer-{layer}" class="input" aria-describedby={trellisIssues[layer] ? 'recipe-ht-help' : undefined} bind:value={draft.overrides[layer]}>
+          <option value="">Default ({draft.defaultType})</option>
+          {@render typeOptions(draft.overrides[layer] ?? '', layer)}
         </select>
-        {#if trellisIssues[layer]}<span class="hint" id="ht-help-{layer}">HT3/HT4 unavailable. {trellisIssues[layer]}</span>{/if}
       </div>
     {/each}
   </div>
@@ -211,18 +294,18 @@
   {#if tooMany}<p class="note warn small" role="alert">Use at most 256 layer overrides.</p>{/if}
   <div><button type="button" class="btn" onclick={download} disabled={!recipe} aria-describedby={incompatible.length ? 'recipe-codec-warning' : undefined}>Download recipe</button></div>
   {#if format === 'gguf'}
-    <p class="hint">The GGUF exporter supports GPT-2 and Qwen2 layouts. Layer overrides apply to decoder layer matrices. The default also applies to other eligible matrices.</p>
+    <p class="hint">Layer overrides apply to decoder layer matrices. The default also applies to other supported matrices.</p>
   {:else}
     <p class="hint">Offline HGN exporter: <code>python3 tools/layer_recipe_hgn.py SOURCE layer-recipe.json OUTPUT --helper PATH</code>. For a standalone file, also supply <code>--assets DIR</code>.</p>
-    <p class="hint">Managed native HGN checks dense Llama and Qwen2 layouts on a configured local worker. HT3 and HT4 apply only to layer matrices. Verification checks the archive structure; it does not check runtime loading or model quality.</p>
+    <p class="hint">HT3 and HT4 apply only to layer matrices. Verification checks the archive structure. It does not check runtime loading or model quality.</p>
     <p class="hint">Native HGN HT3/HT4 is not EXL3 or a reference QTIP checkpoint. GGUF KT encoding is not available through this recipe.</p>
   {/if}
 {/if}
 
 {#if standalone}
   <label class="field">
-    Config and tokenizer assets
-    <select class="input" bind:value={assetId} disabled={!assets.length}>
+    {roleLabel('assets')}
+    <select class="input" bind:value={draft.assetId} disabled={!assets.length}>
       <option value="">Select matching assets</option>
       {#each assets as asset (asset.id)}<option value={asset.id}>{modelLabel(asset)} · {asset.path}</option>{/each}
     </select>
@@ -230,17 +313,11 @@
   {#if !assets.length}<p class="hint"><a href="#/library">Register the matching assets in Library</a> on {host?.name ?? source.host}.</p>{/if}
 {/if}
 <Submit blockers={runBlockers} busy={starter.busy} onclick={run}>Run layer recipe</Submit>
-{#if setup}
-  <p class="hint">Ask an operator to configure managed {format.toUpperCase()} layer recipes on this worker. <a href="#/settings/infrastructure?host={encodeURIComponent(source.host)}">Open host settings</a>.</p>
-{/if}
 <div aria-live="polite" class="xs">
-  {#if currentSubmission && starter.error}
-    <p class="note bad" role="alert">{starter.error} Run the same recipe again to retry the same request.</p>
-  {:else if currentSubmission && !starter.busy && starter.last}
-    <p class="muted">{starter.replayed ? 'This request already started conversion' : 'Started conversion'} <span class="mono">{starter.last.id}</span>. {#if starter.replayed}No second conversion was started. {/if}
-      <button type="button" class="btn ghost small" onclick={() => {
-        (document.getElementById(`run-${starter.last?.id}`) ?? document.getElementById('conversion-runs'))?.scrollIntoView({ block: 'start' });
-      }}>View conversion progress</button>
-    </p>
+  {#if currentAttempt && starter.error}
+    <p class="note bad" role="alert">{starter.error}</p>
+  {:else if !starter.busy && starter.last}
+    <p class="muted">{starter.matched ? 'This request is already queued as job' : starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a bind:this={runLink} href={conversionRunHref(starter.last.id, 'recipe')}>{starter.last.id}</a>. {#if starter.replayed}No second conversion was started.{/if}</p>
   {/if}
+  {#if currentAttempt && starter.repeat}<button type="button" class="btn small" disabled={starter.busy} onclick={starter.repeat}>Queue another</button>{/if}
 </div>

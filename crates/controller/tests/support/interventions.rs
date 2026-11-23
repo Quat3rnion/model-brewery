@@ -131,9 +131,19 @@ fn trace_admission_resolves_saved_directions_and_verified_patch_rows() {
     app.json("POST", "/api/jobs", Some(wrong_revision), 400);
 
     fs::write(app.path("trace-corrupt"), "").unwrap();
-    app.json("POST", "/api/jobs", Some(request.clone()), 502);
+    let repeat = |body| {
+        app.request(
+            "POST",
+            "/api/jobs",
+            Some(body),
+            "Brewery-Allow-Duplicate: 1\r\n",
+        )
+    };
+    let (status, reply) = repeat(request.clone());
+    assert_eq!(status, 502, "{reply}");
     fs::write(app.path("trace-pruned"), "").unwrap();
-    app.json("POST", "/api/jobs", Some(request), 404);
+    let (status, reply) = repeat(request);
+    assert_eq!(status, 404, "{reply}");
     assert_eq!(app.launches().len(), 2);
 }
 

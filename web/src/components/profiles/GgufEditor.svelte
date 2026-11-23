@@ -1,16 +1,21 @@
 <script lang="ts">
+  let saveBarHeight = $state(0);
+  import { unsavedChanges } from '../../lib/unsaved-changes.svelte';
   import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { api, errorText } from '../../lib/api';
+  import { acceptedJobSummary, guardReadLink, jobRequestKey, ReadVisit, Submitter } from '../../lib/submit.svelte';
+  import { PlainAttempt } from '../../lib/submission-key';
   import { brewery } from '../../lib/store.svelte';
   import { profileStore } from '../../lib/profiles.svelte';
-  import { WEIGHT_SOURCES, isSafeSource, formatBytes, formatTime } from '../../lib/format';
+  import { WEIGHT_SOURCES, hostName, isSafeSource, formatBytes, formatTime } from '../../lib/format';
   import { parseGgufProfiles, shortRev, type SavedGgufProfile } from '../../lib/profiles';
   import { buildGgufProfileBody, imatrixRequired, layerOf, rangeOverrides, tensorBytes, forkSelected, profileMatches, FORK_NOTICE, type GgufCatalog } from '../../lib/gguf';
   import { ggufEvidenceIds, inventoryBlocker, resolveGgufSource, validSha, type ExactInventory } from '../../lib/ggufSource';
-  import { inventoryJob, walkInventory } from '../../lib/weightmap';
+  import { inventoryJob, supersededInventory, walkInventory } from '../../lib/weightmap';
   import type { JobDetail, JobSummary } from '../../lib/types';
   import Badge from '../Badge.svelte';
+  import JobState from '../JobState.svelte';
   import ModelSelect from '../ModelSelect.svelte';
 
   let { catalog }: { catalog: GgufCatalog } = $props();
@@ -23,14 +28,10 @@
   let overrides = $state<Record<string, string>>({});
   let start = $state<SavedGgufProfile | null>(null);
 
-  // Choose the first available supported Library entry until the user selects one.
   const models = $derived((brewery.state?.models ?? []).filter(m => WEIGHT_SOURCES.includes(m.kind)));
   const jobs = $derived(brewery.state?.jobs ?? []);
   let sourceId = $state('');
   const source = $derived(models.find(m => m.id === sourceId));
-  $effect(() => {
-    if (!source) sourceId = (models.find(m => m.available !== false) ?? models[0])?.id ?? '';
-  });
   const sourceKey = $derived(source ? JSON.stringify([source.id, source.kind, source.host, source.path, source.sha256, source.bundle_sha256]) : '');
   const evidenceKey = $derived(source ? JSON.stringify(ggufEvidenceIds(source, jobs)) : '');
   const lookupKey = $derived(sourceKey ? JSON.stringify([sourceKey, evidenceKey]) : '');
@@ -39,7 +40,7 @@
   function loadDetail(id: string): Promise<JobDetail> {
     let pending = evidence.get(id);
     if (!pending) {
-      pending = brewery.loadJob(id);
+      pending = brewery.loadJob(id).finally(() => evidence.delete(id));
       evidence.set(id, pending);
     }
     return pending;
@@ -60,33 +61,80 @@
   const host = $derived(brewery.state?.hosts.find(h => h.id === source?.host));
   const blocked = $derived(source ? inventoryBlocker(source, host) : null);
   const packed = $derived(!!source && !isSafeSource(source.kind) && host?.capabilities?.weight_packed === true);
-  const submitted = new SvelteMap<string, JobSummary | string | null>();
-  const detailErrors = new SvelteMap<string, string>();
-  const inventoryJobs = $derived([...jobs, ...[...submitted.values()].filter((j): j is JobSummary =>
-    !!j && typeof j !== 'string' && !jobs.some(row => row.id === j.id))]);
+  const submitted = new SvelteMap<string, JobSummary>();
+  const restarts = new SvelteMap<string, Set<string>>();
+  const launcher = 'profiles.gguf.inventory';
+  const readAttempts = new PlainAttempt();
+  const reads = new SvelteMap<string, Submitter>();
+  const readVisit = $derived(sourceKey ? {
+    jobs: new ReadVisit(),
+    attempts: new SvelteMap<string, true>(),
+    detailErrors: new SvelteMap<string, string>(),
+  } : null);
+  const attempted = new Map<string, Date | null>();
+  const inventoryJobs = $derived([...jobs, ...[...submitted.values()].filter(j => !jobs.some(row => row.id === j.id))]
+    .filter(job => readVisit?.jobs.shows(job) && !restarts.get(sourceKey)?.has(job.id)));
   const inv = $derived(source && lookup && !lookup.exact ? walkInventory(source, inventoryJobs, brewery.details, {
     format: source.kind, packed, matchHost: true,
     sha: source.kind === 'hf' ? validSha(source.bundle_sha256) ?? validSha(source.sha256) : validSha(source.sha256),
   }) : null);
   const need = $derived(source && inv?.need ? inventoryJob(source.id, source.host, inv.need.offset, inv.need.sha, packed) : null);
-  const needKey = $derived(need ? JSON.stringify([sourceKey, need.options]) : '');
-  const invError = $derived(inv?.error || (inv?.job && detailErrors.get(inv.job.id)) ||
-    (typeof submitted.get(needKey) === 'string' ? submitted.get(needKey) as string : null));
+  const firstPage = $derived(source ? inventoryJob(source.id, source.host, 0, undefined, packed) : null);
+  const firstPageKey = $derived(firstPage ? jobRequestKey(launcher, firstPage) : '');
+  const needKey = $derived(need ? jobRequestKey(launcher, need) : '');
+  const readPending = $derived(reads.get(needKey)?.busy ?? false);
+  const restartPending = $derived(reads.get(firstPageKey)?.busy ?? false);
+  const canRestart = $derived(!blocked && !!firstPage && !!inv?.pages.length && (!!need || !!inv.error));
+  const lastReads = new SvelteMap<string, { job: JobSummary; read: Submitter }>();
+  const lastRead = $derived(lastReads.get(sourceKey));
+  let readLink: HTMLAnchorElement | undefined = $state();
+  const lastJob = $derived(jobs.find(j => j.id === lastRead?.job.id) ?? lastRead?.job ?? null);
+  const readJob = $derived(inv?.job ?? (lastJob && readVisit?.jobs.shows(lastJob) && !restarts.get(sourceKey)?.has(lastJob.id) ? lastJob : null));
+  const invError = $derived.by(() => {
+    const read = reads.get(needKey);
+    // Keep instructions for resolving an ambiguous POST with its original key.
+    const restart = canRestart ? reads.get(firstPageKey) : undefined;
+    return ((restart?.ambiguous || readVisit?.attempts.has(firstPageKey)) && restart?.error) ||
+      ((read?.ambiguous || readVisit?.attempts.has(needKey)) && read?.error) || inv?.error;
+  });
+  const detailError = $derived(inv?.job && readVisit?.detailErrors.get(inv.job.id));
   $effect(() => {
+    const visit = readVisit;
+    const snapshot = brewery.lastUpdated;
     const job = inv?.job;
-    if (job?.state !== 'succeeded' || brewery.details[job.id]) return;
-    void loadDetail(job.id).catch(error => detailErrors.set(job.id, errorText(error)));
+    visit?.jobs.observe(job);
+    if (job?.state !== 'succeeded' || brewery.details[job.id] || attempted.get(job.id) === snapshot) return;
+    attempted.set(job.id, snapshot);
+    void loadDetail(job.id).then(
+      () => visit?.detailErrors.delete(job.id),
+      error => visit?.detailErrors.set(job.id, errorText(error)),
+    );
   });
-  $effect(() => {
-    const key = needKey;
-    const request = need;
-    if (!key || !request || blocked || submitted.has(key)) return;
-    submitted.set(key, null);
-    void api.submitJob(request).then(job => {
+  function readTensors(event: MouseEvent, restart = false) {
+    const key = restart ? firstPageKey : needKey;
+    const request = restart ? firstPage : need;
+    if (!key || !request || blocked || (restart && !canRestart)) return;
+    const modelKey = sourceKey;
+    const visit = readVisit;
+    let read = reads.get(key);
+    if (!read) {
+      read = new Submitter(launcher, readAttempts);
+      reads.set(key, read);
+    }
+    const submitter = read;
+    void read.submit(request, event, false, () => visit?.attempts.set(key, true), (accepted, focus) => {
+      const job = acceptedJobSummary(accepted, request);
+      if (restart) restarts.set(modelKey, supersededInventory([...jobs, ...submitted.values()], request.input_ids[0], job.id));
+      (modelKey === sourceKey ? readVisit : visit)?.jobs.remember(job.id);
       submitted.set(key, job);
-      void brewery.refresh();
-    }).catch(error => submitted.set(key, errorText(error)));
-  });
+      // A slow reply from an earlier page must not replace a newer page's result.
+      const previousOffset = lastReads.get(modelKey)?.job.options?.offset;
+      if (restart || previousOffset === undefined || Number(previousOffset) <= Number(request.options?.offset)) {
+        lastReads.set(modelKey, { job, read: submitter });
+      }
+      if (modelKey === sourceKey) void focus?.(() => readLink);
+    }, restart);
+  }
   const native = $derived(inv?.pages.flatMap(p => p.tensors) ?? []);
   const nativeNames = $derived(new Set(source?.kind === 'gguf' ? [] : native.map(t => t.name)));
   const tensors = $derived(lookup?.exact?.tensors ??
@@ -125,7 +173,7 @@
   const manualProblem = $derived(nativeNames.has(manualName.trim())
     ? 'This is a native source name, not a GGUF override.'
     : manualName && !/^[A-Za-z0-9_.\-]{1,200}$/.test(manualName.trim()) ? 'Use the exact GGUF tensor name, for example blk.12.ffn_down.weight.' : null);
-  const discovering = $derived(!!source && (!lookup || (!!inv && !blocked && !invError && !!(inv.need || inv.job))));
+  const discovering = $derived(!!source && (!lookup || readPending || (!!inv?.job && !blocked && !invError && !detailError)));
   function addManual() {
     const n = manualName.trim();
     if (!n || manualProblem || !manualType || discovering) return;
@@ -158,8 +206,10 @@
   const nativeOverrides = $derived(Object.keys(overrides).some(n => nativeNames.has(n)));
   const startJson = $derived(start ? JSON.stringify([start.name, start.preset, start.overrides]) : JSON.stringify(['', catalog.presets[0]?.id ?? '', {}]));
   const dirty = $derived(JSON.stringify([name.trim(), preset, overrides]) !== startJson);
+  const guard = unsavedChanges(() => dirty);
 
   function edit(p: SavedGgufProfile) {
+    if (saving || !guard.confirm()) return;
     start = p;
     name = p.name;
     preset = p.preset;
@@ -198,14 +248,15 @@
     }
   }
   function useInConvert(p: SavedGgufProfile) {
-    if (!profileMatches(catalog,p)) return;
+    if (saving || !profileMatches(catalog,p) || !guard.confirm()) return;
+    reset();
     profileStore.pendingUse = `gguf:${p.revision}`;
-    location.hash = '#/convert';
+    location.hash = '#/convert?format=gguf';
   }
   const typeNote = (id: string) => (catalog.typeById.get(id)?.fork ? ' · ROCmFPX' : '') + (catalog.typeById.get(id)?.requiresImatrix ? ' (needs imatrix)' : '');
 </script>
 
-<div class="stack">
+<div class="stack profile-editor" style:--save-bar-height="{saveBarHeight}px">
   <p class="note info">
     GGUF output uses llama.cpp tensor types. A preset sets every tensor; overrides change single tensors by their exact GGUF name. Only types the worker's llama.cpp build supports are listed. Sizes are shown only where the block size and the tensor shape are known.
   </p>
@@ -225,7 +276,7 @@
               <td class="xs" data-label="Saved">{p.createdAt ? formatTime(p.createdAt) : '—'}</td>
               <td class="acts">
                 <button type="button" class="btn small" onclick={() => edit(p)} aria-label="Edit {p.name} as a new revision">Edit</button>
-                <button type="button" class="btn small primary" disabled={!profileMatches(catalog,p)} onclick={() => useInConvert(p)} aria-label="Use GGUF profile {p.name} in Convert">Use in Convert</button>
+                <button type="button" class="btn small primary" disabled={!profileMatches(catalog,p)} onclick={() => useInConvert(p)} aria-label="Use in Convert: {p.name} revision {shortRev(p.revision)}">Use in Convert</button>
                 {#if !profileMatches(catalog,p)}<span class="xs muted">Incompatible encoder revision</span>{/if}
               </td>
             </tr>
@@ -245,17 +296,44 @@
       {#if forkSelected(catalog,preset,overrides)}<p class="note warn small">{FORK_NOTICE} Conversion requires a worker with ROCmFPX output support.</p>{/if}
     </div>
     <div class="stack">
-      <ModelSelect bind:value={sourceId} kinds={WEIGHT_SOURCES} label="Source model" hint="Choose a Library model to list its tensors." />
+      <ModelSelect bind:value={sourceId} kinds={WEIGHT_SOURCES} label="Source model" hint="Choose a Library model. You can also add overrides by exact name without a source." />
+      {#if source && !blocked && (need || readJob)}
+        <div class="row">
+          <button type="button" class="btn" onclick={(event) => readTensors(event)} disabled={!need || readPending}>
+            {need && inv?.pages.length ? 'Read next tensors' : 'Read tensor list'}
+          </button>
+          {#if canRestart}<button type="button" class="btn" onclick={(event) => readTensors(event, true)} disabled={readPending || restartPending}>Read from page 1</button>{/if}
+          <span class="hint">This queues a <code>weight_inspect</code> job on {hostName(brewery.state?.hosts ?? [], source.host)}.</span>
+        </div>
+      {/if}
+      {#if readJob}
+        <div class="row" role="status">
+          <a bind:this={readLink} href="#/jobs/{encodeURIComponent(readJob.id)}" onclick={(event) => guardReadLink(event, launcher)}>Tensor list read job</a>
+          <JobState job={readJob} />
+          {#if lastRead?.read.replayed && lastRead.job.id === readJob.id}
+            {#if lastRead.read.repeat}
+              <span class="hint">This request is already queued as job <a href="#/jobs/{encodeURIComponent(readJob.id)}">{readJob.id}</a>.</span>
+              {#if !blocked}<button type="button" class="btn small" disabled={lastRead.read.busy} onclick={lastRead.read.repeat}>Queue another</button>{/if}
+            {:else}
+              <span class="hint">This request already has a job. No second job was queued.</span>
+            {/if}
+          {/if}
+        </div>
+      {/if}
       <span class="hint" role="status">
-        {#if discovering}<span>Reading the tensor inventory{inv?.pages.length ? ` (${native.length} of ${inv.pages[0].total})` : ''}…</span>
+        {#if readPending}Submitting the tensor list read.
+        {:else if source && !lookup}Checking for saved tensor names.
+        {:else if discovering}Waiting for the tensor list.
+        {:else if need && inv?.pages.length}{native.length} of {inv.pages[0].total} tensors.
         {:else if lookup?.exact?.planned}{tensors?.length} planned main GGUF tensor names in {layers.length} layers. This plan does not confirm conversion or list separate outputs.
         {:else if tensors}{tensors.length} exact GGUF tensor names in {layers.length} layers.
-        {:else if native.length}{native.length} native source tensors (read-only). No verified GGUF tensor mapping is available.
+        {:else if native.length}{native.length} native source tensors. No verified GGUF tensor mapping is available.
         {:else if blocked}{blocked}
-        {:else if source && !invError}No tensor names were found for this source.
+        {:else if source && !need && !invError}No tensor names were found for this source.
         {/if}
-        {#if invError}{' '}{invError}{/if}
       </span>
+      {#if invError}<p class="note bad" role="alert">{invError}</p>{/if}
+      {#if detailError}<p class="note bad" role="alert"><span>{detailError}</span> The workbench will retry the job details.</p>{/if}
     </div>
   </div>
 
@@ -329,7 +407,7 @@
               <td class="mono xs" data-label="Original format">{t.currentType ?? 'Not reported'}</td>
               <td data-label="Output type">
                 {#if t.kind === 'native'}
-                  <span class="xs muted">Read-only</span>
+                  <span class="xs muted">No GGUF mapping</span>
                   {#if ov}<button type="button" class="btn small" onclick={() => setOne(t.name, '')}>Remove draft override</button>{/if}
                 {:else}
                 <label class="sr-only" for="{uid}-o-{t.name}">Output type for {t.name}</label>
@@ -362,17 +440,36 @@
       <input id="{uid}-name" class="input" bind:value={name} maxlength="80" autocomplete="off" aria-describedby="{uid}-name-h" />
       <span class="hint" id="{uid}-name-h">Saving with the same name adds a new revision; the imatrix is chosen at conversion time.</span>
     </div>
-    <button type="button" class="btn primary" disabled={!built.body || saving || discovering || nativeOverrides || (!dirty && !!start)} onclick={save}>{saving ? 'Saving…' : 'Save GGUF revision'}</button>
   </div>
   {#if built.problems.length}<p class="why xs"><strong>Needed:</strong> {built.problems.join(' ')}</p>{/if}
-  {#if nativeOverrides}<p class="why xs">Remove the draft overrides for read-only source names to save this profile.</p>{/if}
+  {#if nativeOverrides}<p class="why xs">Remove draft overrides for source names without a GGUF mapping to save this profile.</p>{/if}
   <div aria-live="polite">
     {#if saveErr}<p class="note bad" role="alert">{saveErr} Your changes are kept.</p>{/if}
-    {#if saved}<div class="note info"><p>Saved <strong>{saved.name}</strong>, revision <span class="mono">{shortRev(saved.revision)}</span>. No job was started.</p><button type="button" class="btn small primary" onclick={() => useInConvert(saved!)}>Use in Convert</button></div>{/if}
+    {#if saved}<div class="note info"><p>Saved <strong>{saved.name}</strong>, revision <span class="mono">{shortRev(saved.revision)}</span>.</p><button type="button" class="btn small primary" onclick={() => useInConvert(saved!)}>Use in Convert</button></div>{/if}
+  </div>
+  <div class="save-bar" bind:offsetHeight={saveBarHeight}>
+    {#if !name.trim()}<a href="#{uid}-name" onclick={(event) => { event.preventDefault(); document.getElementById(`${uid}-name`)?.focus(); }}>Enter a profile name</a>{/if}
+    <button type="button" class="btn primary" disabled={!built.body || saving || discovering || nativeOverrides || (!dirty && !!start)} onclick={save}>{saving ? 'Saving…' : 'Save revision'}</button>
   </div>
 </div>
 
 <style>
+  .profile-editor :global(:focus) {
+    scroll-margin-bottom: var(--save-bar-height);
+  }
+  .save-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--s-2);
+    padding: var(--s-2);
+    background: var(--surface-2);
+    border-radius: var(--r-md);
+  }
   .sum {
     display: flex;
     flex-wrap: wrap;

@@ -321,6 +321,9 @@ impl Route {
                     Some("header") if write && original_name == "Idempotency-Key" => {
                         "idempotency_key"
                     }
+                    Some("header") if write && original_name == "Brewery-Allow-Duplicate" => {
+                        continue;
+                    }
                     _ => panic!("unsupported tool parameter"),
                 };
                 if name == "idempotency_key" {

@@ -131,7 +131,8 @@ fn scratch_grant_is_job_scoped_exact_and_verified_before_use() {
     let pin = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
     let mut cfg: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
     cfg["engine_env"] = json!({"BREWERY_LANTERNFISH_TRACE":"/unused-in-fixture"});
-    cfg["scratch_access"] = json!({"job_id":"private-trace","paths":{(model.to_str().unwrap()):pin}});
+    cfg["scratch_access"] =
+        json!({"job_id":"private-trace","paths":{(model.to_str().unwrap()):pin}});
     fs::write(&t.b, cfg.to_string()).unwrap();
     fs::set_permissions(&t.b, fs::Permissions::from_mode(0o600)).unwrap();
     let input = |path: &Path| json!({"host":"b","path":path,"kind":"gguf","id":"scratch"});
@@ -152,12 +153,16 @@ fn scratch_grant_is_job_scoped_exact_and_verified_before_use() {
     assert!(resolve("normal", &model)["error"].is_string());
     prepare("another-trace", "trace", &model);
     assert!(resolve("another-trace", &model)["error"].is_string());
-    assert_eq!(prepare("private-trace", "trace", &model)["ok"]["state"], "queued");
+    assert_eq!(
+        prepare("private-trace", "trace", &model)["ok"]["state"],
+        "queued"
+    );
     assert!(resolve("private-trace", &other)["error"].is_string());
     fs::write(&model, b"bad").unwrap();
     assert!(
         resolve("private-trace", &model)["error"]
-            .as_str().is_some_and(|e| e.contains("scratch input SHA-256 mismatch"))
+            .as_str()
+            .is_some_and(|e| e.contains("scratch input SHA-256 mismatch"))
     );
     fs::write(&model, b"abc").unwrap();
     let resolved = resolve("private-trace", &model);
@@ -169,7 +174,12 @@ fn scratch_grant_is_job_scoped_exact_and_verified_before_use() {
         "queued"
     );
     let failed = t.wait("private-trace", "failed");
-    assert!(failed["error"].as_str().unwrap().contains("scratch input SHA-256 mismatch"));
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("scratch input SHA-256 mismatch")
+    );
     assert!(!t.root.join("b/jobs/private-trace/work").exists());
 }
 
@@ -200,22 +210,38 @@ print(json.dumps(dict(kind="convert", output_format="gguf", gguf_type="BF16",
     fs::write(&t.b, cfg.to_string()).unwrap();
     fs::set_permissions(&t.b, fs::Permissions::from_mode(0o600)).unwrap();
     fs::write(t.src.join("config.json"), "{}").unwrap();
-    let reply = t.dispatch("start", "scratch-export", Some(&json!({
-        "kind":"scratch_gguf","inputs":[{"host":"b","path":private,"kind":"safetensors"},
-                                       {"host":"b","path":t.src,"kind":"assets"}],
-        "options":{"output_format":"gguf","gguf_type":"BF16"}
-    })));
+    let reply = t.dispatch(
+        "start",
+        "scratch-export",
+        Some(&json!({
+            "kind":"scratch_gguf","inputs":[{"host":"b","path":private,"kind":"safetensors"},
+                                           {"host":"b","path":t.src,"kind":"assets"}],
+            "options":{"output_format":"gguf","gguf_type":"BF16"}
+        })),
+    );
     assert_eq!(reply["state"], "queued", "{reply}");
     let receipt = t.wait("scratch-export", "succeeded");
     assert_eq!(receipt["result"]["kind"], "convert");
     let out = &receipt["result"]["artifact"]["path"];
     assert!(Path::new(out.as_str().unwrap()).is_file());
+    assert_eq!(
+        t.rpc_raw(&json!({"op":"stat","path":t.src}))["ok"],
+        json!({"state":"outside_roots"})
+    );
     // Test ordinary RPCs under the same worker state, without the grant config.
     cfg.as_object_mut().unwrap().remove("scratch_access");
     fs::write(&t.b, cfg.to_string()).unwrap();
     let input = json!({"host":"b","path":out,"kind":"gguf"});
     assert!(t.rpc_raw(&json!({"op":"describe","input":input}))["error"].is_string());
-    let reply = t.dispatch("start", "ordinary", Some(&json!({"kind":"unrelated","inputs":[input]})));
+    assert_eq!(
+        t.rpc_raw(&json!({"op":"stat","path":out}))["ok"],
+        json!({"state":"outside_roots"})
+    );
+    let reply = t.dispatch(
+        "start",
+        "ordinary",
+        Some(&json!({"kind":"unrelated","inputs":[input]})),
+    );
     assert_eq!(reply["state"], "failed", "{reply}");
 }
 
@@ -256,23 +282,35 @@ print(json.dumps(dict(kind="trace",schema_version=1,model_id=src["id"],model_sha
     executable_sha256="0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f",
     bytes=size,prompts=[dict(bytes=size,manifest_sha256=sha(data))])))
 "#,
-    ).unwrap();
+    )
+    .unwrap();
     let src = t.src.join("source.gguf");
     fs::write(&src, b"GGUF").unwrap();
-    t.dispatch("start", "non-trace", Some(&json!({"kind":"unrelated","inputs":[]})));
+    t.dispatch(
+        "start",
+        "non-trace",
+        Some(&json!({"kind":"unrelated","inputs":[]})),
+    );
     t.wait("non-trace", "succeeded");
-    let submit = |id, prompt| t.dispatch("start", id, Some(&json!({
+    let submit =
+        |id, prompt| {
+            t.dispatch("start", id, Some(&json!({
         "kind":"trace","inputs":[{"host":"b","path":src,"kind":"gguf","id":"v1"}],
         "prompt":prompt,"options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":1,
             "byte_cap":65536,"retain_jobs":1}
-    })));
+    })))
+        };
     submit("trace-old", "test");
     t.wait("trace-old", "succeeded");
-    let wrong_revision = t.dispatch("start", "trace-wrong-revision", Some(&json!({
-        "kind":"trace","inputs":[{"host":"b","path":src,"kind":"gguf","id":"v1"}],
-        "prompt":"test","options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":1,
-            "byte_cap":65536,"retain_jobs":1,"expected_model_sha256":"0".repeat(64)}
-    })));
+    let wrong_revision = t.dispatch(
+        "start",
+        "trace-wrong-revision",
+        Some(&json!({
+            "kind":"trace","inputs":[{"host":"b","path":src,"kind":"gguf","id":"v1"}],
+            "prompt":"test","options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":1,
+                "byte_cap":65536,"retain_jobs":1,"expected_model_sha256":"0".repeat(64)}
+        })),
+    );
     assert_eq!(wrong_revision["state"], "failed");
     assert!(
         wrong_revision["error"]
@@ -285,8 +323,12 @@ print(json.dumps(dict(kind="trace",schema_version=1,model_id=src["id"],model_sha
     let summary = t.dispatch("trace-read", "trace-old", Some(&json!({"view":"manifest"})));
     assert_eq!(summary["data"]["tensor_count"], 1);
     assert!(summary["data"]["model"].get("path").is_none());
-    let tensor = t.dispatch("trace-read", "trace-old", Some(&json!(
-        {"view":"tensor","layer":0,"role":"l_out","start":0,"end":1})));
+    let tensor = t.dispatch(
+        "trace-read",
+        "trace-old",
+        Some(&json!(
+        {"view":"tensor","layer":0,"role":"l_out","start":0,"end":1})),
+    );
     assert_eq!(tensor["data"]["rows"][0]["data_base64"], "AACAPw==");
     for (view, token) in [("logit_lens", 8), ("model_logits", 7)] {
         let value = t.dispatch("trace-read", "trace-old", Some(&json!({"view":view})));
@@ -298,22 +340,103 @@ print(json.dumps(dict(kind="trace",schema_version=1,model_id=src["id"],model_sha
     assert_eq!(data["tensors"][0]["data_base64"], "AACAPw==");
     assert_eq!(data["model_logits"][0]["top"][0]["token_id"], 7);
     let diff = brewery_worker::trace::diff::compare(data.clone(), data).unwrap();
-    assert_eq!(serde_json::to_value(diff).unwrap()["activations"][0]["l2"], 0.);
+    assert_eq!(
+        serde_json::to_value(diff).unwrap()["activations"][0]["l2"],
+        0.
+    );
     submit("trace-corrupt", "corrupt");
-    assert!(t.wait("trace-corrupt", "failed")["error"].as_str().unwrap().contains("SHA-256"));
+    assert!(
+        t.wait("trace-corrupt", "failed")["error"]
+            .as_str()
+            .unwrap()
+            .contains("SHA-256")
+    );
     assert!(!t.root.join("b/jobs/trace-corrupt/work").exists());
     assert!(!t.root.join("b/trace-results/trace-corrupt").exists());
 
     submit("trace-new", "test");
     t.wait("trace-new", "succeeded");
-    assert_eq!(t.dispatch("trace-read", "trace-old", Some(&json!({"view":"manifest"}))),
-        json!({"status":"missing"}));
+    assert_eq!(
+        t.dispatch("trace-read", "trace-old", Some(&json!({"view":"manifest"}))),
+        json!({"status":"missing"})
+    );
     assert_eq!(
         t.dispatch("trace-read", "trace-old", Some(&slice)),
         json!({"status":"missing"})
     );
     t.wait("trace-old", "succeeded");
-    assert!(t.root.join("b/jobs/non-trace/work/unrelated-artifact").is_file());
+    assert!(
+        t.root
+            .join("b/jobs/non-trace/work/unrelated-artifact")
+            .is_file()
+    );
+}
+
+#[test]
+fn stat_reports_model_paths_without_following_symlinks_or_reading_private_state() {
+    let t = Rig::new();
+    let model = t.src.join("model.gguf");
+    let private = t.root.join("private");
+    fs::write(&model, b"1234567").unwrap();
+    fs::write(&private, b"not model data").unwrap();
+    symlink(&private, t.src.join("escape")).unwrap();
+    let published = t.root.join("b/jobs/job-id/work/output.gguf");
+    fs::create_dir_all(published.parent().unwrap()).unwrap();
+    fs::set_permissions(t.root.join("b"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(&published, b"123").unwrap();
+    let publication_record = t.root.join("b/jobs/job-id/state.json");
+    fs::write(
+        &publication_record,
+        json!({"action":"start","reply":{"state":"succeeded","result":{"artifact":{"path":published}}}})
+            .to_string(),
+    )
+    .unwrap();
+    for (path, reply) in [
+        (model, json!({"state":"file","bytes":7})),
+        (t.src.clone(), json!({"state":"directory"})),
+        (t.src.join("missing.gguf"), json!({"state":"missing"})),
+        (t.src.join("escape"), json!({"state":"outside_roots"})),
+        (t.src.join("../private"), json!({"state":"outside_roots"})),
+        (private, json!({"state":"outside_roots"})),
+        (published.clone(), json!({"state":"file","bytes":3})),
+        (publication_record, json!({"state":"outside_roots"})),
+        (
+            published.with_file_name("other.gguf"),
+            json!({"state":"outside_roots"}),
+        ),
+    ] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_brewery-dispatch"));
+        cmd.env("BREWERY_DISPATCH_CONFIG", &t.dispatch)
+            .args(["stat", "b"]);
+        assert_eq!(output(cmd, Some(&json!({"path":path}))), reply, "{path:?}");
+    }
+    fs::remove_file(&published).unwrap();
+    assert_eq!(
+        t.rpc_raw(&json!({"op":"stat","path":published}))["ok"],
+        json!({"state":"missing"})
+    );
+}
+
+#[test]
+fn stat_requires_a_directory_for_paths_with_directory_suffixes() {
+    let t = Rig::new();
+    let model = t.src.join("model.safetensors");
+    fs::write(&model, b"weights").unwrap();
+    for (path, state) in [
+        (
+            model.display().to_string(),
+            json!({"state":"file","bytes":7}),
+        ),
+        (format!("{}/.", model.display()), json!({"state":"missing"})),
+        (format!("{}/", model.display()), json!({"state":"missing"})),
+        (
+            format!("{}/.", t.src.display()),
+            json!({"state":"directory"}),
+        ),
+    ] {
+        let reply = t.rpc_raw(&json!({"op":"stat","path":path}));
+        assert_eq!(reply["ok"], state, "{path}");
+    }
 }
 
 #[test]
@@ -1398,7 +1521,7 @@ fn local_hosts_preview_resume_reuse_and_cleanup_bundles() {
     assert_eq!(
         t.rpc(Rpc::Write {
             id: "move".into(),
-            digest: bundle.digest,
+            digest: bundle.digest.clone(),
             entry: bundle.files[1].clone(),
             offset: 0,
             data: STANDARD.encode(&bytes[..CHUNK])
@@ -1417,6 +1540,24 @@ fn local_hosts_preview_resume_reuse_and_cleanup_bundles() {
     assert_eq!(done["result"]["missing_bytes"], 349);
     let path = Path::new(done["result"]["inputs"][0]["path"].as_str().unwrap());
     assert_eq!(fs::read(path.join("nested/weights")).unwrap(), bytes);
+    let cached = serde_json::from_value(json!({"host":"b","path":path,"kind":"hgn"})).unwrap();
+    let cached_desc: Description =
+        serde_json::from_value(t.rpc(Rpc::Describe { input: cached })).unwrap();
+    assert_eq!(cached_desc.bundle.digest, bundle.digest);
+    let stat = |path: &Path| t.rpc_raw(&json!({"op":"stat","path":path}))["ok"].clone();
+    assert_eq!(stat(path), json!({"state":"directory"}));
+    assert_eq!(
+        stat(&path.join("nested/weights")),
+        json!({"state":"file","bytes":bytes.len()})
+    );
+    assert_eq!(
+        stat(&path.parent().unwrap().join("manifest.json")),
+        json!({"state":"outside_roots"})
+    );
+    let escape = path.join("escape");
+    symlink(&t.b, &escape).unwrap();
+    assert_eq!(stat(&escape), json!({"state":"outside_roots"}));
+    fs::remove_file(escape).unwrap();
     let reuse = t.dispatch("transfer", "reuse", Some(&job));
     assert_eq!(reuse["result"]["missing_bytes"], 0);
     assert_eq!(reuse["result"]["inputs"][0]["cached"], true);

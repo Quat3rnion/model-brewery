@@ -102,6 +102,11 @@ pub(super) fn input(store: &Store, row: &Revision, name: &str, kind: &str) -> Mo
             .to_string_lossy()
             .into_owned(),
         kind: kind.into(),
+        sha256: None,
+        bytes: None,
+        available: None,
+        reason: None,
+        job_id: None,
     }
 }
 
@@ -131,24 +136,29 @@ pub(super) fn private_job(kind: &str, inputs: Vec<Model>, options: Value) -> (Jo
 pub(crate) fn enqueue(
     app: &App,
     store: &mut Store,
-    mut job: Job,
+    job: Job,
     envelope: Envelope,
     submission: Option<&Submission<'_>>,
     code: StatusCode,
 ) -> Result<Response> {
+    let job = prepare_enqueue(app, job, &envelope)?;
+    let tx = store.submission_transaction().map_err(ApiError::storage)?;
+    Store::enqueue(&tx, &job, &envelope, submission).map_err(ApiError::storage)?;
+    tx.commit().map_err(ApiError::storage)?;
+    Ok((code, Json(job)).into_response())
+}
+
+pub(crate) fn prepare_enqueue(app: &App, mut job: Job, envelope: &Envelope) -> Result<Job> {
     let lane = admit(app, &job.host)?;
     job.local_edit = true;
     job.scratch_job = true;
     let hosts = app.effective_hosts().map_err(ApiError::storage)?;
-    if crate::domain::candidates(&job, &envelope, &hosts).is_empty() {
+    if crate::domain::candidates(&job, envelope, &hosts).is_empty() {
         return Err(conflict("no eligible local worker for this scratch job"));
     }
     lane.snapshot_scratch(&job.host, &job.id, &envelope.scratch_pins)
         .map_err(ApiError::storage)?;
-    store
-        .enqueue(&job, &envelope, submission)
-        .map_err(ApiError::storage)?;
-    Ok((code, Json(job)).into_response())
+    Ok(job)
 }
 
 pub(crate) fn finish(

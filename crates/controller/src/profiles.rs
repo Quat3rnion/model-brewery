@@ -158,6 +158,26 @@ impl NewProfile {
 }
 
 impl Profile {
+    // A valid, unsaved representative for checking whether a worker admits
+    // custom HGN policies independently of the user's saved profile list.
+    pub(crate) fn eligibility_example() -> Option<&'static Self> {
+        static EXAMPLE: LazyLock<Option<Profile>> = LazyLock::new(|| {
+            let catalog = CATALOG.as_ref().ok()?;
+            let tensor = catalog.tensors.iter().find(|tensor| tensor.editable)?;
+            NewHgnProfile {
+                format: Format::Hgn,
+                name: "Eligibility example".into(),
+                base: Base::V2,
+                catalog_sha256: catalog.catalog_sha256.clone(),
+                overrides: BTreeMap::from([(tensor.name.clone(), Base::Ht43)]),
+            }
+            .save()
+            .ok()
+            .map(Profile::Hgn)
+        });
+        EXAMPLE.as_ref()
+    }
+
     pub fn name(&self) -> &str {
         match self {
             Self::Hgn(row) => &row.name,

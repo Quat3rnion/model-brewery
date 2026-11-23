@@ -190,10 +190,12 @@ the controller on a public interface: it has no login. See
 [Web settings](#web-settings) for infrastructure controls.
 
 The optional HTTPS gateway checks the client's source address, the exact
-Host and browser origin, and the password before it forwards requests to
-the loopback controller. It does not bypass worker permissions or GPU
-admission. Without endpoint overrides, the gateway binds to `127.0.0.1`
-and accepts only `127.0.0.1` clients and `Host: 127.0.0.1:8443`.
+Host, and browser request headers before it forwards requests to the
+loopback controller. The gateway does not ask for a login. Allow only
+trusted client networks: clients on these networks have controller
+operator permissions. The gateway does not bypass worker permissions or
+GPU admission. Without endpoint overrides, the gateway binds to
+`127.0.0.1` and accepts only `127.0.0.1` clients and `Host: 127.0.0.1:8443`.
 
 For LAN access, add a user systemd drop-in for `model-brewery-lan.service`:
 
@@ -218,23 +220,20 @@ alternate. Use brackets around an IPv6 literal in a host value, but not in
 `BREWERY_BIND`. The HTTPS certificate must cover the names or addresses
 that clients use.
 
-Open `https://<configured-LAN-host>:8443/`. Transfer the
-public `~/.local/state/model-brewery-lan/tls/lan-ca.crt` to your client over
-a trusted channel. Trust that certificate before entering the `brewery`
-login. The password is in `~/.local/state/model-brewery-lan/password` on
-the host. Do not copy `tls/server.key` or put the password in a URL.
-Each logged-in user has controller operator permissions.
+Transfer the public `~/.local/state/model-brewery-lan/tls/lan-ca.crt` to
+your client over a trusted channel. Trust that certificate on the client.
+Then open `https://<configured-LAN-host>:8443/`. Do not copy
+`tls/server.key`.
 
 For Tailscale, `model-brewery-tailnet.service` requires
 `~/.config/model-brewery/tailnet.env`. Set the same four variables for your
 tailnet: use this machine's Tailscale addresses for `BREWERY_BIND`, the
 allowed tailnet client CIDRs for `BREWERY_CLIENT_NETS`, and the Tailscale IP
-or DNS name that clients use for each host value. Open the configured
-tailnet host on HTTPS port `8443`. Copy the public certificate
+or DNS name that clients use for each host value. Copy the public certificate
 `~/.local/state/model-brewery-lan/tls/tailnet-ca.crt` from the host over
-a trusted channel. Trust it on the client, then use the same `brewery`
-login. Do not copy any `.key` file. The tailnet gateway does not use
-public Funnel access. To remove only tailnet access, run
+a trusted channel. Trust it on the client. Then open the configured tailnet
+host on HTTPS port `8443`. Do not copy any `.key` file. The tailnet gateway
+does not use public Funnel access. To remove only tailnet access, run
 `systemctl --user disable --now model-brewery-tailnet.service`.
 
 Check the services with `systemctl --user status model-brewery-lan.service
@@ -669,6 +668,14 @@ enter an absolute path. The worker checks it when a job uses it.
    reload, the page reconnects to the job.
 6. Read the result. `GET /api/jobs/{id}` returns the full result and the
    controller event log.
+
+For jobs that the workbench can submit, open the job's view and enter the
+inputs again. To repeat a failed `hf_download` on a named remote worker,
+submit it through `POST /api/jobs` with the same `host`. The Library form
+uses the controller's download service and cannot select a remote worker.
+
+If you lose a reply after you submit a job, check **Jobs** first. If you
+submit again, use the same inputs and do not leave or reload the page.
 
 ### Convert a model
 
@@ -1298,18 +1305,17 @@ the client (example for Claude Code):
 ```
 
 For LAN or tailnet access, use the workbench HTTPS URL with `/mcp`. The
-gateway has no login. The client must trust the gateway certificate.
+client must trust the gateway certificate. See the access risk under
+[Web settings](#web-settings).
 
-**Accepted access risk:** MCP has the same access as the workbench and has
-no separate token. The controller checks the exact Host, Origin (if sent),
+MCP uses the workbench trust boundary and has no separate token. The
+controller checks the exact Host, Origin (if sent),
 and `Sec-Fetch-Site` (if sent) on the same loopback listener. The optional
-gateway also checks source CIDR, Host, and Origin. It has no login and
-no token. Every client in an allowed LAN or tailnet CIDR can reach `/mcp`
-and drive the agent tools. It can create,
+gateway also checks source CIDR, Host, and Origin. Every client in an
+allowed LAN or tailnet CIDR can reach `/mcp`. It can create,
 edit, or discard scratch revisions, run traces and checks, and request
 publication. MCP cannot approve a publication, change settings, administer
-workers, or deploy. The separate operator API uses the same workbench trust
-boundary. Give workbench access only to trusted clients.
+workers, or deploy.
 
 1. Use `tools/list` to get the input schemas. Use `register_model` to add a
    worker-side file to the Library. Use `list_models` and `list_scratch` to
@@ -1459,6 +1465,19 @@ operator control; the API does not expose an arbitrary command runner.
 
 All JSON POST requests need `Content-Type: application/json`.
 
+`GET /api/state` reports model availability from the owning worker. These
+checks run in the background. Registrations for the same worker, executor,
+and path share one result for 30 seconds. A missing or disallowed path, or a
+disabled or removed worker, reports `available: false`. If the ordinary
+worker cannot check access on a separate weight editor, the controller
+reports `available: null`. Pending, failed, and unsupported checks also
+report `null`. Update older dispatchers and workers to get file state.
+The check does not hash or read model data. A reported `sha256` comes from
+a verified output receipt, not from the file check.
+
+`GET /api/jobs/{id}` returns `prompt_text`, the text sent to the worker at
+submission. Later edits to a saved prompt do not change this text.
+
 ```sh
 curl -s http://127.0.0.1:4141/api/state
 curl -s -X POST http://127.0.0.1:4141/api/suggestions/paths \
@@ -1486,6 +1505,29 @@ curl -s -X POST http://127.0.0.1:4141/api/conversions \
 
 A new workflow returns `201`. The same key and the same body return `200`
 with the current workflow. A different body for the same key returns `409`.
+
+For `/api/jobs` and `/api/conversions`, the controller checks the
+`Idempotency-Key` first. Then it compares a SHA-256 fingerprint of the
+canonical request body on the same route. It does this with or without a
+key. If matching work is queued, running, or cancelling, or if the
+controller accepted it less than 10 seconds ago, the controller does not
+queue new work. It returns `200`, the existing ID, `duplicate_of: true`,
+and the `Brewery-Duplicate` header with that ID. A new key on a match is
+bound to the existing ID.
+
+SQLite stores the fingerprint in the same transaction that queues the
+work. This check still works after a controller restart. Work queued
+before this feature was installed has no fingerprint. The controller
+removes expired fingerprints for finished work on later submissions.
+To repeat identical work on purpose, select **Queue another** after a
+match, or send `Brewery-Allow-Duplicate: 1` with a new `Idempotency-Key`.
+The normal admission checks still apply.
+
+If a reply is lost, check Jobs or retry with the same inputs. The
+workbench keeps an unconfirmed key during the current visit. It treats
+a `4xx` reply as a controller rejection only if the reply has
+`Brewery-Error: 1`, `Content-Type: application/json`, and exactly one
+string field named `error`.
 
 Settings and administration routes are in
 [Web settings and administration](#web-settings-and-administration).
@@ -2224,7 +2266,13 @@ It does not accept arbitrary commands.
 
 Both sections use the same API request protections.
 Infrastructure has no second admin key.
-The loopback listener has no login. Use the authenticated gateway for network access.
+The HTTPS gateway does not ask for a login. Thus each client on an allowed
+LAN or tailnet network can use all Infrastructure actions. These include
+host policy, resource limits, catalog runtimes, editor directory grants,
+SSH host definitions and worker installation. This is an accepted risk.
+Allow only trusted client networks.
+The loopback listener has no login. For network access, use the HTTPS
+gateway and limit access to trusted client networks.
 
 ### What the operator can set
 
@@ -2792,7 +2840,10 @@ removed, use `qualification/fixtures/halogen-0.18.22-timing.jsonl`.
 Open the **Calibration** tab of the web page (`#/calibration`). Use
 **Report files (JSON)** to select one or more files from your disk. Each file
 can be at most 16 MiB. The browser reads the files. It does not upload them
-to the controller and does not load a model.
+to the controller and does not load a model. Open reports stay in memory when
+you go to another workbench page in the same browser tab. Reloading or closing
+the tab clears them. When no reports are open, the page shows the commands
+that make each report.
 
 The page accepts these schemas:
 

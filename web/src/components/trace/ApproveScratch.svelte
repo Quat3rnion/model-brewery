@@ -3,8 +3,8 @@
   // SHA-256 and the check results; the request sends that hash, so a
   // revision that changed after the page loaded is refused by the controller.
   import Badge from '../Badge.svelte';
-  import { api, errorText } from '../../lib/api';
-  import { newKey } from '../../lib/conversion';
+  import { api } from '../../lib/api';
+  import { Submission } from '../../lib/submit.svelte';
   import { approvalState, checkRows, type ScratchRevision } from '../../lib/weightspace';
 
   let { rev, onapproved }: { rev: ScratchRevision; onapproved?: (r: ScratchRevision) => void } = $props();
@@ -15,30 +15,21 @@
   const failing = $derived(checks.filter((c) => c.status !== 'passed'));
   let dialog: HTMLDialogElement | undefined = $state();
   let opener: HTMLButtonElement | undefined = $state();
-  let busy = $state(false);
-  let error = $state<string | null>(null);
-  // One key per opened dialog: a retry after a lost response does not approve twice.
-  let key = '';
+  const submission = new Submission();
 
   function open() {
-    error = null;
-    key = newKey().replace(/^conv-/, 'approve-');
+    submission.error = null;
     dialog?.showModal();
   }
   function close() {
     dialog?.close();
   }
-  async function approve() {
-    busy = true;
-    error = null;
-    try {
-      const r = (await api.approveScratch(rev.id, rev.sha256, key)) as ScratchRevision;
+  async function approve(event: MouseEvent) {
+    const r = await submission.send('edits.approve', { id: rev.id, sha256: rev.sha256 },
+      (body, key) => api.approveScratch(body.id, body.sha256, key.replace(/^conv-/, 'approve-')) as Promise<ScratchRevision>, event);
+    if (r) {
       close();
       onapproved?.(r);
-    } catch (e) {
-      error = errorText(e);
-    } finally {
-      busy = false;
     }
   }
 </script>
@@ -71,10 +62,10 @@
         {failing.length} {failing.length === 1 ? 'check did' : 'checks did'} not pass.{#if rev.check_bundle?.acknowledged_at_ms}{' The requester acknowledged this bundle.'}{/if}{' '}Read the results before you approve.
       </p>
     {/if}
-    {#if error}<p class="note bad" role="alert">{error}</p>{/if}
+    {#if submission.error}<p class="note bad" role="alert">{submission.error}</p>{/if}
     <div class="row actions">
-      <button type="button" class="btn ghost" disabled={busy} onclick={close}>Keep pending</button>
-      <button type="button" class="btn primary" disabled={busy} aria-busy={busy} onclick={approve}>{busy ? 'Approving…' : 'Approve this hash'}</button>
+      <button type="button" class="btn ghost" disabled={submission.busy} onclick={close}>Keep pending</button>
+      <button type="button" class="btn primary" disabled={submission.busy} aria-busy={submission.busy} onclick={approve}>{submission.busy ? 'Approving…' : 'Approve this hash'}</button>
     </div>
   </form>
 </dialog>

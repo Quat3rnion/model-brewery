@@ -7,6 +7,7 @@
   import { api, errorText } from '../lib/api';
   import { brewery } from '../lib/store.svelte';
   import { conversions } from '../lib/conversions.svelte';
+  import { focusAfterRemoval } from '../lib/focus';
   import { formatTime, hostName, modelLabel } from '../lib/format';
   import { parseConversion, stageRows, STAGE_LABEL, type Conversion, type StageStatus } from '../lib/conversion';
   import type { Tone } from '../lib/format';
@@ -50,13 +51,18 @@
   let confirming = $state(false);
   let busy = $state(false);
   let error = $state<string | null>(null);
+  let cancelButton: HTMLButtonElement | undefined = $state();
+  let keepButton: HTMLButtonElement | undefined = $state();
+  let title: HTMLHeadingElement | undefined = $state();
   async function cancel() {
     busy = true;
     error = null;
     try {
       const r = parseConversion(await api.cancelConversion(c.id));
-      if (r) conversions.upsert(r);
-      confirming = false;
+      await focusAfterRemoval(() => {
+        if (r) conversions.upsert(r);
+        confirming = false;
+      }, () => cancelButton ?? title);
       void conversions.refresh();
     } catch (e) {
       error = errorText(e);
@@ -69,7 +75,7 @@
 <article class="run" aria-labelledby="{uid}-h">
   <header class="top">
     <div class="who">
-      <h3 id="{uid}-h" class="title">{source ? modelLabel(source) : (c.inputIds[0] ?? 'Conversion')} → {profile}</h3>
+      <h3 id="{uid}-h" class="title" tabindex="-1" bind:this={title}>{source ? modelLabel(source) : 'Source not in Library'} → {profile}</h3>
       <p class="xs muted break">
         on {c.requestedHost === 'auto' && c.host ? `${hostName(hosts, c.host)} (pool)` : hostName(hosts, c.host)}{#if c.createdAt}{' · started '}{formatTime(c.createdAt)}{/if}{' · '}<span class="mono">{c.id}</span>
       </p>
@@ -81,9 +87,11 @@
           <span class="xs muted">Cancel requested</span>
         {:else if confirming}
           <button type="button" class="btn danger small" disabled={busy} onclick={cancel}>{busy ? 'Cancelling…' : 'Confirm cancel'}</button>
-          <button type="button" class="btn ghost small" disabled={busy} onclick={() => (confirming = false)}>Keep running</button>
+          <button type="button" class="btn ghost small" bind:this={keepButton} disabled={busy}
+            onclick={() => focusAfterRemoval(() => { confirming = false; }, () => cancelButton)}>Keep running</button>
         {:else}
-          <button type="button" class="btn danger small" onclick={() => (confirming = true)} aria-label="Cancel conversion {c.id}">Cancel</button>
+          <button type="button" class="btn danger small" bind:this={cancelButton}
+            onclick={() => focusAfterRemoval(() => { confirming = true; }, () => keepButton)} aria-label="Cancel conversion {c.id}">Cancel</button>
         {/if}
       {/if}
     </div>
@@ -115,6 +123,7 @@
       {#if c.artifactModelId}Output: <a href="#/library?entry={encodeURIComponent(c.artifactModelId)}">{output ? modelLabel(output) : c.artifactModelId} in the Library</a>.{:else}Finished; the controller did not name an output entry.{/if}
       {#if nativeRecipe}The native reader verified the archive structure. Runtime loading and quality were not tested.
       {:else}File verification passed. This does not prove GPU execution or quality.{/if}
+      This result is not release-qualified.
     </p>
   {/if}
 </article>

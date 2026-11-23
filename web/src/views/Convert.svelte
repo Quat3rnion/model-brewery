@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { SvelteMap } from 'svelte/reactivity';
   import Advanced from '../components/Advanced.svelte';
   import { brewery } from '../lib/store.svelte';
   import { Submitter } from '../lib/submit.svelte';
-  import { CONVERT_SOURCE_KINDS, capability, isSafeSource } from '../lib/format';
+  import { PlainAttempt } from '../lib/submission-key';
+  import { CONVERT_SOURCE_KINDS, capability, hostName, isSafeSource } from '../lib/format';
   import { CONVERT_ENUMS, VERIFY_OUTPUT_KINDS, buildConvertJob, poolHosts, type ConvertForm, type ConvertStep } from '../lib/convert';
   import HostSelect from '../components/HostSelect.svelte';
   import ModelSelect from '../components/ModelSelect.svelte';
@@ -14,18 +16,35 @@
   import { componentBlockers } from '../lib/components';
   import { profileStore } from '../lib/profiles.svelte';
   import { BASE_LABEL, shortRev } from '../lib/profiles';
-  import { REV_PREFIX } from '../lib/conversion';
-  import GgufConvert from '../components/GgufConvert.svelte';
-  import LayerRecipe from '../components/LayerRecipe.svelte';
+  import { DEFAULT_PROFILE, REV_PREFIX } from '../lib/conversion';
+  import GgufConvert, { type GgufDraft } from '../components/GgufConvert.svelte';
+  import LayerRecipe, { type RecipeDraft } from '../components/LayerRecipe.svelte';
   import Hy4Plan from '../components/Hy4Plan.svelte';
   import { conversions, ConversionStarter } from '../lib/conversions.svelte';
-  import { buildConversion, isActiveConversion } from '../lib/conversion';
+  import { buildConversion, conversionRunHref, isActiveConversion, STAGES } from '../lib/conversion';
+  import { api, errorText } from '../lib/api';
+  import { fieldError, visibleBlockers, type Blocker } from '../lib/blockers';
+  import { hostWorkflowEligibility } from '../lib/eligibility';
+  import { validSha } from '../lib/ggufSource';
+  import { hashParam, route } from '../lib/route.svelte';
+  import type { EligibilityEntry, Host, JobSummary, Workflow } from '../lib/types';
+  import Blockers from '../components/Blockers.svelte';
+  import FieldError from '../components/FieldError.svelte';
+  import WorkflowGate from '../components/WorkflowGate.svelte';
+  import { tick, untrack } from 'svelte';
 
   const hosts = $derived(brewery.state?.hosts ?? []);
   const models = $derived(brewery.state?.models ?? []);
+  const stateReady = $derived(!!brewery.state);
+  const encoders = {
+    ht_backend: 'HT uses 3-bit or 4-bit values to store weights.',
+    i4r_backend: 'I4R uses 4-bit values after it applies a rotation to the weights.',
+    q4cp_backend: 'Q4CP uses 4-bit values to look up weights in a codebook.',
+  };
+  const seedHint = `Enter a whole number from 0 to ${Number.MAX_SAFE_INTEGER.toLocaleString('en-US')}.`;
 
   let step = $state<ConvertStep>('inspect');
-  let form = $state<ConvertForm>({
+  const emptyForm = (): ConvertForm => ({
     source: '',
     bundle: '',
     extras: { assets: '', ngram: '', vision: '', mtp: '' },
@@ -38,8 +57,10 @@
     decode_backend: '',
     seed: null,
     threads: null,
-    ht_beam: null,
+    ht_beam: null
   });
+  let form = $state(emptyForm());
+  let diagnostic = $state(emptyForm());
 
   const STEPS: { id: ConvertStep; label: string; text: string }[] = [
     { id: 'inspect', label: 'Inspect', text: 'Read the checkpoint and report what the converter would write. Writes nothing.' },
@@ -48,11 +69,12 @@
     { id: 'verify', label: 'Verify', text: 'Check a complete bundle against its original source. File verification only; it does not prove GPU use or quality.' },
   ];
 
-  const built = $derived(buildConvertJob(step, form, models, hosts));
+  const built = $derived(buildConvertJob(step, diagnostic, models, hosts));
   const blockers = $derived.by(() => {
     const out = [...built.problems];
-    if (!(step === 'convert' && form.anyHost)) {
-      const target = form.host || models.find((m) => m.id === form.source)?.host;
+    if (step !== 'verify' && !diagnostic.profile) out.push('Choose a profile.');
+    if (!(step === 'convert' && diagnostic.anyHost)) {
+      const target = diagnostic.host || models.find((m) => m.id === diagnostic.source)?.host;
       if (target) {
         const c = capability(hosts.find((h) => h.id === target), step);
         if (!c.allowed && c.reason) out.push(c.reason);
@@ -68,15 +90,76 @@
   const wfForm = $derived<ConvertForm>({ ...form, host: wfHost, anyHost: wfAny });
   const wfBuilt = $derived(buildConversion(wfForm, models));
   const wfSource = $derived(models.find((m) => m.id === form.source));
-  let outFormat = $state<'hgn' | 'gguf'>('hgn');
-  let useLayerRecipe = $state(false);
-  const recipeStarter = new ConversionStarter();
-  const recipeSource = $derived(wfSource && isSafeSource(wfSource.kind) ? wfSource : undefined);
+  const MODES = [
+    { id: 'hgn', title: 'Managed HGN', help: 'Run four steps to make and verify an HGN bundle.' },
+    { id: 'gguf', title: 'GGUF', help: 'Make and verify a GGUF file on the source host.' },
+    { id: 'recipe', title: 'Layer recipe', help: 'Set the encoding for each layer of a SafeTensors checkpoint.' },
+  ] as const;
+  type Mode = (typeof MODES)[number]['id'];
+  const formatParam = $derived(hashParam(route.hash, 'format'));
+  const mode = $derived(formatParam === 'gguf' || formatParam === 'recipe' ? formatParam : 'hgn');
+  function setMode(value: Mode) {
+    if (value === mode) return;
+    location.hash = value === 'hgn' ? '#/convert' : `#/convert?format=${value}`;
+  }
+  let ggufSource = $state('');
+  const emptyGguf = (): GgufDraft => ({ choice: '', assets: '', imatrix: '', threads: null });
+  let ggufDraft = $state(emptyGguf());
+  let layerSource = $state('');
+  const emptyRecipe = (): RecipeDraft => ({ defaultType: 'BF16', overrides: {}, assetId: '' });
+  let recipeDraft = $state(emptyRecipe());
+  let hy4Source = $state('');
+  let hy4Encode = $state(false);
+  const recipeFormat = $derived(hashParam(route.hash, 'output') === 'gguf' ? 'gguf' : 'hgn');
+  let diagnosticsOpen = $state(false);
+  $effect(() => {
+    const hash = route.hash;
+    const source = hashParam(hash, 'model');
+    const host = hashParam(hash, 'host');
+    const profile = hashParam(hash, 'profile');
+    const requestedStep = STAGES.find((value) => value === hashParam(hash, 'step'));
+    // Resolve IDs against inventory before putting them in visible pickers.
+    if ((source || host || profile || requestedStep) && stateReady) {
+      untrack(() => {
+        if (requestedStep) {
+          step = requestedStep;
+          diagnosticsOpen = true;
+        }
+        const draft = requestedStep ? diagnostic : form;
+        const model = models.find((m) => m.id === source);
+        if (model && !requestedStep && formatParam === 'gguf') {
+          if (['hf', 'gguf', 'safetensors'].includes(model.kind)) ggufSource = model.id;
+        } else if (model && CONVERT_SOURCE_KINDS.has(model.kind)) draft.source = model.id;
+        if (host && hosts.some((h) => h.id === host)) {
+          if (requestedStep) diagnostic.host = host;
+          else wfHost = host;
+        }
+        if (profile === 'v2' || profile === 'ht43') draft.profile = profile;
+      });
+    }
+  });
+  const recipeStarter = new ConversionStarter('convert.recipe');
+  const recipeReadAttempts = new PlainAttempt();
+  const recipeReads = new SvelteMap<string, JobSummary>();
+  const recipeRestarts = new SvelteMap<string, Set<string>>();
+  function selectRecipeSource(id: string) {
+    if (id === layerSource) return;
+    layerSource = id;
+    recipeDraft = emptyRecipe();
+  }
+  const recipeSource = $derived(models.find((m) => m.id === layerSource && isSafeSource(m.kind)));
   const recipeKey = $derived(recipeSource && JSON.stringify([
     recipeSource.id, recipeSource.kind, recipeSource.host, recipeSource.path, recipeSource.sha256, recipeSource.bundle_sha256,
   ]));
   $effect(() => {
-    if (profileStore.pendingUse?.startsWith('gguf:')) outFormat = 'gguf';
+    if (!stateReady) return;
+    if (form.source && !wfSource) form.source = '';
+    if (layerSource && !recipeSource) layerSource = '';
+    if (ggufSource && !models.some((m) => m.id === ggufSource)) ggufSource = '';
+    if (diagnostic.source && !models.some((m) => m.id === diagnostic.source)) diagnostic.source = '';
+  });
+  $effect(() => {
+    if (profileStore.pendingUse?.startsWith('gguf:') && mode !== 'gguf') setMode('gguf');
   });
   // Saved custom profiles (read-only GET). A revision is chosen as 'rev:<hex>'.
   $effect(() => {
@@ -92,40 +175,112 @@
       profileStore.pendingUse = null;
     }
   });
-  const wfBlockers = $derived.by(() => {
-    const out = [...wfBuilt.problems];
-    if (chosenRev) {
-      const target = wfAny ? null : hosts.find((h) => h.id === (wfHost || wfSource?.host));
-      if (target) {
-        const c = capability(target, 'custom_profiles');
-        if (!c.allowed) out.push(c.reason ?? `${target.name ?? target.id} does not accept custom profiles.`);
-      } else if (wfAny && eligible.length && !eligible.some((h) => capability(h, 'custom_profiles').allowed)) out.push('No pool worker accepts custom profiles.');
-      const cat = profileStore.catalog;
-      if (cat && wfSource?.sha256 && cat.sourceSha256 && wfSource.sha256 !== cat.sourceSha256) out.push('This profile was made for a different source checkpoint.');
+  const hasRevision = $derived(form.profile.startsWith(REV_PREFIX));
+  // The component workflow flag covers HF replacements, not GGUF assets.
+  const hasComponents = $derived(wfSource?.kind === 'hf' && Object.values(form.extras).some(Boolean));
+  const workflow = $derived<Workflow>(hasRevision ? 'custom_profile_conversion' : hasComponents ? 'component_conversion' : 'managed_conversion');
+  const poolWorkflow = $derived<Workflow>(hasRevision ? 'pool_custom_profile_conversion' : hasComponents ? 'pool_component_conversion' : 'pool_conversion');
+  const snapshot = $derived(brewery.state?.eligibility);
+  const targetId = $derived((wfAny ? '' : wfHost) || wfSource?.host);
+  const hostChecks = $derived.by(() => {
+    if (wfAny && eligible.length) return eligible.map((host) => checkHost(host.id, poolWorkflow));
+    return targetId ? [checkHost(targetId, wfAny ? poolWorkflow : workflow)] : [];
+  });
+  function legacyHostCheck(host: Host): EligibilityEntry {
+    const fix_anchor = `#/settings/infrastructure?host=${encodeURIComponent(host.id)}&section=policy`;
+    const reasons = host.scheduling_paused ? [{ text: 'Resume job scheduling.', fix_anchor }] : [];
+    for (const stage of [...STAGES, ...(hasRevision ? ['custom_profiles'] : []), ...(hasComponents ? ['convert_components'] : [])]) {
+      const cap = capability(host, stage);
+      if (!cap.allowed) reasons.push(host.capability_reasons?.[stage] ?? { text: cap.reason ?? `Enable the ${stage} step.`, fix_anchor });
     }
-    if (!wfAny) out.push(...componentBlockers(wfSource, form.extras, hosts.find((h) => h.id === (wfHost || wfSource?.host))));
-    else if (eligible.length && eligible.every((h) => componentBlockers(wfSource, form.extras, h).length)) out.push('No pool worker accepts component replacements. Remove them or pick a host.');
-    if (!wfAny) {
-      const target = wfHost || models.find((m) => m.id === form.source)?.host;
-      if (target) {
-        const c = capability(hosts.find((h) => h.id === target), 'convert');
-        if (!c.allowed && c.reason) out.push(c.reason);
-      }
-    }
+    return { eligible: !reasons.length, reasons };
+  }
+  function checkHost(id: string, kind: Workflow): Blocker[] {
+    const host = hosts.find((h) => h.id === id);
+    const display = hostName(hosts, id);
+    if (!host) return [{ host: display, field: 'host', text: 'The controller did not report this host.', fixAnchor: '#/settings/infrastructure' }];
+    const decision = hostWorkflowEligibility(snapshot, id, kind) ?? legacyHostCheck(host);
+    const reasons = decision.reasons.map((reason) => ({ text: reason.text, fixAnchor: reason.fix_anchor }));
+    if (decision.eligible && hasRevision) reasons.push(...componentBlockers(wfSource, form.extras, host).map((text) => ({
+      text, fixAnchor: host.capability_reasons?.convert_components?.fix_anchor ?? `#/settings/infrastructure?host=${encodeURIComponent(id)}&section=policy`,
+    })));
+    return reasons.map((item) => ({
+      ...item, host: display, field: 'host',
+    }));
+  }
+  const sourceSha = $derived(validSha(wfSource?.sha256));
+  const localBlockers = $derived.by((): Blocker[] => {
+    const out = wfBuilt.problems.map((text): Blocker => ({
+      text, field: !form.profile && text === 'Choose the output profile.' ? 'profile'
+        : (!wfSource || wfSource.available === false) && (text === 'Select a source checkpoint.' || text === (wfSource?.reason ?? 'Select an available source checkpoint.')) ? 'source' : undefined,
+    }));
+    if (hasRevision && !chosenRev?.compatible) out.push({ text: 'Select a compatible saved profile.', field: 'profile' });
+    const catalogSha = profileStore.catalog?.sourceSha256;
+    if (chosenRev && sourceSha && catalogSha && sourceSha !== catalogSha) out.push({ text: 'This profile was made for a different source checkpoint.', field: 'profile' });
+    if (hostChecks.length && hostChecks.every((reasons) => reasons.length)) out.push(...hostChecks.flat());
     return out;
   });
-  const starter = new ConversionStarter();
-  async function startConversion() {
-    // One POST per click. The body is built only here, never from an effect.
-    if (useLayerRecipe || !wfBuilt.body || starter.busy) return;
-    const c = await starter.start(wfBuilt.body);
-    if (c) queueMicrotask(() => document.getElementById(`run-${c.id}`)?.scrollIntoView({ block: 'nearest' }));
+  const checkBody = $derived(mode === 'hgn' && conversions.status !== 'unavailable' && !localBlockers.length && wfBuilt.body ? JSON.stringify(wfBuilt.body) : null);
+  // Compare by value: polling an unchanged snapshot must not repeat the check.
+  const checkState = $derived(checkBody ? JSON.stringify([hosts, snapshot,
+    models.filter((model) => wfBuilt.body?.input_ids.includes(model.id))]) : '');
+  let checked = $state<{ key: string; decision?: EligibilityEntry; error?: string }>();
+  const checkKey = $derived(checkBody && JSON.stringify([checkBody, checkState]));
+  let retryCheck = $state(0);
+  $effect(() => {
+    const body = checkBody;
+    const key = checkKey;
+    void retryCheck;
+    checked = undefined;
+    if (!body || !key) return;
+    const abort = new AbortController();
+    const timer = window.setTimeout(async () => {
+      try {
+        const decision = await api.conversionEligibility(JSON.parse(body), abort.signal);
+        if (!abort.signal.aborted) checked = { key, decision };
+      } catch (error) {
+        if (!abort.signal.aborted) checked = { key, error: errorText(error) };
+      }
+    }, 250);
+    return () => { window.clearTimeout(timer); abort.abort(); };
+  });
+  const checking = $derived(checkKey !== null && checked?.key !== checkKey);
+  const wfBlockers = $derived.by((): Blocker[] => {
+    if (conversions.status === 'unavailable') return [{ text: 'This controller does not provide managed conversions. Use the individual steps below.' }];
+    if (!checkBody || checking) return localBlockers;
+    if (checked?.error) return [{ text: `Cannot check this conversion. ${checked.error}` }];
+    return (checked?.decision?.reasons ?? []).map((r) => ({ text: r.text, fixAnchor: r.fix_anchor }));
+  });
+  const touched = $state<Record<string, boolean>>({});
+  let attempted = $state(false);
+  const visible = $derived(visibleBlockers(wfBlockers, touched, attempted || !!checkBody || (!!wfSource && !!form.profile)));
+  const starter = new ConversionStarter('convert.managed');
+  let runLink: HTMLAnchorElement | undefined = $state();
+  function startConversion(event: MouseEvent) {
+    // Submit only on a click, never from an effect.
+    attempted = true;
+    if (!wfBuilt.body || !checkKey || checked?.key !== checkKey || !checked.decision?.eligible) return;
+    void starter.start(wfBuilt.body, event, () => runLink);
   }
   $effect(() => conversions.watch());
   const runs = $derived(conversions.list);
   const activeRuns = $derived(runs.filter(isActiveConversion));
   let showOlder = $state(false);
   const finishedRuns = $derived(runs.filter((c) => !isActiveConversion(c)));
+  const linkedRun = $derived(hashParam(route.hash, 'run'));
+  const visibleFinished = $derived(showOlder ? finishedRuns : finishedRuns.filter((c, i) => i < 5 || c.id === linkedRun));
+  const hasLinkedRun = $derived(!!linkedRun && runs.some((c) => c.id === linkedRun));
+  const linkedVisit = $derived(route.capture());
+  $effect(() => {
+    const id = linkedRun;
+    const visit = linkedVisit;
+    if (id && hasLinkedRun) void tick().then(() => {
+      if (!visit.canPresent()) return;
+      const target = document.getElementById(`run-${id}`);
+      target?.focus({ preventScroll: true });
+      target?.scrollIntoView({ block: 'nearest' });
+    });
+  });
   const optsChangedWf = $derived(
     [
       ...(['ht_backend', 'i4r_backend', 'q4cp_backend'] as const).filter((k) => form[k]).map((k) => `${k.replace('_backend', '').toUpperCase()} ${form[k]}`),
@@ -136,17 +291,17 @@
     ].filter(Boolean),
   );
 
-  const s = new Submitter();
-  function submit() {
-    if (!useLayerRecipe && built.job) s.submit(built.job);
+  const s = new Submitter(job => `convert.${job.kind}`);
+  function submit(event: MouseEvent) {
+    if (built.job && !blockers.length) s.submit(built.job, event);
   }
   const usesBackends = $derived(step === 'inspect' || step === 'plan' || step === 'convert');
   const usesPlanOpts = $derived(step === 'plan' || step === 'convert');
   const optsChanged = $derived(
     [
-      ...(usesBackends ? (['ht_backend', 'i4r_backend', 'q4cp_backend'] as const).filter((k) => form[k]).map((k) => `${k.replace('_backend', '').toUpperCase()} ${form[k]}`) : []),
-      ...(usesPlanOpts ? [form.seed !== null ? `seed ${form.seed}` : '', form.threads !== null ? `${form.threads} threads` : '', form.ht_beam !== null ? `beam ${form.ht_beam}` : ''] : []),
-      step === 'verify' && form.decode_backend ? `decode ${form.decode_backend}` : '',
+      ...(usesBackends ? (['ht_backend', 'i4r_backend', 'q4cp_backend'] as const).filter((k) => diagnostic[k]).map((k) => `${k.replace('_backend', '').toUpperCase()} ${diagnostic[k]}`) : []),
+      ...(usesPlanOpts ? [diagnostic.seed !== null ? `seed ${diagnostic.seed}` : '', diagnostic.threads !== null ? `${diagnostic.threads} threads` : '', diagnostic.ht_beam !== null ? `beam ${diagnostic.ht_beam}` : ''] : []),
+      step === 'verify' && diagnostic.decode_backend ? `decode ${diagnostic.decode_backend}` : '',
     ].filter(Boolean),
   );
 </script>
@@ -154,46 +309,66 @@
 <div class="stack">
   <div class="head">
     <h1 tabindex="-1">Convert</h1>
-    <p class="muted small">Convert a checkpoint to HGN or GGUF. Managed conversions run inspect, plan, convert and verify. To set the output type per layer for SafeTensors, select Layer recipe.</p>
+    <p class="muted small">Convert a source checkpoint to an HGN bundle or a GGUF file.</p>
   </div>
 
   <section class="panel" aria-labelledby="wf-h">
     <header>
-      <h2 id="wf-h">Convert a checkpoint</h2>
-      <div class="fmt" role="radiogroup" aria-label="Output format">
-        <label class:on={outFormat === 'hgn'}><input type="radio" bind:group={outFormat} value="hgn" /> {useLayerRecipe ? 'HGN archive' : 'HGN bundle'}</label>
-        <label class:on={outFormat === 'gguf'}><input type="radio" bind:group={outFormat} value="gguf" /> GGUF file</label>
+      <h2 id="wf-h" tabindex="-1">Convert a checkpoint</h2>
+      <div class="fmt" role="radiogroup" aria-label="Conversion mode">
+        {#each MODES as item (item.id)}
+          <label class:on={mode === item.id}>
+            <input type="radio" name="convert-format" checked={mode === item.id} onchange={() => setMode(item.id)} aria-describedby="convert-mode-help" />
+            {item.title}
+          </label>
+        {/each}
       </div>
     </header>
-    <div class="body">
-      <label class="inline"><input type="checkbox" bind:checked={useLayerRecipe} /> Layer recipe</label>
-    </div>
-    {#if useLayerRecipe}
+    <p id="convert-mode-help" class="body small muted">{MODES.find((item) => item.id === mode)?.help}</p>
+    {#if mode === 'recipe'}
       <div class="body stack">
-        <ModelSelect bind:value={form.source} kinds={['hf', 'safetensors']} label="Source checkpoint" hint="Select the SafeTensors file or indexed HF directory to read its layers and SHA-256." id="recipe-source" />
+        <div class="grid-2">
+          <ModelSelect bind:value={() => layerSource, selectRecipeSource} kinds={['hf', 'safetensors']} label="Source checkpoint" hint="Choose a SafeTensors file or an indexed HF directory." id="recipe-source" />
+          <div class="field">
+            <label for="recipe-format">Recipe output</label>
+            <select class="input" id="recipe-format" value={recipeFormat} onchange={(event) => {
+              const output = event.currentTarget.value;
+              location.hash = output === 'gguf' ? '#/convert?format=recipe&output=gguf' : '#/convert?format=recipe';
+            }}>
+              <option value="hgn">Structural HGN archive</option>
+              <option value="gguf">GGUF file</option>
+            </select>
+          </div>
+        </div>
         {#if recipeSource}
           {#key recipeKey}
-            <LayerRecipe source={recipeSource} format={outFormat} starter={recipeStarter} />
+            <LayerRecipe source={recipeSource} format={recipeFormat} starter={recipeStarter}
+              readAttempts={recipeReadAttempts} acceptedReads={recipeReads} restarts={recipeRestarts} bind:draft={recipeDraft} />
           {/key}
         {:else}
-          <Submit blockers={['Select a SafeTensors source.']} onclick={() => {}}>Run layer recipe</Submit>
+          <p class="hint">Select a source to see if it supports a layer recipe.</p>
         {/if}
       </div>
-    {:else if outFormat === 'gguf'}
+    {:else if mode === 'gguf'}
+    <WorkflowGate workflow="gguf_output">
     <div class="body">
-      {#if profileStore.gguf}<GgufConvert catalog={profileStore.gguf} bind:source={form.source} />
+      {#if profileStore.gguf}<GgufConvert catalog={profileStore.gguf} bind:source={ggufSource} bind:draft={ggufDraft} />
       {:else if profileStore.ggufStatus === 'unavailable'}<p class="note warn">This controller does not offer GGUF output.</p>
       {:else if profileStore.status === 'loading' || profileStore.status === 'idle'}<p class="muted">Loading GGUF types…</p>
       {:else}<p class="note bad" role="alert">The GGUF catalog could not be loaded.</p>{/if}
     </div>
+    </WorkflowGate>
     {:else}
+    <WorkflowGate workflow="managed_conversion">
     <div class="body stack">
       <div class="grid-2">
-        <ModelSelect bind:value={form.source} kinds={CONVERT_SOURCE_KINDS} label="Source checkpoint" hint="Hugging Face BF16 directory, GGUF or HGN." id="wf-source" />
+        <ModelSelect bind:value={form.source} kinds={CONVERT_SOURCE_KINDS} label="Source checkpoint" hint="Hugging Face BF16 directory, GGUF or HGN." id="wf-source" error={fieldError(visible, 'source')} onblur={() => (touched.source = true)} />
         <div class="field">
           <label for="wf-profile">Output profile</label>
-          <select id="wf-profile" class="input" bind:value={form.profile} aria-describedby="wf-profile-hint" aria-required="true">
+          <select id="wf-profile" class="input" bind:value={form.profile} onblur={() => (touched.profile = true)}
+            aria-invalid={!!fieldError(visible, 'profile')} aria-describedby={fieldError(visible, 'profile') ? 'wf-profile-error wf-profile-hint' : 'wf-profile-hint'} aria-required="true">
             <option value="" disabled>Choose a profile</option>
+            <option value={DEFAULT_PROFILE}>Converter default profile</option>
             <optgroup label="Built-in">
               {#each CONVERT_ENUMS.profile as p (p)}<option value={p}>{p === 'v2' ? 'HGN v2' : p === 'ht43' ? 'HT43' : p}</option>{/each}
             </optgroup>
@@ -203,8 +378,10 @@
               </optgroup>
             {/if}
           </select>
+          <FieldError id="wf-profile-error" error={fieldError(visible, 'profile')} />
           <span class="hint" id="wf-profile-hint">
-            {#if chosenRev}Custom revision <span class="mono" title={chosenRev.revision}>{shortRev(chosenRev.revision)}</span>: {Object.keys(chosenRev.overrides).length} tensors changed from {BASE_LABEL[chosenRev.base]}.{:else}Format of the bundle. Required, so the result is never a silent default.{/if}
+            {#if chosenRev}Custom revision <span class="mono" title={chosenRev.revision}>{shortRev(chosenRev.revision)}</span>: {Object.keys(chosenRev.overrides).length} tensors changed from {BASE_LABEL[chosenRev.base]}.{:else}Select the encoding for the HGN bundle. <abbr title="HGN profile with 4-bit and 3-bit HT tensor types">HT43</abbr> is a built-in profile.{/if}
+            {#if wfSource && !sourceSha}<span>Source checkpoint unverified.</span>{/if}
             <a href="#/profiles">{savedProfiles.length ? 'Edit profiles' : 'Create a custom profile'}</a>
           </span>
         </div>
@@ -218,7 +395,7 @@
               {eligible.length ? `Pool: ${eligible.map((h) => h.name ?? h.id).join(', ')}.` : 'No pool is configured, so it runs on the source host.'}
             </p>
           {:else}
-            <HostSelect bind:value={wfHost} kind="convert" label="Run on" optional optionalLabel="Host of the source" id="wf-host" />
+            <HostSelect bind:value={wfHost} {workflow} fallbackEligibility={legacyHostCheck} label="Run on" optional optionalLabel="Host of the source" id="wf-host" error={fieldError(visible, 'host')} onblur={() => (touched.host = true)} />
           {/if}
           <label class="inline"><input type="checkbox" bind:checked={wfAny} /> Any eligible pool worker</label>
         </div>
@@ -230,23 +407,27 @@
           {#each ['ht_backend', 'i4r_backend', 'q4cp_backend'] as const as key (key)}
             <div class="field">
               <label for="wf-{key}">{key.replace('_backend', '').toUpperCase()} encoder backend</label>
-              <select id="wf-{key}" class="input" bind:value={form[key]}>
+              <select id="wf-{key}" class="input" bind:value={form[key]} aria-describedby="wf-{key}-hint">
                 <option value="">Converter default</option>
                 {#each CONVERT_ENUMS.backend as b (b)}<option value={b}>{b}</option>{/each}
               </select>
+              <span class="hint" id="wf-{key}-hint">{encoders[key]}</span>
             </div>
           {/each}
           <div class="field">
             <label for="wf-seed">Seed <span class="muted">(optional)</span></label>
-            <input id="wf-seed" class="input num" type="number" min="0" step="1" bind:value={form.seed} inputmode="numeric" />
+            <input id="wf-seed" class="input num" type="number" min="0" max={Number.MAX_SAFE_INTEGER} step="1" bind:value={form.seed} inputmode="numeric" aria-describedby="wf-seed-hint" />
+            <span class="hint" id="wf-seed-hint">{seedHint}</span>
           </div>
           <div class="field">
             <label for="wf-threads">Threads <span class="muted">(optional)</span></label>
             <input id="wf-threads" class="input num" type="number" min="1" max="64" step="1" bind:value={form.threads} inputmode="numeric" />
+            <span class="hint">1 to 64.</span>
           </div>
           <div class="field">
             <label for="wf-beam">HT beam <span class="muted">(optional)</span></label>
             <input id="wf-beam" class="input num" type="number" min="1" max="256" step="1" bind:value={form.ht_beam} inputmode="numeric" />
+            <span class="hint">1 to 256.</span>
           </div>
           <div class="field">
             <label for="wf-dec">Verify decode backend</label>
@@ -259,17 +440,25 @@
         <p class="xs muted">The receipt records the backends that actually ran. A requested backend is not evidence of GPU use.</p>
       </Advanced>
 
-      <Submit blockers={conversions.status === 'unavailable' ? ['This controller has no conversion workflow. Use the individual steps below.'] : wfBlockers} busy={starter.busy} onclick={startConversion}>Start conversion</Submit>
+      <Blockers blockers={visible} />
+      <div class="row">
+        <button type="button" class="btn primary" disabled={!checked?.decision?.eligible || !checkBody || checking || !!wfBlockers.length || starter.busy} onclick={startConversion}>Start conversion</button>
+        {#if checking && conversions.status !== 'unavailable'}<span class="hint" role="status">Checking this conversion.</span>{/if}
+        {#if checkKey && checked?.key === checkKey && checked.error}
+          <button type="button" class="btn small" onclick={() => { checked = undefined; retryCheck++; }}>Check again</button>
+        {/if}
+      </div>
       <div aria-live="polite" class="xs">
-        {#if starter.error}<p class="note bad" role="alert">{starter.error} Pressing Start again retries the same request; it will not start a second conversion.</p>
-        {:else if starter.last && starter.replayed}<p class="muted">This exact request already started conversion <span class="mono">{starter.last.id}</span>; no second conversion was started. Change the source, profile or options to start another.</p>
-        {:else if starter.last}<p class="muted">Started conversion <span class="mono">{starter.last.id}</span>. It continues on the controller if you leave this page.</p>{/if}
+        {#if starter.error}<p class="note bad" role="alert">{starter.error}</p>
+        {:else if starter.last}
+          <p class="muted">{starter.matched ? 'This request is already queued as job' : starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a bind:this={runLink} href={conversionRunHref(starter.last.id)}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : 'The run continues if you leave this page.'}</p>
+        {/if}
+        {#if starter.repeat}<button type="button" class="btn small" disabled={starter.busy} onclick={starter.repeat}>Queue another</button>{/if}
       </div>
     </div>
+    </WorkflowGate>
     {/if}
   </section>
-
-  <Hy4Plan bind:sourceId={form.source} />
 
   <section class="panel" id="conversion-runs" aria-labelledby="runs-h">
     <header><h2 id="runs-h">Conversions <span class="muted num small">({runs.length})</span></h2></header>
@@ -284,8 +473,8 @@
     {:else}
       {#if conversions.status === 'error'}<p class="xs muted" style="margin:8px 16px 0">Showing the last loaded list ({conversions.error}).</p>{/if}
       <div>
-        {#each activeRuns as c (c.id)}<div id="run-{c.id}"><ConversionRun {c} /></div>{/each}
-        {#each showOlder ? finishedRuns : finishedRuns.slice(0, 5) as c (c.id)}<div id="run-{c.id}"><ConversionRun {c} /></div>{/each}
+        {#each activeRuns as c (c.id)}<div id="run-{c.id}" tabindex="-1"><ConversionRun {c} /></div>{/each}
+        {#each visibleFinished as c (c.id)}<div id="run-{c.id}" tabindex="-1"><ConversionRun {c} /></div>{/each}
       </div>
       {#if finishedRuns.length > 5}
         <div class="more"><button type="button" class="btn small ghost" aria-expanded={showOlder} onclick={() => (showOlder = !showOlder)}>{showOlder ? 'Show fewer' : `Show ${finishedRuns.length - 5} older`}</button></div>
@@ -293,8 +482,7 @@
     {/if}
   </section>
 
-  {#if !useLayerRecipe}
-  <details class="disclosure manual">
+  <details class="disclosure manual" bind:open={diagnosticsOpen}>
     <summary><span class="t">Individual steps (diagnostics)</span><span class="s xs">Run inspect, plan, convert or verify as a single job</span></summary>
     <div class="stack manual-body">
 
@@ -326,46 +514,48 @@
       <p class="small">{STEPS.find((x) => x.id === step)?.text}</p>
 
       <div class="grid-2">
-        <ModelSelect bind:value={form.source} kinds={CONVERT_SOURCE_KINDS} label="Source checkpoint" hint="Same source as above." />
+        <ModelSelect id="cv-source" bind:value={diagnostic.source} kinds={CONVERT_SOURCE_KINDS} label="Source checkpoint" hint="Select a source for this diagnostic job." />
         {#if step === 'verify'}
-          <ModelSelect bind:value={form.bundle} kinds={VERIFY_OUTPUT_KINDS} label="Bundle to verify" hint="Choose the output registered as kind hgn." exclude={form.source ? [form.source] : []} />
+          <ModelSelect bind:value={diagnostic.bundle} kinds={VERIFY_OUTPUT_KINDS} label="Bundle to verify" hint="Choose the HGN bundle." exclude={diagnostic.source ? [diagnostic.source] : []} />
         {:else}
           <div class="field">
-            {#if step === 'convert' && form.anyHost}
+            {#if step === 'convert' && diagnostic.anyHost}
               <span class="flabel">Run on</span>
               <p class="hint">
                 The controller assigns this job to an idle pool worker when it starts, and never moves it. Each job converts one complete checkpoint on one host; queue more jobs to use more workers.
                 {eligible.length ? `Pool: ${eligible.map((h) => h.name ?? h.id).join(', ')}.` : 'No pool is configured, so the job runs on the source host.'}
               </p>
             {:else}
-              <HostSelect bind:value={form.host} kind={step} label="Run on" optional optionalLabel="Host of the source" />
+              <HostSelect bind:value={diagnostic.host} kind={step} label="Run on" optional optionalLabel="Host of the source" />
             {/if}
             {#if step === 'convert'}
-              <label class="inline"><input type="checkbox" bind:checked={form.anyHost} /> Any eligible pool worker</label>
+              <label class="inline"><input type="checkbox" bind:checked={diagnostic.anyHost} /> Any eligible pool worker</label>
             {/if}
           </div>
         {/if}
       </div>
       {#if step === 'verify'}
         <div class="grid-2">
-          <HostSelect bind:value={form.host} kind="verify" label="Run on" optional optionalLabel="Host of the source" />
+          <HostSelect bind:value={diagnostic.host} kind="verify" label="Run on" optional optionalLabel="Host of the source" />
         </div>
       {/if}
 
       {#if usesBackends}
         <div class="grid-2">
           <div class="field">
-            <label for="cv-profile">Profile</label>
-            <select id="cv-profile" class="input" bind:value={form.profile} aria-describedby="cv-profile-hint">
-              <option value="">Converter default</option>
+            <label for="cv-profile">Output profile</label>
+            <select id="cv-profile" class="input" bind:value={diagnostic.profile} aria-describedby="cv-profile-hint" aria-required="true">
+              <option value="" disabled>Choose a profile</option>
               {#each CONVERT_ENUMS.profile as p (p)}<option value={p}>{p === 'v2' ? 'HGN v2' : p === 'ht43' ? 'HT43' : p}</option>{/each}
             </select>
-            <span class="hint" id="cv-profile-hint">Output format of the bundle.</span>
+            <span class="hint" id="cv-profile-hint">Select the encoding for the HGN bundle.</span>
           </div>
         </div>
       {/if}
 
-      <p class="xs muted">Components and advanced options are shared with the form above.</p>
+      {#each models.filter((m) => m.id === diagnostic.source) as source (source.id)}
+        <ComponentPicker bind:value={diagnostic.extras} {source} idPrefix="cv-comp" />
+      {/each}
 
       {#if usesBackends || usesPlanOpts || step === 'verify'}
         <Advanced changed={optsChanged}>
@@ -374,31 +564,35 @@
               {#each ['ht_backend', 'i4r_backend', 'q4cp_backend'] as const as key (key)}
                 <div class="field">
                   <label for="cv-{key}">{key.replace('_backend', '').toUpperCase()} encoder backend</label>
-                  <select id="cv-{key}" class="input" bind:value={form[key]}>
+                  <select id="cv-{key}" class="input" bind:value={diagnostic[key]} aria-describedby="cv-{key}-hint">
                     <option value="">Converter default</option>
                     {#each CONVERT_ENUMS.backend as b (b)}<option value={b}>{b}</option>{/each}
                   </select>
+                  <span class="hint" id="cv-{key}-hint">{encoders[key]}</span>
                 </div>
               {/each}
             {/if}
             {#if usesPlanOpts}
               <div class="field">
                 <label for="cv-seed">Seed <span class="muted">(optional)</span></label>
-                <input id="cv-seed" class="input num" type="number" min="0" step="1" bind:value={form.seed} inputmode="numeric" />
+                <input id="cv-seed" class="input num" type="number" min="0" max={Number.MAX_SAFE_INTEGER} step="1" bind:value={diagnostic.seed} inputmode="numeric" aria-describedby="cv-seed-hint" />
+                <span class="hint" id="cv-seed-hint">{seedHint}</span>
               </div>
               <div class="field">
                 <label for="cv-threads">Threads <span class="muted">(optional)</span></label>
-                <input id="cv-threads" class="input num" type="number" min="1" max="64" step="1" bind:value={form.threads} inputmode="numeric" />
+                <input id="cv-threads" class="input num" type="number" min="1" max="64" step="1" bind:value={diagnostic.threads} inputmode="numeric" />
+                <span class="hint">1 to 64.</span>
               </div>
               <div class="field">
                 <label for="cv-beam">HT beam <span class="muted">(optional)</span></label>
-                <input id="cv-beam" class="input num" type="number" min="1" max="256" step="1" bind:value={form.ht_beam} inputmode="numeric" />
+                <input id="cv-beam" class="input num" type="number" min="1" max="256" step="1" bind:value={diagnostic.ht_beam} inputmode="numeric" />
+                <span class="hint">1 to 256.</span>
               </div>
             {/if}
             {#if step === 'verify'}
               <div class="field">
                 <label for="cv-dec">Decode backend</label>
-                <select id="cv-dec" class="input" bind:value={form.decode_backend}>
+                <select id="cv-dec" class="input" bind:value={diagnostic.decode_backend}>
                   <option value="">Converter default</option>
                   {#each CONVERT_ENUMS.backend as b (b)}<option value={b}>{b}</option>{/each}
                 </select>
@@ -413,9 +607,9 @@
       <SubmitStatus {s} />
     </div>
   </div>
+      <Hy4Plan bind:sourceId={hy4Source} bind:encode={hy4Encode} />
     </div>
   </details>
-  {/if}
 
   <RecentJobs kinds={['inspect', 'plan', 'convert', 'verify']} title="Recent converter jobs" limit={8} />
 </div>
@@ -467,6 +661,7 @@
   }
   .fmt {
     display: inline-flex;
+    flex-wrap: wrap;
     padding: 2px;
     border: 1px solid var(--line);
     border-radius: var(--r-md);

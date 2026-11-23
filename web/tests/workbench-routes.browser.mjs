@@ -13,7 +13,7 @@ const policy={...host,revision:1,paused:false,draining:false,installed_jobs:['co
 const routes=[
   ['library','Library'],['queue','Jobs'],['transfers','Transfers'],['compare','Compare'],['trace','Trace'],['edits','Edit sessions'],['trace?job=missing','Trace','trace'],['edits?rev=missing','Edit sessions','edits'],['convert','Convert'],
   ['evaluate','Evaluate'],['benchmarks','Benchmarks'],['calibration','Calibration inputs'],['settings','Settings'],
-  [`jobs/${job.id}`,'Conversion','queue'],['profiles?format=gguf','Conversion profiles','convert'],
+  [`jobs/${job.id}`,'Convert step','queue'],['profiles?format=gguf','Conversion profiles','convert'],
   ['weights?source=local-sample','Weight edits','library'],['library?entry=local-sample','Library','library'],
   ['settings/infrastructure?host=frame&section=weights','Settings','settings','weight-settings-h'],
   ['settings/infrastructure?host=frame&section=policy','Settings','settings','host-policy-h'],

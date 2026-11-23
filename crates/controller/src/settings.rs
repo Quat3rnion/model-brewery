@@ -1,4 +1,4 @@
-use crate::domain::{BaselineSource, BenchmarkChoice, Host};
+use crate::domain::{BaselineSource, BenchmarkChoice, Host, Reason, standard_job_host_blocker};
 use crate::store::Store;
 use brewery_worker::operational::{self, Catalog, Policy, Settings};
 use serde::{Deserialize, Serialize};
@@ -8,10 +8,17 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 pub const KINDS: &[&str] = &["benchmark", "baseline", "evaluate", "generate"];
 
-pub(crate) fn trace_policy(config: Option<&Value>) -> Result<brewery_worker::trace::Policy, crate::Error> {
-    let policy: brewery_worker::trace::Policy = config.and_then(|v| v.get("trace"))
-        .map(|v| serde_json::from_value(v.clone())).transpose()?.unwrap_or_default();
-    policy.check().map_err(|e| -> crate::Error { e.to_string().into() })?;
+pub(crate) fn trace_policy(
+    config: Option<&Value>,
+) -> Result<brewery_worker::trace::Policy, crate::Error> {
+    let policy: brewery_worker::trace::Policy = config
+        .and_then(|v| v.get("trace"))
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()?
+        .unwrap_or_default();
+    policy
+        .check()
+        .map_err(|e| -> crate::Error { e.to_string().into() })?;
     Ok(policy)
 }
 
@@ -88,7 +95,16 @@ enum EvaluationStatus {
 struct Evaluation {
     status: EvaluationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<&'static str>,
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason_detail: Option<Reason>,
+}
+
+#[derive(Serialize)]
+struct Readiness {
+    ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<Reason>,
 }
 
 #[derive(Serialize)]
@@ -100,6 +116,7 @@ pub struct View<'a> {
     // Compatibility fields describe evaluation settings only, not host management.
     managed: bool,
     ready: bool,
+    readiness: BTreeMap<&'static str, Readiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
     approved_ports: Vec<u16>,
@@ -158,7 +175,7 @@ impl Managed {
             let reason = if id == crate::backend_hf::ID {
                 "Saved on the controller only; the backend worker does not run evaluation"
             } else {
-                "Saved on the controller only; execution needs an eligible local worker policy"
+                "Saved on the controller only; this worker does not apply managed evaluation settings"
             };
             return profile_only(reason, explicit);
         };
@@ -282,12 +299,14 @@ impl Managed {
         &self,
         store: &Store,
         host: &'a Host,
+        effective: Option<&Host>,
         management_available: bool,
     ) -> Result<View<'a>, crate::Error> {
         let binding = self.profile_binding(host);
         let draft = store.evaluation_profile(&binding)?;
         Ok(Self::render(
             host,
+            effective,
             management_available,
             self.native(&host.id),
             binding,
@@ -295,14 +314,33 @@ impl Managed {
         ))
     }
 
-    fn render(
-        host: &Host,
+    fn render<'a>(
+        host: &'a Host,
+        effective: Option<&Host>,
         management_available: bool,
         native: Native,
         binding: String,
         draft: Option<Settings>,
-    ) -> View<'_> {
+    ) -> View<'a> {
         let management = Management::for_host(host, management_available);
+        let readiness = KINDS
+            .iter()
+            .map(|&kind| {
+                let reason = match effective {
+                    None => Some(Reason::settings(host, "policy", "Activate this worker")),
+                    Some(host) => standard_job_host_blocker(host, kind),
+                };
+                (
+                    kind,
+                    Readiness {
+                        ready: reason.is_none(),
+                        reason,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let evaluation_reason = readiness["evaluate"].reason.clone();
+        let ready = readiness.values().any(|row| row.ready);
         match native {
             Native::Managed(profile) => View {
                 id: &host.id,
@@ -310,16 +348,12 @@ impl Managed {
                 management,
                 evaluation: Evaluation {
                     status: EvaluationStatus::Managed,
-                    reason: if !profile.policy.evaluation_allowed {
-                        Some("Evaluation and generation are disabled by the worker policy")
-                    } else if !profile.eval_ready {
-                        Some("Ask the operator to configure GPU loading and pin a Halogen image")
-                    } else {
-                        None
-                    },
+                    reason: evaluation_reason.as_ref().map(|reason| reason.text.clone()),
+                    reason_detail: evaluation_reason,
                 },
                 managed: true,
-                ready: true,
+                ready,
+                readiness,
                 reason: None,
                 approved_ports: profile.policy.allowed_ports,
                 evaluation_allowed: profile.eval_ready,
@@ -340,10 +374,12 @@ impl Managed {
                 management,
                 evaluation: Evaluation {
                     status: EvaluationStatus::ProfileOnly,
-                    reason: Some(reason),
+                    reason: Some(reason.into()),
+                    reason_detail: evaluation_reason,
                 },
                 managed: false,
-                ready: false,
+                ready,
+                readiness,
                 reason: Some(reason),
                 approved_ports: Vec::new(),
                 evaluation_allowed: false,
@@ -356,21 +392,20 @@ impl Managed {
         }
     }
 
-    pub fn put<'a>(
+    pub fn put(
         &self,
         store: &Store,
-        host: &'a Host,
+        host: &Host,
         native: Native,
         mut replacement: Settings,
         request_binding: Option<&str>,
-        management_available: bool,
-    ) -> Result<View<'a>, PutError> {
+    ) -> Result<(), PutError> {
         let binding = self.profile_binding(host);
-        let mut draft = store
+        let draft = store
             .evaluation_profile(&binding)
             .map_err(PutError::Storage)?;
-        let native = match native {
-            Native::Managed(mut profile) => {
+        match native {
+            Native::Managed(profile) => {
                 if request_binding.is_some() {
                     return Err(PutError::Conflict);
                 }
@@ -383,10 +418,8 @@ impl Managed {
                         "Could not save evaluation settings; check the worker's private state root",
                     )
                 })?;
-                profile.settings = replacement;
-                Native::Managed(profile)
             }
-            other => {
+            Native::ProfileOnly { .. } => {
                 if request_binding != Some(binding.as_str()) {
                     return Err(PutError::Conflict);
                 }
@@ -397,17 +430,9 @@ impl Managed {
                 store
                     .save_evaluation_profile(&binding, &replacement)
                     .map_err(PutError::Storage)?;
-                draft = Some(replacement);
-                other
             }
-        };
-        Ok(Self::render(
-            host,
-            management_available,
-            native,
-            binding,
-            draft,
-        ))
+        }
+        Ok(())
     }
 
     pub fn effective(&self, hosts: &[Host]) -> Vec<Host> {
@@ -422,17 +447,20 @@ impl Managed {
                 {
                     return host;
                 };
-                let mut enabled = [false; 4];
                 host.benchmark_targets.clear();
                 host.benchmarks.clear();
                 host.baseline_sources.clear();
-                if let Native::Managed(profile) = native
-                    && profile
+                let validation = match &native {
+                    Native::Managed(profile) => profile
                         .settings
                         .validate(&profile.policy, &profile.catalog, profile.eval_ready)
-                        .is_ok()
+                        .map_err(|error| error.to_string()),
+                    Native::ProfileOnly { reason, .. } => Err((*reason).into()),
+                };
+                if let Native::Managed(profile) = &native
+                    && validation.is_ok()
                 {
-                    let settings = profile.settings;
+                    let settings = &profile.settings;
                     host.benchmark_targets = settings
                         .benchmark_targets
                         .iter()
@@ -445,38 +473,93 @@ impl Managed {
                         .collect();
                     host.baseline_sources = settings
                         .baseline_endpoints
-                        .into_iter()
+                        .iter()
                         .map(|b| BaselineSource {
-                            id: b.id,
-                            label: b.label,
+                            id: b.id.clone(),
+                            label: b.label.clone(),
                         })
                         .collect();
-                    enabled = [
-                        !host.benchmark_targets.is_empty() && !host.benchmarks.is_empty(),
-                        !host.baseline_sources.is_empty(),
-                        settings.evaluation_enabled,
-                        settings.evaluation_enabled,
-                    ];
                 }
-                for (&kind, enabled) in KINDS.iter().zip(enabled) {
-                    let enabled = enabled
-                        && !self.entries.get(&host.id).is_some_and(|entry| {
+                for &kind in KINDS {
+                    let reason =
+                        if self.entries.get(&host.id).is_some_and(|entry| {
                             entry["capabilities"][kind].as_bool() == Some(false)
-                        });
-                    if !enabled {
-                        host.reasons.insert(
-                            kind.into(),
-                            "Managed worker has no ready settings for this job".into(),
-                        );
+                        }) {
+                            Some(Reason::settings(
+                                &host,
+                                "policy",
+                                &format!("Enable {kind} in the controller worker policy"),
+                            ))
+                        } else if let Native::Managed(profile) = &native {
+                            profile.reason(&host, kind, &validation)
+                        } else {
+                            validation
+                                .as_ref()
+                                .err()
+                                .map(|error| invalid_settings(&host, error))
+                        };
+                    host.capabilities.insert(kind.into(), reason.is_none());
+                    if let Some(reason) = reason {
+                        host.reasons.insert(kind.into(), reason.text.clone());
+                        host.capability_reasons.insert(kind.into(), reason);
                     } else {
                         host.reasons.remove(kind);
                     }
-                    host.capabilities.insert(kind.into(), enabled);
                 }
                 host
             })
             .collect()
     }
+}
+
+impl Profile {
+    fn reason(&self, host: &Host, kind: &str, validation: &Result<(), String>) -> Option<Reason> {
+        let (section, action) = match kind {
+            "evaluate" | "generate" if !self.policy.evaluation_allowed => {
+                ("policy", "Allow evaluation in the worker policy")
+            }
+            "evaluate" | "generate" if !self.eval_ready => (
+                "policy",
+                "Allow GPU loading and pin a Halogen runtime image",
+            ),
+            "baseline" if !self.policy.baseline_allowed => {
+                ("policy", "Allow baseline endpoints in the worker policy")
+            }
+            _ if validation.is_err() => {
+                return validation
+                    .as_ref()
+                    .err()
+                    .map(|error| invalid_settings(host, error));
+            }
+            "benchmark" if self.settings.benchmark_targets.is_empty() => {
+                ("evaluation", "Add a benchmark target")
+            }
+            "benchmark" if self.settings.enabled_suites.is_empty() => {
+                if self.catalog.adapters.is_empty() {
+                    (
+                        "policy",
+                        "Add an approved benchmark suite to the worker catalog",
+                    )
+                } else {
+                    ("evaluation", "Select a benchmark suite")
+                }
+            }
+            "baseline" if self.settings.baseline_endpoints.is_empty() => {
+                ("evaluation", "Add a baseline endpoint")
+            }
+            "evaluate" | "generate" if !self.settings.evaluation_enabled => {
+                ("evaluation", "Allow GSM8K evaluation")
+            }
+            _ => return None,
+        };
+        Some(Reason::settings(host, section, action))
+    }
+}
+
+fn invalid_settings(host: &Host, detail: &str) -> Reason {
+    let mut reason = Reason::settings(host, "evaluation", "Correct the settings");
+    reason.text = format!("{} ({detail}).", reason.text.trim_end_matches('.'));
+    reason
 }
 
 fn advance_revision(settings: &mut Settings, current: u64) -> Result<(), PutError> {

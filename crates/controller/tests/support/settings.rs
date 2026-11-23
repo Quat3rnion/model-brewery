@@ -55,8 +55,8 @@ fn backend_and_legacy_hosts_have_management_without_evaluation_enrollment() {
     let hosts = settings["hosts"].as_array().unwrap();
     assert_eq!(hosts.len(), 3);
     for (index, (id, reason, job)) in [
-        ("alpha", "eligible local worker", "inspect"),
-        ("beta", "eligible local worker", "evaluate"),
+        ("alpha", "managed evaluation settings", "inspect"),
+        ("beta", "managed evaluation settings", "evaluate"),
         ("backend-hf", "does not run evaluation", "hf_download"),
     ]
     .into_iter()
@@ -155,11 +155,32 @@ fn managed_settings_persist_and_gate_job_admission() {
     )
     .unwrap();
     app.launch();
+    let initial = app.json("GET", "/api/settings", None, 200);
+    let alpha = &initial["hosts"][0];
+    assert_eq!(alpha["ready"], false);
+    assert_eq!(alpha["readiness"]["benchmark"]["ready"], false);
+    assert_eq!(
+        alpha["readiness"]["benchmark"]["reason"],
+        json!({
+            "text":"Add a benchmark target in Settings > Hosts > alpha > Evaluation.",
+            "fix_anchor":"#/settings/evaluation?host=alpha"
+        })
+    );
+    assert_eq!(
+        alpha["evaluation"]["reason_detail"],
+        alpha["readiness"]["evaluate"]["reason"]
+    );
+    assert_eq!(
+        app.json("GET", "/api/state", None, 200)["hosts"][0]["capability_reasons"]["benchmark"],
+        alpha["readiness"]["benchmark"]["reason"]
+    );
     let new = json!({"revision":0,"benchmark_targets":[{"id":"saved","endpoint":"http://127.0.0.1:9101/v1","model":"fixture"}],
         "enabled_suites":["suite"],"baseline_endpoints":[],"evaluation_enabled":false});
     let saved = app.json("PUT", "/api/settings/alpha", Some(new.clone()), 200);
     assert_eq!(saved["revision"], 1);
     assert_eq!(saved["evaluation"]["status"], "managed");
+    assert_eq!(saved["ready"], true);
+    assert_eq!(saved["readiness"]["benchmark"]["ready"], true);
     assert_eq!(saved["evaluation_allowed"], false);
     assert!(
         saved["evaluation"]["reason"]

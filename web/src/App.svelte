@@ -39,7 +39,10 @@
     const v = route.view;
     if (v !== previous) {
       previous = v;
-      queueMicrotask(() => main?.querySelector<HTMLElement>('h1')?.focus());
+      // Settings setup links manage focus for their specific destination.
+      if (v !== 'settings' || !['#/settings/infrastructure', '#/settings/evaluation'].includes(route.hash.split('?')[0])) {
+        queueMicrotask(() => main?.querySelector<HTMLElement>('h1')?.focus());
+      }
     }
   });
 
@@ -50,7 +53,7 @@
   ];
 
   $effect(() => {
-    const label = VIEWS.find((v) => v.id === route.view)?.label ?? (route.view === 'profiles' ? 'Profiles' : route.view === 'weights' ? 'Weight edits' : 'Job');
+    const label = VIEWS.find((v) => v.id === route.view)?.label ?? (route.view === 'profiles' ? 'Profiles' : route.view === 'weights' ? 'Weight edits' : route.view === 'not-found' ? 'Not found' : 'Job');
     document.title = `${running ? '▶ ' : ''}${label} · Model Brewery`;
   });
 </script>
@@ -59,7 +62,10 @@
 <header class="top">
   <div class="brand">
     <span class="mark" aria-hidden="true"></span>
-    <span class="name" translate="no">Model Brewery</span>
+    <div>
+      <span class="name" translate="no">Model Brewery</span>
+      <p class="qualification xs muted">This workbench is not release-qualified.</p>
+    </div>
   </div>
   <nav aria-label="Sections">
     <ul class="seg">
@@ -75,9 +81,9 @@
   <div class="controls">
     <div class="conn c-{brewery.connection}" role="status" aria-live="polite">
       <span class="cdot" aria-hidden="true"></span>
-      {#if brewery.connection === 'live'}<span>Connected</span>
-      {:else if brewery.connection === 'retrying'}<span title={brewery.lastError ?? ''}>Reconnecting…</span>
-      {:else}<span>Connecting…</span>{/if}
+      {#if brewery.connection === 'live'}<span aria-label="Controller connected">Connected</span>
+      {:else if brewery.lastError}<span aria-label="Controller disconnected. Retrying.">Retrying</span>
+      {:else}<span aria-label="Connecting to controller">Connecting</span>{/if}
     </div>
     <fieldset class="seg theme">
       <legend class="sr-only">Theme</legend>
@@ -110,16 +116,18 @@
     <div class="boot">
       {#if brewery.lastError}
         <h1 tabindex="-1">Controller not reachable</h1>
-        <p class="muted">{brewery.lastError} The page retries on its own. Start the controller (default <code>127.0.0.1:4141</code>) and keep this tab open.</p>
+        <p class="muted">Start the controller (default <code>127.0.0.1:4141</code>). This page connects again automatically.</p>
+        <p class="muted small break">{brewery.lastError}</p>
       {:else}
         <h1 tabindex="-1">Loading workbench…</h1>
       {/if}
     </div>
   {:else}
     {#if brewery.connection === 'retrying'}
-      <p class="note warn stale" role="alert">
-        Lost contact with the controller ({brewery.lastError}). Showing the last known state from {brewery.lastUpdated?.toLocaleTimeString()}. Jobs keep running on the controller.
-      </p>
+      <div class="note warn stale" role="alert">
+        <p>The controller disconnected. This page shows the state from {brewery.lastUpdated?.toLocaleTimeString()} and tries to connect again. Jobs continue on the controller.</p>
+        {#if brewery.lastError}<p class="small break">{brewery.lastError}</p>{/if}
+      </div>
     {/if}
     {#if route.view === 'library'}<Library />
     {:else if route.view === 'queue'}<Queue />
@@ -135,6 +143,11 @@
     {:else if route.view === 'weights'}<Weights />
     {:else if route.view === 'trace'}<Trace />
     {:else if route.view === 'edits'}<Edits />
+    {:else}
+      <div class="stack">
+        <h1 tabindex="-1">Not found</h1>
+        <p>This page does not exist. <a href="#/library">Open Library</a>.</p>
+      </div>
     {/if}
   {/if}
 </main>
@@ -182,6 +195,11 @@
     height: 17px;
     background: currentColor;
     clip-path: polygon(15% 0, 85% 0, 100% 100%, 0 100%);
+  }
+  .qualification {
+    margin: 0;
+    font-weight: 400;
+    letter-spacing: normal;
   }
   nav {
     flex: 1;
@@ -334,6 +352,9 @@
   }
   .stale {
     margin-bottom: var(--s-4);
+  }
+  .stale p + p {
+    margin-top: var(--s-1);
   }
   @media (max-width: 760px) {
     /* On phones the header scrolls away, as in Halogen Dashboard: a sticky

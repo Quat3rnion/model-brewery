@@ -238,6 +238,21 @@ pub struct SuggestRequest {
     pub prefix: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatRequest {
+    pub path: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PathState {
+    File { bytes: u64 },
+    Directory,
+    Missing,
+    OutsideRoots,
+}
+
 pub fn validate_suggest_prefix(prefix: &str) -> Result<()> {
     ensure!(
         prefix.len() <= SUGGEST_PREFIX_BYTES
@@ -331,6 +346,7 @@ pub enum Rpc {
         id: String,
         slice: trace::Slice,
     },
+    Stat(StatRequest),
     Read {
         root: PathBuf,
         entry: Entry,

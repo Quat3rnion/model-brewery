@@ -14,7 +14,7 @@ export type Base = 'v2' | 'ht43';
 export type Choice = Base;
 export type Overrides = Record<string, Choice>;
 export const GROUPS = ['trunk', 'vision', 'mtp', 'global', 'engram'] as const;
-export const GROUP_LABEL: Record<string, string> = { trunk: 'Trunk layers', vision: 'Vision tower', mtp: 'MTP head', global: 'Global (embeddings, output)', engram: 'Engram lookup' };
+export const GROUP_LABEL: Record<string, string> = { trunk: 'Trunk layers', vision: 'Vision tower', mtp: 'MTP draft head', global: 'Global (embeddings, output)', engram: 'Engram (n-gram lookup)' };
 export const BASE_LABEL: Record<Base, string> = { v2: 'HGN v2', ht43: 'HT43' };
 export const BUILT_IN_NAMES = new Set(['v2', 'ht43', 'hgn v2', 'hgn-v2']);
 

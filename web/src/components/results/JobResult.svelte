@@ -6,20 +6,23 @@
   import BenchmarkReport from './BenchmarkReport.svelte';
   import ComponentEvidence from '../ComponentEvidence.svelte';
   import WeightReport from '../weights/WeightReport.svelte';
+  import ConversionSummary from './ConversionSummary.svelte';
   import { selectionFrom } from '../../lib/components';
   import { missingSuites, readBenchmarkReport, requestedOf } from '../../lib/benchmark';
   import { formatBytes, shortHash } from '../../lib/format';
-  import { referenceInfo, accuracyText, isFullSplit, isSynthetic, loadProofText, obj, readScore, verifyVerdict, explicitVerdict } from '../../lib/reports';
+  import { referenceInfo, accuracyText, isFullSplit, isSynthetic, loadProofText, obj, readScore, fileVerificationStatus, explicitVerdict, NOT_RELEASE_QUALIFIED } from '../../lib/reports';
   import type { JobDetail } from '../../lib/types';
 
   let { job }: { job: JobDetail } = $props();
   const result = $derived(obj(job.result));
   const artifact = $derived(obj(result?.artifact));
   const kind = $derived(String(job.kind));
+  const conversion = $derived(kind === 'convert' || result?.kind === 'hy4_plan');
   const bench = $derived(readBenchmarkReport(job.result));
   const requestedRoles = $derived(selectionFrom(job.input_ids, job.options));
   const benchShown = ['kind', 'schema', 'target', 'model', 'status', 'runs', 'release_qualified'];
-  const shown = $derived([...(bench ? benchShown : []), 'artifact', 'traces', 'alignment', 'report', 'text', 'score', 'comparison', 'disk_preflight', 'file_verification', 'hardware_proof', 'load_proof', 'identity', 'kind', ...(result?.score ? ['baseline_score','baseline_identity','reference_scope'] : []), 'dataset', 'protocol_id', 'inputs', 'bytes', 'missing_bytes', 'available_bytes', 'removed', 'skipped', 'components', ...(kind.startsWith('weight_') ? ['proposal'] : [])]);
+  const conversionShown = ['runtime_ready', 'payload_verified', 'file_bytes', 'base_file_bytes', 'resident_bytes', 'base_resident_bytes', 'resident_delta_bytes', 'source_metadata_read_bytes', 'reflink_bytes', 'engram', 'release_qualified'];
+  const shown = $derived([...(bench ? benchShown : []), ...(conversion ? conversionShown : []), 'artifact', 'traces', 'alignment', 'report', 'text', 'score', 'comparison', 'disk_preflight', 'file_verification', 'hardware_proof', 'load_proof', 'identity', 'kind', ...(result?.score ? ['baseline_score','baseline_identity','reference_scope'] : []), 'dataset', 'protocol_id', 'inputs', 'bytes', 'missing_bytes', 'available_bytes', 'removed', 'skipped', 'components', ...(kind.startsWith('weight_') ? ['proposal'] : [])]);
 </script>
 
 {#if !result}
@@ -30,6 +33,7 @@
   {/if}
 {:else}
   <div class="stack">
+    {#if conversion}<ConversionSummary {job} {result} />{/if}
     {#if ['inspect', 'plan', 'convert', 'verify'].includes(kind) && (result.components || Object.values(requestedRoles).some(Boolean))}
       <ComponentEvidence requested={requestedRoles} result={job.result} />
     {/if}
@@ -66,7 +70,8 @@
           <p class="xs muted">Free space is measured, not reserved. Other writes can use it before the transfer runs.</p>
         {/if}
         {#if inputs.length}
-          <div class="table-wrap">
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard users must be able to scroll this table.) -->
+          <div class="table-wrap" role="region" aria-label="Transfer inputs scroll area" tabindex="0">
             <table class="data">
               <caption class="sr-only">Inputs of this transfer</caption>
               <thead><tr><th scope="col">{kind === 'transfer' && job.state === 'succeeded' ? 'Copy' : 'Source'}</th><th scope="col">Kind</th><th scope="col">Size</th><th scope="col">Bundle SHA-256</th><th scope="col">On destination</th>{#if kind === 'transfer' && job.state === 'succeeded'}<th scope="col"><span class="sr-only">Library</span></th>{/if}</tr></thead>
@@ -127,11 +132,11 @@
     {/if}
 
     {#if kind === 'verify' || result.file_verification}
-      {@const v = verifyVerdict(result)}
+      {@const v = fileVerificationStatus(result)}
       <section>
         <h3 class="h">File verification</h3>
         <div class="row">
-          <Badge tone={v === true ? 'ok' : v === false ? 'bad' : 'muted'} label={v === true ? 'Passed' : v === false ? 'Failed' : 'No verdict'} />
+          <Badge tone={v === 'passed' ? 'ok' : v === 'failed' ? 'bad' : 'muted'} label={v === 'passed' ? 'Passed' : v === 'failed' ? 'Failed' : v === 'not_performed' ? 'Not performed' : 'No verdict'} />
         </div>
         {#if result.file_verification}<KeyValues data={result.file_verification} />{/if}
       </section>
@@ -183,20 +188,21 @@
         <h3 class="h">GSM8K score</h3>
         {#if score}<p class="num">{accuracyText(score)}{typeof score.unparsed === 'number' ? ` · ${score.unparsed} unparsed` : ''}</p>{/if}
         <div class="row">
+          <Badge tone="muted" label={NOT_RELEASE_QUALIFIED} />
           {#if full === true}
-            <Badge tone="ok" label="Full pinned split{typeof result.protocol_id === 'string' ? ` · ${result.protocol_id}` : ''}" />
+            <Badge tone="muted" label="Full pinned split{typeof result.protocol_id === 'string' ? ` · ${result.protocol_id}` : ''}" />
           {:else if isSynthetic(result)}
-            <Badge tone="warn" label="Synthetic fixture — does not qualify" />
+            <Badge tone="warn" label="Synthetic fixture" />
           {:else if full === false}
-            <Badge tone="warn" label="Not the full split — does not qualify" />
+            <Badge tone="warn" label="Not the full split" />
           {:else}
-            <Badge tone="warn" label="Split not confirmed — does not qualify" />
+            <Badge tone="warn" label="Split not confirmed" />
           {/if}
           {#if kind === 'evaluate' && !reference}<Badge tone="muted" label="Standalone evaluation" />{/if}
         </div>
         {#if reference}
           <h4>Reference comparison</h4>
-          <p class="small">{reference.scope === 'attested_bf16_same_source' ? 'Attested BF16 reference from the same source.' : 'Diagnostic reference.'} Precision: {reference.precision ?? 'not reported'}. This comparison does not qualify a release.</p>
+          <p class="small">{reference.scope === 'attested_bf16_same_source' ? 'Attested BF16 reference from the same source.' : 'Diagnostic reference.'} Precision: {reference.precision ?? 'not reported'}.</p>
           {@const rs = readScore({score:reference.score})}
           {#if rs}<p class="small num">Reference: {accuracyText(rs)}</p>{/if}
           {#if reference.identity}<details><summary class="small">Reference identity and provenance</summary><KeyValues data={reference.identity} /></details>{/if}
@@ -234,7 +240,7 @@
           <dt>Kind</dt><dd>{String(artifact.kind ?? '—')}</dd>
           <dt>Path</dt><dd class="mono break">{String(artifact.path ?? '—')}</dd>
           <dt>SHA-256</dt><dd class="mono break" title={String(artifact.sha256 ?? '')}>{shortHash(artifact.sha256)}</dd>
-          <dt>Size</dt><dd class="num">{formatBytes(artifact.bytes)}</dd>
+          {#if !conversion}<dt>Size</dt><dd class="num">{formatBytes(artifact.bytes)}</dd>{/if}
         </dl>
         {#if Array.isArray(artifact.files)}
           <details><summary class="xs">{artifact.files.length} files</summary><pre class="block">{JSON.stringify(artifact.files, null, 2)}</pre></details>

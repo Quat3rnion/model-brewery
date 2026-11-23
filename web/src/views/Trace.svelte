@@ -2,7 +2,7 @@
   import { untrack } from 'svelte';
   import { api, errorText } from '../lib/api';
   import { brewery } from '../lib/store.svelte';
-  import { hashParam } from '../lib/route.svelte';
+  import { hashParam, route } from '../lib/route.svelte';
   import { Submitter } from '../lib/submit.svelte';
   import { capability, formatBytes, formatTime, isTerminal, modelLabel, newestFirst } from '../lib/format';
   import { obj } from '../lib/reports';
@@ -151,11 +151,13 @@
     ].filter(Boolean),
   );
 
-  const s = new Submitter();
-  async function submit() {
-    if (!built.job) return;
-    const job = await s.submit(built.job);
-    if (job) location.hash = `#/trace?job=${encodeURIComponent(job.id)}`;
+  const s = new Submitter('trace.queue');
+  function submit(event: MouseEvent) {
+    if (!built.job || blockers.length) return;
+    const { canPresent } = route.capture();
+    void s.submit(built.job, event, false, undefined, (job) => {
+      if (canPresent()) location.hash = `#/trace?job=${encodeURIComponent(job.id)}`;
+    });
   }
 
   // ---- Selected run (#/trace?job=<id>) ----

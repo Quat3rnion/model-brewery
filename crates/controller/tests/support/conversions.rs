@@ -43,9 +43,14 @@ fn native_layer_recipe_queues_only_on_its_configured_local_worker() {
     app.launch();
     let source = app.register("alpha", "hf", "/source/base");
     let other = app.register("beta", "hf", "/source/other");
-    app.json("POST", "/api/models", Some(json!({
-        "host":"alpha","path":"/source/not-verified","kind":"hgn-archive"
-    })), 400);
+    app.json(
+        "POST",
+        "/api/models",
+        Some(json!({
+            "host":"alpha","path":"/source/not-verified","kind":"hgn-archive"
+        })),
+        400,
+    );
     let policy = json!({"schema":"brewery.layer-quant.v1","source_sha256":"1".repeat(64),
                         "default_type":"BF16","layers":{"0":"HT3","1":"HT4"}});
     let request = json!({"format":"hgn","input_ids":[source],"options":{"layer_recipe":policy}});
@@ -160,15 +165,18 @@ fn gguf_workflow_accepts_direct_default_and_rejects_private_options() {
     let verify = app.detail(done["job_ids"]["verify"].as_str().unwrap());
     assert_eq!(verify["result"]["gguf_type"], "Q4_K_M");
     let state = app.json("GET", "/api/state", None, 200);
-    assert!(
-        state["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m["id"] == done["artifact_model_id"]
-                && m["kind"] == "gguf"
-                && m["path"].as_str().unwrap().ends_with("/converted.gguf"))
-    );
+    let model = state["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == done["artifact_model_id"])
+        .unwrap();
+    assert_eq!(model["kind"], "gguf");
+    assert!(model["path"].as_str().unwrap().ends_with("/converted.gguf"));
+    assert_eq!(model["sha256"], "b".repeat(64));
+    assert_eq!(model["bytes"], 9);
+    assert_eq!(model["job_id"], done["job_ids"]["convert"]);
+    assert_eq!(model.get("available"), Some(&Value::Null));
     app.json(
         "POST",
         "/api/jobs",

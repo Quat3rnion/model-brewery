@@ -42,6 +42,7 @@ export function buildConvertJob(step: ConvertStep, f: ConvertForm, models: Model
   const problems: string[] = [];
   const src = models.find((m) => m.id === f.source);
   if (!src) problems.push('Select a source checkpoint.');
+  else if (src.available === false) problems.push(src.reason ?? 'Select an available source checkpoint.');
   else if (!CONVERT_SOURCE_KINDS.has(src.kind)) problems.push('The source must be a checkpoint, GGUF or HGN entry.');
 
   const input_ids = f.source ? [f.source] : [];
@@ -50,6 +51,7 @@ export function buildConvertJob(step: ConvertStep, f: ConvertForm, models: Model
   if (step === 'verify') {
     const bundle = models.find((m) => m.id === f.bundle);
     if (!bundle) problems.push('Select the bundle to verify.');
+    else if (bundle.available === false) problems.push('Select an available bundle to verify.');
     else if (!VERIFY_OUTPUT_KINDS.has(bundle.kind)) problems.push('The output must be registered as kind hgn.');
     else if (bundle.id === f.source) problems.push('Select a bundle that is not the source.');
     if (f.bundle) input_ids.push(f.bundle);
@@ -59,6 +61,10 @@ export function buildConvertJob(step: ConvertStep, f: ConvertForm, models: Model
     for (const k of EXTRA_INPUT_KINDS) {
       const id = f.extras[k];
       if (!id) continue;
+      if (!models.some(model => model.id === id && model.kind === k && model.available !== false)) {
+        problems.push(`The ${k} input ${id} is not available. Select another entry.`);
+        continue;
+      }
       if (input_ids.includes(id)) {
         problems.push(`The ${k} input repeats another input.`);
         continue;
@@ -71,7 +77,7 @@ export function buildConvertJob(step: ConvertStep, f: ConvertForm, models: Model
     if (f.profile) options.profile = f.profile;
     for (const key of ['ht_backend', 'i4r_backend', 'q4cp_backend'] as const) if (f[key]) options[key] = f[key];
     if (step !== 'inspect') {
-      if (!intIn(f.seed, 0, Number.MAX_SAFE_INTEGER)) problems.push('Seed must be a whole number of 0 or more.');
+      if (!intIn(f.seed, 0, Number.MAX_SAFE_INTEGER)) problems.push(`Seed: enter a whole number from 0 to ${Number.MAX_SAFE_INTEGER.toLocaleString('en-US')}.`);
       if (!intIn(f.threads, 1, 64)) problems.push('Threads must be 1 to 64.');
       if (!intIn(f.ht_beam, 1, 256)) problems.push('HT beam must be 1 to 256.');
       if (f.seed !== null) options.seed = f.seed;

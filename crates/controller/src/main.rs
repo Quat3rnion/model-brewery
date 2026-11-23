@@ -2,21 +2,24 @@ mod admin;
 mod backend_calibration;
 mod backend_hf;
 mod conversion;
+mod dedupe;
 mod diff;
 mod dispatch;
 mod domain;
+mod eligibility;
 mod feed;
 mod gguf;
 mod hf_download;
 mod hf_tokens;
 mod idempotency;
-mod interventions;
-mod sae;
 mod infra_hosts;
+mod interventions;
 mod local_edit;
 mod mcp;
+mod model_availability;
 mod profiles;
 mod remote_edit;
+mod sae;
 mod scratch;
 mod settings;
 mod store;
@@ -54,6 +57,7 @@ struct App {
     ssh_hosts: Arc<infra_hosts::Registry>,
     remote_edit: Arc<remote_edit::Installer>,
     suggestions: suggestions::PathSuggestions,
+    model_availability: Arc<model_availability::ModelAvailability>,
     feed_subscribers: Arc<tokio::sync::Semaphore>,
     scratch_slots: Arc<tokio::sync::Semaphore>,
     diffs: diff::Service,
@@ -160,6 +164,7 @@ async fn main() -> Result<(), Error> {
         ssh_hosts,
         remote_edit,
         suggestions: suggestions::PathSuggestions::new(dispatcher.command.clone()),
+        model_availability: Arc::new(model_availability::ModelAvailability::new(&dispatcher)),
         feed_subscribers: Arc::new(tokio::sync::Semaphore::new(feed::SUBSCRIBERS)),
         scratch_slots: Arc::new(tokio::sync::Semaphore::new(1)),
         diffs: diff::Service::default(),
