@@ -16,6 +16,7 @@ const WAIT_MS_MAX: u64 = 5000;
 // Never select a route from a client-supplied URL, method or operation ID.
 const ROUTES: &[(&str, &str, &str)] = &[
     ("list_models", "get", "/api/models"),
+    ("register_model", "post", "/api/models"),
     ("list_scratch", "get", "/api/scratch"),
     ("get_scratch", "get", "/api/scratch/{id}"),
     ("start_trace", "post", "/api/jobs"),
@@ -39,6 +40,7 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ),
     ("create_scratch", "post", "/api/scratch"),
     ("apply_edit", "post", "/api/scratch/{id}/edits"),
+    ("convert_scratch_gguf", "post", "/api/scratch/{id}/gguf"),
     ("discard_scratch", "post", "/api/scratch/{id}/discard"),
     ("run_checks", "post", "/api/scratch/{id}/checks"),
     ("get_checks", "get", "/api/scratch/{id}/checks"),
@@ -95,7 +97,7 @@ impl Server {
         for (&name, route) in &routes {
             let mut schema = route.schema.clone();
             let description = match name {
-                "start_trace" => "Queue a CPU trace of one Library GGUF. Poll its ID with get_job.",
+                "start_trace" => "Queue a CPU trace. Enter one Library GGUF ID or one scratch revision ID with private GGUF in input_ids. Poll its ID with get_job.",
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({
                         "type":"integer", "minimum":0, "maximum":WAIT_MS_MAX, "default":0,
@@ -221,7 +223,7 @@ impl Server {
             .await
             .expect("Axum Router has an infallible service error type");
         let status = response.status();
-        if status.is_success() && route.path.ends_with("/gguf") {
+        if status.is_success() && !route.write && route.path.ends_with("/gguf") {
             // Export has validated the rules. The client downloads the binary
             // separately through the workbench, not as a JSON tool result.
             return Ok(json!({"url":format!("/api{path}")}));

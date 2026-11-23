@@ -134,8 +134,18 @@ async fn create(
     let model = store
         .model(&body.model_id)
         .map_err(ApiError::storage)?
-        .filter(|model| model.kind == "gguf")
-        .ok_or_else(|| ApiError::bad("Intervention artifacts need a Library GGUF model"))?;
+        .filter(|model| model.kind == "gguf");
+    let name_hint = match model {
+        Some(model) => model.name,
+        None => {
+            let (model, sha) = crate::scratch::jobs::trace_input(&store, &body.model_id)
+                .map_err(|_| ApiError::bad("Intervention artifacts need a Library or private scratch GGUF"))?;
+            if sha != body.model_sha256 {
+                return Err(ApiError::bad("Intervention artifact must match the private GGUF hash"));
+            }
+            model.name
+        }
+    };
     save(
         &mut store,
         Binding {
@@ -145,7 +155,7 @@ async fn create(
             model_sha256: body.model_sha256,
         },
         1,
-        model.name,
+        name_hint,
         body.interventions,
         submission.as_ref(),
     )

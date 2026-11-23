@@ -296,6 +296,7 @@ export interface CheckBundle {
   smoke: CheckStatus | { status: string; reason?: string };
   behavior: CheckStatus | { status: string; reason?: string };
   offline_report?: unknown;
+  measured_job_id?: string;
   acknowledged_at_ms: number | null;
   job_refs: { job_id: string; role: string; kind: string; verified_revision?: boolean }[];
 }
@@ -328,6 +329,7 @@ export interface ScratchRevision {
   };
   delta: { changed_tensors: number; changed_bytes: number; delta_bytes: number; delta_sha256: string; [extra: string]: unknown };
   check_bundle?: CheckBundle;
+  gguf?: { sha256: string; revision_sha256: string; converter_version: string; bytes: number; job_id: string };
 }
 
 export const SCRATCH_STATE: Record<string, { label: string; tone: Tone }> = {

@@ -210,7 +210,7 @@
       "post": {
         "operationId": "createModel",
         "summary": "Register a worker-side model or input artifact",
-        "description": "Registers metadata only. This does not upload bytes or verify file existence. The controller accepts bf16-checkpoint as an alias and stores the kind as hf. Scratch artifacts require the separate approveScratch action.",
+        "description": "Registers metadata only. This does not upload bytes or verify file existence. The controller accepts bf16-checkpoint as an alias and stores the kind as hf. To publish a scratch SafeTensors file, use the separate operator approval action. A private GGUF cannot enter the Library.",
         "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
         "requestBody": {
           "required": true,
@@ -392,6 +392,28 @@
         }
       }
     },
+    "/api/scratch/{id}/gguf": {
+      "post": {
+        "operationId": "convertScratchGguf",
+        "summary": "Queue a private BF16 GGUF conversion for a scratch revision",
+        "description": "Use the current scratch hash and a Library assets directory on the same local worker. The output stays with the scratch revision. Ordinary jobs cannot use it. Discard removes it.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false, "required": ["sha256", "assets_id"], "properties": {
+            "sha256": {"$ref": "#/components/schemas/ScratchHash"}, "assets_id": {"$ref": "#/components/schemas/Id"}
+          }
+        }}}},
+        "responses": {
+          "200": {"$ref": "#/components/responses/CreateReplay"},
+          "202": {"description": "Queued conversion job.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"}
+        }
+      }
+    },
     "/api/scratch/{id}/checks": {
       "get": {
         "operationId": "getScratchChecks",
@@ -406,17 +428,16 @@
       "post": {
         "operationId": "runScratchChecks",
         "summary": "Check a scratch revision and save the results",
-        "description": "Checks the exact child and immediate parent SafeTensors files. You can also include an offline behavior report and references to completed evaluation or benchmark jobs. These are not verified model results. Each run replaces the last bundle and clears its acknowledgement. You cannot change results after a publish request.",
+        "description": "Checks the exact child and immediate parent SafeTensors files. With private GGUF files, the local worker loads both models, generates text and measures behavior on fixed datasets. Poll the returned job ID. Without both files, or if integrity fails, the controller saves an integrity-only bundle. Do not send measured values or job references.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {
           "type": "object", "additionalProperties": false, "required": ["sha256"], "properties": {
-            "sha256": {"$ref": "#/components/schemas/ScratchHash"},
-            "job_refs": {"type": "array", "maxItems": 8, "items": {"$ref": "#/components/schemas/ScratchCheckJobReference"}},
-            "offline_report": {"anyOf": [{"$ref": "#/components/schemas/ScratchOfflineReport"}, {"type": "null"}]}
+            "sha256": {"$ref": "#/components/schemas/ScratchHash"}
           }
         }}}},
         "responses": {
-          "200": {"$ref": "#/components/responses/ScratchRow"},
+          "200": {"description": "The current scratch record for an integrity-only bundle, or a job ID on a matching retry."},
+          "202": {"description": "Queued worker check job.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
           "400": {"$ref": "#/components/responses/BadRequest"},
           "403": {"$ref": "#/components/responses/Forbidden"},
           "404": {"$ref": "#/components/responses/NotFound"},
@@ -649,7 +670,7 @@
       "post": {
         "operationId": "createIntervention",
         "summary": "Save the first version of an intervention artifact",
-        "description": "Specify a Library GGUF model ID and the SHA-256 of its file. The worker checks the SHA-256 when it uses the artifact.",
+        "description": "Specify a Library GGUF or scratch revision ID and the SHA-256 of its GGUF file. A trace rejects rules and patch sources for another model ID or GGUF hash.",
         "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateIntervention"}}}},
         "responses": {
@@ -1364,7 +1385,12 @@
           "sha256": {"$ref": "#/components/schemas/ScratchHash"}, "qualification": {"const": "not release-qualified"},
           "library_model_id": {"anyOf": [{"$ref": "#/components/schemas/Id"}, {"type": "null"}]},
           "provenance": {"$ref": "#/components/schemas/ScratchProvenance"}, "delta": {"$ref": "#/components/schemas/ScratchDelta"},
-          "check_bundle": {"$ref": "#/components/schemas/ScratchCheckBundle"}
+          "check_bundle": {"$ref": "#/components/schemas/ScratchCheckBundle"},
+          "gguf": {"type":"object", "required":["revision_sha256","sha256","converter_version","job_id","bytes"], "properties":{
+            "revision_sha256":{"$ref":"#/components/schemas/ScratchHash"},
+            "sha256":{"$ref":"#/components/schemas/ScratchHash"}, "converter_version":{"type":"string"},
+            "job_id":{"$ref":"#/components/schemas/Id"}, "bytes":{"type":"integer","minimum":4}
+          }}
         }
       },
       "ScratchCheckStatus": {
@@ -1373,10 +1399,6 @@
           {"type": "object", "additionalProperties": false, "required": ["status", "reason"],
             "properties": {"status": {"enum": ["failed", "not_run", "reported"]}, "reason": {"type": "string"}}}
         ]
-      },
-      "ScratchCheckJobReference": {
-        "type": "object", "additionalProperties": false, "required": ["job_id", "role"],
-        "properties": {"job_id": {"$ref": "#/components/schemas/Id"}, "role": {"enum": ["parent", "child"]}}
       },
       "ScratchOfflineReport": {
         "type": "object", "additionalProperties": false,
@@ -1423,6 +1445,8 @@
           "smoke": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "behavior": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "offline_report": {"$ref": "#/components/schemas/ScratchOfflineReport"},
+          "measured_report": {"$ref": "#/components/schemas/ScratchOfflineReport"},
+          "measured_job_id": {"$ref": "#/components/schemas/Id"},
           "acknowledged_at_ms": {"type": ["integer", "null"], "minimum": 0},
           "job_refs": {"type": "array", "maxItems": 8, "items": {"type": "object", "required": ["job_id", "role", "kind", "verified_revision"],
             "properties": {
@@ -1581,7 +1605,7 @@
         "type": "object",
         "required": ["id", "kind", "host", "pool_slot", "state", "progress", "input_ids", "options", "cancel_requested", "has_result", "created_at", "updated_at"],
         "properties": {
-          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"$ref": "#/components/schemas/JobKind"},
+          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf","scratch_checks"]}]},
           "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}], "description": "Concrete worker ID, or auto before assignment of a pool conversion."},
           "requested_host": {"const": "auto", "description": "Present if auto conversion routing was requested."},
           "pool_slot": {"type": "boolean"}, "state": {"$ref": "#/components/schemas/JobState"}, "progress": {"type": "string"},
@@ -1704,12 +1728,12 @@
         }
       },
       "TraceJob": {
-        "description":"Run a CPU trace of one single-file Library GGUF on its own opted-in worker. Supply exactly one of prompt, prompt_id, or options.prompts. Token positions include special tokens. There is no generation.",
+        "description":"Run a CPU trace of one Library GGUF or one scratch revision with private GGUF on its own opted-in worker. Supply exactly one of prompt, prompt_id, or options.prompts. Token positions include special tokens. There is no generation.",
         "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"}],
         "required":["input_ids","options"],
         "properties":{
           "kind":{"const":"trace"},
-          "input_ids":{"minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
+          "input_ids":{"description":"The Library GGUF ID or scratch revision ID.","minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
           "prompt":{"maxLength":16384,"x-brewery-max-utf8-bytes":16384},
           "options":{"$ref":"#/components/schemas/TraceOptions"}
         },

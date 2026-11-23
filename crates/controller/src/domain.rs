@@ -175,6 +175,8 @@ pub struct Job {
     pub remote_editor: Option<uuid::Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scratch_job: bool,
     pub state: State,
     pub progress: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -292,6 +294,8 @@ pub struct Envelope {
     pub options: Map<String, Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scratch_pins: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -714,6 +718,17 @@ impl Host {
 // Prefer the source host if eligible, avoiding a transfer. Selection of an
 // *idle* host occurs in the scheduler, not during POST.
 pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<&'a Host> {
+    if job.scratch_job {
+        return hosts.iter().filter(|host| {
+            host.id == job.host
+                && host.local_edit
+                && !host.scheduling_paused
+                && host.capabilities["weight_apply"]
+                && host.capabilities["weight_safetensors"]
+                && (job.kind != brewery_worker::trace::JOB
+                    || host.capabilities[brewery_worker::trace::JOB])
+        }).collect();
+    }
     if envelope.inputs.iter().any(|input| {
         hosts
             .iter()
@@ -1016,6 +1031,16 @@ impl NewJob {
                 check_options(&self.kind, &self.options, &inputs)?;
             }
         }
+        Ok(self.records(host, inputs, prompt, format))
+    }
+
+    pub(crate) fn records(
+        self,
+        host: String,
+        inputs: Vec<Model>,
+        prompt: Option<String>,
+        format: crate::gguf::Format,
+    ) -> (Job, Envelope) {
         let at = now();
         let envelope_kind = if self.kind == "cache_cleanup" {
             "cache-cleanup".into()
@@ -1027,6 +1052,7 @@ impl NewJob {
             inputs,
             options: self.options.clone(),
             prompt,
+            scratch_pins: Default::default(),
         };
         let requested_host = (host == "auto").then(|| host.clone());
         let job = Job {
@@ -1045,6 +1071,7 @@ impl NewJob {
             local_edit: false,
             remote_editor: None,
             directory_revision: None,
+            scratch_job: false,
             input_ids: self.input_ids,
             options: self.options,
             prompt_id: self.prompt_id,
@@ -1054,7 +1081,7 @@ impl NewJob {
             created_at: at,
             updated_at: at,
         };
-        Ok((job, envelope))
+        (job, envelope)
     }
 }
 

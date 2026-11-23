@@ -1,12 +1,18 @@
 use super::*;
-use crate::domain::State as JobState;
+use crate::{
+    domain::{Envelope, Job, Model},
+    web::{read_submission, replay},
+};
+use axum::response::{IntoResponse, Response};
 use brewery_worker::weight_source::{Header, LIMIT as HEADER_LIMIT};
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 
 const SCHEMA: &str = "brewery.scratch-checks.v1";
 const BEHAVIOR_SCHEMA: &str = "brewery.scratch-behavior.v1";
 const FIXTURES: &str = include_str!("../../eval/data/edit-checks/manifest.json");
-const NO_GGUF: &str = "no pre-approval GGUF path";
+const NO_GGUF: &str = "convert both scratch revisions to private GGUF";
 const METRICS: &[(&str, &str)] = &[
     ("counterfact_efficacy", "higher"),
     ("counterfact_target_probability", "higher"),
@@ -40,6 +46,11 @@ pub(super) struct Bundle {
     behavior: Check,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     offline_report: Option<OfflineReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    measured_report: Option<OfflineReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    measured_job_id: Option<String>,
+    #[serde(default)]
     job_refs: Vec<JobRef>,
     acknowledged_at_ms: Option<u64>,
 }
@@ -57,9 +68,6 @@ enum Check {
 #[serde(deny_unknown_fields)]
 pub(super) struct Run {
     sha256: String,
-    #[serde(default)]
-    job_refs: Vec<Reference>,
-    offline_report: Option<OfflineReport>,
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
@@ -81,7 +89,7 @@ struct JobRef {
     #[serde(flatten)]
     reference: Reference,
     kind: String,
-    // Job admission does not pin its input to a scratch revision.
+    // Legacy, unverified references are retained for existing bundles only.
     verified_revision: bool,
 }
 
@@ -97,7 +105,6 @@ struct OfflineReport {
     runner_sha256: String,
     fixture_sha256: std::collections::BTreeMap<String, String>,
     metrics: Vec<Metric>,
-    // Leave controller smoke as not_run. These are client-reported samples.
     parent_generation: String,
     child_generation: String,
 }
@@ -134,13 +141,13 @@ impl OfflineReport {
             || self.metrics.len() != METRICS.len()
         {
             return Err(ApiError::bad(
-                "offline report does not match this revision or protocol",
+                "behavior report does not match this revision or protocol",
             ));
         }
         for (name, better) in METRICS {
             let mut found = self.metrics.iter().filter(|m| m.name == *name);
             let Some(m) = found.next() else {
-                return Err(ApiError::bad("missing offline metric"));
+                return Err(ApiError::bad("missing behavior metric"));
             };
             let low = if name.ends_with("_rank") || *name == "perplexity" {
                 1.
@@ -154,7 +161,7 @@ impl OfflineReport {
                     .into_iter()
                     .all(|v| (low..=high).contains(&v))
             {
-                return Err(ApiError::bad("invalid offline metric"));
+                return Err(ApiError::bad("invalid behavior metric"));
             }
         }
         Ok(())
@@ -177,27 +184,37 @@ pub(super) async fn run(
     Path(id): Path<String>,
     headers: HeaderMap,
     payload: Payload<Run>,
-) -> Mutation {
-    mutate(
-        app,
-        headers,
-        "scratch-checks",
-        Some(id),
-        read(payload)?,
-        check,
-    )
+) -> Result<Response> {
+    let request = read(payload)?;
+    // Keep the existing scratch writer serialization for checks and edits.
+    let slot = app.scratch_slots.clone().try_acquire_owned().map_err(|_| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "scratch editor is busy".into(),
+        )
+    })?;
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        let (_, submission) =
+            read_submission(&headers, "scratch-checks", Ok(Json((&id, &request))))?;
+        check(&app, id, request, submission.as_ref())
+    })
     .await
+    .map_err(ApiError::storage)?
 }
 
-fn check(
-    app: &App,
-    target: Option<String>,
-    request: Run,
-    key: Option<&Submission<'_>>,
-) -> Mutation {
-    let id = request_id(target)?;
-    let (mut row, directory, parent, jobs) = {
+fn check(app: &App, id: String, request: Run, key: Option<&Submission<'_>>) -> Result<Response> {
+    let (row, directory, parent) = {
         let store = app.store.lock().map_err(ApiError::storage)?;
+        if let Some(key) = key
+            && let Replay::Matched(ref id) = store.replay(key).map_err(ApiError::storage)?
+            && let Some(prior) = store.scratch(id).map_err(ApiError::storage)?
+        {
+            return Ok((StatusCode::OK, Json(prior)).into_response());
+        }
+        if let Some(response) = replay(&store, key)? {
+            return Ok(response);
+        }
         let row = visible(&store, &id)?;
         if row.state != RevisionState::Scratch || row.sha256 != request.sha256 {
             return Err(conflict(
@@ -205,61 +222,154 @@ fn check(
             ));
         }
         admit(app, &row.provenance.worker)?;
-        if let Some(report) = &request.offline_report {
-            report.validate(&row)?;
-        }
         let root = store.scratch_root();
         let parent_id = &row.provenance.parent_id;
         let parent = if let Some(parent) = store.scratch(parent_id).map_err(ApiError::storage)? {
             (parent.state != RevisionState::Discarded
                 && parent.sha256 == row.provenance.parent_sha256)
-                .then(|| root.join(parent.id).join(scratch::MODEL))
+                .then(|| jobs::input(&store, &parent, scratch::MODEL, "safetensors"))
         } else if let Some(model) = store.model(parent_id).map_err(ApiError::storage)? {
-            let path = PathBuf::from(model.path);
+            let path = FsPath::new(&model.path);
             if model.kind != "safetensors" || model.host != row.provenance.worker {
                 return Err(conflict("parent is not the reviewed SafeTensors source"));
             }
-            require_source(app, &model.host, &path)?;
-            Some(path)
+            require_source(app, &model.host, path)?;
+            Some(model)
         } else {
             None
         };
-        let jobs = job_refs(&store, request.job_refs)?;
-        (row, root.join(id), parent, jobs)
+        (row, root.join(&id), parent)
     };
-    let integrity = match parent {
-        Some(parent) => integrity(&row, &parent, &directory.join(scratch::MODEL)),
+    let integrity = match &parent {
+        Some(parent) => integrity(
+            &row,
+            FsPath::new(&parent.path),
+            &directory.join(scratch::MODEL),
+        ),
         None => Err("immediate parent is not available".into()),
     };
-    let (integrity, offline_report) = match integrity {
-        Ok(()) => (Check::Passed, request.offline_report),
-        Err(reason) => (Check::Failed { reason }, None),
-    };
-    let behavior = if offline_report.is_some() {
-        Check::Reported {
-            reason: "client report; GGUF ancestry and measurements are not verified".into(),
-        }
+    let mut store = app.store.lock().map_err(ApiError::storage)?;
+    let mut row = visible(&store, &id)?;
+    if store
+        .scratch_has_jobs(&id, Some(jobs::CHECK))
+        .map_err(ApiError::storage)?
+    {
+        return Err(conflict("checks are already running for this revision"));
+    }
+    if let (Ok(()), Some(parent)) = (&integrity, parent)
+        && let Some((job, envelope)) = plan(&store, &row, parent)?
+    {
+        return jobs::enqueue(app, &mut store, job, envelope, key, StatusCode::ACCEPTED);
+    }
+    let failure = integrity.err();
+    row.check_bundle = Some(bundle(&row, failure, None));
+    write_behavior(&row, &directory).map_err(ApiError::storage)?;
+    store
+        .update_scratch(&row, RevisionState::Scratch, None, key)
+        .map_err(ApiError::storage)?;
+    Ok((StatusCode::OK, Json(row)).into_response())
+}
+
+fn plan(store: &Store, row: &Revision, parent: Model) -> Result<Option<(Job, Envelope)>> {
+    if row.gguf.is_none() {
+        return Ok(None);
+    }
+    let (child_gguf, child_pin) = jobs::trace_input(store, &row.id)?;
+    let (parent_gguf, parent_pin) = if row.sha256 == row.provenance.parent_sha256 {
+        // A byte-identical root copy already has its parent's exact weights.
+        (child_gguf.clone(), child_pin.clone())
     } else {
-        Check::NotRun {
-            reason: NO_GGUF.into(),
+        let Some(parent) = store
+            .scratch(&parent.id)
+            .map_err(ApiError::storage)?
+            .filter(|p| p.gguf.is_some() && p.sha256 == row.provenance.parent_sha256)
+        else {
+            return Ok(None);
+        };
+        jobs::trace_input(store, &parent.id)?
+    };
+    let child = jobs::input(store, row, scratch::MODEL, "safetensors");
+    let pins = BTreeMap::from([
+        (parent_gguf.path.clone(), parent_pin),
+        (child_gguf.path.clone(), child_pin),
+        (parent.path.clone(), row.provenance.parent_sha256.clone()),
+        (child.path.clone(), row.sha256.clone()),
+    ]);
+    let (job, mut envelope) = jobs::private_job(
+        jobs::CHECK,
+        vec![parent_gguf, child_gguf, parent, child],
+        json!({}),
+    );
+    envelope.scratch_pins = pins;
+    Ok(Some((job, envelope)))
+}
+
+pub(super) fn finish(
+    mut row: Revision,
+    envelope: &Envelope,
+    job: &Job,
+    result: &Value,
+    directory: &FsPath,
+) -> std::result::Result<(Revision, Value), crate::Error> {
+    let measured: OfflineReport = serde_json::from_value(result.clone())?;
+    measured
+        .validate(&row)
+        .map_err(|_| "invalid scratch behavior protocol or measurements")?;
+    for (input, sha) in envelope.inputs.iter().zip([
+        &measured.parent_gguf_sha256,
+        &measured.revision_gguf_sha256,
+        &measured.parent_sha256,
+        &measured.revision_sha256,
+    ]) {
+        if envelope.scratch_pins.get(&input.path) != Some(sha) {
+            return Err("worker behavior result does not match the pinned inputs".into());
+        }
+    }
+    row.check_bundle = Some(bundle(&row, None, Some((job.id.clone(), measured))));
+    write_behavior(&row, directory)?;
+    let safe_result = json!({"scratch_id":row.id, "check_bundle":row.check_bundle});
+    Ok((row, safe_result))
+}
+
+fn bundle(
+    row: &Revision,
+    failure: Option<String>,
+    measured: Option<(String, OfflineReport)>,
+) -> Bundle {
+    let (measured_job_id, measured_report) = measured.unzip();
+    let not_run = if failure.is_some() {
+        "integrity check did not pass"
+    } else {
+        NO_GGUF
+    };
+    let measured_status = || {
+        if measured_report.is_some() {
+            Check::Passed
+        } else {
+            Check::NotRun {
+                reason: not_run.into(),
+            }
         }
     };
-    let bundle = Bundle {
+    Bundle {
         schema: SCHEMA.into(),
         id: crate::domain::id(),
         revision_sha256: row.sha256.clone(),
         parent_sha256: row.provenance.parent_sha256.clone(),
         created_at_ms: now(),
         qualification: "not release-qualified".into(),
-        integrity,
-        smoke: Check::NotRun {
-            reason: NO_GGUF.into(),
-        },
-        behavior,
-        offline_report,
-        job_refs: jobs,
+        integrity: failure.map_or(Check::Passed, |reason| Check::Failed { reason }),
+        smoke: measured_status(),
+        behavior: measured_status(),
+        offline_report: None,
+        measured_report,
+        measured_job_id,
+        job_refs: Vec::new(),
         acknowledged_at_ms: None,
-    };
+    }
+}
+
+fn write_behavior(row: &Revision, directory: &FsPath) -> std::result::Result<(), crate::Error> {
     #[derive(Serialize)]
     struct Behavior<'a> {
         schema_version: u8,
@@ -271,65 +381,28 @@ fn check(
         schema_version: 1,
         parent_id: &row.provenance.parent_id,
         child_id: &row.id,
-        metrics: bundle
-            .offline_report
+        metrics: row
+            .check_bundle
             .as_ref()
+            .and_then(|b| b.measured_report.as_ref())
             .map_or(&[], |report| &report.metrics),
     };
     // Metrics have fixed keys and bounded numbers. Keep the projection below the W5 read limit.
-    if serde_json::to_vec(&behavior)
-        .map_err(ApiError::storage)?
-        .len()
-        >= 256 * 1024
-    {
-        return Err(ApiError::storage(
-            "scratch behavior result exceeds its size limit",
-        ));
+    if serde_json::to_vec(&behavior)?.len() >= 256 * 1024 {
+        return Err("scratch behavior result exceeds its size limit".into());
     }
-    brewery_worker::atomic(&directory.join("behavior.v1.json"), &behavior)
-        .map_err(ApiError::storage)?;
-    row.check_bundle = Some(bundle);
-    let mut store = app.store.lock().map_err(ApiError::storage)?;
-    store
-        .update_scratch(&row, RevisionState::Scratch, None, key)
-        .map_err(ApiError::storage)?;
-    Ok((StatusCode::OK, Json(row)))
-}
-
-fn job_refs(store: &Store, references: Vec<Reference>) -> Result<Vec<JobRef>> {
-    let mut seen = std::collections::HashSet::new();
-    if references.len() > 8 || references.iter().any(|r| !seen.insert(&r.job_id)) {
-        return Err(ApiError::bad("use at most eight distinct check job IDs"));
-    }
-    references
-        .into_iter()
-        .map(|reference| {
-            let job = store
-                .job(&reference.job_id)
-                .map_err(ApiError::storage)?
-                .filter(|job| {
-                    matches!(job.kind.as_str(), "evaluate" | "baseline" | "benchmark")
-                        && job.state == JobState::Succeeded
-                        && job.has_result
-                })
-                .ok_or_else(|| ApiError::bad("check job reference needs a completed evaluation or benchmark with a result"))?;
-            Ok(JobRef {
-                reference,
-                kind: job.kind,
-                verified_revision: false,
-            })
-        })
-        .collect()
+    brewery_worker::atomic(&directory.join("behavior.v1.json"), &behavior)?;
+    Ok(())
 }
 
 pub(super) fn require_publishable(
-    row: &mut Revision,
+    row: &Revision,
     new: RevisionState,
     acknowledgement: Option<&str>,
-) -> Result<()> {
+) -> Result<bool> {
     let bundle = row
         .check_bundle
-        .as_mut()
+        .as_ref()
         .filter(|b| {
             b.schema == SCHEMA
                 && b.revision_sha256 == row.sha256
@@ -341,16 +414,22 @@ pub(super) fn require_publishable(
         (&bundle.smoke, &bundle.behavior),
         (Check::Passed, Check::Passed)
     ) {
-        return Ok(());
+        return Ok(false);
     }
     if new == RevisionState::PublishRequested && acknowledgement == Some(bundle.id.as_str()) {
-        bundle.acknowledged_at_ms = Some(now());
+        return Ok(true);
     } else if new != RevisionState::Approved || bundle.acknowledged_at_ms.is_none() {
         return Err(conflict(
             "acknowledge the current incomplete scratch check bundle by ID",
         ));
     }
-    Ok(())
+    Ok(false)
+}
+
+pub(super) fn acknowledge(row: &mut Revision) {
+    if let Some(bundle) = row.check_bundle.as_mut() {
+        bundle.acknowledged_at_ms = Some(now());
+    }
 }
 
 fn integrity(row: &Revision, parent: &FsPath, child: &FsPath) -> std::result::Result<(), String> {

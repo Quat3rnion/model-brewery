@@ -28,6 +28,7 @@ COMMIT = "184f6536024668e8908ab8c86033d56708e62b40"
 CODE_SHA = "fdb7c0fd39b826727012ba3cd9031818dde766b3b7dc4cc400e67f551a2ca35d"
 MIB = 1 << 20
 MAX_EXPORT = 512 * MIB
+MAX_SCRATCH_EXPORT = 1100 * MIB
 MAX_HEADER = 16 * MIB
 DTYPE = {"BF16": 2, "F16": 2, "F32": 4, "I64": 8}
 ASSETS = frozenset("config.json tokenizer.json tokenizer_config.json chat_template.jinja merges.txt "
@@ -161,7 +162,7 @@ def inventory(source, paths=None):
     return files, config, tensors, names
 
 
-def qwen2(config, tensors):
+def qwen2(config, tensors, scratch_private=False):
     def integer(name, maximum):
         value = config.get(name)
         need(type(value) is int and 0 < value <= maximum, f"unsupported Qwen2 {name}")
@@ -173,8 +174,9 @@ def qwen2(config, tensors):
     kv = integer("num_key_value_heads", heads)
     ffn = integer("intermediate_size", 32768)
     vocab = integer("vocab_size", 262144)
-    need(hidden % heads == heads % kv == 0 and not config.get("tie_word_embeddings", False),
-         "only untied dense Qwen2 with integral head sizes is supported")
+    tied = config.get("tie_word_embeddings", False)
+    need(hidden % heads == heads % kv == 0 and (not tied or (tied is True and scratch_private)),
+         "only dense Qwen2 with integral head sizes is supported; tied weights require a private BF16 export")
     head_dim = hidden // heads
     need(config.get("model_type") == "qwen2" and config.get("head_dim", head_dim) == head_dim
          and not any(config.get(key) for key in ("quantization_config", "vision_config", "rope_scaling")),
@@ -186,7 +188,8 @@ def qwen2(config, tensors):
 
     add("model.embed_tokens.weight", "token_embd.weight", [vocab, hidden])
     add("model.norm.weight", "output_norm.weight", [hidden])
-    add("lm_head.weight", "output.weight", [vocab, hidden])
+    if not tied:
+        add("lm_head.weight", "output.weight", [vocab, hidden])
     for i in range(n):
         for suffix, gguf, shape in [
             ("input_layernorm.weight", "attn_norm.weight", [hidden]),
@@ -543,7 +546,7 @@ def qwen4exp(arch, config, tensors, shard_names):
     return {"schema_version": 1, "scope": "safetensors_header_coverage", "sources": sources, "artifacts": artifacts}
 
 
-def inspect(source, outtype, paths=None):
+def inspect(source, outtype, paths=None, scratch_private=False):
     files, config, tensors, shard_names = inventory(source, paths)
     architectures = config.get("architectures")
     if "architectures" not in config and config.get("model_type") == "gpt2":
@@ -576,11 +579,11 @@ def inspect(source, outtype, paths=None):
                             "an undeclared or bare transformer does not establish a language-model head")
     elif arch not in ("Qwen2ForCausalLM", "GPT2LMHeadModel"):
         report["reason"] = "architecture has no audited offline tensor mapping"
-    elif set(roles) != {"text"} or total > MAX_EXPORT:
-        report["reason"] = "only text and at most 512 MiB of input are admitted"
+    elif set(roles) != {"text"} or total > (MAX_SCRATCH_EXPORT if scratch_private else MAX_EXPORT):
+        report["reason"] = f"only text and at most {1100 if scratch_private else 512} MiB of input are admitted"
     else:
         is_gpt2 = arch == "GPT2LMHeadModel"
-        dims, dtypes = (gpt2 if is_gpt2 else qwen2)(config, tensors)
+        dims, dtypes = gpt2(config, tensors) if is_gpt2 else qwen2(config, tensors, scratch_private)
         report.update(expected_gguf_tensors=dims, source_dtypes=dtypes)
         if not {"tokenizer.json", "tokenizer_config.json"} <= files.keys():
             report["reason"] = "local tokenizer.json and tokenizer_config.json are required"
@@ -783,7 +786,7 @@ def gguf_inventory(path, outtype, expected, arch="qwen2", expected_types=None):
     return types
 
 
-def export(source, output, report, files, paths, assets):
+def export(source, output, report, files, paths, assets, scratch_private=False):
     need(report["export_supported"], report.get("reason", "unsupported source"))
     need(output.is_absolute() and output.parent.resolve(strict=True) == output.parent
          and output.name not in ("", ".", "..") and not os.path.lexists(output),
@@ -860,7 +863,8 @@ def export(source, output, report, files, paths, assets):
                "CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "2", "OPENBLAS_NUM_THREADS": "2"}
 
         def limits():
-            resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_EXPORT * 2 + 64 * MIB,) * 2)
+            ceiling = MAX_SCRATCH_EXPORT if scratch_private else MAX_EXPORT
+            resource.setrlimit(resource.RLIMIT_FSIZE, (ceiling * 2 + 64 * MIB,) * 2)
             resource.setrlimit(resource.RLIMIT_AS, (6 << 30,) * 2)
             resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
 
@@ -897,6 +901,8 @@ def main():
     parser.add_argument("--outtype", choices=("bf16", "f16"), help="uniform floating type for inspect/export")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--recipe", type=Path, help="source-bound JSON layer recipe")
+    parser.add_argument("--scratch-private", action="store_true",
+                        help="allow larger and tied models for private standalone BF16 evaluation")
     args = parser.parse_args()
     is_export = args.operation in ("export", "export-layer-recipe")
     layer_recipe = args.operation.endswith("-layer-recipe")
@@ -907,11 +913,13 @@ def main():
         parser.error("--recipe is required for compile-layer-recipe and export-layer-recipe only")
     if need_identity and args.outtype is not None:
         parser.error("--outtype is only for inspect/export")
+    if args.scratch_private and (args.assets is None or need_identity or args.outtype == "f16"):
+        parser.error("--scratch-private requires standalone BF16 inspect or export")
     try:
         source = args.source
         need(source.is_absolute() and source.resolve(strict=True) == source, "source must be an absolute canonical path")
         paths = selected_paths(source, args.assets)
-        report, files = inspect(source, args.outtype or "bf16", paths)
+        report, files = inspect(source, args.outtype or "bf16", paths, args.scratch_private)
         report["source_format"] = "safetensors" if args.assets else "hf"
         if need_identity:
             need(args.assets is not None or INDEX in files, "layer recipes require indexed HF or standalone SafeTensors")
@@ -922,7 +930,7 @@ def main():
                 report = compile_layer_recipe(report, read_json(args.recipe))
         need({n: stamp(p) for n, p in selected_paths(source, args.assets).items()} == files, "source changed during inspection")
         if is_export:
-            report = export(source, args.output, report, files, paths, args.assets)
+            report = export(source, args.output, report, files, paths, args.assets, args.scratch_private)
         print(json.dumps(report, sort_keys=True, allow_nan=False))
     except (OSError, ValueError, TypeError, RecursionError, subprocess.SubprocessError) as err:
         sys.exit(f"HF GGUF export blocked: {err}")

@@ -77,14 +77,17 @@ impl TracePlan {
                 "Expected at most 8 patch selectors and 1 to 64 positions per selector",
             ));
         }
-        let mut digest = None::<String>;
         let model = &envelope.inputs[0];
+        let mut digest = envelope.scratch_pins.get(&model.path).cloned();
         if let Some(saved) = saved {
             let saved = artifact(store, &saved.id, saved.version)?;
             if saved.binding.model_id != model.id {
                 return Err(ApiError::bad(
                     "Intervention artifact is bound to a different model",
                 ));
+            }
+            if digest.as_ref().is_some_and(|sha| sha != &saved.binding.model_sha256) {
+                return Err(ApiError::bad("Intervention artifact is bound to a different GGUF hash"));
             }
             digest = Some(saved.binding.model_sha256);
             rules.extend(saved.interventions);

@@ -1259,15 +1259,19 @@ publication. MCP cannot approve a publication, change settings, administer
 workers, or deploy. The separate operator API uses the same workbench trust
 boundary. Give workbench access only to trusted clients.
 
-1. Use `tools/list` to get the input schemas. Use `list_models` and
-   `list_scratch` to find Library inputs and scratch revisions.
-2. Use `start_trace` for a Library GGUF. Use `get_job` to poll progress
+1. Use `tools/list` to get the input schemas. Use `register_model` to add a
+   worker-side file to the Library. Use `list_models` and `list_scratch` to
+   find inputs and scratch revisions.
+2. Use `start_trace` for a Library GGUF or a scratch revision with private
+   GGUF. Put its ID in `input_ids`. Use `get_job` to poll progress
    (`wait_ms` can wait up to 5000 ms per call). Use `read_trace` with
    `manifest`, `tensor`, `logit_lens`, or `model_logits`. Use
    `create_intervention` and `new_intervention_version` to save rules.
    `export_control_vector` returns a relative URL for the same workbench.
-3. Use `create_scratch`, `apply_edit`, and `run_checks` for a SafeTensors
-   edit. Use the tensor, trace, and behavior diff tools to compare results.
+3. Use `create_scratch` and `apply_edit` for a SafeTensors edit. Use
+   `convert_scratch_gguf` on the parent and child. Run `run_checks` on the
+   child and use `get_job` to see the result. Use the tensor, trace, and
+   behavior diff tools to compare results.
 4. Use `request_publish` with the exact revision hash and check bundle
    acknowledgement if it is necessary. The operator reviews the request
    separately. Results are not release-qualified.
@@ -1418,7 +1422,8 @@ Do not delete the Library entry if you need to select that parent later.
 | `POST /api/scratch/{id}/edits` | `{"operations":[...]}` | New scratch child of `{id}` (`201`). |
 | `GET /api/scratch` | None | List of scratch records with provenance (`200`). |
 | `GET /api/scratch/{id}/delta` | None | Parent and child hashes, delta hash and size, and counts of changed tensors and bytes (`200`). |
-| `POST /api/scratch/{id}/checks` | `{"sha256":"<hash>"}` | Current scratch record with a new `check_bundle` (`200`). |
+| `POST /api/scratch/{id}/gguf` | `{"sha256":"<hash>","assets_id":"<Library assets ID>"}` | Private BF16 conversion job (`202`). |
+| `POST /api/scratch/{id}/checks` | `{"sha256":"<hash>"}` | Worker check job (`202`), or an integrity-only result (`200`). |
 | `GET /api/scratch/{id}/checks` | None | Current check bundle (`200`), or `404` if there is none. |
 | `POST /api/scratch/{id}/discard` | `{}` | Record with state `discarded` (`200`). The controller removes the files and omits the record from the list. Discard unapproved children before their parent. You cannot discard an approved revision. |
 | `POST /api/scratch/{id}/publish-request` | `{"sha256":"<hash>","acknowledge_bundle":"<bundle-id>"}` | Record with state `publish_requested` (`200`). The Library does not change. |
@@ -1457,26 +1462,50 @@ directories and SSH workers are not supported by this API.
 
 #### Checks before a publish request
 
+Register a Library `assets` directory with the approved local worker. It must
+contain the model configuration and tokenizer files, not a copy of the weights.
+Use the same assets for both conversions. Poll each conversion with
+`GET /api/jobs/{id}`. Read the GGUF SHA-256, SafeTensors SHA-256, and converter
+version in the scratch record. The GGUF is not a Library file. Ordinary jobs
+cannot use it. Only the assigned scratch job gets access. Discard removes the
+private file after the scratch jobs complete.
+
+Enable `trace` on that worker to trace a scratch revision. Use its ID in
+`input_ids`, as for a Library model. Bind a saved intervention to that scratch ID
+and its GGUF SHA-256. Patches from another trace must have the same ID and
+GGUF SHA-256. To compare traces, capture the same prompts and token positions
+with the same capture options.
+
 Run checks before you send a publish request. The controller checks the
 parent and child hashes, tensor names, shapes, dtypes, offsets, and finite
-values against the immediate parent and edit record. Read `integrity.status`:
-HTTP `200` means the controller saved the result. It does not mean that the
-check passed. You cannot waive failed integrity checks.
+values against the immediate parent and edit record. Read `integrity.status`.
+You cannot waive a failed integrity check.
 
-An unapproved scratch ID is not a conversion source. The controller sets
-`smoke.status` to `not_run` with reason `no pre-approval GGUF path`. For local
-scoring, use private test copies and follow [Scratch behavior
-checks](crates/eval/README.md#scratch-behavior-checks). To attach the result,
-include it as `offline_report` when you run checks. The controller checks
-the report format, dataset hashes and revision hashes. It does not verify
-the GGUF conversion or repeat inference. `behavior.status` is `reported`,
-not `passed`.
+If integrity passes and both GGUF files are ready, the worker loads both
+models and generates text. It measures target, paraphrase and locality
+results on fixed CounterFact and zsRE subsets. It measures perplexity on a
+separate corpus. Poll the job ID, then read `GET /api/scratch/{id}/checks`.
+The measured report identifies both SafeTensors and GGUF files by SHA-256.
+Use `GET /api/diff/behavior` to compare the metrics. If a GGUF is not ready,
+the controller saves an integrity-only bundle. Do not send a behavior report
+or benchmark references in a check request. GSM8K is separate; see
+[GSM8K protocol](#gsm8k-protocol).
 
-If your profile calls for GSM8K or benchmarks, run the applicable jobs in the
-existing runner. After the jobs finish, include `job_refs` in the check
-request. Each reference has `job_id` and `role` (`parent` or `child`). Omit
-`job_refs` if the profile does not call for these jobs. The bundle does not
-start jobs or verify that they used the revision under review.
+For conversion, set the local worker's `engine_env` as shown in
+[GGUF output](#gguf-output). Private
+BF16 conversion also accepts tied Qwen2 models and up to 1100 MiB of input.
+This limit does not change ordinary conversion. For checks, build the
+[CPU runner](crates/eval/README.md#scratch-behavior-checks). Put the two
+pinned dataset files in a local cache. Set these keys in the worker's
+`engine_env`:
+
+- `BREWERY_SCRATCH_CHECKS_SCRIPT`: Absolute path of `tools/scratch_checks.py`.
+- `BREWERY_SCRATCH_CHECKS_RUNNER`: Absolute path of the CPU runner.
+- `BREWERY_SCRATCH_CHECKS_RUNNER_SHA256`: SHA-256 of the runner.
+- `BREWERY_SCRATCH_CHECKS_CACHE`: Absolute path of the local dataset cache.
+
+The worker does not download data during a check. Restart the controller
+after a change to the local worker's runtime configuration.
 
 Review `check_bundle` for the exact `sha256`. If smoke or behavior did not
 pass, put the current bundle `id` in `acknowledge_bundle` to confirm that you

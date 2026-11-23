@@ -19,7 +19,7 @@ fn fixture(t: &Test, values: &[f32]) -> std::path::PathBuf {
     fs::write(
         t.root.path().join("dispatch.json"),
         json!({"hosts":{"existing":{"local":true,"config":config,
-          "capabilities":{"benchmark":true},
+          "capabilities":{"benchmark":true,"trace":true},
           "benchmark_targets":[{"id":"cpu","label":"CPU"}],
           "benchmarks":[{"id":"gsm8k","label":"GSM8K"}]}}})
         .to_string(),
@@ -30,8 +30,15 @@ fn fixture(t: &Test, values: &[f32]) -> std::path::PathBuf {
         t.root.path().join("dispatch"),
         r#"#!/bin/sh
 case "$1" in
-  start) cat >/dev/null; printf '%s\n' '{"state":"running","progress":"mock benchmark"}' ;;
-  status) printf '%s\n' '{"state":"succeeded","progress":"mock benchmark done","result":{"mock":true}}' ;;
+  start)
+    python3 -c 'import json,sys
+j=json.load(sys.stdin)
+result=dict(kind="trace",schema_version=1,model_id=j["inputs"][0]["id"],
+    model_sha256="a"*64,prompts=[{}]) if j["kind"]=="trace" else {"mock":True}
+print(json.dumps(dict(state="succeeded",progress="mock done",result=result)))' > "${0%/*}/$3.result"
+    printf '%s\n' '{"state":"running","progress":"mock running"}'
+    ;;
+  status) cat "${0%/*}/$3.result" ;;
   *) exit 1 ;;
 esac
 "#,
@@ -58,6 +65,347 @@ printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","w
 
 fn sha(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[test]
+fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
+    let mut t = Test::new();
+    let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
+    let digest = sha(&fs::read(&source).unwrap());
+    let mock = t.root.path().join("editor-DISPATCH");
+    fs::write(
+        t.root.path().join("mock-check-protocol.json"),
+        include_str!("../../../../api/openapi.json"),
+    )
+    .unwrap();
+    fs::write(&mock, r#"#!/bin/sh
+set -eu
+case "$1" in
+  start)
+    body=$(cat)
+    dir=${BREWERY_DISPATCH_CONFIG%/*}/worker/jobs/$3/work
+    mkdir -p "$dir"
+    if echo "$body" | grep -q '"kind":"scratch_checks"'; then
+        printf '%s' "$body" | python3 -c 'import hashlib,json,pathlib,sys
+job=json.load(sys.stdin); models=job["inputs"]
+cfg=json.load(open(sys.argv[1]))["hosts"][models[0]["host"]]["config"]
+grant=json.load(open(cfg))["scratch_access"]
+paths=[m["path"] for m in models]
+pins={p:hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() for p in paths}
+assert grant == {"job_id":sys.argv[2],"paths":pins}
+root=pathlib.Path(sys.argv[3]); protocol=json.load((root/"mock-check-protocol.json").open())
+schema=protocol["components"]["schemas"]["ScratchOfflineReport"]["properties"]
+metrics=[]
+for name in schema["metrics"]["items"]["properties"]["name"]["enum"]:
+    numeric=name.endswith("_rank") or name=="perplexity"
+    metrics.append(dict(name=name,parent=10 if numeric else 0.5,child=11 if numeric else 0.6,
+                        better="neither" if "_locality_" in name else "lower" if numeric else "higher"))
+result=dict(schema="brewery.scratch-behavior.v1",qualification="not release-qualified",
+    fixture_sha256={k:v["const"] for k,v in schema["fixture_sha256"]["properties"].items()},
+    runner_sha256="c"*64,metrics=metrics,parent_generation="Before",child_generation="After")
+result.update(zip(["parent_gguf_sha256","revision_gguf_sha256","parent_sha256","revision_sha256"],
+                  map(pins.__getitem__,paths),strict=True))
+if (root/"reject-check-receipt").exists(): result["revision_gguf_sha256"]="0"*64
+print(json.dumps(dict(state="succeeded",progress="done",result=result)))' "$BREWERY_DISPATCH_CONFIG" "$3" "${0%/*}" > "$dir/result"
+        printf '%s\n' '{"state":"running","progress":"mock scratch checks"}'
+        exit
+    fi
+    if echo "$body" | grep -q '"kind":"trace"'; then
+        printf '%s' "$body" | python3 -c 'import hashlib,json,pathlib,sys
+job=json.load(sys.stdin); model=job["inputs"][0]
+cfg=json.load(open(sys.argv[1]))["hosts"][model["host"]]["config"]
+grant=json.load(open(cfg))["scratch_access"]
+sha=hashlib.sha256(pathlib.Path(model["path"]).read_bytes()).hexdigest()
+assert grant == {"job_id":sys.argv[2],"paths":{model["path"]:sha}}
+assert job["options"]["expected_model_sha256"] == sha
+print(json.dumps({"state":"succeeded","progress":"done","result":{"kind":"trace","schema_version":1,"model_id":model["id"],"model_sha256":sha}}))' "$BREWERY_DISPATCH_CONFIG" "$3" > "$dir/result"
+        printf '%s\n' '{"state":"running","progress":"mock scratch trace"}'
+        exit
+    fi
+    echo "$body" | grep -q '"kind":"scratch_gguf"'
+    printf GGUFmock > "$dir/converted.gguf"
+    rev=$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["inputs"][0]["path"])')
+    printf '%s\n' "$(sha256sum "$rev" | cut -d' ' -f1)" > "$dir/input.sha"
+    basename "$(dirname "$rev")" > "$dir/input.id"
+    printf '%s\n' '{"state":"running","progress":"mock conversion"}'
+    ;;
+  status)
+    dir=${BREWERY_DISPATCH_CONFIG%/*}/worker/jobs/$3/work
+    if [ -f "$dir/result" ]; then cat "$dir/result"; exit; fi
+    hash=$(sha256sum "$dir/converted.gguf" | cut -d' ' -f1)
+    tool=$(printf '%064d' 1)
+    printf '{"state":"succeeded","progress":"done","result":{"kind":"convert","gguf_type":"BF16","file_verification":{"status":"passed"},"artifact":{"kind":"gguf","path":"%s","sha256":"%s","bytes":8},"inputs":[{"sha256":"%s","id":"%s"}],"backend_receipt":{"executable_sha256":"%s","hf_exporter_sha256":"%s"}}}\n' "$dir/converted.gguf" "$hash" "$(cat "$dir/input.sha")" "$(cat "$dir/input.id")" "$tool" "$tool"
+    ;;
+  *) exit 1 ;;
+esac
+"#).unwrap();
+    t.launch();
+    assert_eq!(
+        t.admin(Some(
+            json!({"action":"set_weight_editor","worker":"existing",
+        "revision":0,"enabled":true})
+        ))
+        .0,
+        200
+    );
+    let register = |kind, path: &std::path::Path| {
+        t.request(
+            "/api/models",
+            "",
+            Some(json!({
+                "kind":kind,"path":path,"host":"existing"
+            })),
+        )
+    };
+    let (201, parent) = register("safetensors", &source) else {
+        panic!("parent registration")
+    };
+    let (201, assets) = register("assets", source.parent().unwrap()) else {
+        panic!("asset registration")
+    };
+    let (201, scratch) = t.request(
+        "/api/scratch",
+        "",
+        Some(json!({
+            "parent_id":parent["id"],"parent_sha256":digest
+        })),
+    ) else {
+        panic!("scratch creation")
+    };
+    let id = scratch["id"].as_str().unwrap();
+    let path = format!("/api/scratch/{id}");
+    let convert = format!("{path}/gguf");
+    let body = json!({"sha256":scratch["sha256"],"assets_id":assets["id"]});
+    let (status, job) = t.request(
+        &convert,
+        "Idempotency-Key: private-gguf\r\n",
+        Some(body.clone()),
+    );
+    assert_eq!(status, 202, "{job}");
+    let retry = t.request(&convert, "Idempotency-Key: private-gguf\r\n", Some(body));
+    assert_eq!(retry.1["id"], job["id"]);
+    let until = Instant::now() + Duration::from_secs(5);
+    let job = loop {
+        let (_, job) = t.request(
+            &format!("/api/jobs/{}", job["id"].as_str().unwrap()),
+            "",
+            None,
+        );
+        if !matches!(job["state"].as_str(), Some("queued" | "running")) {
+            break job;
+        }
+        assert!(Instant::now() < until, "{job}");
+        sleep(Duration::from_millis(25));
+    };
+    assert_eq!(job["state"], "succeeded", "{job}");
+    let (_, revision) = t.request(&path, "", None);
+    assert_eq!(revision["gguf"]["revision_sha256"], scratch["sha256"]);
+    assert_eq!(revision["gguf"]["sha256"], sha(b"GGUFmock"));
+    assert_eq!(
+        revision["gguf"]["converter_version"],
+        format!(
+            "llama-quantize sha256:{:064}; HF exporter sha256:{:064}",
+            1, 1
+        )
+    );
+    let private = t
+        .root
+        .path()
+        .join("state/scratch")
+        .join(id)
+        .join("model.gguf");
+    assert_eq!(fs::read(&private).unwrap(), b"GGUFmock");
+    assert!(!job.to_string().contains(".gguf"));
+    assert_eq!(
+        t.request("/api/models", "", None)
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(register("gguf", &private).0, 400);
+    let staged = t
+        .root
+        .path()
+        .join("state/local-edit/existing/worker/jobs")
+        .join(job["id"].as_str().unwrap())
+        .join("work/converted.gguf");
+    assert!(!staged.exists());
+    assert_eq!(register("gguf", &staged).0, 400);
+    for kind in ["convert", "evaluate"] {
+        assert_eq!(
+            t.request(
+                "/api/jobs",
+                "",
+                Some(json!({
+                    "kind":kind,"input_ids":[id],"host":"existing"
+                }))
+            )
+            .0,
+            400
+        );
+    }
+    let (_, library_gguf) = register("gguf", &source.with_extension("gguf"));
+    let (201, art) = t.request("/api/interventions", "", Some(json!({
+        "name":"Library binding","model_id":library_gguf["id"],"model_sha256":revision["gguf"]["sha256"],
+        "interventions":[{"layer":0,"role":"l_out","positions":[0],"op":"zero"}]
+    }))) else { panic!("Library intervention creation") };
+    let trace = |options: Value| {
+        t.request(
+            "/api/jobs",
+            "",
+            Some(json!({
+                "kind":"trace","input_ids":[id],"prompt":"One","options":options
+            })),
+        )
+    };
+    let mut options = json!({"layers":[0],"roles":["l_out"],"positions":[0],"top_k":3,
+        "intervention_artifact":{"id":art["id"],"version":1}});
+    let (status, error) = trace(options.clone());
+    assert_eq!(status, 400);
+    assert!(
+        error["error"].as_str().unwrap().contains("different model"),
+        "{error}"
+    );
+    let (201, scratch_art) = t.request(
+        "/api/interventions",
+        "",
+        Some(json!({
+            "name":"Scratch binding","model_id":id,"model_sha256":revision["gguf"]["sha256"],
+            "interventions":art["interventions"]
+        })),
+    ) else {
+        panic!("scratch intervention creation")
+    };
+    let (201, baseline) = t.request(
+        "/api/jobs",
+        "",
+        Some(json!({
+            "kind":"trace","input_ids":[library_gguf["id"]],"prompt":"One",
+            "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":3}
+        })),
+    ) else {
+        panic!("Library trace admission")
+    };
+    let baseline_path = format!("/api/jobs/{}", baseline["id"].as_str().unwrap());
+    loop {
+        let (_, prior) = t.request(&baseline_path, "", None);
+        if prior["state"] == "succeeded" {
+            break;
+        }
+        assert!(Instant::now() < until, "{prior}");
+        sleep(Duration::from_millis(25));
+    }
+    let (status, error) = trace(
+        json!({"layers":[0],"roles":["l_out"],"positions":[0],"top_k":3,
+        "activation_patches":[{"source_job_id":baseline["id"],"source_prompt":0,
+                               "layer":0,"role":"l_out","positions":[0]}]}),
+    );
+    assert_eq!(status, 400);
+    assert!(
+        error["error"].as_str().unwrap().contains("different model"),
+        "{error}"
+    );
+    options["intervention_artifact"]["id"] = scratch_art["id"].clone();
+    let (status, trace_job) = trace(options);
+    assert_eq!(status, 201, "{trace_job}");
+    loop {
+        let (_, job) = t.request(
+            &format!("/api/jobs/{}", trace_job["id"].as_str().unwrap()),
+            "",
+            None,
+        );
+        if !matches!(job["state"].as_str(), Some("queued" | "running")) {
+            assert_eq!(job["state"], "succeeded", "{job}");
+            break;
+        }
+        assert!(Instant::now() < until, "{job}");
+        sleep(Duration::from_millis(25));
+    }
+    let checks = format!("{path}/checks");
+    let (status, check_job) = t.request(&checks, "", Some(json!({"sha256":scratch["sha256"]})));
+    assert_eq!(status, 202, "{check_job}");
+    loop {
+        let (_, job) = t.request(
+            &format!("/api/jobs/{}", check_job["id"].as_str().unwrap()),
+            "",
+            None,
+        );
+        if !matches!(job["state"].as_str(), Some("queued" | "running")) {
+            assert_eq!(job["state"], "succeeded", "{job}");
+            break;
+        }
+        assert!(Instant::now() < until, "{job}");
+        sleep(Duration::from_millis(25));
+    }
+    let (200, bundle) = t.request(&checks, "", None) else {
+        panic!("check bundle")
+    };
+    assert_eq!(bundle["integrity"]["status"], "passed");
+    assert_eq!(bundle["smoke"]["status"], "passed");
+    assert_eq!(bundle["behavior"]["status"], "passed");
+    assert_eq!(bundle["measured_report"]["runner_sha256"], "c".repeat(64));
+    assert_eq!(
+        bundle["measured_report"]["revision_gguf_sha256"],
+        revision["gguf"]["sha256"]
+    );
+    assert_eq!(
+        bundle["measured_report"]["revision_sha256"],
+        scratch["sha256"]
+    );
+    assert_eq!(
+        bundle["measured_report"]["parent_sha256"],
+        scratch["provenance"]["parent_sha256"]
+    );
+    let (200, diff) = t.request(
+        &format!(
+            "/api/diff/behavior?a={}&b={id}",
+            parent["id"].as_str().unwrap()
+        ),
+        "",
+        None,
+    ) else {
+        panic!("measured behavior diff")
+    };
+    assert_eq!(diff["metrics"].as_array().unwrap().len(), 17);
+    assert_eq!(
+        t.request(
+            &checks,
+            "",
+            Some(json!({"sha256":scratch["sha256"],"offline_report":bundle["measured_report"]}))
+        )
+        .0,
+        422
+    );
+    fs::write(t.root.path().join("reject-check-receipt"), "").unwrap();
+    let (202, mismatched) = t.request(&checks, "", Some(json!({"sha256":scratch["sha256"]})))
+    else {
+        panic!("check job")
+    };
+    loop {
+        let (_, job) = t.request(
+            &format!("/api/jobs/{}", mismatched["id"].as_str().unwrap()),
+            "",
+            None,
+        );
+        if !matches!(job["state"].as_str(), Some("queued" | "running")) {
+            assert_eq!(job["state"], "failed", "{job}");
+            assert!(
+                job["error"].as_str().unwrap().contains("pinned inputs"),
+                "{job}"
+            );
+            break;
+        }
+        assert!(Instant::now() < until, "{job}");
+        sleep(Duration::from_millis(25));
+    }
+    assert_eq!(t.request(&checks, "", None), (200, bundle));
+    assert_eq!(
+        t.request(&format!("{path}/discard"), "", Some(json!({}))).0,
+        200
+    );
+    assert!(!private.exists());
 }
 
 #[test]
@@ -101,6 +449,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
         names,
         [
             "apply_edit",
+            "convert_scratch_gguf",
             "create_intervention",
             "create_scratch",
             "diff_behavior",
@@ -117,6 +466,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "list_scratch",
             "new_intervention_version",
             "read_trace",
+            "register_model",
             "request_publish",
             "run_checks",
             "start_trace",
@@ -149,6 +499,18 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
         text
     };
     assert_eq!(ok("list_models", json!({}))["models"], json!([parent]));
+    let registration = json!({"idempotency_key":"mcp-model","host":"existing","kind":"assets","path":source.parent()});
+    let registered = ok("register_model", registration.clone());
+    assert_eq!(
+        ok("register_model", registration.clone())["id"],
+        registered["id"]
+    );
+    let mut different = registration;
+    different["kind"] = json!("gguf");
+    assert_eq!(
+        call("register_model", different)["result"]["structuredContent"]["status"],
+        409
+    );
     let mut create = json!({"parent_id":parent["id"],"parent_sha256":hash});
     assert_eq!(
         call("create_scratch", create.clone())["error"]["code"],
@@ -221,7 +583,10 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             -32602
         );
     }
-    assert_eq!(ok("list_models", json!({}))["models"], json!([parent]));
+    assert_eq!(
+        ok("list_models", json!({}))["models"],
+        json!([parent, registered])
+    );
 
     let leaf = ok(
         "create_scratch",
@@ -580,89 +945,13 @@ fn scratch_edits_keep_parents_and_require_separate_publish_approval() {
             )
         )
         .0,
-        400
+        422
     );
     assert_eq!(t.request(&requested, "", Some(review.clone())).0, 409);
-    let (status, job) = t.request(
-        "/api/jobs",
-        "",
-        Some(json!({
-            "kind":"benchmark", "host":"existing",
-            "options":{"benchmark_target":"cpu", "benchmarks":["gsm8k"]}
-        })),
-    );
-    assert_eq!(status, 201, "{job}");
-    let job_path = format!("/api/jobs/{}", job["id"].as_str().unwrap());
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        let result = t.request(&job_path, "", None).1;
-        if result["state"] == "succeeded" {
-            break;
-        }
-        assert!(Instant::now() < deadline, "{result}");
-        sleep(Duration::from_millis(15));
-    }
-    let contract: Value =
-        serde_json::from_str(include_str!("../../../../api/openapi.json")).unwrap();
-    let names = contract["components"]["schemas"]["ScratchOfflineReport"]["properties"]["metrics"]
-        ["items"]["properties"]["name"]["enum"]
-        .as_array()
-        .unwrap();
-    let metrics: Vec<_> = names
-        .iter()
-        .map(|name| {
-            let name = name.as_str().unwrap();
-            let is_rank = name.ends_with("_rank");
-            let is_perplexity = name == "perplexity";
-            let (parent, child) = if is_rank || is_perplexity {
-                (10., 12.)
-            } else {
-                (0.5, 0.6)
-            };
-            let better = if name.contains("_locality_") {
-                "neither"
-            } else if is_rank || is_perplexity {
-                "lower"
-            } else {
-                "higher"
-            };
-            json!({"name":name, "parent":parent, "child":child, "better":better})
-        })
-        .collect();
-    let report = json!({
-        "schema":"brewery.scratch-behavior.v1",
-        "qualification":"not release-qualified",
-        "parent_sha256":parent_hash,
-        "revision_sha256":child["sha256"],
-        "parent_gguf_sha256":"a".repeat(64),
-        "revision_gguf_sha256":"b".repeat(64),
-        "runner_sha256":"c".repeat(64),
-        "fixture_sha256":serde_json::from_str::<Value>(include_str!(
-            "../../../eval/data/edit-checks/manifest.json"
-        )).unwrap(),
-        "metrics":metrics, "parent_generation":"before", "child_generation":"after"
-    });
-    let mut attach = json!({"sha256":child["sha256"], "offline_report":report,
-        "job_refs":[{"job_id":job["id"], "role":"child"}]});
-    attach["offline_report"]["revision_sha256"] = json!("0".repeat(64));
-    assert_eq!(t.request(&checks, "", Some(attach.clone())).0, 400);
-    attach["offline_report"]["revision_sha256"] = child["sha256"].clone();
-    let (status, checked_again) = t.request(&checks, "", Some(attach));
+    let (status, checked_again) = t.request(&checks, "", Some(review.clone()));
     assert_eq!(status, 200, "{checked_again}");
     let latest = &checked_again["check_bundle"];
-    assert_eq!(latest["behavior"]["status"], "reported");
-    assert_eq!(
-        latest["job_refs"],
-        json!([{"job_id":job["id"], "role":"child",
-        "kind":"benchmark", "verified_revision":false}])
-    );
-    assert_eq!(
-        serde_json::from_slice::<Value>(
-            &fs::read(root.join(child_id).join("behavior.v1.json")).unwrap()
-        )
-        .unwrap(),
-        json!({"schema_version":1,"parent_id":id,"child_id":child_id,"metrics":metrics})
-    );
+    assert_eq!(latest["behavior"]["status"], "not_run");
     assert_eq!(
         t.request(
             &requested,
