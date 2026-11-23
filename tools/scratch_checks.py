@@ -16,6 +16,7 @@ from urllib.request import urlopen
 
 DATA = Path(__file__).resolve().parents[1] / "crates/eval/data/edit-checks"
 MAX_SOURCE_BYTES = 48 * 1024 * 1024
+MAX_TOKEN_LOSS_BYTES = 256 * 1024
 
 
 def file_sha(path):
@@ -115,6 +116,7 @@ class RowScore:
     probability: float
     rank: int
     top1: bool
+    details: tuple[tuple[float, str], ...] | None = None
 
 
 def aggregate(groups):
@@ -149,15 +151,50 @@ def score(runner, path, threads, rows):
         raise ValueError("incorrect native runner result")
     groups = defaultdict(list)
     for (group, _, _), line in zip(rows, lines, strict=True):
-        tokens, prefix, logp, prob, ranks, top1 = line.split("\t")
+        tokens, prefix, logp, prob, ranks, top1, *extra = line.split("\t")
         tokens = tuple(map(int, tokens.split(",")))
         prefix = int(prefix)
-        if not 0 < prefix < len(tokens):
+        if not 0 < prefix < len(tokens) <= 512 or len(extra) > 1:
             raise ValueError("incorrect native runner token boundary")
+        details = None
+        if group == "perplexity" and extra:
+            details = tuple((float(lp), piece) for lp, piece in
+                            (entry.split(":") for entry in extra[0].split(",")))
+            if len(details) != len(tokens) - prefix or any(
+                not math.isfinite(lp) or lp > 0 or len(piece) > 1024
+                or bytes.fromhex(piece).hex() != piece for lp, piece in details
+            ) or not math.isclose(math.fsum(lp for lp, _ in details), float(logp),
+                                  rel_tol=1e-12, abs_tol=1e-12):
+                raise ValueError("invalid native runner token log probabilities or pieces")
         groups[group].append(RowScore(
-            tokens, prefix, float(logp), float(prob), int(ranks), top1 == "1",
+            tokens, prefix, float(logp), float(prob), int(ranks), top1 == "1", details,
         ))
     return bytes.fromhex(generation).decode("utf-8", errors="replace"), groups
+
+
+def token_loss(rows, parent, child):
+    heldout = [(p, c) for p, c in zip(parent["perplexity"], child["perplexity"], strict=True)]
+    if len(heldout) != sum(group == "perplexity" for group, *_ in rows):
+        raise ValueError("missing heldout sentences")
+    if all(p.details is None and c.details is None for p, c in heldout):
+        return None  # The old pinned runner still supports aggregate checks.
+    result = []
+    for p, c in heldout:
+        if (p.tokens, p.prompt_tokens) != (c.tokens, c.prompt_tokens):
+            raise ValueError("models do not tokenize the scored inputs identically")
+        if p.details is None or c.details is None:
+            raise ValueError("missing heldout token scores")
+        sentence = []
+        for id_, (before, a), (after, b) in zip(
+            p.tokens[p.prompt_tokens:], p.details, c.details, strict=True,
+        ):
+            if a != b:
+                raise ValueError("models do not decode the same token pieces")
+            sentence.append(dict(id=id_, piece_hex=a, parent_logprob=before, child_logprob=after))
+        result.append(sentence)
+    if len(json.dumps(result, allow_nan=False)) > MAX_TOKEN_LOSS_BYTES:
+        raise ValueError("heldout token scores exceed the size limit")
+    return result
 
 
 def progress(completed):
@@ -209,11 +246,14 @@ def main():
     ]
     if any(file_sha(files[name]) != sha for name, sha in hashes.items()):
         raise ValueError("a model or runner file changed during scoring")
-    print(json.dumps(dict(
+    report = dict(
         schema="brewery.scratch-behavior.v1", qualification="not release-qualified",
         **hashes, fixture_sha256=pins, metrics=metrics,
         parent_generation=parent_text, child_generation=child_text,
-    ), indent=2, allow_nan=False))
+    )
+    if (tokens := token_loss(rows, parent, child)) is not None:
+        report["token_loss"] = tokens
+    print(json.dumps(report, allow_nan=False))
     progress(4)
 
 

@@ -83,6 +83,10 @@ pub struct Revision {
 }
 
 impl Revision {
+    pub(crate) fn token_loss(&self) -> Option<(&str, &crate::scratch_token_loss::Reference)> {
+        self.check_bundle.as_ref()?.token_loss()
+    }
+
     pub(crate) fn is_compiled_program(&self) -> bool {
         self.provenance.compiled_program.is_some()
     }

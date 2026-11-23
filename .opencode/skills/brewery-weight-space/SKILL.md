@@ -31,7 +31,11 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
 4. Use `convert_scratch_gguf` on the child with the same assets as the parent.
    Trace the child with the same prompts, positions, and capture settings.
 5. Use `run_checks`, wait for any check job, then read `get_checks`. Compare
-   with `diff_tensors`, `diff_traces`, and `diff_behavior` as applicable.
+   with `diff_tensors`, `diff_traces`, and `diff_behavior` as applicable. If
+   the bundle has `token_loss`, use `read_token_loss_diff` with the immediate
+   parent `a` and child `b`. Use `sentence`, `start`, and `end` to limit the
+   read. Report the signed share of net log-probability gain and the check
+   bundle ID.
 6. If the user asks, use `request_publish` for the exact child hash. If smoke
    or behavior did not pass, disclose that and acknowledge the current bundle
    only after review. Integrity failure blocks the request. A request leaves

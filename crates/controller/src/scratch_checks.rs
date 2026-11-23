@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     domain::{Envelope, Job, Model},
+    scratch_token_loss,
     web::{read_submission, replay},
 };
 use axum::response::{IntoResponse, Response};
@@ -54,9 +55,17 @@ pub(super) struct Bundle {
     measured_report: Option<OfflineReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     measured_job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token_loss: Option<scratch_token_loss::Reference>,
     #[serde(default)]
     job_refs: Vec<JobRef>,
     acknowledged_at_ms: Option<u64>,
+}
+
+impl Bundle {
+    pub(super) fn token_loss(&self) -> Option<(&str, &scratch_token_loss::Reference)> {
+        Some((&self.id, self.token_loss.as_ref()?))
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -320,7 +329,13 @@ pub(super) fn finish(
     result: &Value,
     directory: &FsPath,
 ) -> std::result::Result<(Revision, Value), crate::Error> {
-    let measured: OfflineReport = serde_json::from_value(result.clone())?;
+    let mut result = result.clone();
+    let tokens = result
+        .as_object_mut()
+        .and_then(|report| report.remove("token_loss"))
+        .map(serde_json::from_value::<scratch_token_loss::Sentences>)
+        .transpose()?;
+    let measured: OfflineReport = serde_json::from_value(result)?;
     measured
         .validate(&row)
         .map_err(|_| "invalid scratch behavior protocol or measurements")?;
@@ -334,7 +349,17 @@ pub(super) fn finish(
             return Err("worker behavior result does not match the pinned inputs".into());
         }
     }
-    row.check_bundle = Some(bundle(&row, None, Some((job.id.clone(), measured))));
+    let perplexity = measured.metrics.iter().find(|m| m.name == "perplexity");
+    let (parent, child) = perplexity
+        .map(|m| (m.parent, m.child))
+        .ok_or("missing perplexity result")?;
+    let mut bundle = bundle(&row, None, Some((job.id.clone(), measured)));
+    if let Some(tokens) = tokens {
+        bundle.token_loss = Some(scratch_token_loss::store(
+            directory, &tokens, parent, child,
+        )?);
+    }
+    row.check_bundle = Some(bundle);
     write_behavior(&row, directory)?;
     let safe_result = json!({"scratch_id":row.id, "check_bundle":row.check_bundle});
     Ok((row, safe_result))
@@ -375,6 +400,7 @@ fn bundle(
         offline_report: None,
         measured_report,
         measured_job_id,
+        token_loss: None,
         job_refs: Vec::new(),
         acknowledged_at_ms: None,
     }

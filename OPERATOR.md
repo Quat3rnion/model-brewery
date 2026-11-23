@@ -1817,6 +1817,31 @@ still apply to the approved file. An unapproved scratch ID is not a
 conversion source. Use the existing conversion workflow after approval if
 the worker can read the file and supports the source and target formats.
 
+#### Token loss diff
+
+Build and pin the current CPU check runner as described in
+[Scratch behavior checks](crates/eval/README.md#scratch-behavior-checks).
+Run scratch checks again after you update the runner. Old bundles and the
+old runner can still report aggregate perplexity, but they do not have
+token scores. The check bundle records the SHA-256 of the private score
+file. The controller checks that hash on each read.
+
+In **Edits**, select the child and click **Token loss diff**. The first
+sentence has the largest absolute change. Select a different sentence to
+see its tokens. The view shows parent and child log probabilities and ranks
+the tokens by absolute loss change. A negative loss change means the child
+gives the token a higher probability.
+
+Use `GET /api/diff/token-loss?a=<parent>&b=<child>` or MCP
+`read_token_loss_diff`. Both accept `sentence`, `start` and `end`. These
+indices start at zero. `end` is exclusive. A slice contains up to 128
+predicted tokens and excludes the prompt. The response also includes each
+sentence's contribution and the top eight token contributors for the
+selected sentence. The share divides the sentence's gain by the signed
+net gain over the heldout split. It can be negative or greater than 100%.
+If the net gain is zero, the share is null. The result is not
+release-qualified.
+
 #### Compiled programs
 
 Run `sh tools/provision_compiled_program.sh fetch` to fetch the pinned CPU

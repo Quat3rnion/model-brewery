@@ -21,7 +21,10 @@ For a weight change, convert the child to private GGUF with the same assets.
 Trace it with the same prompts and capture settings as the parent. Always
 call `run_checks` and read `get_checks` on the child. Compare weights, traces,
 and measured behavior with `diff_tensors`, `diff_traces`, and `diff_behavior`
-as applicable. For compiled programs, use program correctness checks instead
+as applicable. If the bundle has token scores, use `read_token_loss_diff`
+to find which heldout sentences and tokens account for the change in
+perplexity. Report the signed share of the net gain, not a share of absolute
+changes. For compiled programs, use program correctness checks instead
 of the GGUF loop. Report failed or missing checks and regressions, including
 locality loss and higher perplexity. Missing measurements are not passes.
 Use `request_publish` only if the user asks and after reviewing the checks.
