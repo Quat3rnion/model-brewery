@@ -287,6 +287,7 @@ export function lensGrid(rows: { layer: number; position: number; top: TopLogit[
 
 export type CheckStatus = { status: 'passed' } | { status: 'failed' | 'not_run' | 'reported'; reason: string };
 export interface CheckBundle {
+  token_loss?: { sha256: string };
   id: string;
   revision_sha256: string;
   parent_sha256: string;

@@ -314,6 +314,29 @@
         }
       }
     },
+    "/api/diff/token-loss": {
+      "get": {
+        "operationId": "diffTokenLoss",
+        "summary": "Read the heldout token loss diff for a scratch revision",
+        "description": "Reads the SHA-256 checked token scores in the latest check bundle for B. A must be its immediate parent. Sentences are ranked by absolute log-probability gain. The default slice shows the first ranked sentence. Positive log-probability gain means lower loss. Shares use the signed corpus net gain, so they can be negative or exceed 100%. A zero net gain gives null shares.",
+        "parameters": [
+          {"$ref": "#/components/parameters/DiffA"}, {"$ref": "#/components/parameters/DiffB"},
+          {"name": "sentence", "in": "query", "description": "Zero-based heldout sentence index.", "schema": {"type": "integer", "minimum": 0, "maximum": 15}},
+          {"name": "start", "in": "query", "description": "First predicted token position. Defaults to 0.", "schema": {"type": "integer", "minimum": 0, "maximum": 510}},
+          {"name": "end", "in": "query", "description": "Exclusive end position. Defaults to start plus 128 or the sentence end, whichever is smaller.", "schema": {"type": "integer", "minimum": 1, "maximum": 511}}
+        ],
+        "responses": {
+          "200": {"description": "Token loss diff and slice.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TokenLossDiffReport"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/DiffNotFound"},
+          "413": {"$ref": "#/components/responses/DiffTooLarge"},
+          "422": {"$ref": "#/components/responses/DiffInvalid"},
+          "429": {"$ref": "#/components/responses/DiffBusy"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
     "/api/scratch": {
       "get": {
         "operationId": "listScratch",
@@ -2001,6 +2024,44 @@
           "child_generation": {"type": "string", "minLength": 1, "maxLength": 4096}
         }
       },
+      "TokenLossDiffToken": {
+        "type": "object",
+        "required": ["position", "id", "piece", "parent_logprob", "child_logprob", "loss_delta"],
+        "properties": {
+          "position": {"type": "integer", "minimum": 0, "maximum": 510, "description": "Position in the predicted suffix, not the prompt."},
+          "id": {"type": "integer", "minimum": 0},
+          "piece": {"type": "string", "description": "Decoded token piece. Invalid UTF-8 bytes use replacement characters."},
+          "parent_logprob": {"type": "number", "maximum": 0},
+          "child_logprob": {"type": "number", "maximum": 0},
+          "loss_delta": {"type": "number", "description": "Child loss minus parent loss, in natural log units."}
+        }
+      },
+      "TokenLossDiffReport": {
+        "type": "object",
+        "required": ["schema_version", "qualification", "a", "b", "check_bundle_id", "artifact_sha256", "heldout_sha256", "total_tokens", "total_logprob_gain", "sentences", "sentence", "start", "end", "tokens", "top_tokens"],
+        "properties": {
+          "schema_version": {"const": 1}, "qualification": {"const": "not release-qualified"},
+          "a": {"$ref": "#/components/schemas/Id"}, "b": {"$ref": "#/components/schemas/Id"},
+          "check_bundle_id": {"$ref": "#/components/schemas/Id"},
+          "artifact_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "heldout_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "total_tokens": {"type": "integer", "minimum": 1},
+          "total_logprob_gain": {"type": "number"},
+          "sentences": {"type": "array", "maxItems": 16, "items": {
+            "type": "object", "required": ["index", "text", "token_count", "logprob_gain", "share_of_net_gain"],
+            "properties": {
+              "index": {"type": "integer", "minimum": 0, "maximum": 15}, "text": {"type": "string"},
+              "token_count": {"type": "integer", "minimum": 1, "maximum": 511},
+              "logprob_gain": {"type": "number"}, "share_of_net_gain": {"type": ["number", "null"]}
+            }
+          }},
+          "sentence": {"type": "integer", "minimum": 0, "maximum": 15},
+          "start": {"type": "integer", "minimum": 0, "maximum": 510},
+          "end": {"type": "integer", "minimum": 1, "maximum": 511},
+          "tokens": {"type": "array", "maxItems": 128, "items": {"$ref": "#/components/schemas/TokenLossDiffToken"}},
+          "top_tokens": {"type": "array", "maxItems": 8, "items": {"$ref": "#/components/schemas/TokenLossDiffToken"}, "description": "Tokens from the selected sentence, ranked by absolute loss change. The rank does not depend on the slice."}
+        }
+      },
       "ScratchCheckBundle": {
         "type": "object",
         "required": ["schema", "id", "revision_sha256", "parent_sha256", "created_at_ms", "qualification", "integrity", "smoke", "behavior", "job_refs", "acknowledged_at_ms"],
@@ -2018,6 +2079,7 @@
           "offline_report": {"$ref": "#/components/schemas/ScratchOfflineReport"},
           "measured_report": {"$ref": "#/components/schemas/ScratchOfflineReport"},
           "measured_job_id": {"$ref": "#/components/schemas/Id"},
+          "token_loss": {"type": "object", "required": ["sha256"], "properties": {"sha256": {"$ref": "#/components/schemas/ScratchHash"}}},
           "acknowledged_at_ms": {"type": ["integer", "null"], "minimum": 0},
           "job_refs": {"type": "array", "maxItems": 8, "items": {"type": "object", "required": ["job_id", "role", "kind", "verified_revision"],
             "properties": {

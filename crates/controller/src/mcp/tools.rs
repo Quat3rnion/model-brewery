@@ -58,6 +58,7 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("diff_tensors", "get", "/api/diff/tensors"),
     ("diff_traces", "get", "/api/diff/traces"),
     ("diff_behavior", "get", "/api/diff/behavior"),
+    ("read_token_loss_diff", "get", "/api/diff/token-loss"),
     (
         "request_publish",
         "post",

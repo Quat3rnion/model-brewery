@@ -7,10 +7,19 @@
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <vector>
 
 constexpr int context_size = 512;
+
+static void hex_piece(std::ostream & out, const std::string & text) {
+    out << std::hex << std::setfill('0');
+    for (unsigned char byte : text) {
+        out << std::setw(2) << static_cast<unsigned>(byte);
+    }
+    out << std::dec;
+}
 
 static std::vector<llama_token> tokenize(const llama_vocab * vocab, const std::string & text) {
     std::vector<llama_token> tokens(context_size);
@@ -54,11 +63,9 @@ static void generate(llama_context * ctx, const llama_vocab * vocab, int vocab_s
     if (text.find_first_not_of(" \t\n\r") == std::string::npos) {
         throw std::runtime_error("generation produced no text");
     }
-    std::cout << "generation\t" << std::hex << std::setfill('0');
-    for (unsigned char byte : text) {
-        std::cout << std::setw(2) << static_cast<unsigned>(byte);
-    }
-    std::cout << std::dec << '\n';
+    std::cout << "generation\t";
+    hex_piece(std::cout, text);
+    std::cout << '\n';
 }
 
 static void score(llama_context * ctx, const llama_vocab * vocab, int vocab_size,
@@ -80,6 +87,8 @@ static void score(llama_context * ctx, const llama_vocab * vocab, int vocab_size
     double logp = 0, prob = 0;
     uint64_t ranks = 0;
     bool top1 = true;
+    std::ostringstream details;
+    details << std::setprecision(17);
     for (size_t i = 0; i < whole.size(); ++i) {
         if (i > 0) {
             std::cout << ',';
@@ -101,9 +110,19 @@ static void score(llama_context * ctx, const llama_vocab * vocab, int vocab_size
         prob += std::exp(lp);
         ranks += rank;
         top1 &= rank == 1;
+        char buf[512];
+        const int size = llama_token_to_piece(vocab, whole[i], buf, sizeof(buf), 0, false);
+        if (size < 0) {
+            throw std::runtime_error("token piece exceeds size limit");
+        }
+        if (i > prompt.size()) {
+            details << ',';
+        }
+        details << lp << ':';
+        hex_piece(details, std::string(buf, size));
     }
     std::cout << '\t' << prompt.size() << '\t' << logp << '\t' << prob << '\t' << ranks
-              << '\t' << top1 << '\n';
+              << '\t' << top1 << '\t' << details.str() << '\n';
 }
 
 int main(int argc, char ** argv) try {

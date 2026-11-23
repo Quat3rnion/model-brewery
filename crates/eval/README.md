@@ -142,13 +142,14 @@ once. CounterFact uses two paraphrases and two neighborhood prompts per
 case; zsRE uses one of each. Locality compares the same control answer before
 and after the edit. Perplexity is the exponential of the mean negative log
 probability of the held-out suffix tokens. The first word of each sentence
-is its prompt. The report includes samples from an eight-token greedy smoke
-test on both files.
+is its prompt. The current runner also records log probabilities for the
+predicted tokens in these 16 sentences. The report includes samples from
+an eight-token greedy smoke test on both files.
 
-Send `behavior.json` as `offline_report` in a scratch check request. Results
-from this tool are diagnostic. Use the paired scores to review the effect of
-the edit. A change in score does not qualify a release. The controller does
-not verify the ancestry of the local GGUF files.
+`behavior.json` is for offline inspection. To attach evidence to a scratch
+revision, run the [worker checks](../../OPERATOR.md#checks-before-a-publish-request).
+The controller does not accept a report in a check request. These results
+are not release-qualified.
 
 ## Operator configuration
 

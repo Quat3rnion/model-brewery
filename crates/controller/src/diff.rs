@@ -1,6 +1,7 @@
 //! Read-only pair reports. Open artifacts before a cache lookup.
 mod behavior;
 mod tensors;
+mod token_loss;
 
 use crate::{
     App,
@@ -193,6 +194,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/diff/tensors", get(tensors))
         .route("/diff/traces", get(traces))
         .route("/diff/behavior", get(behavior))
+        .route("/diff/token-loss", get(token_loss::get_loss))
 }
 
 async fn tensors(State(app): State<Arc<App>>, query: Params<Pair>) -> Result<impl IntoResponse> {

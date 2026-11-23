@@ -447,6 +447,14 @@ for name in schema["metrics"]["items"]["properties"]["name"]["enum"]:
 result=dict(schema="brewery.scratch-behavior.v1",qualification="not release-qualified",
     fixture_sha256={k:v["const"] for k,v in schema["fixture_sha256"]["properties"].items()},
     runner_sha256="c"*64,metrics=metrics,parent_generation="Before",child_generation="After")
+if (root/"with-token-loss").exists():
+    import math
+    result["token_loss"] = [
+        [dict(id=1,piece_hex="206f6c64",parent_logprob=-4,child_logprob=-4+gain),
+         dict(id=2,piece_hex="20636c6f636b",parent_logprob=-2,child_logprob=-2)]
+        for gain in [0]*5+[2,-1]+[0]*9
+    ]
+    metrics[-1].update(parent=math.exp(3),child=math.exp(95/32))
 result.update(zip(["parent_gguf_sha256","revision_gguf_sha256","parent_sha256","revision_sha256"],
                   map(pins.__getitem__,paths),strict=True))
 if (root/"reject-check-receipt").exists(): result["revision_gguf_sha256"]="0"*64
@@ -742,6 +750,7 @@ fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
         sleep(Duration::from_millis(25));
     }
     let checks = format!("{path}/checks");
+    fs::write(t.root.path().join("with-token-loss"), "").unwrap();
     let (status, check_job) = t.request(&checks, "", Some(json!({"sha256":scratch["sha256"]})));
     assert_eq!(status, 202, "{check_job}");
     loop {
@@ -787,6 +796,39 @@ fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
         panic!("measured behavior diff")
     };
     assert_eq!(diff["metrics"].as_array().unwrap().len(), 17);
+    assert_eq!(bundle["token_loss"]["sha256"].as_str().unwrap().len(), 64);
+    assert!(bundle["measured_report"].get("token_loss").is_none());
+    let loss_route = format!(
+        "/api/diff/token-loss?a={}&b={id}&sentence=5&start=1&end=2",
+        parent["id"].as_str().unwrap(),
+    );
+    let (200, loss) = t.request(&loss_route, "", None) else {
+        panic!("token loss slice");
+    };
+    assert_eq!(loss["total_logprob_gain"].as_f64(), Some(1.));
+    assert_eq!(loss["sentences"][0]["index"], 5);
+    assert_eq!(loss["sentences"][0]["share_of_net_gain"].as_f64(), Some(2.));
+    assert_eq!(loss["top_tokens"][0]["position"], 0);
+    assert_eq!(loss["top_tokens"][0]["parent_logprob"].as_f64(), Some(-4.));
+    assert_eq!(loss["top_tokens"][0]["child_logprob"].as_f64(), Some(-2.));
+    assert_eq!(loss["tokens"].as_array().unwrap().len(), 1);
+    assert_eq!(loss["tokens"][0]["position"], 1);
+    assert_eq!(loss["tokens"][0]["piece"], " clock");
+    assert_eq!(
+        t.request(&loss_route.replace("end=2", "end=1"), "", None).0,
+        400
+    );
+    assert_eq!(
+        t.request(&loss_route.replace("end=2", "end=3"), "", None).0,
+        400
+    );
+    let artifact = private.with_file_name("token-loss.v1.json");
+    assert_eq!(
+        bundle["token_loss"]["sha256"],
+        sha(&fs::read(&artifact).unwrap())
+    );
+    fs::write(artifact, "{}").unwrap();
+    assert_eq!(t.request(&loss_route, "", None).0, 422);
     assert_eq!(
         t.request(
             &checks,
@@ -891,6 +933,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "prune_experts",
             "prune_model",
             "read_feature_trace",
+            "read_token_loss_diff",
             "read_trace",
             "register_model",
             "request_publish",

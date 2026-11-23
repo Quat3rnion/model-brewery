@@ -21,6 +21,7 @@
   import Badge from '../components/Badge.svelte';
   import JobLink from '../components/JobLink.svelte';
   import ApproveScratch from '../components/trace/ApproveScratch.svelte';
+  import TokenLossDiff from '../components/trace/TokenLossDiff.svelte';
 
   const POLL_MS = 3000;
   const models = $derived(brewery.state?.models ?? []);
@@ -329,6 +330,9 @@
               <button type="button" class="btn small" disabled={diffBusy !== ''} aria-busy={diffBusy === 'tensors'} onclick={() => runDiff('tensors')}>{diffBusy === 'tensors' ? 'Reading…' : 'Tensor diff'}</button>
               <button type="button" class="btn small" disabled={diffBusy !== '' || p.method === 'copy'} aria-busy={diffBusy === 'behavior'} onclick={() => runDiff('behavior')}>{diffBusy === 'behavior' ? 'Reading…' : 'Behavior diff'}</button>
             </div>
+            {#key selected.check_bundle?.id}
+              <TokenLossDiff parent={p.parent_id} child={selected.id} available={!!selected.check_bundle?.token_loss} />
+            {/key}
             {#if diffError}<p class="note bad small" role="alert">{diffError}</p>{/if}
             {#if tensorDiff}
               {#if !tensorRows.length}

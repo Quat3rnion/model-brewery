@@ -91,6 +91,7 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/diff/tensors", "diffTensors"),
         ("get", "/api/diff/traces", "diffTraces"),
         ("get", "/api/diff/behavior", "diffBehavior"),
+        ("get", "/api/diff/token-loss", "diffTokenLoss"),
         ("post", "/api/scratch", "createScratch"),
         ("post", "/api/scratch/merge", "mergeModels"),
         ("post", "/api/scratch/compile_program", "compileProgram"),
