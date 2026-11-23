@@ -71,17 +71,34 @@ impl Dispatcher {
                 }
             })
             .transpose()?;
-        self.invoke(action, job, envelope, payload, duration, RESULT_LIMIT).await
+        self.invoke(action, job, envelope, payload, duration, RESULT_LIMIT)
+            .await
     }
 
-    pub async fn trace_read(&self, job: &Job, slice: &brewery_worker::trace::Slice) -> Result<brewery_worker::trace::ReadReply, Error> {
-        self.invoke("trace-read", job, None, Some(serde_json::to_vec(slice)?),
-            SHORT_RPC, brewery_worker::trace::RESPONSE_CAP + 128).await
+    pub async fn trace_read(
+        &self,
+        job: &Job,
+        slice: &brewery_worker::trace::Slice,
+    ) -> Result<brewery_worker::trace::ReadReply, Error> {
+        self.invoke(
+            "trace-read",
+            job,
+            None,
+            Some(serde_json::to_vec(slice)?),
+            SHORT_RPC,
+            brewery_worker::trace::RESPONSE_CAP + 128,
+        )
+        .await
     }
 
     async fn invoke<T: serde::de::DeserializeOwned>(
-        &self, action: &str, job: &Job, envelope: Option<&Envelope>,
-        payload: Option<Vec<u8>>, duration: Duration, limit: usize,
+        &self,
+        action: &str,
+        job: &Job,
+        envelope: Option<&Envelope>,
+        payload: Option<Vec<u8>>,
+        duration: Duration,
+        limit: usize,
     ) -> Result<T, Error> {
         let backend = if job.host == backend_hf::ID {
             Some(

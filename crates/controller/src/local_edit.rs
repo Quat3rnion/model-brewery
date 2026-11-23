@@ -281,6 +281,8 @@ impl Lanes {
                 trace::LIB_DIR,
                 sensitivity::PIN,
                 sensitivity::MANIFEST_SHA,
+                trace::ROUTING_EXECUTABLE,
+                trace::ROUTING_LIB_DIR,
                 locate_edit::EXECUTABLE,
                 locate_edit::LIB_DIR,
                 "BREWERY_CPU_THREADS",

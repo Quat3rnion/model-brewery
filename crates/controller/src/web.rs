@@ -87,6 +87,10 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
         .route("/jobs/{id}/trace/tensor", get(trace_tensor))
         .route("/jobs/{id}/trace/logit-lens", get(trace_logit_lens))
         .route("/jobs/{id}/trace/model-logits", get(trace_model_logits))
+        .route(
+            "/jobs/{id}/trace/routing-atlas",
+            get(crate::routing_atlas::get),
+        )
         .route("/jobs/{id}/cancel", post(cancel))
         .route("/conversions", get(list_conversions).post(add_conversion))
         .route("/conversions/{id}", get(get_conversion))

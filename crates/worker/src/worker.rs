@@ -1004,15 +1004,21 @@ impl Worker {
             );
         }
         if job.kind == trace::JOB {
+            let request = trace::Request::worker(&job.options, job.prompt.as_deref());
+            let (executable, lib_dir) = if request.as_ref().is_ok_and(|r| r.routing()) {
+                (trace::ROUTING_EXECUTABLE, trace::ROUTING_LIB_DIR)
+            } else {
+                (trace::EXECUTABLE, trace::LIB_DIR)
+            };
             let allowed = action == "start"
                 && job.inputs.len() == 1
                 && job.inputs[0].kind == "gguf"
                 && self
                     .cfg
                     .engine_env
-                    .get(trace::EXECUTABLE)
+                    .get(executable)
                     .is_some_and(|p| Path::new(p).is_absolute())
-                && trace::Request::worker(&job.options, job.prompt.as_deref()).is_ok();
+                && request.is_ok();
             if !allowed {
                 return self.record_prepare(
                     id,
@@ -1024,14 +1030,14 @@ impl Worker {
             if !self
                 .cfg
                 .engine_env
-                .get(trace::LIB_DIR)
+                .get(lib_dir)
                 .is_some_and(|p| Path::new(p).is_absolute())
             {
                 return self.record_prepare(
                     id,
                     action,
                     job,
-                    Reply::error("BREWERY_LANTERNFISH_TRACE_LIB_DIR must be an absolute path"),
+                    Reply::error(format!("{lib_dir} must be an absolute path")),
                 );
             }
         }

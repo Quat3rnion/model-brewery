@@ -100,7 +100,7 @@ export const api = {
   saveProfile: (body: unknown) => request<unknown>('POST', '/api/profiles', body),
   cancelJob: (id: string) => request<JobSummary>('POST', `/api/jobs/${encodeURIComponent(id)}/cancel`, {}),
   // Weight-space programming: trace slices, scratch revisions, diffs.
-  trace: (id: string, query: Record<string, string | number>, view: '' | 'tensor' | 'logit-lens' | 'model-logits' | 'features' = '', signal?: AbortSignal) =>
+  trace: (id: string, query: Record<string, string | number>, view: '' | 'tensor' | 'logit-lens' | 'model-logits' | 'features' | 'routing-atlas' = '', signal?: AbortSignal) =>
     request<unknown>('GET', `/api/jobs/${encodeURIComponent(id)}/trace${view ? `/${view}` : ''}?${new URLSearchParams(Object.entries(query).map(([k, v]) => [k, String(v)]))}`, undefined, signal),
   interventions: (signal?: AbortSignal) => request<unknown>('GET', '/api/interventions', undefined, signal),
   scratch: (signal?: AbortSignal) => request<unknown>('GET', '/api/scratch', undefined, signal),

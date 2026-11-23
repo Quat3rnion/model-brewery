@@ -555,6 +555,96 @@ fn mcp_expert_apply_cannot_publish_or_make_a_partial_scratch() {
     );
 }
 
+#[test]
+fn plan_experts_binds_routing_evidence_without_changing_the_map() {
+    let mut t = Test::new();
+    let input = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
+    let source = input.with_extension("gguf");
+    fs::rename(&input, &source).unwrap();
+    let digest = sha(&fs::read(&source).unwrap());
+    let script = t.root.path().join("dispatch");
+    let before = fs::read_to_string(&script).unwrap();
+    let route = r#"
+  trace-read)
+    python3 -c 'import json,sys
+req=json.load(sys.stdin)
+assert req["view"]=="routing_input"
+receipt=json.load(open(sys.argv[1]))["result"]
+print(json.dumps(dict(status="ok",data=dict(
+  model_id=receipt["model_id"],model_sha256=sys.argv[2],
+  lanternfish_commit="5699379af18d6428a6589c996f516c07a91e1a86",
+  manifest_sha256="a"*64,tokens=[dict(position=0,token_id=1)],interventions=[],
+  rows=[dict(position=0,logits=[0,1],ids=[1],weights=[1])]))))' "${0%/*}/$3.result" __DIGEST__
+    ;;
+"#;
+    fs::write(
+        script,
+        before.replace(
+            "  start)",
+            &(route.replace("__DIGEST__", &digest) + "  start)"),
+        ),
+    )
+    .unwrap();
+    t.launch();
+    assert_eq!(
+        t.admin(Some(
+            json!({"action":"set_weight_editor","worker":"existing",
+        "revision":0,"enabled":true})
+        ))
+        .0,
+        200
+    );
+    let (status, model) = t.request(
+        "/api/models",
+        "",
+        Some(json!({
+            "host":"existing","kind":"gguf","path":source
+        })),
+    );
+    assert_eq!(status, 201, "{model}");
+    let mcp = |name, arguments| {
+        let (status, reply) = t.request("/mcp", "Accept: application/json, text/event-stream\r\n",
+            Some(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}})));
+        assert_eq!(status, 200, "{reply}");
+        reply["result"]["structuredContent"].clone()
+    };
+    let job = mcp(
+        "start_trace",
+        json!({
+            "idempotency_key":"atlas-reap-trace","input_ids":[model["id"]],"prompt":"one",
+            "options":{"layers":[0],"positions":[0],"top_k":0,
+                "roles":["ffn_moe_logits","ffn_moe_topk","ffn_moe_route_weights"]}
+        }),
+    );
+    assert_eq!(
+        mcp("get_job", json!({"id":job["id"],"wait_ms":5000}))["state"],
+        "succeeded"
+    );
+    let split = |split, first, last| {
+        json!({
+            "schema":"brewery.expert-activations.v1","source_sha256":digest,
+            "observer_sha256":"c".repeat(64),"split":split,"n_layers":1,"routed_layers":[0],
+            "n_experts":2,"top_k":1,"samples":[{"tokens":[first,last],"positions":[
+                {"0":[{"expert":0,"applied_gate":1.,"output_l2":1.}]},
+                {"0":[{"expert":1,"applied_gate":1.,"output_l2":2.}]}
+            ]}]
+        })
+        .to_string()
+    };
+    let mut args = json!({"id":model["id"],"source_sha256":digest,"keep":1,
+        "calibration":split("calibration",1,2),"held_out":split("held-out",3,4)});
+    let baseline = mcp("plan_experts", args.clone());
+    assert!(baseline["plan"].is_string(), "{baseline}");
+    args["routing_evidence"] = json!({"job_id":job["id"],"layer":0,"start":0,"end":1});
+    let linked = mcp("plan_experts", args.clone());
+    assert_eq!(linked["routing_evidence"]["job_id"], job["id"], "{linked}");
+    assert_eq!(linked["routing_evidence"]["experts"][1]["load"], 1.);
+    assert_eq!(linked["plan"], baseline["plan"]);
+    assert_eq!(linked["plan_sha256"], baseline["plan_sha256"]);
+    args["source_sha256"] = json!("b".repeat(64));
+    assert_eq!(mcp("plan_experts", args)["status"], 422);
+}
+
 fn mock_scratch_worker(t: &Test) {
     let mock = t.root.path().join("editor-DISPATCH");
     fs::write(
@@ -1128,6 +1218,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "register_model",
             "request_publish",
             "rome_edit",
+            "routing_atlas",
             "run_checks",
             "run_program",
             "start_trace",

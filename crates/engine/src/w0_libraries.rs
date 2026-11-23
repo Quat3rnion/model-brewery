@@ -1,5 +1,5 @@
 use crate::integrity;
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use std::{
     env, fs,
     os::unix::fs::PermissionsExt,
@@ -110,10 +110,12 @@ mod tests {
         let staged = stage("valid").unwrap();
         assert_eq!(fs::read(staged.join(nested)).unwrap(), b"abc");
         fs::write(&member, b"def").unwrap();
-        assert!(stage("tampered")
-            .unwrap_err()
-            .to_string()
-            .contains("SHA-256 mismatch"));
+        assert!(
+            stage("tampered")
+                .unwrap_err()
+                .to_string()
+                .contains("SHA-256 mismatch")
+        );
 
         fs::remove_dir_all(source.join("rocblas")).unwrap();
         let elsewhere = root.join("rocblas/library");

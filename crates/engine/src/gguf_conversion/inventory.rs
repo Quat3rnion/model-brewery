@@ -1,6 +1,6 @@
 use crate::gguf::{number, read_string, scalar_width, skip};
-use anyhow::{bail, ensure, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, bail, ensure};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
@@ -301,14 +301,15 @@ impl Model {
     }
 
     pub(super) fn summary(&self, types: &Types, target: Namespace) -> Value {
-        json!(self
-            .tensors
-            .iter()
-            .map(|(name, t)| json!({
-                "name":name,"shape":t.shape,"current_type":self.namespace.spec(t.ty).unwrap().1,
-                "planned_type":types.get(name).and_then(|id|target.spec(*id).ok()).map(|s|s.1)
-            }))
-            .collect::<Vec<_>>())
+        json!(
+            self.tensors
+                .iter()
+                .map(|(name, t)| json!({
+                    "name":name,"shape":t.shape,"current_type":self.namespace.spec(t.ty).unwrap().1,
+                    "planned_type":types.get(name).and_then(|id|target.spec(*id).ok()).map(|s|s.1)
+                }))
+                .collect::<Vec<_>>()
+        )
     }
 
     pub(super) fn parse_plan(

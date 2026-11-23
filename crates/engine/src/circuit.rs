@@ -1,15 +1,15 @@
 use crate::{
-    bounded, child_threads,
+    Job, bounded, child_threads,
     gguf_conversion::{
-        inventory::{Model, Namespace},
         Tool,
+        inventory::{Model, Namespace},
     },
     integrity::{self, Identity},
     progress::Progress,
     sensitivity::Pin,
-    write_json, Job,
+    write_json,
 };
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use brewery_worker::{
     circuit::{self, Artifact, Request, Site},
     locate_edit::Backend,
@@ -17,7 +17,7 @@ use brewery_worker::{
     weight_source::open_regular,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs,

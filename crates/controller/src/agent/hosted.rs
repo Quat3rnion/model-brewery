@@ -26,13 +26,10 @@ fn system_prompt_uses_catalog_tools_and_reserves_approval_for_operator() {
     // Mark every tool reference with backticks; keep other prose unmarked.
     let parts: Vec<_> = SYSTEM.split('`').collect();
     assert_eq!(parts.len() % 2, 1, "unpaired backtick in system prompt");
-    assert!(parts.len() > 1, "expected MCP tool references");
-    for (index, part) in parts.iter().enumerate() {
-        if index % 2 == 1 {
-            assert!(tools.contains(part), "unknown MCP tool: {part}");
-        } else {
-            assert!(!part.contains('_'), "unmarked identifier in system prompt");
-        }
+    let referenced: BTreeSet<_> = parts.iter().skip(1).step_by(2).copied().collect();
+    assert_eq!(referenced, tools, "prompt tool catalog differs from MCP");
+    for part in parts.iter().step_by(2) {
+        assert!(!part.contains('_'), "unmarked identifier in system prompt");
     }
 
     assert_eq!(

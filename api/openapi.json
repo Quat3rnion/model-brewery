@@ -595,7 +595,12 @@
           "properties": {
             "source_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "keep": {"type": "integer", "minimum": 1, "maximum": 1024},
             "calibration": {"type": "string", "minLength": 1, "maxLength": 98304, "description": "Exact brewery.expert-activations.v1 JSON text for the calibration split. Byte limit: 96 KiB."},
-            "held_out": {"type": "string", "minLength": 1, "maxLength": 98304, "description": "Exact brewery.expert-activations.v1 JSON text for the held-out split. Byte limit: 96 KiB."}
+            "held_out": {"type": "string", "minLength": 1, "maxLength": 98304, "description": "Exact brewery.expert-activations.v1 JSON text for the held-out split. Byte limit: 96 KiB."},
+            "routing_evidence": {"type":"object","additionalProperties":false,"required":["job_id","layer","start","end"],
+              "description":"Optional routing atlas evidence for the exact source model and SHA-256. Does not replace REAP inputs.",
+              "properties":{"job_id":{"$ref":"#/components/schemas/Id"},"prompt":{"type":"integer","minimum":0,"maximum":3},
+                "layer":{"$ref":"#/components/schemas/TraceLayer"},"start":{"$ref":"#/components/schemas/TracePosition"},
+                "end":{"type":"integer","minimum":1,"maximum":4096}}}
           }
         }}}},
         "responses": {
@@ -604,7 +609,7 @@
             "properties": {"parent_id": {"$ref": "#/components/schemas/Id"}, "source_sha256": {"$ref": "#/components/schemas/ScratchHash"},
               "plan": {"type": "string", "maxLength": 131072}, "plan_sha256": {"$ref": "#/components/schemas/ScratchHash"},
               "planner_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "expert_usage_sha256": {"$ref": "#/components/schemas/ScratchHash"},
-              "qualification": {"const": "not release-qualified"}}
+               "qualification": {"const": "not release-qualified"}, "routing_evidence":{"type":["object","null"]}}
           }}}},
           "400": {"$ref": "#/components/responses/BadRequest"},
           "403": {"$ref": "#/components/responses/Forbidden"},
@@ -1056,6 +1061,27 @@
           "200": {"description": "Native top logits at selected positions.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TraceLogits"}}}},
           "400": {"$ref": "#/components/responses/BadRequest"}, "403": {"$ref": "#/components/responses/Forbidden"},
           "404": {"$ref": "#/components/responses/TraceNotFound"}, "413": {"$ref": "#/components/responses/TraceTooLarge"}, "502": {"$ref": "#/components/responses/TraceReadFailed"}
+        }
+      }
+    },
+    "/api/jobs/{id}/trace/routing-atlas": {
+      "get": {
+        "operationId": "getRoutingAtlas",
+        "summary": "Read MoE expert load, routing entropy, co-activation, and specialization",
+        "description": "Use a retained Qwen2MoE or Qwen3MoE trace with router logits, IDs, and weights. Select one layer and at most 128 contiguous captured positions. For an ablation comparison, select a paired zero_expert trace with the same model digest and tokens and capture l_out in both.",
+        "parameters": [
+          {"$ref":"#/components/parameters/ResourceId"}, {"$ref":"#/components/parameters/TracePrompt"},
+          {"name":"layer","in":"query","required":true,"schema":{"$ref":"#/components/schemas/TraceLayer"}},
+          {"name":"start","in":"query","required":true,"schema":{"$ref":"#/components/schemas/TracePosition"}},
+          {"name":"end","in":"query","required":true,"description":"Exclusive end position.","schema":{"type":"integer","minimum":1,"maximum":4096}},
+          {"name":"ablation_job_id","in":"query","schema":{"$ref":"#/components/schemas/Id"}}
+        ],
+        "responses": {
+          "200":{"description":"Routing statistics and provenance for the selected trace slice.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RoutingAtlas"}}}},
+          "400":{"$ref":"#/components/responses/BadRequest"}, "403":{"$ref":"#/components/responses/Forbidden"},
+          "404":{"$ref":"#/components/responses/TraceNotFound"}, "413":{"$ref":"#/components/responses/TraceTooLarge"},
+          "422":{"$ref":"#/components/responses/InvalidJsonData"}, "502":{"$ref":"#/components/responses/TraceReadFailed"},
+          "503":{"description":"Routing analysis is busy."}
         }
       }
     },
@@ -2666,7 +2692,33 @@
       "RequiredHost": {"required": ["host"], "properties": {"host": {"$ref": "#/components/schemas/HostId"}}},
       "TraceLayer": {"type":"integer","minimum":0,"maximum":4095},
       "TracePosition": {"type":"integer","minimum":0,"maximum":4095},
-      "TraceRole": {"type":"string","enum":["l_out","attn_out","ffn_inp","ffn_out","kq_soft_max"]},
+      "TraceRole": {"type":"string","enum":["l_out","attn_out","ffn_inp","ffn_out","kq_soft_max","ffn_moe_logits","ffn_moe_topk","ffn_moe_route_weights"]},
+      "RoutingAtlas": {
+        "type":"object",
+        "required":["schema_version","job_id","model_id","model_sha256","manifest_sha256","prompt","layer","start","end","positions","expert_count","experts_per_token","mean_entropy_nats","experts","coactivation","ablation"],
+        "properties":{
+          "schema_version":{"const":1},"job_id":{"$ref":"#/components/schemas/Id"},"model_id":{"$ref":"#/components/schemas/Id"},
+          "model_sha256":{"$ref":"#/components/schemas/ScratchHash"},"manifest_sha256":{"$ref":"#/components/schemas/ScratchHash"},
+          "prompt":{"type":"integer"},"layer":{"$ref":"#/components/schemas/TraceLayer"},"start":{"type":"integer"},"end":{"type":"integer"},
+          "positions":{"type":"integer"},"expert_count":{"type":"integer"},"experts_per_token":{"type":"integer"},
+          "mean_entropy_nats":{"type":"number","description":"Mean entropy of the full router softmax before top-k selection."},
+          "experts":{"type":"array","items":{"type":"object","properties":{
+            "expert":{"type":"integer"},"selected":{"type":"integer"},"load":{"type":"number"},"mean_selected_weight":{"type":["number","null"]},
+            "token_clusters":{"type":"array","items":{"$ref":"#/components/schemas/RoutingCluster"}},
+            "context_clusters":{"type":"array","items":{"$ref":"#/components/schemas/RoutingCluster"}}
+          }}},
+          "coactivation":{"type":"array","items":{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"},"count":{"type":"integer"}}}},
+          "ablation":{"type":["object","null"],"properties":{"expert":{"type":"integer"},"rows":{"type":"array","items":{"type":"object","properties":{
+            "position":{"type":"integer"},"selected":{"type":"boolean"},"residual_l2":{"type":"number"},"top_token_changed":{"type":["boolean","null"]}
+          }}}}},
+          "lanternfish_commit":{"type":"string"},"ablation_job_id":{"type":["string","null"]},"ablation_manifest_sha256":{"type":["string","null"]},
+          "qualification":{"const":"not release-qualified"}
+        }
+      },
+      "RoutingCluster": {"type":"object","properties":{
+        "token_id":{"type":"integer"},"previous_token_id":{"type":["integer","null"]},"selected":{"type":"integer"},
+        "observations":{"type":"integer"},"selection_rate":{"type":"number"}
+      }},
       "TraceCapture": {
         "type":"object", "required":["layers","roles","positions","top_k"],
         "properties":{
@@ -2906,13 +2958,16 @@
         "properties":{
           "layer":{"$ref":"#/components/schemas/TraceLayer"}, "role":{"enum":["l_out","attn_out","ffn_inp","ffn_out"]},
           "positions":{"type":"array","minItems":1,"items":{"$ref":"#/components/schemas/TracePosition"}},
-          "op":{"enum":["zero","scale","add","replace"]}, "factor":{"type":"number"},
+          "op":{"enum":["zero","scale","add","replace","zero_expert"]}, "factor":{"type":"number"},
+          "expert":{"type":"integer","minimum":0,"maximum":4095},
           "vector":{"type":"array","minItems":1,"maxItems":16384,"items":{"type":"number"}}
         },
         "oneOf":[
-          {"properties":{"op":{"const":"zero"}}, "not":{"anyOf":[{"required":["factor"]},{"required":["vector"]}]}},
-          {"properties":{"op":{"const":"scale"}},"required":["factor"],"not":{"required":["vector"]}},
-          {"properties":{"op":{"enum":["add","replace"]}},"required":["vector"],"not":{"required":["factor"]}}
+          {"properties":{"op":{"const":"zero"}}, "not":{"anyOf":[{"required":["factor"]},{"required":["vector"]},{"required":["expert"]}]}},
+          {"properties":{"op":{"const":"scale"}},"required":["factor"],"not":{"anyOf":[{"required":["vector"]},{"required":["expert"]}]}},
+          {"properties":{"op":{"enum":["add","replace"]}},"required":["vector"],"not":{"anyOf":[{"required":["factor"]},{"required":["expert"]}]}},
+          {"properties":{"op":{"const":"zero_expert"},"role":{"const":"ffn_out"}},"required":["expert"],
+            "not":{"anyOf":[{"required":["factor"]},{"required":["vector"]}]}}
         ]
       },
       "InterventionRef": {

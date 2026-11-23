@@ -165,7 +165,8 @@ pub(crate) fn prepare_enqueue(app: &App, mut job: Job, envelope: &Envelope) -> R
     } else if job.kind == brewery_worker::sensitivity::JOB {
         brewery_worker::sensitivity::Request::resolved(&Value::Object(envelope.options.clone()))
             .map_err(ApiError::storage)?
-            .0.backend
+            .0
+            .backend
     } else {
         locate_edit::Backend::Cpu
     };

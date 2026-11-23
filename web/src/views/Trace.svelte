@@ -9,6 +9,7 @@
   import {
     MAX_PATCHES,
     MAX_PROMPTS,
+    PATCH_ROLES,
     ROLE_LABELS,
     TRACE_ROLES,
     buildTraceJob,
@@ -77,6 +78,10 @@
   let artifactId = $state('');
   let artifactVersion = $state(1);
   let patches = $state<PatchForm[]>([]);
+  let ablate = $state(false);
+  let ablationLayer = $state<number | undefined>(0);
+  let ablationExpert = $state<number | undefined>(undefined);
+  let ablationPositions = $state('0');
 
   const modelArtifacts = $derived(artifacts.filter((a) => a.model_id === model));
   const artifact = $derived(modelArtifacts.find((a) => a.id === artifactId) ?? null);
@@ -106,6 +111,7 @@
       fullDump,
       artifact: artifact ? { id: artifact.id, version: artifactVersion } : null,
       patches,
+      ablation: ablate ? { layer: ablationLayer, expert: ablationExpert, positions: ablationPositions } : undefined,
     }),
   );
   const blockers = $derived.by(() => {
@@ -243,9 +249,18 @@
           <div class="field">
             <label for="{uid}-topk">Top-k logits</label>
             <input id="{uid}-topk" class="input num" type="number" min="0" max="100" step="1" bind:value={topK} inputmode="numeric" aria-describedby="{uid}-topk-h" />
-            <span class="hint" id="{uid}-topk-h">0 to 100. Above 0 adds the logit lens for each layer and the model logits.</span>
+            <span class="hint" id="{uid}-topk-h">0 to 100. Above 0 adds model logits and a logit lens for dense Llama and Qwen2.</span>
           </div>
         </div>
+        <label><input type="checkbox" bind:checked={ablate} /> Zero one MoE expert</label>
+        {#if ablate}
+          <div class="grid-3">
+            <label class="field">Ablation layer<input class="input" type="number" min="0" max="4095" bind:value={ablationLayer} /></label>
+            <label class="field">Expert ID<input class="input" type="number" min="0" max="4095" bind:value={ablationExpert} /></label>
+            <label class="field">Ablation positions<input class="input" bind:value={ablationPositions} /></label>
+          </div>
+          <p class="hint">Use the same model and prompt as the baseline. A position that does not select this expert does not change.</p>
+        {/if}
         <div class="checks" role="group" aria-label="Roles">
           {#each TRACE_ROLES as r (r)}
             <label><input type="checkbox" checked={roles.includes(r)} onchange={(e) => toggleRole(r, e.currentTarget.checked)} /> {ROLE_LABELS[r]}</label>
@@ -337,7 +352,7 @@
                   <div class="field">
                     <label for="{uid}-pr{i}">Role</label>
                     <select id="{uid}-pr{i}" class="input" bind:value={p.role}>
-                      {#each TRACE_ROLES.filter((r) => r !== 'kq_soft_max') as r (r)}<option value={r}>{r}</option>{/each}
+                      {#each PATCH_ROLES as r (r)}<option value={r}>{r}</option>{/each}
                     </select>
                   </div>
                   <div class="field">

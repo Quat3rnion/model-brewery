@@ -26,7 +26,13 @@ fn jump_weights() -> Vec<u8> {
     output
 }
 
-pub(super) fn upload(app: &Fixture, route: &str, metadata: &Value, weights: &[u8], status: u16) -> Value {
+pub(super) fn upload(
+    app: &Fixture,
+    route: &str,
+    metadata: &Value,
+    weights: &[u8],
+    status: u16,
+) -> Value {
     let mut body = format!("--brewery\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n--brewery\r\nContent-Disposition: form-data; name=\"weights\"; filename=\"sae.safetensors\"\r\n\r\n").into_bytes();
     body.extend(weights);
     body.extend(b"\r\n--brewery--\r\n");

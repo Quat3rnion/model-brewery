@@ -30,6 +30,11 @@ For quantization damage, use `quantization_damage_map` with the pinned
 reference and quantized GGUFs from the same revision. Use
 `read_quantization_damage` after success. Report the measured swaps and any
 disagreement with the estimates. Do not apply the recipe proposal.
+Use `routing_atlas` after you capture router logits, expert IDs, and weights
+on Qwen2MoE or Qwen3MoE. To compare an expert ablation, set the expert-zero
+operation on the FFN output and capture the block output in both traces.
+Attach atlas observations to `plan_experts` as evidence for the same source
+digest. They do not replace independent calibration and held-out REAP data.
 
 For a weight change, convert the child to private GGUF with the same assets.
 Trace it with the same prompts and capture settings as the parent. Always
@@ -53,6 +58,12 @@ different decoder is evidence of an association, not of cause.
 Use `request_publish` only if the user asks and after reviewing the checks.
 Report any integrity or program correctness failure as a blocker. Say
 "not release-qualified" when reporting experiment results.
+
+Other tool references: `list_models`, `register_model`, `list_scratch`,
+`get_scratch`, `create_scratch`, `discard_scratch`, `read_trace`,
+`read_feature_trace`, `list_interventions`, `get_intervention`,
+`create_intervention`, `new_intervention_version`, `export_control_vector`,
+`prune_experts`, and `run_program`.
 
 Stay within the time, token, tool call, and byte limits. Use small trace
 slices and bounded waits for jobs. Retry writes with the same key and

@@ -391,6 +391,43 @@ the half-open token position range `start` and `end`. Tensor reads also
 require `layer` and `role`; logit lens reads can filter by `layer`. Narrow
 the range if a response exceeds 4 MiB (HTTP 413).
 
+### MoE routing atlas
+
+Configure `BREWERY_LANTERNFISH_ROUTING` and
+`BREWERY_LANTERNFISH_ROUTING_LIB_DIR` in the trace worker's `engine_env`.
+Use the executable and four `.so.0` libraries from the CPU routing pin
+(`lanternfish-x7-5699379`). Check `SHA256SUMS` before you install the files.
+Keep the dense trace pin in place for other trace jobs. For a direct CLI
+check, set `LD_LIBRARY_PATH` to the routing pin directory.
+
+1. Start a Qwen2MoE or Qwen3MoE trace with all three roles:
+   `ffn_moe_logits`, `ffn_moe_topk`, and `ffn_moe_route_weights`.
+   Also capture `l_out` if you plan to compare an ablation. `top_k` is the
+   number of model output logits. It does not set the number of experts.
+2. Open the **MoE routing atlas** in Trace, call `routing_atlas`, or use
+   `GET /api/jobs/{id}/trace/routing-atlas`. Select `layer`, `start`, `end`
+   (exclusive), and optionally `prompt`. Read up to 128 contiguous
+   captured positions from one layer per request.
+3. To test an expert, run a second trace with the same model, prompt, and
+   capture settings. Set
+   `interventions: [{"layer":0,"role":"ffn_out","positions":[1],"op":"zero_expert","expert":3}]`
+   for your layer, positions, and expert. Supply the second job ID as
+   `ablation_job_id` on the baseline atlas. Only selected slots change.
+   The comparison measures the layer's residual L2 change and, if both
+   traces have model logits, shows whether the top token changed.
+
+Load is the fraction of captured positions that select each expert.
+Entropy is the mean entropy of the full router softmax, in nats.
+Co-activation counts positions that select both experts. Specialization
+groups selections by token ID and by the previous/current token ID pair.
+The atlas shows up to five groups per expert, ranked by selection count.
+These are observations of the selected prompts, not release qualification.
+
+Pass `routing_evidence: {"job_id":"...","layer":0,"start":0,"end":4}` to
+`plan_experts` to append source-bound routing evidence to its response.
+The model ID and SHA-256 must match. This evidence does not replace the
+independent REAP calibration and held-out inputs or change the REAP map.
+
 ## Tensor sensitivity
 
 Use `sensitivity` to measure empirical Fisher for a dense Qwen2 or Llama F32
@@ -805,6 +842,8 @@ worker environment applies to jobs that run on that worker.
 | `BREWERY_LANTERNFISH` | engine | Configured Lanternfish `run` binary for `compare`. This lookup does not check the trace pin. |
 | `BREWERY_LANTERNFISH_TRACE` | engine | Absolute path to the pinned CPU Lanternfish binary for `trace`. |
 | `BREWERY_LANTERNFISH_TRACE_LIB_DIR` | engine | Absolute path to the directory with the four pinned CPU trace libraries. |
+| `BREWERY_LANTERNFISH_ROUTING` | engine | Absolute path to the pinned CPU Lanternfish executable for MoE routing and expert ablation. |
+| `BREWERY_LANTERNFISH_ROUTING_LIB_DIR` | engine | Absolute path to the matching directory with the four pinned routing trace libraries. |
 | `BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR` | engine | Absolute path to the directory with the four pinned CPU scratch-check libraries. |
 | `BREWERY_LANTERNFISH_EDIT` | engine | Absolute path to the pinned CPU Lanternfish binary for locate-then-edit jobs. |
 | `BREWERY_LANTERNFISH_EDIT_LIB_DIR` | engine | Absolute path to the directory with the four pinned llama.cpp and ggml libraries. |

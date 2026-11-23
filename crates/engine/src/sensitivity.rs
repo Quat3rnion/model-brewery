@@ -1,14 +1,14 @@
 use crate::{
-    bounded, child_threads,
+    Job, bounded, child_threads,
     gguf_conversion::{
-        inventory::{Model, Namespace},
         Tool,
+        inventory::{Model, Namespace},
     },
     integrity,
     progress::Progress,
-    w0_libraries, write_json, Job,
+    w0_libraries, write_json,
 };
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use brewery_worker::{
     is_digest,
     locate_edit::{self, Backend},

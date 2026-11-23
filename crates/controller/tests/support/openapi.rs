@@ -151,6 +151,11 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
             "/api/jobs/{id}/trace/model-logits",
             "getTraceModelLogits",
         ),
+        (
+            "get",
+            "/api/jobs/{id}/trace/routing-atlas",
+            "getRoutingAtlas",
+        ),
         ("get", "/api/interventions", "listInterventions"),
         ("get", "/api/saes", "listSaes"),
         ("post", "/api/saes", "createSae"),

@@ -1,12 +1,12 @@
 //! Bounded, uncalibrated EXL3 layer encoding. The worker never exposes the
 //! source to the helper: it receives only a private, transposed FP32 block.
-use crate::{integrity, progress::Progress, Job};
-use anyhow::{bail, ensure, Context, Result};
+use crate::{Job, integrity, progress::Progress};
+use anyhow::{Context, Result, bail, ensure};
 use brewery_worker::{
-    exl3_layer::{self as wire, Codebook, Spec, DIM},
+    exl3_layer::{self as wire, Codebook, DIM, Spec},
     weight_source,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     env, fs,
     io::{self, Read, Seek},
@@ -463,9 +463,11 @@ mod tests {
         .unwrap();
         let source = integrity::Identity::weight_manifest(&input).unwrap();
         let progress = Progress::new(dir.path(), [&path]);
-        assert!(source
-            .snapshot_single_weight_member(bytes as u64 - 1, &progress)
-            .is_err());
+        assert!(
+            source
+                .snapshot_single_weight_member(bytes as u64 - 1, &progress)
+                .is_err()
+        );
         let snapshot = source
             .snapshot_single_weight_member(bytes as u64, &progress)
             .unwrap();
