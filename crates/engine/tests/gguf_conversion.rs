@@ -29,6 +29,13 @@ fn stage(root: &Path, kind: &str, options: Value, inputs: Vec<Value>, exe: &Path
     child.wait_with_output().unwrap()
 }
 
+fn private_quantizer(root: &Path) -> std::path::PathBuf {
+    let quantizer = root.join("quantizer");
+    fs::write(&quantizer, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&quantizer, fs::Permissions::from_mode(0o700)).unwrap();
+    quantizer
+}
+
 #[test]
 fn gguf_route_requires_a_dedicated_quantizer_before_reading_the_model() {
     let tmp = tempfile::tempdir().unwrap();
@@ -62,7 +69,7 @@ fn scratch_conversion_routes_to_the_standalone_gguf_converter() {
             json!({"kind":"safetensors","host":"fixture","path":weights,"sha256":"0".repeat(64)}),
             json!({"kind":"assets","host":"fixture","path":assets}),
         ],
-        Path::new("/usr/bin/false"),
+        &private_quantizer(tmp.path()),
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
@@ -92,7 +99,7 @@ fn scratch_conversion_enables_private_exporter_mode() {
                 "sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}),
             json!({"kind":"assets","host":"fixture","path":assets}),
         ],
-        Path::new("/usr/bin/false"),
+        &private_quantizer(tmp.path()),
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
