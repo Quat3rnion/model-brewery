@@ -12,7 +12,7 @@ use std::{
 fn fixture() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("brewery-grant-")
-        .tempdir_in("/arboretum")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
         .unwrap()
 }
 

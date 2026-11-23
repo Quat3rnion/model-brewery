@@ -9,6 +9,7 @@ use std::{
 };
 
 const REV: &str = "fb08d7cdb67082ddda15a25e64dc7ec413afc41c";
+const STOCK_EXE: &str = "stock-quantizer";
 
 fn gguf(path: &Path, file_type: u32, ty: u32, payload: usize) {
     fn string(bytes: &mut Vec<u8>, s: &str) {
@@ -50,7 +51,7 @@ fn stage(
     fs::create_dir(work).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_brewery-engine"))
         .env_remove("BREWERY_EXPECTED_SOURCE_SHA256")
-        .env("BREWERY_GGUF_QUANTIZER", "/usr/bin/false")
+        .env("BREWERY_GGUF_QUANTIZER", exe.with_file_name(STOCK_EXE))
         .env("BREWERY_GGUF_ROCMFPX_QUANTIZER", exe)
         .env("BREWERY_GGUF_ROCMFPX_SHA256", sha)
         .current_dir(work)
@@ -92,6 +93,9 @@ fn fork_requires_operator_pin_and_verifies_private_type_layout_independently() {
     let template = root.join("template.gguf");
     let marker = root.join("executed");
     let exe = root.join("fork");
+    let stock_exe = exe.with_file_name(STOCK_EXE);
+    fs::write(&stock_exe, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&stock_exe, fs::Permissions::from_mode(0o700)).unwrap();
     // File type 103 is the FAST preset, but tensor 103 means FP8, not FAST FP4.
     gguf(&source, 0, 0, 64 * 32 * 4);
     gguf(&template, 103, 101, 2 * 32 * 17);
