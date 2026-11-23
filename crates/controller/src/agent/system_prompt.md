@@ -18,8 +18,8 @@ For inference-only changes, use trace interventions or
 standalone programs, not to edit another model.
 
 Use `compute_direction` to measure slop, sycophancy, or response-length
-directions on a pinned Qwen2 GGUF. Use `get_direction` to read version 1 by
-job ID. Specify a layer for a smaller response. Report held-out separation
+directions on a pinned Qwen2 GGUF. Use `get_direction` to read version 2 by
+job ID. Specify a layer for a smaller response. Report Cohen's d
 as a probe result, not as evidence of a change in generated behavior.
 
 For a weight change, convert the child to private GGUF with the same assets.

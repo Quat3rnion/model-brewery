@@ -859,9 +859,9 @@
           {"in":"query","name":"layer","schema":{"$ref":"#/components/schemas/TraceLayer"},"description":"Return one layer. Omit to return all layers."}
         ],
         "responses": {
-          "200": {"description": "Version 1 of the direction artifact. The artifact ID is the direction job ID.",
+          "200": {"description": "The requested immutable version. New direction jobs write version 2; old jobs keep version 1. The artifact ID is the direction job ID.",
             "content": {"application/json": {"schema": {"type":"object","required":["id","version","direction"],"properties":{
-              "id":{"$ref":"#/components/schemas/Id"},"version":{"const":1},"direction":{"$ref":"#/components/schemas/BehaviorDirectionResult"}
+              "id":{"$ref":"#/components/schemas/Id"},"version":{"enum":[1,2]},"direction":{"$ref":"#/components/schemas/BehaviorDirectionResult"}
             }}}}},
           "404": {"$ref": "#/components/responses/NotFound"},
           "500": {"$ref": "#/components/responses/StorageError"}
@@ -3589,18 +3589,22 @@
       "ByteCount": {"type": "integer", "minimum": 0},
       "BehaviorDirectionResult": {
         "type":"object","required":["kind","schema_version","release_qualified","model_id","model_sha256","position","behavior","contrast_sha256","lanternfish_commit","executable_sha256","fit"],
+        "if":{"properties":{"schema_version":{"const":2}}},
+        "then":{"properties":{"fit":{"properties":{"layers":{"items":{"required":["held_out_cohens_d","mean_residual_norm"]}}}}}},
         "properties":{
-          "kind":{"const":"behavior_direction"},"schema_version":{"const":1},"release_qualified":{"const":false},
+          "kind":{"const":"behavior_direction"},"schema_version":{"enum":[1,2]},"release_qualified":{"const":false},
           "model_id":{"$ref":"#/components/schemas/Id"},"model_sha256":{"$ref":"#/components/schemas/Sha256"},
           "position":{"type":["integer","null"]},"behavior":{"$ref":"#/components/schemas/DirectionBehavior"},
           "contrast_sha256":{"$ref":"#/components/schemas/Sha256"},"lanternfish_commit":{"type":"string"},
           "executable_sha256":{"$ref":"#/components/schemas/Sha256"},
           "fit":{"type":"object","required":["role","train_pairs","held_out_pairs","selected_layer","layers"],"properties":{
             "role":{"$ref":"#/components/schemas/DirectionRole"},"train_pairs":{"const":12},"held_out_pairs":{"const":8},
-            "selected_layer":{"type":["integer","null"]},"layers":{"type":"array","items":{"type":"object",
+            "selected_layer":{"type":["integer","null"],"description":"Layer with the highest positive held-out Cohen's d in version 2, or the highest positive raw margin in version 1. Null if none qualifies."},"layers":{"type":"array","items":{"type":"object",
               "required":["layer","norm","unit_vector","held_out_margin"],"properties":{
                 "layer":{"$ref":"#/components/schemas/TraceLayer"},"norm":{"type":"number","minimum":0},
-                "unit_vector":{"type":["array","null"],"items":{"type":"number"}},"held_out_margin":{"type":["number","null"]}
+                "unit_vector":{"type":["array","null"],"items":{"type":"number"}},"held_out_margin":{"type":["number","null"]},
+                "held_out_cohens_d":{"type":["number","null"],"description":"Raw margin divided by the pooled within-class sample standard deviation of held-out projections. Null if undefined."},
+                "mean_residual_norm":{"type":"number","minimum":0,"description":"Mean L2 norm of l_out over both classes of held-out prompts, at the captured token."}
               }}}
           }}
         }

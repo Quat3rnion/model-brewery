@@ -459,10 +459,11 @@ or run text generation.
    `layers` in increasing order. Do not send prompts. The MCP tool
    `compute_direction` supplies the job kind.
 4. Wait for the job to succeed. Read
-   `GET /api/directions/{id}/versions/1` or MCP `get_direction` with the
-   job ID and `version: 1`. This immutable artifact contains the model
+   `GET /api/directions/{id}/versions/2` or MCP `get_direction` with the
+   job ID and `version: 2`. This immutable artifact contains the model
    digest and the prompt and runtime pins. Each run makes a new artifact.
    Specify `layer` to read one layer instead of all vectors.
+   For an older job, request version 1 to read its original raw-margin selection.
 
 The default role is `l_out`; you can select `attn_out` or `ffn_out`. The
 default token is the last user instruction token. Set `position` for one
@@ -470,10 +471,15 @@ explicit zero-based index, including special tokens. The worker captures the
 prefix through the end of the user text. The fit uses 12 prompt pairs and
 scores 8 disjoint pairs. Each layer has the L2 norm of the training mean
 difference, its unit vector, and the mean held-out signed projection of
-positive minus negative rows. The largest strictly positive projection
-selects the layer; equal projections select the lower layer. A zero-norm
-direction has no unit vector or score. Scores measure separation for these
-prompt pairs only. They do not measure a change in generated behavior.
+positive minus negative rows (`held_out_margin`). The job divides this
+margin by the pooled within-class sample standard deviation of the held-out
+projections to get `held_out_cohens_d`. The largest positive score selects
+the layer. Equal scores select the lower layer. Cohen's d is null if the
+pooled standard deviation is zero or the direction has zero norm. These
+layers cannot win. `mean_residual_norm` is the mean L2 norm of `l_out` at the
+same token across both classes of held-out prompts, even when the direction
+uses another role. Scores measure separation for these prompt pairs only.
+They do not measure a change in generated behavior.
 Results are not release-qualified.
 
 The cache script modifies the source data by selecting a small subset and

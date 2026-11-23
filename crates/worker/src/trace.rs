@@ -440,20 +440,22 @@ pub fn direction_probe() -> Capture {
 pub fn direction_capture(layers: &[usize], role: Role, position: usize) -> Capture {
     Capture {
         layers: layers.iter().copied().collect(),
-        roles: BTreeSet::from([role]),
+        roles: BTreeSet::from([role, Role::LOut]),
         positions: BTreeSet::from([position]),
         top_k: 0,
         byte_cap: HARD_BYTE_CAP,
     }
 }
 
-/// Read one verified, unedited CPU trace row per layer. Keep token IDs in
+/// Read the directions' rows and residual norms from a verified CPU trace. Keep token IDs in
 /// memory to cross-check the probe and the activation run.
 pub fn direction_rows(
     dir: &Path,
     spec: &Capture,
     verified: &Export,
-) -> Result<(Vec<i32>, Vec<Vec<f32>>)> {
+    role: Role,
+) -> Result<(Vec<i32>, Vec<crate::behavior_direction::Observation>)> {
+    use crate::behavior_direction::{Observation, residual_norm};
     let (m, check) = manifest(dir, spec.byte_cap)?;
     ensure!(
         check.manifest_sha256 == verified.manifest_sha256
@@ -465,24 +467,42 @@ pub fn direction_rows(
     let width = m.model["hidden"]
         .as_u64()
         .context("missing Qwen2 hidden width")?;
-    let mut tensors = m.tensors;
-    tensors.sort_unstable_by_key(|t| t.key.layer);
-    let rows = tensors
+    let mut tensors: std::collections::BTreeMap<_, _> = m
+        .tensors
         .into_iter()
-        .map(|t| {
-            ensure!(
-                t.shape == [width] && (1..=16384).contains(&width),
-                "invalid direction tensor shape"
-            );
-            let data = read_file(&dir.join(t.file), t.bytes)?;
-            ensure!(
-                data.len() as u64 == t.bytes && format!("{:x}", Sha256::digest(&data)) == t.sha256,
-                "direction tensor size or SHA-256 mismatch"
-            );
-            Ok(data
-                .chunks_exact(4)
-                .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
-                .collect())
+        .map(|t| ((t.key.layer, t.key.role), t))
+        .collect();
+    let mut read = |layer, role| -> Result<Vec<f32>> {
+        let t = tensors
+            .remove(&(layer, role))
+            .context("missing direction tensor")?;
+        ensure!(
+            t.shape == [width] && (1..=16384).contains(&width),
+            "invalid direction tensor shape"
+        );
+        let data = read_file(&dir.join(t.file), t.bytes)?;
+        ensure!(
+            data.len() as u64 == t.bytes && format!("{:x}", Sha256::digest(&data)) == t.sha256,
+            "direction tensor size or SHA-256 mismatch"
+        );
+        Ok(data
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect())
+    };
+    let rows = spec
+        .layers
+        .iter()
+        .map(|&layer| {
+            let activation = read(layer, role)?;
+            if role == Role::LOut {
+                Ok(Observation::residual(activation))
+            } else {
+                Ok(Observation {
+                    activation,
+                    residual_norm: residual_norm(&read(layer, Role::LOut)?),
+                })
+            }
         })
         .collect::<Result<_>>()?;
     Ok((m.tokens.into_iter().map(|t| t.token_id).collect(), rows))

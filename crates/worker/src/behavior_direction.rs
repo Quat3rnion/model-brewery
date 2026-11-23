@@ -9,6 +9,7 @@ use std::{
 };
 
 pub const JOB: &str = "behavior_direction";
+pub const VERSION: u32 = 2;
 pub const CACHE: &str = "BREWERY_CONTRAST_CACHE";
 pub const CAP: u64 = 2 << 20;
 const FLOAT_CAP: usize = 65536;
@@ -104,14 +105,25 @@ impl Request {
     }
 
     pub fn verify_result(&self, result: &Value, model_id: &str, sha: &str) -> Result<()> {
+        self.verify_version(result, model_id, sha, VERSION)
+    }
+
+    pub fn verify_version(
+        &self,
+        result: &Value,
+        model_id: &str,
+        sha: &str,
+        version: u32,
+    ) -> Result<()> {
         ensure!(
-            !model_id.is_empty()
+            matches!(version, 1 | VERSION)
+                && !model_id.is_empty()
                 && result["model_id"] == model_id
                 && crate::is_digest(sha)
                 && sha == self.model_sha256
                 && result["model_sha256"] == sha
                 && result["kind"] == JOB
-                && result["schema_version"] == 1
+                && result["schema_version"] == version
                 && result["release_qualified"] == false
                 && result["behavior"] == serde_json::to_value(self.behavior)?
                 && result["contrast_sha256"] == self.behavior.contrast_sha256()
@@ -120,8 +132,19 @@ impl Request {
                 && result["executable_sha256"] == trace::SHA256,
             "direction result does not match the model, prompt or runtime pins"
         );
+        if version == VERSION {
+            ensure!(
+                result["fit"]["layers"]
+                    .as_array()
+                    .is_some_and(|layers| layers
+                        .iter()
+                        .all(|row| row.get("held_out_cohens_d").is_some()
+                            && row["mean_residual_norm"].is_number())),
+                "missing direction separation or residual norm"
+            );
+        }
         let fit: Fit = serde_json::from_value(result["fit"].clone())?;
-        fit.verify(self)
+        fit.verify(self, version)
     }
 }
 
@@ -181,6 +204,8 @@ pub struct Layer {
     pub norm: f64,
     pub unit_vector: Option<Vec<f32>>,
     pub held_out_margin: Option<f64>,
+    pub held_out_cohens_d: Option<f64>,
+    pub mean_residual_norm: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -194,7 +219,7 @@ pub struct Fit {
 }
 
 impl Fit {
-    fn verify(&self, request: &Request) -> Result<()> {
+    fn verify(&self, request: &Request, version: u32) -> Result<()> {
         ensure!(
             self.role == request.role
                 && self.train_pairs == 12
@@ -209,8 +234,16 @@ impl Fit {
         let mut width = None;
         let mut best = (0.0, None);
         for row in &self.layers {
+            if version == VERSION {
+                ensure!(
+                    row.mean_residual_norm
+                        .is_some_and(|n| n.is_finite() && n >= 0.0)
+                        && row.held_out_cohens_d.is_none_or(f64::is_finite),
+                    "invalid direction separation or residual norm"
+                );
+            }
             match (&row.unit_vector, row.held_out_margin) {
-                (None, None) if row.norm == 0.0 => {}
+                (None, None) if row.norm == 0.0 && row.held_out_cohens_d.is_none() => {}
                 (Some(v), Some(margin)) => {
                     ensure!(
                         row.norm.is_finite()
@@ -223,8 +256,13 @@ impl Fit {
                                 <= 1e-5,
                         "invalid direction vector, norm or margin"
                     );
-                    if margin > best.0 {
-                        best = (margin, Some(row.layer));
+                    let score = if version == 1 {
+                        Some(margin)
+                    } else {
+                        row.held_out_cohens_d
+                    };
+                    if let Some(score) = score.filter(|&score| score > best.0) {
+                        best = (score, Some(row.layer));
                     }
                 }
                 _ => anyhow::bail!("inconsistent zero direction"),
@@ -244,14 +282,36 @@ fn valid_selection(layers: &[usize], role: Role) -> bool {
         && matches!(role, Role::LOut | Role::AttnOut | Role::FfnOut)
 }
 
-/// Read activations in layer order, positive minus negative within each pair.
-/// Select the layer with the largest signed mean held-out projection. Break
-/// ties by layer number and do not select non-positive margins.
+pub struct Observation {
+    pub activation: Vec<f32>,
+    pub residual_norm: f64,
+}
+
+pub fn residual_norm(values: &[f32]) -> f64 {
+    values
+        .iter()
+        .map(|&x| f64::from(x).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
+impl Observation {
+    pub fn residual(activation: Vec<f32>) -> Self {
+        let residual_norm = residual_norm(&activation);
+        Self {
+            activation,
+            residual_norm,
+        }
+    }
+}
+
+/// Fit on training pairs, then select by the largest positive held-out Cohen's d.
+/// An undefined score cannot win; equal scores select the lower layer.
 pub fn compute(
     layers: &[usize],
     role: Role,
     splits: &[Split],
-    mut trace: impl FnMut(usize, bool) -> Result<Vec<Vec<f32>>>,
+    mut trace: impl FnMut(usize, bool) -> Result<Vec<Observation>>,
 ) -> Result<Fit> {
     let train_pairs = splits.iter().filter(|&&p| p == Split::Train).count();
     let held_out_pairs = splits.len() - train_pairs;
@@ -263,74 +323,130 @@ pub fn compute(
         valid_selection(layers, role),
         "invalid direction layers or role"
     );
-    let mut sums: [Vec<Vec<f64>>; 2] = Default::default();
-    for (output, split) in sums.iter_mut().zip([Split::Train, Split::HeldOut]) {
-        output.resize_with(layers.len(), Vec::new);
-        for (row, _) in splits.iter().enumerate().filter(|&(_, p)| *p == split) {
-            let positive = trace(row, true)?;
-            let negative = trace(row, false)?;
+    let mut widths = vec![0; layers.len()];
+    let mut checked_trace = |row, positive| {
+        let observations = trace(row, positive)?;
+        ensure!(
+            observations.len() == layers.len(),
+            "incomplete direction activation inventory"
+        );
+        for (obs, width) in observations.iter().zip(&mut widths) {
+            let n = obs.activation.len();
             ensure!(
-                positive.len() == layers.len() && negative.len() == layers.len(),
-                "incomplete direction activation inventory"
+                (1..=16384).contains(&n)
+                    && n * layers.len() <= FLOAT_CAP
+                    && (*width == 0 || *width == n),
+                "invalid direction activation width"
             );
-            for ((sum, p), n) in output.iter_mut().zip(positive).zip(negative) {
-                ensure!(
-                    (1..=16384).contains(&p.len())
-                        && p.len() == n.len()
-                        && p.len() * layers.len() <= FLOAT_CAP,
-                    "invalid direction activation width"
-                );
-                if sum.is_empty() {
-                    sum.resize(p.len(), 0.0);
-                }
-                ensure!(sum.len() == p.len(), "direction activation width changed");
-                for ((sum, p), n) in sum.iter_mut().zip(p).zip(n) {
-                    ensure!(
-                        p.is_finite() && n.is_finite(),
-                        "nonfinite direction activation"
+            ensure!(
+                obs.activation.iter().all(|v| v.is_finite())
+                    && obs.residual_norm.is_finite()
+                    && obs.residual_norm >= 0.0,
+                "invalid direction activation or residual norm"
+            );
+            *width = n;
+        }
+        Ok::<_, anyhow::Error>(observations)
+    };
+
+    let mut train = vec![Vec::<f64>::new(); layers.len()];
+    for (row, _) in splits
+        .iter()
+        .enumerate()
+        .filter(|&(_, p)| *p == Split::Train)
+    {
+        let positive = checked_trace(row, true)?;
+        let negative = checked_trace(row, false)?;
+        for ((sum, p), n) in train.iter_mut().zip(positive).zip(negative) {
+            sum.resize(p.activation.len(), 0.0);
+            for ((sum, p), n) in sum.iter_mut().zip(p.activation).zip(n.activation) {
+                *sum += f64::from(p) - f64::from(n);
+            }
+        }
+    }
+
+    let mut fitted: Vec<_> = train
+        .into_iter()
+        .map(|mut mean| {
+            for v in &mut mean {
+                *v /= train_pairs as f64;
+            }
+            let norm = mean.iter().map(|x| x.powi(2)).sum::<f64>().sqrt();
+            let unit = (norm > 0.0).then(|| mean.into_iter().map(|x| x / norm).collect::<Vec<_>>());
+            (norm, unit, [Vec::<f64>::new(), Vec::new()], 0.0)
+        })
+        .collect();
+
+    for (row, _) in splits
+        .iter()
+        .enumerate()
+        .filter(|&(_, p)| *p == Split::HeldOut)
+    {
+        for (class, positive) in [true, false].into_iter().enumerate() {
+            for ((_, unit, projections, residual_sum), obs) in
+                fitted.iter_mut().zip(checked_trace(row, positive)?)
+            {
+                *residual_sum += obs.residual_norm;
+                if let Some(unit) = unit {
+                    projections[class].push(
+                        unit.iter()
+                            .zip(obs.activation)
+                            .map(|(u, x)| u * f64::from(x))
+                            .sum(),
                     );
-                    *sum += f64::from(p) - f64::from(n);
                 }
             }
         }
     }
-    let [train, held_out] = sums;
-    let mut fit = Fit {
+
+    let mut best = (0.0, None);
+    let layers = layers
+        .iter()
+        .zip(fitted)
+        .map(|(&layer, (norm, unit, projections, residual_sum))| {
+            let n = held_out_pairs as f64;
+            let held_out_margin = unit.as_ref().map(|_| {
+                projections[0]
+                    .iter()
+                    .zip(&projections[1])
+                    .map(|(p, q)| p - q)
+                    .sum::<f64>()
+                    / n
+            });
+            let held_out_cohens_d = held_out_margin.and_then(|margin| {
+                if held_out_pairs < 2 {
+                    return None;
+                }
+                let within_class_ss = projections
+                    .iter()
+                    .map(|values| {
+                        let mean = values.iter().sum::<f64>() / n;
+                        values.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+                    })
+                    .sum::<f64>();
+                let pooled_sd = (within_class_ss / (2.0 * (n - 1.0))).sqrt();
+                (pooled_sd > 0.0)
+                    .then(|| margin / pooled_sd)
+                    .filter(|d| d.is_finite())
+            });
+            if let Some(d) = held_out_cohens_d.filter(|&d| d > best.0) {
+                best = (d, Some(layer));
+            }
+            Layer {
+                layer,
+                norm,
+                unit_vector: unit.map(|v| v.into_iter().map(|x| x as f32).collect()),
+                held_out_margin,
+                held_out_cohens_d,
+                mean_residual_norm: Some(residual_sum / (2.0 * n)),
+            }
+        })
+        .collect();
+    Ok(Fit {
         role,
         train_pairs,
         held_out_pairs,
-        selected_layer: None,
-        layers: Vec::with_capacity(layers.len()),
-    };
-    let mut best = 0.0;
-    for ((&layer, train), held_out) in layers.iter().zip(train).zip(held_out) {
-        ensure!(
-            train.len() == held_out.len(),
-            "held-out activation width changed"
-        );
-        let mean: Vec<_> = train.into_iter().map(|x| x / train_pairs as f64).collect();
-        let norm = mean.iter().map(|x| x * x).sum::<f64>().sqrt();
-        let (unit_vector, held_out_margin) = if norm > 0.0 {
-            let vector: Vec<_> = mean.into_iter().map(|x| x / norm).collect();
-            let margin = vector.iter().zip(held_out).map(|(x, y)| x * y).sum::<f64>()
-                / held_out_pairs as f64;
-            if margin > best {
-                best = margin;
-                fit.selected_layer = Some(layer);
-            }
-            (
-                Some(vector.into_iter().map(|x| x as f32).collect()),
-                Some(margin),
-            )
-        } else {
-            (None, None)
-        };
-        fit.layers.push(Layer {
-            layer,
-            norm,
-            unit_vector,
-            held_out_margin,
-        });
-    }
-    Ok(fit)
+        selected_layer: best.1,
+        layers,
+    })
 }

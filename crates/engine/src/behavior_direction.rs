@@ -46,7 +46,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             model.check()?;
             let verified = runtime.capture(&input.path, &prompt, spec, &out, None)?;
             model.check()?;
-            let captured = trace::direction_rows(&out, spec, &verified)?;
+            let captured = trace::direction_rows(&out, spec, &verified, request.role)?;
             fs::remove_dir_all(&out)?;
             Ok::<_, anyhow::Error>(captured)
         };
@@ -72,7 +72,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     })?;
     phase.finish();
     let result = json!({
-        "kind":direction::JOB, "schema_version":1, "release_qualified":false,
+        "kind":direction::JOB, "schema_version":direction::VERSION, "release_qualified":false,
         "model_id":model_id, "model_sha256":model.sha256, "position":request.position,
         "behavior":request.behavior, "contrast_sha256":request.behavior.contrast_sha256(),
         "lanternfish_commit": trace::COMMIT, "executable_sha256":trace::SHA256,

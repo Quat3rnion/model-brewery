@@ -116,10 +116,11 @@ def exercise(evidence, base, commit):
                 break
         save(evidence / f"{behavior}-job.json", job)
         assert job["state"] == "succeeded", job
-        artifact = mcp("get_direction", id=job_id, version=1)
-        assert artifact == request(f"/api/directions/{job_id}/versions/1")
+        artifact = mcp("get_direction", id=job_id, version=2)
+        assert artifact == request(f"/api/directions/{job_id}/versions/2")
         direction = artifact["direction"]
         assert direction == job["result"]
+        assert artifact["version"] == direction["schema_version"] == 2
         assert direction["model_sha256"] == model_sha and direction["position"] is None
         assert direction["release_qualified"] is False
         fit = direction["fit"]
@@ -130,13 +131,15 @@ def exercise(evidence, base, commit):
             assert len(layer["unit_vector"]) == 896
             assert abs(math.hypot(*layer["unit_vector"]) - 1) < 1e-5
             assert math.isfinite(layer["held_out_margin"]) and layer["norm"] > 0
-        best = max(layers, key=lambda x: x["held_out_margin"])
-        assert fit["selected_layer"] == best["layer"] and best["held_out_margin"] > 0
-        single = mcp("get_direction", id=job_id, version=1, layer=best["layer"])
+            assert math.isfinite(layer["held_out_cohens_d"])
+            assert math.isfinite(layer["mean_residual_norm"]) and layer["mean_residual_norm"] > 0
+        best = max(layers, key=lambda x: x["held_out_cohens_d"])
+        assert fit["selected_layer"] == best["layer"] and best["held_out_cohens_d"] > 0
+        single = mcp("get_direction", id=job_id, version=2, layer=best["layer"])
         assert single["direction"]["fit"]["layers"] == [best]
         summary["directions"][behavior] = {
             "job_id": job_id, "contrast_sha256": direction["contrast_sha256"],
-            "best": {key: best[key] for key in ("layer", "norm", "held_out_margin")},
+            "best": {key: val for key, val in best.items() if key != "unit_vector"},
             "layers": [{k: v for k, v in layer.items() if k != "unit_vector"} for layer in layers],
         }
         save(evidence / "report.json", summary)

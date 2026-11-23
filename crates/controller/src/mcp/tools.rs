@@ -119,7 +119,10 @@ impl Server {
                     "Queue a CPU trace with one SAE decoder direction. Set options.feature_steering. Poll its ID with get_job."
                 }
                 "compute_direction" => {
-                    "Queue CPU behavior directions for one pinned Library GGUF and an approved contrast set. Poll with get_job. Read version 1 with get_direction."
+                    "Queue CPU behavior directions for one pinned Library GGUF and an approved contrast set. Poll with get_job. Read version 2 with get_direction."
+                }
+                "get_direction" => {
+                    "Read an immutable direction artifact. Version 2 reports held-out Cohen's d and mean residual norm. Version 1 is only for older jobs."
                 }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({

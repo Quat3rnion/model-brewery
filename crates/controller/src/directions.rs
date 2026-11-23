@@ -25,7 +25,7 @@ async fn get_version(
     Path((id, version)): Path<(String, u32)>,
     Query(selection): Query<Selection>,
 ) -> Result<Json<Value>, ApiError> {
-    if version != 1 {
+    if !matches!(version, 1 | direction::VERSION) {
         return Err(ApiError::not_found("direction version"));
     }
     let store = app.store.lock().map_err(ApiError::storage)?;
@@ -38,6 +38,9 @@ async fn get_version(
         .job_result(&id)
         .map_err(ApiError::storage)?
         .ok_or_else(|| ApiError::not_found("direction result"))?;
+    if result["schema_version"] != version {
+        return Err(ApiError::not_found("direction version"));
+    }
     let request = direction::Request::parse(&json!(job.options)).map_err(ApiError::storage)?;
     let envelope = store.envelope(&id).map_err(ApiError::storage)?;
     let input = envelope
@@ -45,7 +48,7 @@ async fn get_version(
         .first()
         .ok_or_else(|| ApiError::storage("Direction input is missing"))?;
     request
-        .verify_result(&result, &input.id, &request.model_sha256)
+        .verify_version(&result, &input.id, &request.model_sha256, version)
         .map_err(ApiError::storage)?;
     if let Some(layer) = selection.layer {
         let row = result["fit"]["layers"]
