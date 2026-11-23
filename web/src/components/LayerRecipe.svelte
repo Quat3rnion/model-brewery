@@ -28,7 +28,7 @@
   import Blockers from './Blockers.svelte';
   import Submit from './Submit.svelte';
   import SubmitStatus from './SubmitStatus.svelte';
-  import { acceptedJobSummary, guardReadLink, jobRequestKey, Submitter } from '../lib/submit.svelte';
+  import { acceptedJobSummary, guardReadLink, jobRequestKey, ReadVisit, Submitter } from '../lib/submit.svelte';
   import { captureResultFocus } from '../lib/focus';
   import { trellisProblem } from '../lib/trellis-layer';
   import { bodyKey, type PlainAttempt } from '../lib/submission-key';
@@ -39,10 +39,12 @@
   } = $props();
 
   const launcher = 'convert.recipe.inventory';
-  const loaded = new SvelteMap<string, JobDetail | 'rejected' | null>();
+  const loaded = new SvelteMap<string, JobDetail | null>();
+  const rejected = new SvelteMap<string, string>();
   const attempted = new Map<string, Date | null>();
   const reads = new Submitter(launcher, untrack(() => readAttempts));
-  let error = $state('');
+  const readVisit = new ReadVisit();
+  let receiptError = $state('');
   const host = $derived(brewery.state?.hosts.find(h => h.id === source.host));
   const blocked = $derived(inventoryBlocker(source, host));
   const expectedSha = $derived(source.kind === 'hf'
@@ -50,7 +52,8 @@
     : validSha(source.sha256));
   const currentJobs = $derived([...acceptedReads.values()]
     .filter(job => job.host === source.host && job.input_ids[0] === source.id)
-    .map(job => brewery.state?.jobs.find(j => j.id === job.id) ?? job));
+    .map(job => brewery.state?.jobs.find(j => j.id === job.id) ?? brewery.details[job.id] ?? job)
+    .filter(job => readVisit.shows(job)));
   // Terminal inventory jobs may be reused only after their receipts have been
   // checked. The exporter verifies those bytes again before it writes.
   const jobs = $derived([
@@ -59,8 +62,8 @@
       job.host === source.host && job.input_ids[0] === source.id &&
       (isActive(job.state) || (job.state === 'succeeded' && job.has_result !== false)) &&
       !currentJobs.some(current => current.id === job.id)),
-  ].filter(job => loaded.get(job.id) !== 'rejected'));
-  const details = $derived(Object.fromEntries([...loaded].filter(([, detail]) => detail && detail !== 'rejected')) as Record<string, JobDetail>);
+  ].filter(job => !rejected.has(job.id)));
+  const details = $derived(Object.fromEntries([...loaded].filter(([, detail]) => detail)) as Record<string, JobDetail>);
   const inventory = $derived(walkInventory(source, jobs, details, { format: source.kind, sha: expectedSha, matchHost: true }));
   // Physical HF tree digest of the pinned release (qualification/release_matrix.md).
   const flashDigest = '0eb8fb9e3b0f2422297174c880aa2ad8304e77a34d37b15c592ded1c3f9b4cd1';
@@ -73,39 +76,39 @@
 
   async function readLayers(event: MouseEvent) {
     const next = inventory.need;
-    if (flash || blocked || error || !next) return;
+    if (flash || blocked || !next) return;
     const { offset, sha } = next;
     const request = inventoryJob(source.id, source.host, offset, sha);
     const key = jobRequestKey(launcher, request);
-    if (acceptedReads.has(key)) return;
     const focus = captureResultFocus(event);
-    const accepted = await reads.submit(request, event, false);
+    const accepted = await reads.submit(request, event, false, admitted => { if (admitted) receiptError = ''; });
     if (!accepted) return;
     const id = accepted.id;
     function record(job: JobSummary) {
       if (job.id !== id || job.kind !== request.kind || job.host !== request.host || job.input_ids?.length !== 1 || job.input_ids[0] !== request.input_ids[0]) {
-        error = 'The inventory job does not match the selected source.';
+        receiptError = 'The inventory job does not match the selected source.';
         return;
       }
+      readVisit.remember(id);
       acceptedReads.set(key, job);
     }
     record(acceptedJobSummary(accepted, request));
     void focus?.(() => readLink);
     // A match can return only the ID. If the detail GET fails, wait for the
     // state poll to replace the placeholder instead of latching an error.
-    if (!('state' in accepted)) void brewery.loadJob(id).then(record).catch(() => {});
+    if (!('state' in accepted)) void brewery.loadJob(id).then(detail => {
+      if (acceptedReads.get(key)?.id === id) record(detail);
+    }).catch(() => {});
   }
 
   $effect(() => {
     // Try a transient detail error again after the next successful state poll.
     const snapshot = brewery.lastUpdated;
     const job = inventory.job;
-    if (flash || error || job?.state !== 'succeeded') return;
+    if (flash || job?.state !== 'succeeded') return;
     const jobId = job.id;
-    const fresh = currentJobs.some(current => current.id === jobId);
     function reject(reason: string) {
-      if (fresh) error = reason;
-      else loaded.set(jobId, 'rejected');
+      rejected.set(jobId, reason);
     }
     if (inventory.error) {
       reject(inventory.error);
@@ -130,10 +133,11 @@
   });
 
   const formatTypes = $derived(recipeTypes(format));
-  const complete = $derived(!flash && !error && !inventory.need && !inventory.job && inventory.pages.length > 0);
+  const complete = $derived(!flash && !inventory.need && !inventory.job && inventory.pages.length > 0);
   const problem = $derived(flash ? 'The layer-recipe exporters do not support this Flash-Next checkpoint.'
-    : error || (source.available === false || (!complete && !inventory.job) ? blocked : null) ||
-      (inventory.job?.state === 'succeeded' ? null : inventory.error));
+    : source.available === false || (!complete && !inventory.job) ? blocked : null);
+  const readError = $derived(receiptError || (inventory.job?.state === 'succeeded' ? null : inventory.error) ||
+    (readJob && rejected.get(readJob.id)));
   const layers = $derived(complete ? [...new Set(inventory.pages.flatMap(({ tensors }) => tensors.flatMap(t => {
     const match = /^(?:model\.layers|transformer\.h)\.(0|[1-9]\d*)\./.exec(t.name);
     const layer = Number(match?.[1]);
@@ -237,6 +241,7 @@
   </div>
 {/if}
 {#if reads.error || reads.replayed}<SubmitStatus s={reads} />{/if}
+{#if readError}<p class="note bad" role="alert">{readError}</p>{/if}
 {#if problem}
   <p class="note bad" role="alert">{problem}</p>
 {:else if inventory.need}

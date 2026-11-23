@@ -5,7 +5,7 @@
   import { SvelteMap } from 'svelte/reactivity';
   import { api, errorText } from '../../lib/api';
   import { captureResultFocus } from '../../lib/focus';
-  import { acceptedJobSummary, guardReadLink, jobRequestKey, Submitter } from '../../lib/submit.svelte';
+  import { acceptedJobSummary, guardReadLink, jobRequestKey, ReadVisit, Submitter } from '../../lib/submit.svelte';
   import { PlainAttempt } from '../../lib/submission-key';
   import { brewery } from '../../lib/store.svelte';
   import { profileStore } from '../../lib/profiles.svelte';
@@ -41,7 +41,7 @@
   function loadDetail(id: string): Promise<JobDetail> {
     let pending = evidence.get(id);
     if (!pending) {
-      pending = brewery.loadJob(id);
+      pending = brewery.loadJob(id).finally(() => evidence.delete(id));
       evidence.set(id, pending);
     }
     return pending;
@@ -66,8 +66,14 @@
   const launcher = 'profiles.gguf.inventory';
   const readAttempts = new PlainAttempt();
   const reads = new SvelteMap<string, Submitter>();
-  const detailErrors = new SvelteMap<string, string>();
-  const inventoryJobs = $derived([...jobs, ...[...submitted.values()].filter(j => !jobs.some(row => row.id === j.id))]);
+  const readVisit = $derived(sourceKey ? {
+    jobs: new ReadVisit(),
+    attempts: new SvelteMap<string, true>(),
+    detailErrors: new SvelteMap<string, string>(),
+  } : null);
+  const attempted = new Map<string, Date | null>();
+  const inventoryJobs = $derived([...jobs, ...[...submitted.values()].filter(j => !jobs.some(row => row.id === j.id))]
+    .filter(job => readVisit?.jobs.shows(job)));
   const inv = $derived(source && lookup && !lookup.exact ? walkInventory(source, inventoryJobs, brewery.details, {
     format: source.kind, packed, matchHost: true,
     sha: source.kind === 'hf' ? validSha(source.bundle_sha256) ?? validSha(source.sha256) : validSha(source.sha256),
@@ -78,28 +84,41 @@
   const lastReads = new SvelteMap<string, { job: JobSummary; matched: boolean }>();
   const lastRead = $derived(lastReads.get(sourceKey));
   let readLink: HTMLAnchorElement | undefined = $state();
-  const readJob = $derived(inv?.job ?? jobs.find(j => j.id === lastRead?.job.id) ?? lastRead?.job ?? null);
-  const invError = $derived(inv?.error || (inv?.job && detailErrors.get(inv.job.id)) ||
-    reads.get(needKey)?.error);
+  const lastJob = $derived(jobs.find(j => j.id === lastRead?.job.id) ?? lastRead?.job ?? null);
+  const readJob = $derived(inv?.job ?? (lastJob && readVisit?.jobs.shows(lastJob) ? lastJob : null));
+  const invError = $derived.by(() => {
+    const read = reads.get(needKey);
+    // Keep instructions for resolving an ambiguous POST with its original key.
+    return ((read?.ambiguous || readVisit?.attempts.has(needKey)) && read?.error) ||
+      inv?.error || (inv?.job && readVisit?.detailErrors.get(inv.job.id));
+  });
   $effect(() => {
+    const visit = readVisit;
+    const snapshot = brewery.lastUpdated;
     const job = inv?.job;
-    if (job?.state !== 'succeeded' || brewery.details[job.id]) return;
-    void loadDetail(job.id).catch(error => detailErrors.set(job.id, errorText(error)));
+    if (job?.state !== 'succeeded' || brewery.details[job.id] || attempted.get(job.id) === snapshot) return;
+    attempted.set(job.id, snapshot);
+    void loadDetail(job.id).then(
+      () => visit?.detailErrors.delete(job.id),
+      error => visit?.detailErrors.set(job.id, errorText(error)),
+    );
   });
   async function readTensors(event: MouseEvent) {
     const key = needKey;
     const request = need;
     if (!key || !request || blocked) return;
     const modelKey = sourceKey;
+    const visit = readVisit;
     const focus = captureResultFocus(event);
     let read = reads.get(key);
     if (!read) {
       read = new Submitter(launcher, readAttempts);
       reads.set(key, read);
     }
-    const accepted = await read.submit(request, event, false);
+    const accepted = await read.submit(request, event, false, () => visit?.attempts.set(key, true));
     if (!accepted) return;
     const job = acceptedJobSummary(accepted, request);
+    visit?.jobs.remember(job.id);
     submitted.set(key, job);
     // A slow reply from an earlier page must not replace a newer page's result.
     const previousOffset = lastReads.get(modelKey)?.job.options?.offset;
@@ -298,8 +317,8 @@
         {:else if blocked}{blocked}
         {:else if source && !need && !invError}No tensor names were found for this source.
         {/if}
-        {#if invError}{' '}{invError}{/if}
       </span>
+      {#if invError}<p class="note bad" role="alert">{invError}</p>{/if}
     </div>
   </div>
 

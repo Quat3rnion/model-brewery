@@ -16,8 +16,9 @@ import {
   step,
   tileJob,
   tileRequest,
+  walkInventory,
 } from './weightmap';
-import type { JobSummary } from './types';
+import type { JobDetail, JobSummary } from './types';
 
 const SHA = 'b'.repeat(64);
 
@@ -78,6 +79,24 @@ const inv = (tensors: unknown[], extra: Record<string, unknown> = {}) => ({
 });
 
 describe('inventory', () => {
+  it('keeps loaded pages and the next action when a later page fails', () => {
+    const source = { id: 'model', host: 'worker' };
+    const read = (id: string, offset: number, sha?: string): JobSummary => ({
+      id, state: 'succeeded', ...inventoryJob(source.id, source.host, offset, sha),
+    });
+    const first = read('first', 0);
+    const next = read('second', 1, SHA);
+    const result = inv([{ name: 'blk.0.weight', shape: [2], dtype: 'F16' }], { total: 2, next_offset: 1 });
+    const details: Record<string, JobDetail> = { first: { ...first, result, events: [] } };
+    const failed: JobSummary = { ...next, state: 'failed', error: 'Could not open the file.' };
+    const inventory = walkInventory(source, [first, failed], details);
+    expect(inventory.pages.flatMap(page => page.tensors.map(tensor => tensor.name))).toEqual(['blk.0.weight']);
+    expect(inventory.error).toBe('Could not open the file.');
+    expect(inventory.need).toEqual({ offset: 1, sha: SHA });
+    const queued: JobSummary = { ...next, id: 'retry', state: 'queued' };
+    expect(walkInventory(source, [first, failed, queued], details)).toMatchObject({ job: queued });
+  });
+
   it('groups HF vision block tensors by layer, not as global tensors', () => {
     const p = readInventory(inv([
       { name: 'model.visual.blocks.7.attn.qkv.weight', shape: [4, 4], dtype: 'F32' },
