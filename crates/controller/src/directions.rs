@@ -26,17 +26,27 @@ async fn get_version(
     Query(selection): Query<Selection>,
 ) -> Result<Json<Value>, ApiError> {
     let store = app.store.lock().map_err(ApiError::storage)?;
-    let mut result = load(&store, &id, version)?;
-    if let Some(layer) = selection.layer {
+    let result = artifact(&store, &id, version, selection.layer)?;
+    Ok(Json(
+        json!({"id":id, "version":version, "direction":result}),
+    ))
+}
+
+pub(crate) fn artifact(
+    store: &Store,
+    id: &str,
+    version: u32,
+    layer: Option<usize>,
+) -> Result<Value, ApiError> {
+    let mut result = load(store, id, version)?;
+    if let Some(layer) = layer {
         let row = result["fit"]["layers"]
             .as_array()
             .and_then(|rows| rows.iter().find(|row| row["layer"] == layer))
             .ok_or_else(|| ApiError::not_found("direction layer"))?;
         result["fit"]["layers"] = json!([row]);
     }
-    Ok(Json(
-        json!({"id":id, "version":version, "direction":result}),
-    ))
+    Ok(result)
 }
 
 pub(crate) fn load(store: &Store, id: &str, version: u32) -> Result<Value, ApiError> {

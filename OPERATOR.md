@@ -327,11 +327,12 @@ It does not start a Lanternfish service or use a Lanternfish HTTP API.
 It does not change the model or qualify a release.
 
 1. Install the headless binary from Lanternfish commit
-   `0ea30b37729a136a76b8412e7ad1ec91bd7de9b5`. Check its SHA-256:
-   `0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f`.
+   `d8420857ed1ab2e29c527f1ffde09aeef19f36c4`. Check its SHA-256:
+   `3009f4b0c362ddc04d955e40efac9e1d88659b9a0bc393fdc8ea6da287bde010`.
    The engine rejects other binaries.
-2. Install the matching CPU libraries from llama.cpp `184f653` with
-   Lanternfish patches `0001` and `0002`. Put the four files below in an
+2. Install the matching CPU libraries from llama.cpp `184f653`. Apply the
+   patches with `patches/apply-llama.sh` from the pinned Lanternfish commit.
+   Put the four files below in an
    operator-controlled release directory. The engine copies and checks each
    file in the private job directory. It sets `LD_LIBRARY_PATH` to those
    copies. It does not need the build directory in the binary's RUNPATH.
@@ -344,14 +345,15 @@ It does not change the model or qualify a release.
    not run traces. The existing GPU `compare` job still uses
    `BREWERY_LANTERNFISH` and its `run` command.
 
-Save this list as `w0-libraries.sha256` in the release library directory.
-In that directory, run `sha256sum -c w0-libraries.sha256`:
+Save this list as `trace-libraries.sha256` in the CPU trace release library
+directory. In that directory, run `sha256sum -c trace-libraries.sha256`.
+These are not the scratch-check runtime libraries.
 
 ```text
-bb94467edcc18c8fb875f86628d89c112adedcfea1e8f6c5549c706adf5f25cc  libllama.so.0
-04a3a199429b02e6e4bce9a8cbc465530bcffe4b0539be561dedfcfd476957be  libggml.so.0
-1fef6e5b16b4b03e8255cf5f3c446cc76005515e0bb261b4d0ee333ea399fbad  libggml-base.so.0
-29390b353b7931bce11926598773eb052bbe53506b903f2140a13ea1f54ead6e  libggml-cpu.so.0
+f4a59a07c8ebea5d02779f82e16cf23d5815a288fede9cdbf851f73b1854c005  libllama.so.0
+c51f659bc7c64ab3b675fb56cdddf1beab54c75818ace8325c7e49ff1a60e3e4  libggml.so.0
+c445afaddb3d37bbb8ef6d979786f66f4cae71b5597fee0feb398f9b961289b8  libggml-base.so.0
+fd7b911f677b93bef0b2fd31877da45bc5e78bd7197fe33df5ed4b76f75b08cd  libggml-cpu.so.0
 ```
 
 To set the limits, add this top-level object to the controller dispatch JSON:
@@ -610,11 +612,37 @@ model ID. If the registered file has a different SHA-256, the worker
 rejects it before it runs Lanternfish. A saved artifact does not change
 model weights or qualify the model for release.
 
+#### Direction ablation and subtraction
+
+To use an A1 behavior direction, send `direction_rules` in place of or with
+`interventions`. Each rule names the immutable direction ID and version, the
+layer to read from that artifact, and the target layer, role, and positions.
+The direction must match the model ID and GGUF SHA-256. The controller saves
+the reference and the resolved unit vector in the intervention version.
+
+```json
+{
+  "direction_rules":[{
+    "direction_id":"<direction-job-id>","direction_version":2,"source_layer":15,
+    "layer":15,"role":"l_out","positions":[4],"op":"project_out"
+  }]
+}
+```
+
+Use `project_out` to remove the activation component along the direction.
+Use `subtract` with a finite, nonnegative `scale` to subtract a fixed multiple
+of the unit vector. Save these rules with `create_direction_intervention`
+or send the rules to either intervention write endpoint. Use the artifact
+with `start_trace`. Compare the edited activation and logits with an
+unmodified trace of the same prompt and capture spec.
+
 Use `GET /api/interventions/{id}/versions/{version}/gguf` to download a
 GGUF v3 control vector. Pass the file to llama.cpp with `--control-vector`.
-Export requires one `add` rule per `l_out` layer and the same vector width
-for all layers. It does not support layer 0, which the llama.cpp adapter
-does not use. For layer `N`, the F32 tensor name is `direction.N`. The file
+Export requires one `add` or `subtract` rule per `l_out` layer and the same
+vector width for all layers. A `subtract` rule exports the negative scaled
+vector. llama.cpp control vectors cannot express a projection because the
+removed component depends on the current activation. The llama.cpp adapter
+does not use layer 0. For layer `N`, the F32 tensor name is `direction.N`. The file
 has `general.architecture: "controlvector"`, `controlvector.model_hint`
 with the Library model name, and `controlvector.layer_count` with the
 number of tensors. GGUF does not store token positions or enforce the
@@ -1404,6 +1432,8 @@ workers, or deploy.
    (`wait_ms` can wait up to 5000 ms per call). Use `read_trace` with
    `manifest`, `tensor`, `logit_lens`, or `model_logits`. Use
    `create_intervention` and `new_intervention_version` to save rules.
+   Use `create_direction_intervention` to save projection or subtraction
+   rules from a verified direction artifact.
    `export_control_vector` returns a relative URL for the same workbench.
 3. Use `create_scratch` and `apply_edit` for a SafeTensors edit. Use
    `merge_models` to merge pinned revisions in a new scratch child. Use

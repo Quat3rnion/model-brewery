@@ -201,6 +201,8 @@ else:
     if envelope["kind"] == "trace" and (root / "trace-interventions").exists():
         result.update(kind="trace", schema_version=1, model_id=envelope["inputs"][0]["id"],
                       model_sha256="a" * 64, prompts=[{}])
+    if envelope["kind"] == "behavior_direction" and (root / "direction-result.json").exists():
+        result = json.loads((root / "direction-result.json").read_text())
     if action == "start" and envelope["kind"] == "hf_download":
         assert envelope["inputs"] == [] and "prompt" not in envelope
         options = envelope["options"]

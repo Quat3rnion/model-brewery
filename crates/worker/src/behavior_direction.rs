@@ -105,6 +105,10 @@ impl Request {
     }
 
     pub fn verify_result(&self, result: &Value, model_id: &str, sha: &str) -> Result<()> {
+        ensure!(
+            current_runtime(result),
+            "direction result does not match the current runtime pin"
+        );
         self.verify_version(result, model_id, sha, VERSION)
     }
 
@@ -128,8 +132,7 @@ impl Request {
                 && result["behavior"] == serde_json::to_value(self.behavior)?
                 && result["contrast_sha256"] == self.behavior.contrast_sha256()
                 && result["position"] == serde_json::to_value(self.position)?
-                && result["lanternfish_commit"] == trace::COMMIT
-                && result["executable_sha256"] == trace::SHA256,
+                && (current_runtime(result) || original_runtime(result)),
             "direction result does not match the model, prompt or runtime pins"
         );
         if version == VERSION {
@@ -146,6 +149,17 @@ impl Request {
         let fit: Fit = serde_json::from_value(result["fit"].clone())?;
         fit.verify(self, version)
     }
+}
+
+fn current_runtime(result: &Value) -> bool {
+    result["lanternfish_commit"] == trace::COMMIT && result["executable_sha256"] == trace::SHA256
+}
+
+// The previous pin remains valid only when reading an already stored artifact.
+fn original_runtime(result: &Value) -> bool {
+    result["lanternfish_commit"] == "0ea30b37729a136a76b8412e7ad1ec91bd7de9b5"
+        && result["executable_sha256"]
+            == "0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f"
 }
 
 #[derive(Deserialize)]

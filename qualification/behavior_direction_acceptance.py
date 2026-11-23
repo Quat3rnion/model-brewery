@@ -13,8 +13,8 @@ from urllib.request import Request, urlopen
 
 
 ARB = Path("/arboretum")
-PIN = ARB / "pins/lanternfish-0ea30b3/lanternfish"
-LIBS = ARB / "llama-w0/build/bin"
+PIN = ARB / "pins/lanternfish-d842085/lanternfish"
+LIBS = ARB / "llama-a4/build/bin"
 MODEL = ARB / "models/qwen2.5-0.5b-instruct-w0/Qwen2.5-0.5B-Instruct.bf16.gguf"
 MODEL_SHA = "a33250ab73bbef0d876bf04e01517f5f43292dd8ede34e12d3a3a886e49f36f0"
 BEHAVIORS = ("slop", "sycophancy", "response_length")
@@ -29,12 +29,9 @@ def save(path, data):
     path.write_text(json.dumps(data, indent=2, allow_nan=False) + "\n")
 
 
-def run(args):
-    for pin in (
-        ARB / "pins/lanternfish-0ea30b3.libs.sha256",
-        args.bins / "bin.sha256",
-    ):
-        subprocess.run(["sha256sum", "-c", str(pin)], check=True)
+def run(args, *, pin=PIN, libs=LIBS, exercise_stack=None):
+    subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=pin.parent, check=True)
+    subprocess.run(["sha256sum", "-c", "bin.sha256"], cwd=args.bins, check=True)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     with tempfile.TemporaryDirectory(prefix="isolated-", dir=args.evidence) as directory:
         run = Path(directory)
@@ -47,8 +44,8 @@ def run(args):
             "root": str(worker), "engine": str(args.bins / "brewery-engine"),
             "source_roots": [str(MODEL.parent)], "disk_reserve_bytes": 0,
             "engine_env": {
-                "BREWERY_LANTERNFISH_TRACE": str(PIN),
-                "BREWERY_LANTERNFISH_TRACE_LIB_DIR": str(LIBS),
+                "BREWERY_LANTERNFISH_TRACE": str(pin),
+                "BREWERY_LANTERNFISH_TRACE_LIB_DIR": str(libs),
                 "BREWERY_CONTRAST_CACHE": str(args.cache),
                 "BREWERY_CPU_THREADS": "4",
             },
@@ -56,7 +53,7 @@ def run(args):
         dispatch = run / "dispatch.json"
         save(dispatch, {"hosts": {"local": {"local": True,
             "worker": str(args.bins / "brewery-worker"), "config": str(config),
-            "capabilities": {"behavior_direction": True},
+            "capabilities": {"behavior_direction": True, "trace": True},
         }}})
         env = {
             "PATH": "/usr/bin:/bin", "HOME": directory, "TMPDIR": str(ARB / "tmp"),
@@ -76,7 +73,10 @@ def run(args):
                         break
                     time.sleep(0.1)
                 assert listen and int(listen[2]) not in {0, 3000, 4095, 4141}
-                exercise(args.evidence, listen[1], commit)
+                if exercise_stack is None:
+                    exercise(args.evidence, listen[1], commit)
+                else:
+                    exercise_stack(args.evidence, listen[1], commit, pin)
             finally:
                 controller.terminate()
 

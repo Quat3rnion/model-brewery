@@ -34,6 +34,11 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("list_interventions", "get", "/api/interventions"),
     ("create_intervention", "post", "/api/interventions"),
     (
+        "create_direction_intervention",
+        "post",
+        "/api/interventions",
+    ),
+    (
         "new_intervention_version",
         "post",
         "/api/interventions/{id}/versions",
@@ -101,7 +106,19 @@ impl Server {
         let routes: BTreeMap<_, _> = ROUTES
             .iter()
             .map(|&(name, method, path)| {
-                (name, Route::new(&contract, method, path, job_schema(name)))
+                let mut route = Route::new(&contract, method, path, job_schema(name));
+                if name == "create_direction_intervention" {
+                    route.schema["required"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!("direction_rules"));
+                    route.schema["properties"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("interventions");
+                    route.schema.as_object_mut().unwrap().remove("anyOf");
+                }
+                (name, route)
             })
             .collect();
         let trace_views: BTreeMap<_, _> = TRACE_VIEWS
@@ -124,6 +141,9 @@ impl Server {
                 }
                 "get_direction" => {
                     "Read an immutable direction artifact. Version 2 reports held-out Cohen's d and mean residual norm. Version 1 is only for older jobs."
+                }
+                "create_direction_intervention" => {
+                    "Save trace rules from a verified direction version. Project out its activation component or subtract a scaled unit vector. Pass the saved ID and version to start_trace."
                 }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({
@@ -207,6 +227,14 @@ impl Server {
                 .is_some_and(Value::is_object)
         {
             return Err("steer_feature requires options.feature_steering");
+        }
+        if name == "create_direction_intervention"
+            && !args
+                .get("direction_rules")
+                .and_then(Value::as_array)
+                .is_some_and(|rules| !rules.is_empty())
+        {
+            return Err("create_direction_intervention requires nonempty direction_rules");
         }
         let (path, key, allow_duplicate, body) =
             route.request(args, job_schema(name).map(|(kind, _)| kind))?;

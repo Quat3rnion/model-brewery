@@ -20,6 +20,8 @@ type Payload<T> = std::result::Result<Json<T>, JsonRejection>;
 type Mutation = Result<(StatusCode, Json<Artifact>)>;
 
 mod control_vector;
+mod direction;
+use direction::DirectionRule;
 pub(crate) mod trace_plan;
 pub use trace_plan::TracePlan;
 
@@ -46,6 +48,8 @@ pub struct Artifact {
     pub created_at_ms: u64,
     pub model_hint: String,
     pub interventions: Vec<Rule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub direction_rules: Vec<DirectionRule>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -54,13 +58,19 @@ struct Create {
     name: String,
     model_id: String,
     model_sha256: String,
+    #[serde(default)]
     interventions: Vec<Rule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    direction_rules: Vec<DirectionRule>,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct NewVersion {
+struct Rules {
+    #[serde(default)]
     interventions: Vec<Rule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    direction_rules: Vec<DirectionRule>,
 }
 
 pub fn router() -> Router<Arc<App>> {
@@ -138,10 +148,14 @@ async fn create(
     let name_hint = match model {
         Some(model) => model.name,
         None => {
-            let (model, sha) = crate::scratch::jobs::trace_input(&store, &body.model_id)
-                .map_err(|_| ApiError::bad("Intervention artifacts need a Library or private scratch GGUF"))?;
+            let (model, sha) =
+                crate::scratch::jobs::trace_input(&store, &body.model_id).map_err(|_| {
+                    ApiError::bad("Intervention artifacts need a Library or private scratch GGUF")
+                })?;
             if sha != body.model_sha256 {
-                return Err(ApiError::bad("Intervention artifact must match the private GGUF hash"));
+                return Err(ApiError::bad(
+                    "Intervention artifact must match the private GGUF hash",
+                ));
             }
             model.name
         }
@@ -156,7 +170,10 @@ async fn create(
         },
         1,
         name_hint,
-        body.interventions,
+        Rules {
+            interventions: body.interventions,
+            direction_rules: body.direction_rules,
+        },
         submission.as_ref(),
     )
 }
@@ -165,7 +182,7 @@ async fn new_version(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    payload: Payload<NewVersion>,
+    payload: Payload<Rules>,
 ) -> Mutation {
     let body = crate::web::read(payload)?;
     let (_, submission) =
@@ -187,7 +204,7 @@ async fn new_version(
         latest.binding,
         version,
         latest.model_hint,
-        body.interventions,
+        body,
         submission.as_ref(),
     )
 }
@@ -197,13 +214,27 @@ fn save(
     binding: Binding,
     version: u32,
     model_hint: String,
-    interventions: Vec<Rule>,
+    Rules {
+        mut interventions,
+        direction_rules,
+    }: Rules,
     submission: Option<&Submission<'_>>,
 ) -> Mutation {
-    if interventions.is_empty() {
+    if interventions.is_empty() && direction_rules.is_empty() {
         return Err(ApiError::bad(
             "An intervention artifact needs at least one rule",
         ));
+    }
+    if direction_rules.len() > 8 || interventions.len() + direction_rules.len() > 64 {
+        return Err(ApiError::bad(
+            "Expected at most 64 rules and 8 direction references",
+        ));
+    }
+    for rule in &direction_rules {
+        interventions.push(rule.resolve(store, &binding)?);
+    }
+    if trace_plan::value_count(&interventions) > trace_plan::MAX_VALUES {
+        return Err(ApiError::bad("Intervention vectors are too large"));
     }
     Rule::check_all(&interventions).map_err(|e| ApiError::bad(e.to_string()))?;
     let value = Artifact {
@@ -212,6 +243,7 @@ fn save(
         created_at_ms: now(),
         model_hint,
         interventions,
+        direction_rules,
     };
     store
         .insert_intervention(&value, submission)

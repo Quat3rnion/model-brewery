@@ -991,13 +991,14 @@
       "post": {
         "operationId": "createIntervention",
         "summary": "Save the first version of an intervention artifact",
-        "description": "Specify a Library GGUF or scratch revision ID and the SHA-256 of its GGUF file. A trace rejects rules and patch sources for another model ID or GGUF hash.",
+        "description": "Specify a Library GGUF or scratch revision ID and the SHA-256 of its GGUF file. Save inline rules, references to verified directions for the same model, or both.",
         "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateIntervention"}}}},
         "responses": {
           "200": {"$ref": "#/components/responses/InterventionVersion"},
           "201": {"$ref": "#/components/responses/InterventionVersion"},
           "400": {"$ref": "#/components/responses/BadRequest"}, "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
           "409": {"$ref": "#/components/responses/CreateConflict"}, "413": {"$ref": "#/components/responses/PayloadTooLarge"},
           "415": {"$ref": "#/components/responses/UnsupportedMediaType"}, "422": {"$ref": "#/components/responses/InvalidJsonData"},
           "500": {"$ref": "#/components/responses/StorageError"}
@@ -1036,7 +1037,7 @@
       "get": {
         "operationId": "exportInterventionGguf",
         "summary": "Download a llama.cpp control vector GGUF",
-        "description": "Export requires one add rule per l_out layer, a common vector width, and no layer 0. GGUF does not store trace positions. llama.cpp applies each vector to every token at that layer.",
+        "description": "Export requires one add or subtract rule per l_out layer, a common vector width, and no layer 0. A subtract rule exports the negative scaled vector. llama.cpp cannot express a projection. GGUF does not store trace positions. llama.cpp applies each vector to every token at that layer.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/InterventionVersion"}],
         "responses": {
           "200": {"description": "GGUF v3 controlvector file.", "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}},
@@ -2593,13 +2594,15 @@
         "properties":{
           "layer":{"$ref":"#/components/schemas/TraceLayer"}, "role":{"enum":["l_out","attn_out","ffn_inp","ffn_out"]},
           "positions":{"type":"array","minItems":1,"items":{"$ref":"#/components/schemas/TracePosition"}},
-          "op":{"enum":["zero","scale","add","replace"]}, "factor":{"type":"number"},
+          "op":{"enum":["zero","scale","add","replace","project_out","subtract"]}, "factor":{"type":"number"},
+          "scale":{"type":"number","minimum":0},
           "vector":{"type":"array","minItems":1,"maxItems":16384,"items":{"type":"number"}}
         },
         "oneOf":[
-          {"properties":{"op":{"const":"zero"}}, "not":{"anyOf":[{"required":["factor"]},{"required":["vector"]}]}},
-          {"properties":{"op":{"const":"scale"}},"required":["factor"],"not":{"required":["vector"]}},
-          {"properties":{"op":{"enum":["add","replace"]}},"required":["vector"],"not":{"required":["factor"]}}
+          {"properties":{"op":{"const":"zero"}, "factor":false, "vector":false, "scale":false}},
+          {"properties":{"op":{"const":"scale"}, "vector":false, "scale":false},"required":["factor"]},
+          {"properties":{"op":{"enum":["add","replace","project_out"]}, "factor":false, "scale":false},"required":["vector"]},
+          {"properties":{"op":{"const":"subtract"}, "factor":false},"required":["vector","scale"]}
         ]
       },
       "InterventionRef": {
@@ -2620,17 +2623,42 @@
       "InterventionRules": {
         "type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/components/schemas/TraceIntervention"}
       },
+      "DirectionInterventionRules": {
+        "description": "Resolve each nonzero unit vector from a successful direction job for the same model ID and GGUF hash. Targets must not overlap with other rules.",
+        "type": "array", "minItems": 1, "maxItems": 8,
+        "items": {
+          "type":"object","additionalProperties":false,
+          "required":["direction_id","direction_version","source_layer","layer","role","positions","op"],
+          "properties":{
+            "direction_id":{"$ref":"#/components/schemas/Id"}, "direction_version":{"type":"integer","enum":[1,2]},
+            "source_layer":{"$ref":"#/components/schemas/TraceLayer"},
+            "layer":{"$ref":"#/components/schemas/TraceLayer"}, "role":{"enum":["l_out","attn_out","ffn_inp","ffn_out"]},
+            "positions":{"type":"array","minItems":1,"items":{"$ref":"#/components/schemas/TracePosition"}},
+            "op":{"enum":["project_out","subtract"]}, "scale":{"type":"number","minimum":0}
+          },
+          "oneOf":[
+            {"properties":{"op":{"const":"project_out"}, "scale":false}},
+            {"properties":{"op":{"const":"subtract"}},"required":["scale"]}
+          ]
+        }
+      },
       "CreateIntervention": {
-        "type": "object", "additionalProperties": false, "required": ["name", "model_id", "model_sha256", "interventions"],
+        "type": "object", "additionalProperties": false, "required": ["name", "model_id", "model_sha256"],
+        "anyOf":[{"required":["interventions"]},{"required":["direction_rules"]}],
         "properties": {
           "name": {"type": "string", "minLength": 1, "maxLength": 160, "description": "At most 160 UTF-8 bytes after trimming."},
           "model_id": {"$ref": "#/components/schemas/Id"}, "model_sha256": {"$ref": "#/components/schemas/Sha256"},
-          "interventions": {"$ref": "#/components/schemas/InterventionRules"}
+          "interventions": {"$ref": "#/components/schemas/InterventionRules"},
+          "direction_rules": {"$ref": "#/components/schemas/DirectionInterventionRules"}
         }
       },
       "NewInterventionVersion": {
-        "type": "object", "additionalProperties": false, "required": ["interventions"],
-        "properties": {"interventions": {"$ref": "#/components/schemas/InterventionRules"}}
+        "type": "object", "additionalProperties": false,
+        "anyOf":[{"required":["interventions"]},{"required":["direction_rules"]}],
+        "properties": {
+          "interventions": {"$ref": "#/components/schemas/InterventionRules"},
+          "direction_rules": {"$ref": "#/components/schemas/DirectionInterventionRules"}
+        }
       },
       "InterventionSummary": {
         "type": "object", "required": ["id", "name", "model_id", "model_sha256", "latest_version"],
@@ -2646,7 +2674,8 @@
           "id": {"$ref": "#/components/schemas/Id"}, "version": {"type": "integer", "minimum": 1, "maximum": 4294967295},
           "name": {"type": "string"}, "model_id": {"$ref": "#/components/schemas/Id"},
           "model_sha256": {"$ref": "#/components/schemas/Sha256"}, "created_at_ms": {"type": "integer", "minimum": 0},
-          "model_hint": {"type": "string"}, "interventions": {"$ref": "#/components/schemas/InterventionRules"}
+          "model_hint": {"type": "string"}, "interventions": {"$ref": "#/components/schemas/InterventionRules"},
+          "direction_rules": {"$ref": "#/components/schemas/DirectionInterventionRules"}
         }
       },
       "TraceExport": {

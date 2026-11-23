@@ -872,6 +872,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "compile_program",
             "compute_direction",
             "convert_scratch_gguf",
+            "create_direction_intervention",
             "create_intervention",
             "create_scratch",
             "diff_behavior",
@@ -917,6 +918,11 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             );
         }
         assert_eq!(schema["type"], "object", "{tool}");
+        if tool["name"] == "create_direction_intervention" {
+            assert_eq!(schema["properties"]["direction_rules"]["maxItems"], 8);
+            assert!(schema["properties"].get("interventions").is_none());
+            assert!(schema["required"].as_array().unwrap().contains(&json!("direction_rules")));
+        }
         if tool["name"] == "run_checks" {
             let behavior = &schema["properties"]["behavior_direction"];
             assert_eq!(behavior["required"], json!(["prompt_sets"]));
