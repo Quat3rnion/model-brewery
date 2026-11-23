@@ -117,6 +117,30 @@ neuron, and Wanda-style neuron masks. It records W4 checks, the W5 tensor,
 trace, and behavior diffs, and the held-out perplexity curve. It deletes
 the private scratch copies after use. GSM8K is not run.
 
+All five cases passed integrity, generation smoke, and behavior
+collection. Each behavior diff contains 17 metrics. The evidence is in
+`/arboretum/w12-w4-w5-evidence/report.json`.
+
+| Layer 8 only | Changed tensors | Changed bytes | Held-out perplexity |
+|---|---:|---:|---:|
+| None (parent) | 0 | 0 | 81.04 |
+| Unstructured, 10% of weights in each of three MLP matrices | 3 | 2,607,985 | 81.19 |
+| Unstructured, 30% of weights in each of three MLP matrices | 3 | 7,835,105 | 77.74 |
+| Magnitude, 30% of MLP neurons | 1 | 2,608,903 | 83.52 |
+| Magnitude, 4 of 14 query heads | 1 | 457,812 | 81.61 |
+| Wanda-style, 30% of MLP neurons | 1 | 2,608,939 | 81.12 |
+
+No case prunes another layer. The percentages do not measure model-wide
+sparsity. The full source file has 988,097,824 bytes (about 942 MiB).
+The test corpus has 16 short sentences and 222 scored tokens. A repeat
+of the 30% case produced different parent and child GGUF hashes that
+matched the original run. A separate check verified exactly 1,307,443
+zeroed weights per edited matrix and no other changed tensor payloads.
+The repeat reproduced the 4.07% decrease in perplexity. One sentence
+contributed about 53% of the net increase in log probability. This small
+corpus does not show that quality improved on other workloads. See
+`magnitude-30-repeat.json` in the evidence directory.
+
 The masks keep tensor shapes and configuration unchanged. Physical dense
 pruning needs a scratch artifact format that can pin the updated
 configuration and reverse or compare changes of shape. W3 uses a
