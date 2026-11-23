@@ -108,6 +108,7 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
             "/api/scratch/{id}/ablate_direction",
             "ablateScratchDirection",
         ),
+        ("post", "/api/scratch/{id}/search_ablation", "searchAblation"),
         ("post", "/api/scratch/{id}/rome", "romeEdit"),
         ("post", "/api/scratch/{id}/memit", "memitEdit"),
         ("post", "/api/scratch/{id}/alphaedit", "alphaEdit"),

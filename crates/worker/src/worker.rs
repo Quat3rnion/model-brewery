@@ -77,6 +77,8 @@ impl ScratchAccess {
                 &job.inputs[..]
             }
             trace::JOB if kinds().eq(["gguf"]) => &job.inputs[..],
+            ablation_search::SCREEN if job.prompt.is_none() && kinds().eq(["gguf"])
+                && ablation_search::ScreenRequest::parse(&job.options).is_ok() => &job.inputs[..],
             locate_edit::JOB
                 if job.prompt.is_none()
                     && locate_edit::Request::parse(&job.options).is_ok()
@@ -1030,6 +1032,14 @@ impl Worker {
                 job,
                 Reply::error("Invalid direction request or unavailable CPU trace runtime or cache"),
             );
+        }
+        if job.kind == ablation_search::SCREEN
+            && ![ablation_search::EXECUTABLE, trace::LIB_DIR, behavior_direction::CACHE]
+                .iter().all(|key| self.cfg.engine_env.get(*key)
+                    .is_some_and(|p| Path::new(p).is_absolute()))
+        {
+            return self.record_prepare(id, action, job,
+                Reply::error("Configure the pinned CPU ablation runtime and contrast cache"));
         }
         if job.kind == trace::JOB {
             let allowed = action == "start"

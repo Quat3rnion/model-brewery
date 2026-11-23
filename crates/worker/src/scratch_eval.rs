@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+pub mod paired;
+
 pub const GGUF: &str = "scratch_gguf";
 pub const CHECKS: &str = "scratch_checks";
 pub const SCRIPT: &str = "BREWERY_SCRATCH_CHECKS_SCRIPT";
@@ -25,7 +27,7 @@ pub const CHECK_DIGESTS: [&str; 4] = [
 ];
 
 pub fn private_output(kind: &str) -> bool {
-    matches!(kind, GGUF | CHECKS | crate::locate_edit::JOB)
+    matches!(kind, GGUF | CHECKS | crate::locate_edit::JOB | crate::ablation_search::SCREEN)
 }
 
 pub fn granted(input: &crate::Input) -> bool {
@@ -123,6 +125,8 @@ pub struct BehaviorReport {
     samples: BTreeMap<String, Sample>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     benign_refusal_flags: Option<Vec<RefusalFlag>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paired_outcomes: Option<BTreeMap<String, Vec<paired::PairedOutcome>>>,
     kl_prompts: usize,
     kl_continuation_positions: usize,
     pub metrics: Vec<BehaviorMetric>,
@@ -174,6 +178,15 @@ pub fn validate_behavior(
             && report.metrics.len() == 5 + usize::from(refusal),
         "invalid behavior-direction metadata or samples"
     );
+    if let Some(outcomes) = &report.paired_outcomes {
+        paired::check_outcomes(outcomes, &report.counts, |name| {
+            let mut matches = report.metrics.iter().filter(|m| m.name == name);
+            match (matches.next(), matches.next()) {
+                (Some(m), None) => Some((m.parent, m.child)),
+                _ => None,
+            }
+        })?;
+    }
     for (name, better, max, is_kl) in [
         ("benign_refusal_rate", "lower", 1., false),
         ("slop_marker_rate", "lower", 1., false),
@@ -278,6 +291,25 @@ mod behavior_tests {
         unchecked["benign_refusal_flags"][0]["parent"] = json!(true);
         unchecked["benign_refusal_flags"][0]["reply"] = json!("not allowed");
         assert!(check_behavior(Some(&unchecked), Some(&benign_config)).is_err());
+
+        // Per-prompt paired outcomes are optional, and must match counts and rates.
+        report["paired_outcomes"] = json!({
+            "slop": [{"parent":false,"child":true}],
+            "sycophancy": [{"parent":false,"child":false}],
+        });
+        assert!(check_behavior(Some(&report), Some(&config)).is_ok());
+        report["paired_outcomes"]["slop"][0]["parent"] = json!(true);
+        assert!(check_behavior(Some(&report), Some(&config)).is_err());
+        report["paired_outcomes"]["slop"][0]["parent"] = json!(false);
+        report["paired_outcomes"]["slop"][0]["extra"] = json!(1);
+        assert!(check_behavior(Some(&report), Some(&config)).is_err());
+        report["paired_outcomes"]["slop"][0] = json!({"parent":false,"child":true});
+        report["paired_outcomes"]["slop"] = json!(vec![json!({"parent":false,"child":true}); 2]);
+        assert!(check_behavior(Some(&report), Some(&config)).is_err());
+        report["paired_outcomes"]["slop"] = json!([{"parent":false,"child":true}]);
+        report["paired_outcomes"]["response_length"] = json!([{"parent":false,"child":false}]);
+        assert!(check_behavior(Some(&report), Some(&config)).is_err());
+        report.as_object_mut().unwrap().remove("paired_outcomes");
 
         assert!(check_behavior(None, Some(&config)).is_err());
         assert!(check_behavior(Some(&report), None).is_err());

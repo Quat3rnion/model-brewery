@@ -280,6 +280,7 @@ impl Lanes {
                 scratch_eval::CONTRAST_CACHE,
                 trace::EXECUTABLE,
                 trace::LIB_DIR,
+                brewery_worker::ablation_search::EXECUTABLE,
                 locate_edit::EXECUTABLE,
                 locate_edit::LIB_DIR,
                 "BREWERY_CPU_THREADS",

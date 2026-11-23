@@ -901,6 +901,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "rome_edit",
             "run_checks",
             "run_program",
+            "search_ablation",
             "start_trace",
             "steer_feature",
         ]

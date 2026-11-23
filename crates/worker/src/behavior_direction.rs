@@ -64,46 +64,51 @@ impl Request {
     }
 
     pub fn load_pairs(&self, cache: &Path) -> Result<Vec<Pair>> {
-        let pin = self.behavior.contrast_sha256();
-        let path = cache.join(format!("{pin}.json"));
-        let f = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&path)
-            .context("approved direction prompt cache is missing")?;
-        ensure!(f.metadata()?.is_file(), "invalid prompt cache file type");
-        let mut bytes = Vec::new();
-        f.take(CAP + 1).read_to_end(&mut bytes)?;
-        ensure!(
-            bytes.len() as u64 <= CAP && format!("{:x}", Sha256::digest(&bytes)) == pin,
-            "direction cache size or SHA-256 mismatch"
-        );
-        let set: PromptSet =
-            serde_json::from_slice(&bytes).context("invalid direction cache JSON")?;
-        let mut ids = BTreeSet::new();
-        ensure!(
-            set.schema == SCHEMA
-                && set.behavior == self.behavior
-                && (2..=64).contains(&set.rows.len())
-                && set.rows.iter().all(|row| {
-                    crate::is_digest(&row.id)
-                        && ids.insert(&row.id)
-                        && row.positive.system != row.negative.system
-                        && row.positive.user == row.negative.user
-                        && row.positive.valid()
-                        && row.negative.valid()
-                        && match set.behavior {
-                            Behavior::Sycophancy => {
-                                matches!(row.expected_agreement.as_deref(), Some("(A)" | "(B)"))
-                            }
-                            _ => row.expected_agreement.is_none(),
-                        }
-                }),
-            "invalid direction cache contents"
-        );
-        Ok(set.rows)
+        load_pairs(cache, self.behavior, self.behavior.contrast_sha256())
     }
+}
 
+pub fn load_pairs(cache: &Path, behavior: Behavior, pin: &str) -> Result<Vec<Pair>> {
+    ensure!(crate::is_digest(pin), "invalid prompt set digest");
+    let path = cache.join(format!("{pin}.json"));
+    let f = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+        .context("approved direction prompt cache is missing")?;
+    ensure!(f.metadata()?.is_file(), "invalid prompt cache file type");
+    let mut bytes = Vec::new();
+    f.take(CAP + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= CAP && format!("{:x}", Sha256::digest(&bytes)) == pin,
+        "direction cache size or SHA-256 mismatch"
+    );
+    let set: PromptSet = serde_json::from_slice(&bytes).context("invalid direction cache JSON")?;
+    let mut ids = BTreeSet::new();
+    ensure!(
+        set.schema == SCHEMA
+            && set.behavior == behavior
+            && (2..=64).contains(&set.rows.len())
+            && set.rows.iter().all(|row| {
+                crate::is_digest(&row.id)
+                    && ids.insert(&row.id)
+                    && row.positive.system != row.negative.system
+                    && row.positive.user == row.negative.user
+                    && row.positive.valid()
+                    && row.negative.valid()
+                    && match behavior {
+                        Behavior::Sycophancy => {
+                            matches!(row.expected_agreement.as_deref(), Some("(A)" | "(B)"))
+                        }
+                        _ => row.expected_agreement.is_none(),
+                    }
+            }),
+        "invalid direction cache contents"
+    );
+    Ok(set.rows)
+}
+
+impl Request {
     pub fn verify_result(&self, result: &Value, model_id: &str, sha: &str) -> Result<()> {
         ensure!(
             current_runtime(result),
@@ -173,11 +178,11 @@ struct PromptSet {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pair {
-    id: String,
+    pub id: String,
     pub split: Split,
     pub positive: Prompt,
     pub negative: Prompt,
-    expected_agreement: Option<String>,
+    pub expected_agreement: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -201,6 +206,10 @@ impl Prompt {
             "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}",
             self.system, self.user
         )
+    }
+
+    pub fn user(&self) -> &str {
+        &self.user
     }
 }
 

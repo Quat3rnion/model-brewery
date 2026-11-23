@@ -62,11 +62,12 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(state, seq);
              DROP INDEX IF EXISTS one_active_job;
-              DROP INDEX IF EXISTS one_job_per_active_host;
+             DROP INDEX IF EXISTS one_job_per_active_host;
+             DROP INDEX IF EXISTS one_job_per_active_host_slot;
               CREATE UNIQUE INDEX IF NOT EXISTS one_job_per_active_host_slot
                 ON jobs(json_extract(body, '$.host'),
                         coalesce(json_extract(body, '$.host_slot'), 0))
-                WHERE state = 'running';
+                WHERE state = 'running' AND json_extract(body, '$.kind') <> 'search_ablation';
              CREATE TABLE IF NOT EXISTS events(
                seq INTEGER PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), body TEXT NOT NULL
              );
@@ -148,7 +149,7 @@ impl Store {
     pub fn scratch_has_jobs(&self, id: &str, kind: Option<&str>) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM jobs j WHERE j.state IN ('queued','running')
-             AND json_extract(j.body,'$.scratch_job') = 1
+             AND (json_extract(j.body,'$.scratch_job') = 1 OR json_extract(j.body,'$.kind') = 'search_ablation')
              AND (?2 IS NULL OR json_extract(j.body,'$.kind') = ?2)
              AND EXISTS(SELECT 1 FROM json_each(j.body,'$.input_ids') WHERE value = ?1))",
             params![id, kind],

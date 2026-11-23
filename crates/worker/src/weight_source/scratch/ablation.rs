@@ -2,7 +2,7 @@
 use super::{Header, MAX_EDIT_BYTES, Tensor, decode, editable_width, encode};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_TOTAL_BYTES: u64 = 256 << 20;
 const WRITERS: [&str; 2] = ["self_attn.o_proj", "mlp.down_proj"];
@@ -38,6 +38,32 @@ pub struct Settings {
     pub last_layer: usize,
     pub kernel: Kernel,
     pub variant: Variant,
+    #[serde(default = "unit_scale", skip_serializing_if = "is_unit_scale")]
+    pub alpha: f64,
+}
+
+pub fn unit_scale() -> f64 {
+    1.0
+}
+pub fn is_unit_scale(value: &f64) -> bool {
+    *value == 1.0
+}
+
+#[derive(Serialize)]
+pub struct TraceRule {
+    pub(crate) layer: usize,
+    pub(crate) role: crate::trace::Role,
+    pub(crate) positions: BTreeSet<usize>,
+    op: &'static str,
+    vector: Vec<f32>,
+    scale: f64,
+    keep_norm: bool,
+}
+
+impl TraceRule {
+    pub fn scale(&self) -> f64 {
+        self.scale
+    }
 }
 
 pub struct Plan {
@@ -62,6 +88,7 @@ impl Plan {
             last_layer,
             kernel,
             variant,
+            alpha,
         } = *settings;
         ensure!(
             first_layer <= last_layer && last_layer < 4096 && last_layer - first_layer < 64,
@@ -71,7 +98,9 @@ impl Plan {
             kernel.peak < 4096
                 && kernel.width > 0.0
                 && kernel.width <= 4096.0
-                && (0.0..=1.0).contains(&kernel.min_weight),
+                && (0.0..=1.0).contains(&kernel.min_weight)
+                && alpha > 0.0
+                && alpha <= 4.0,
             "invalid ablation kernel peak, width or minimum weight"
         );
         let mut direction = unit(direction)?;
@@ -117,13 +146,33 @@ impl Plan {
                 layer,
                 Layer {
                     direction,
-                    weight,
+                    weight: weight * alpha,
                     keep_norm,
                 },
             ));
         }
         ensure!(!layers.is_empty(), "the ablation kernel selects no layers");
         Ok(Self { layers })
+    }
+
+    pub fn trace_rules(&self, positions: BTreeSet<usize>) -> Result<Vec<TraceRule>> {
+        ensure!(
+            !positions.is_empty() && positions.iter().all(|p| *p < 4096),
+            "invalid screen positions"
+        );
+        Ok(self
+            .layers
+            .iter()
+            .map(|(layer, plan)| TraceRule {
+                layer: *layer,
+                role: crate::trace::Role::LOut,
+                positions: positions.clone(),
+                op: "project_out",
+                vector: plan.direction.iter().map(|&v| v as f32).collect(),
+                scale: plan.weight,
+                keep_norm: plan.keep_norm,
+            })
+            .collect())
     }
 
     pub(super) fn writers<'a>(

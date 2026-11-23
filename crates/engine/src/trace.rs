@@ -39,14 +39,18 @@ pub(crate) struct Runtime {
 
 impl Runtime {
     pub(crate) fn stage(cwd: &Path) -> Result<Self> {
+        Self::stage_for(cwd, trace::EXECUTABLE, trace::SHA256)
+    }
+
+    pub(crate) fn stage_for(cwd: &Path, variable: &str, sha256: &str) -> Result<Self> {
         let private = tempfile::Builder::new()
             .prefix(".trace-")
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir_in(cwd)?;
         let tool = Tool::pinned_digest(
             private.path(),
-            trace::EXECUTABLE,
-            trace::SHA256,
+            variable,
+            sha256,
             "lanternfish",
             "Lanternfish",
         )?;

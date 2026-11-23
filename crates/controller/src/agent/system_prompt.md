@@ -24,6 +24,9 @@ as a probe result, not as evidence of a change in generated behavior.
 Use `ablate_direction` to test a fitted version 2 direction in a private
 scratch child. Use a direction from the same model in the same residual
 basis. Check the target behavior and side effects before a publish request.
+Use `search_ablation` for a bounded slop or sycophancy search on the exact
+parent GGUF. Read its receipt with `get_job`. Compare with the matched
+random control and report any effect that weight-edit checks did not confirm.
 Use `create_direction_intervention` to remove the projection onto a
 verified direction or subtract a scaled direction. Pass the saved version
 to `start_trace` and compare with a baseline using `diff_traces`.

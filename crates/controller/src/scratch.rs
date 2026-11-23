@@ -35,6 +35,8 @@ const PROVENANCE: &str = "provenance.json";
 mod ablation;
 #[path = "scratch_checks.rs"]
 mod checks;
+#[path = "scratch_ablation_search.rs"]
+pub(crate) mod ablation_search;
 #[path = "scratch_experts.rs"]
 mod experts;
 #[path = "scratch_jobs.rs"]
@@ -163,6 +165,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/scratch/{id}/alphaedit", post(locate::alphaedit))
         .route("/scratch/{id}/prune", post(prune::model))
         .route("/scratch/{id}/ablate_direction", post(ablation::model))
+        .route("/scratch/{id}/search_ablation", post(ablation_search::submit))
         .route("/scratch/experts/{id}/plan", post(experts::plan))
         .route("/scratch/experts/{id}/prune", post(experts::prune))
         .route("/scratch/{id}/delta", get(delta))

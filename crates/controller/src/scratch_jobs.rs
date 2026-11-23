@@ -17,15 +17,15 @@ pub(crate) struct PrivateGguf {
     pub(crate) revision_sha256: String,
     pub(crate) sha256: String,
     pub(crate) converter_version: String,
-    bytes: u64,
-    job_id: String,
+    pub(super) bytes: u64,
+    pub(super) job_id: String,
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Convert {
-    sha256: String,
-    assets_id: String,
+    pub(super) sha256: String,
+    pub(super) assets_id: String,
 }
 
 pub(super) async fn convert(
@@ -36,11 +36,15 @@ pub(super) async fn convert(
 ) -> Result<Response> {
     let request = read(payload)?;
     let (_, submission) = read_submission(&headers, "scratch-gguf", Ok(Json((&id, &request))))?;
+    submit_convert(&app, &id, &request, submission.as_ref())
+}
+
+pub(super) fn submit_convert(app: &App, id: &str, request: &Convert, submission: Option<&Submission<'_>>) -> Result<Response> {
     let mut store = app.store.lock().map_err(ApiError::storage)?;
-    if let Some(response) = replay(&store, submission.as_ref())? {
+    if let Some(response) = replay(&store, submission)? {
         return Ok(response);
     }
-    let row = visible(&store, &id)?;
+    let row = visible(&store, id)?;
     if row.is_compiled_program() {
         return Err(conflict(
             "compiled program architectures do not support GGUF conversion",
@@ -53,7 +57,7 @@ pub(super) async fn convert(
     }
     if row.gguf.is_some()
         || store
-            .scratch_has_jobs(&id, Some(CONVERT))
+            .scratch_has_jobs(id, Some(CONVERT))
             .map_err(ApiError::storage)?
     {
         return Err(conflict(
@@ -82,11 +86,11 @@ pub(super) async fn convert(
     );
     envelope.scratch_pins = pins;
     enqueue(
-        &app,
+        app,
         &mut store,
         job,
         envelope,
-        submission.as_ref(),
+        submission,
         StatusCode::ACCEPTED,
     )
 }
@@ -181,6 +185,14 @@ pub(crate) fn finish(
         .scratch(id)?
         .filter(|r| r.state != RevisionState::Discarded)
         .ok_or("private revision is no longer available")?;
+    if job.kind == brewery_worker::ablation_search::SCREEN {
+        let req = brewery_worker::ablation_search::ScreenRequest::parse(&Value::Object(envelope.options.clone()))?;
+        if envelope.scratch_pins.get(&envelope.inputs[0].path) != Some(&req.model_sha256) {
+            return Err("screen result does not match the pinned model".into());
+        }
+        serde_json::from_value::<brewery_worker::ablation_search::ScreenReport>(result.clone())?.verify(&req)?;
+        return Ok(None);
+    }
     if job.kind == brewery_worker::trace::JOB {
         let model = &envelope.inputs[0];
         if result["model_id"] != model.id

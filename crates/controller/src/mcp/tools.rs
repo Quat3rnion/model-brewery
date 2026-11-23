@@ -56,6 +56,7 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("create_scratch", "post", "/api/scratch"),
     ("apply_edit", "post", "/api/scratch/{id}/edits"),
     ("ablate_direction", "post", "/api/scratch/{id}/ablate_direction"),
+    ("search_ablation", "post", "/api/scratch/{id}/search_ablation"),
     ("merge_models", "post", "/api/scratch/merge"),
     ("rome_edit", "post", "/api/scratch/{id}/rome"),
     ("memit_edit", "post", "/api/scratch/{id}/memit"),

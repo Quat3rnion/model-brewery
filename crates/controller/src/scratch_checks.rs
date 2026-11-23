@@ -76,9 +76,9 @@ pub(super) enum Check {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Run {
-    sha256: String,
+    pub(super) sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    behavior_direction: Option<BehaviorConfig>,
+    pub(super) behavior_direction: Option<BehaviorConfig>,
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
@@ -212,7 +212,7 @@ pub(super) async fn run(
     .map_err(ApiError::storage)?
 }
 
-fn check(app: &App, id: String, request: Run, key: Option<&Submission<'_>>) -> Result<Response> {
+pub(super) fn check(app: &App, id: String, request: Run, key: Option<&Submission<'_>>) -> Result<Response> {
     let (row, directory, parent) = {
         let store = app.store.lock().map_err(ApiError::storage)?;
         if let Some(key) = key

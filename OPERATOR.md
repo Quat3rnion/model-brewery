@@ -1507,9 +1507,11 @@ a `kernel` with `shape`, `peak`, `width`, and `min_weight`:
 
 Projected variants need `negative_mean` in the artifact. Fit the
 direction again if an older artifact does not have this field. For
-`norm_preserving`, include all target layers in the fit. A weight of 1
-removes the component along the effective direction up to storage
-rounding; a lower weight gives only partial removal.
+`norm_preserving`, include all target layers in the fit. Optional `alpha`
+multiplies the kernel weight. The default is 1; the allowed range is
+greater than 0 and at most 4. An effective weight of 1 removes the
+component along the direction, up to storage rounding. A lower weight
+removes only part of it. A higher weight reverses the component.
 
 The editor changes `self_attn.o_proj.weight` and `mlp.down_proj.weight`
 for each active layer of a dense HF checkpoint. It rejects biased
@@ -1529,6 +1531,59 @@ References: [Arditi et al. (2024), section 4.1](https://arxiv.org/abs/2406.11717
 [Labonne's Gaussian layer kernel](https://huggingface.co/mlabonne/gemma-3-4b-it-abliterated-v2);
 [Lai (2025), Projected Abliteration](https://huggingface.co/blog/grimjim/projected-abliteration)
 and [Norm-Preserving Biprojected Abliteration](https://huggingface.co/blog/grimjim/norm-preserving-biprojected-abliteration).
+
+### Native ablation search
+
+Use `search_ablation` or `POST /api/scratch/{id}/search_ablation` on an
+unrequested dense Qwen2.5 scratch revision with a private GGUF. Fit a
+version 2 `l_out` direction at the last user token on a Library GGUF
+with the exact same SHA-256.
+Fit at least three nonzero layers. Include intermediate target layers
+for the norm-preserving variant. Only slop and sycophancy are supported.
+
+Supply `sha256`, `direction_id`, `assets_id`, a 32-bit `seed`,
+`trial_budget` (3 to 32), `max_children` (1 to 3, at most the trial
+budget), `disk_budget_bytes`, and a `behavior_direction` check config.
+The target behavior's pinned confirmation cache must have 32 unique
+held-out groups, with no overlap with A1 fit or screen prompts. The
+other prompt-set pins are the usual A2 inputs. The disk check charges a
+conservative allowance for each retained child, its GGUF and delta, and
+one conversion's temporary files. It also checks available disk space.
+
+Configure `BREWERY_LANTERNFISH_ABLATION` for the local CPU editor worker
+with the sealed Lanternfish `1bcb466` executable, SHA-256
+`d2c38124fad896149456869b02adccc78827ba9dcc9657f88efa6e869d8d2b92`.
+Use the A4 trace library pins and configure the contrast cache, BF16
+converter and W4 checker as usual. No GPU trace backend is used.
+
+The screen edits activations, not weights. It scores the original A1
+holdout at the last user token, the last four user tokens, or the last
+user and assistant-prefix tokens. For sycophancy it reads the first-token
+logit difference between the agreeing and disagreeing answers, using the
+Qwen `(A` and `(B` tokens. For slop it chooses `Certainly`, `In`, or `It`
+by the largest difference in first-token probability between the stock
+model's positive and negative A1 training prompts. For admission, the
+slop gap must be positive in training and the opener probability at
+least 5% on one screen prompt. Sycophancy requires at least one stock
+prompt with a positive agreement margin. These are screening markers,
+not rates of generated behavior.
+
+The seeded search tries different source layers, target ranges, Gaussian
+widths, variants, scales, and position sets. It uses the marker reduction
+and the full first-token distribution KL from the parent. Each trial has
+a same-norm seeded random direction with the same settings. The result
+keeps the Pareto front. A front point can make a scratch child only when
+it lowers the marker and beats its matched control on mean reduction and
+on a majority of prompts. No other point writes weights. The screen
+applies projection to the residual; the weight edit applies it to the
+residual writers. Their effects can differ.
+
+Read the queued job with `get_job` or `GET /api/jobs/{id}`. Check the
+marker, random control, KL, child W4 checks and A2 rates. The generated
+behavior comparisons have Wilson 95% intervals and exact paired McNemar
+tests, with Holm correction across the selected children in that search.
+No result is release-qualified. The job does not request publish or
+approve a child.
 
 Use `plan_experts` with a registered local GGUF and two independent
 `brewery.expert-activations.v1` JSON observations to generate a REAP map.

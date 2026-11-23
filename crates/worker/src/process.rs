@@ -355,6 +355,10 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .context("direction disk reserve overflow")?,
         )?;
     }
+    if job.kind == ablation_search::SCREEN {
+        resources::disk_check(&w.cfg.root,
+            w.disk_floor(job.resources.disk_reserve_bytes).saturating_add(ablation_search::RESERVE))?;
+    }
     let edit_backend = if job.kind == locate_edit::JOB {
         let backend = locate_edit::Request::parse(&job.options)?.edit.backend;
         let bytes = weight_source::open_regular(&job.inputs[0].path)?
@@ -466,6 +470,9 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             locate_edit::JOB => &[],
             behavior_direction::JOB => {
                 &[trace::EXECUTABLE, trace::LIB_DIR, behavior_direction::CACHE]
+            }
+            ablation_search::SCREEN => {
+                &[ablation_search::EXECUTABLE, trace::LIB_DIR, behavior_direction::CACHE]
             }
             _ => &[trace::EXECUTABLE, trace::LIB_DIR],
         };
@@ -718,6 +725,12 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             job.inputs[0].extra["id"].as_str().unwrap_or_default(),
             job.inputs[0].extra["sha256"].as_str().unwrap_or_default(),
         )?;
+        return Ok(value);
+    }
+    if job.kind == ablation_search::SCREEN {
+        let req = ablation_search::ScreenRequest::parse(&job.options)?;
+        ensure!(job.inputs[0].extra["sha256"] == req.model_sha256, "screen input hash mismatch");
+        serde_json::from_value::<ablation_search::ScreenReport>(value.clone())?.verify(&req)?;
         return Ok(value);
     }
     if job.kind == scratch_eval::CHECKS {

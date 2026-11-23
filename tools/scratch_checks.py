@@ -151,6 +151,12 @@ def measure_behavior(rows, kl, refusal_prefixes=REFUSAL_PREFIXES, refusal_classi
         report["benign_refusal_flags"] = [
             dict(parent=parent, child=child) for parent, child in values[BENIGN_REFUSAL]
         ]
+    # Per-prompt paired booleans, so a reader can run paired statistics. The worker
+    # checks that they match the counts and rates above.
+    report["paired_outcomes"] = {
+        behavior: [dict(parent=bool(parent), child=bool(child)) for parent, child in values[behavior]]
+        for behavior in ("slop", "sycophancy") if behavior in values
+    }
     return report
 
 
