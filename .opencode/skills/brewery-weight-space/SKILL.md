@@ -1,6 +1,6 @@
 ---
 name: brewery-weight-space
-description: Run Model Brewery weight-space experiments through MCP or REST. Use for CPU traces, interventions, SAE features, scratch edits, fact edits, merges, pruning, compiled programs, checks, diffs, or publish requests.
+description: Run Model Brewery weight-space experiments through MCP or REST. Use for CPU traces, interventions, SAE features, crosscoders, scratch edits, fact edits, merges, pruning, compiled programs, checks, diffs, or publish requests.
 ---
 
 # Weight-space experiments
@@ -47,6 +47,7 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
 | Combine pinned revisions | `merge_models` on compatible layouts. See [Merge revisions](../../../OPERATOR.md#merge-revisions). |
 | Test pruning | `prune_model` for a reversible dense mask, not a smaller model. `plan_experts` can produce a REAP map; `prune_experts` returns 503 until a private writer is available. See [MCP pruning](../../../OPERATOR.md#mcp-for-weight-space-work). |
 | Change activations only | Use `start_trace` with [trace interventions](../../../OPERATOR.md#trace-interventions). Reuse [versioned rules](../../../OPERATOR.md#library-intervention-artifacts). Use `read_feature_trace` to inspect [SAE features](../../../OPERATOR.md#sparse-autoencoders-saes) or `steer_feature` to apply an SAE direction. Compare to an unmodified trace; there is no weight revision to publish. |
+| Compare learned features across revisions | Use `crosscoder_diff` with a saved ID. To build an artifact, use the offline [crosscoder procedure](../../../OPERATOR.md#crosscoder-model-diff) with unmodified paired traces and separate train and holdout prompts. Check reconstruction for both revisions before interpreting unique or changed features. |
 | Build a standalone program | Use `compile_program` for a supported named program and `run_program` for examples. Run checks and read `program_correctness` and `program_cases`. Failure blocks publication. Acknowledge the bundle before requesting publication. The GGUF, trace, and weight diff steps do not apply. See [Compiled programs](../../../OPERATOR.md#compiled-programs). |
 
 ## Limits and evidence

@@ -58,6 +58,7 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("diff_tensors", "get", "/api/diff/tensors"),
     ("diff_traces", "get", "/api/diff/traces"),
     ("diff_behavior", "get", "/api/diff/behavior"),
+    ("crosscoder_diff", "get", "/api/crosscoders/{id}"),
     (
         "request_publish",
         "post",
@@ -407,6 +408,11 @@ impl Route {
         for name in &self.path_params {
             let value = args.remove(name).ok_or("missing path argument")?;
             let value = match name.as_str() {
+                "id" if self.schema["properties"][name]["format"] == "sha256" => value
+                    .as_str()
+                    .filter(|id| brewery_worker::is_digest(id))
+                    .ok_or("id must be a SHA-256 digest")?
+                    .to_owned(),
                 "id" => {
                     let id = value.as_str().ok_or("id must be a controller UUID")?;
                     uuid::Uuid::try_parse(id)
