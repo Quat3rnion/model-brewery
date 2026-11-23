@@ -20,7 +20,7 @@ const HEADER_BYTES: u64 = 4 << 20;
 pub(super) struct Receipt {
     id: String,
     sha256: String,
-    format: String,
+    pub format: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     shards: Vec<(String, String)>,
 }
@@ -33,15 +33,20 @@ pub(super) struct Checkpoint {
 
 pub(super) struct Entry {
     pub name: String,
-    shape: Vec<u64>,
-    dtype: String,
+    pub shape: Vec<u64>,
+    pub dtype: String,
     offset: u64,
     file: usize,
 }
 
 impl Checkpoint {
-    pub fn open(
+    pub fn open(input: Input<'_>, cancelled: &mut impl FnMut() -> Result<()>) -> Result<Self> {
+        Self::open_bounded(input, MAX_TOTAL_BYTES, cancelled)
+    }
+
+    pub fn open_bounded(
         (id, path, kind, expected): Input<'_>,
+        max_bytes: u64,
         cancelled: &mut impl FnMut() -> Result<()>,
     ) -> Result<Self> {
         let paths = if kind == "hf" {
@@ -80,7 +85,7 @@ impl Checkpoint {
                 .checked_add(metadata.len())
                 .context("Checkpoint size overflow")?;
             ensure!(
-                size <= MAX_TOTAL_BYTES,
+                size <= max_bytes,
                 "Checkpoint exceeds the spectral job byte limit"
             );
             let shard = files.len();
@@ -171,6 +176,24 @@ impl Checkpoint {
         Ok(())
     }
 
+    // Lineage only compares checkpoints with the same floating-point storage.
+    // Avoid interpreting rounding differences between representations as edits.
+    pub fn read_float_tile(
+        &mut self,
+        key: &str,
+        offset: usize,
+        len: usize,
+        raw: &mut Vec<u8>,
+    ) -> Result<()> {
+        let t = &self.entries[key];
+        let width = float_width(&t.dtype).context("Lineage requires floating-point weights")?;
+        let fd = &mut self.files[t.file].0;
+        raw.resize(len * width, 0);
+        fd.seek(SeekFrom::Start(t.offset + (offset * width) as u64))?;
+        fd.read_exact(raw)?;
+        Ok(())
+    }
+
     pub fn measure(
         &mut self,
         key: &str,
@@ -232,6 +255,14 @@ impl Checkpoint {
         })?;
         result.metrics = Some(metrics);
         Ok(Some(result))
+    }
+}
+
+pub(super) fn float_width(dtype: &str) -> Option<usize> {
+    match dtype {
+        "F32" => Some(4),
+        "F16" | "BF16" => Some(2),
+        _ => None,
     }
 }
 

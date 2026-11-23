@@ -6,6 +6,7 @@
   import { weightAccess } from '../lib/weight-access';
   import HostSelect from '../components/HostSelect.svelte';
   import HfDownload from '../components/HfDownload.svelte';
+  import Lineage from '../components/Lineage.svelte';
   import { hashParam, route } from '../lib/route.svelte';
   import Combobox from '../components/Combobox.svelte';
   import { hostOptions, nameSuggestions } from '../lib/pickers';
@@ -213,6 +214,7 @@
   </div>
 
   <HfDownload />
+  <Lineage {models} />
   <section class="panel" aria-labelledby="reg-h">
     <header><h2 id="reg-h">Register an entry</h2></header>
     <WorkflowGate workflow="register_manual">

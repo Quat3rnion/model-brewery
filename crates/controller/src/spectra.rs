@@ -179,7 +179,7 @@ fn resolve(app: &App, store: &Store, id: &str, format: Option<Format>) -> Result
     Ok((model, pin, None))
 }
 
-fn allow_library(app: &App, store: &Store, model: &Model) -> Result<()> {
+pub(crate) fn allow_library(app: &App, store: &Store, model: &Model) -> Result<()> {
     let path = Path::new(&model.path);
     if store.is_scratch_path(path)
         || store.scratch_root().starts_with(path)

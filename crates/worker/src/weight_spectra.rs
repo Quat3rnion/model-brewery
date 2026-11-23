@@ -5,8 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path};
 
+mod lineage;
 mod math;
 mod source;
+pub use lineage::{MAX_CANDIDATES, lineage};
 use source::Checkpoint;
 
 pub const JOB: &str = "weight_spectra";

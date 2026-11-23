@@ -30,6 +30,9 @@ locality loss and higher perplexity. Missing measurements are not passes.
 Use `weight_spectra` for weight health. Select a layer or tensor. Read the
 job with `get_job`. Report the input hashes and whether the spectrum is
 exact or approximate. Do not use a power-law fit as a publish check.
+Use `lineage` for a read-only Library comparison. For a possible merge,
+select a base and two parent candidates. Report the score and evidence
+as a hypothesis, not proof of provenance. A null result names no base.
 Use `request_publish` only if the user asks and after reviewing the checks.
 Report any integrity or program correctness failure as a blocker. Say
 "not release-qualified" when reporting experiment results.

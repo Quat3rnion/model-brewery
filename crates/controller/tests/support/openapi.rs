@@ -80,6 +80,7 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/mcp", "getMcpStream"),
         ("post", "/mcp", "sendMcpMessage"),
         ("get", "/api/models", "listModels"),
+        ("get", "/api/models/{id}/lineage", "readLineage"),
         ("post", "/api/models", "createModel"),
         (
             "post",

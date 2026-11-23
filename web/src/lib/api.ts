@@ -73,6 +73,10 @@ export const api = {
   // Only job detail includes the submission-time prompt_text.
   job: (id: string, signal?: AbortSignal) => request<JobDetail>('GET', `/api/jobs/${encodeURIComponent(id)}`, undefined, signal),
   addModel: (model: NewModel) => request<Model>('POST', '/api/models', model),
+  lineage: (id: string, candidates: string[], signal?: AbortSignal) => {
+    const query = new URLSearchParams(candidates.map((candidate, i) => [`candidate_${i + 1}`, candidate]));
+    return request<import('./lineage').LineageReport>('GET', `/api/models/${encodeURIComponent(id)}/lineage?${query}`, undefined, signal);
+  },
   removeModel: (id: string) => request<void>('DELETE', `/api/models/${encodeURIComponent(id)}`),
   addPrompt: (prompt: NewPrompt) => request<Prompt>('POST', '/api/prompts', prompt),
   updatePrompt: (id: string, prompt: NewPrompt) => request<Prompt>('PUT', `/api/prompts/${encodeURIComponent(id)}`, prompt),

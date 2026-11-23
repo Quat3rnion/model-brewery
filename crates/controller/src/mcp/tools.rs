@@ -16,6 +16,7 @@ const WAIT_MS_MAX: u64 = 5000;
 // Never select a route from a client-supplied URL, method or operation ID.
 const ROUTES: &[(&str, &str, &str)] = &[
     ("list_models", "get", "/api/models"),
+    ("lineage", "get", "/api/models/{id}/lineage"),
     ("register_model", "post", "/api/models"),
     ("list_scratch", "get", "/api/scratch"),
     ("get_scratch", "get", "/api/scratch/{id}"),
