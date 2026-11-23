@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { SvelteMap } from 'svelte/reactivity';
   import Advanced from '../components/Advanced.svelte';
   import { brewery } from '../lib/store.svelte';
   import { Submitter } from '../lib/submit.svelte';
@@ -26,7 +27,7 @@
   import { hostWorkflowEligibility } from '../lib/eligibility';
   import { validSha } from '../lib/ggufSource';
   import { hashParam, route } from '../lib/route.svelte';
-  import type { EligibilityEntry, Host, Workflow } from '../lib/types';
+  import type { EligibilityEntry, Host, JobSummary, Workflow } from '../lib/types';
   import Blockers from '../components/Blockers.svelte';
   import FieldError from '../components/FieldError.svelte';
   import WorkflowGate from '../components/WorkflowGate.svelte';
@@ -139,6 +140,7 @@
   });
   const recipeStarter = new ConversionStarter('convert.recipe');
   const recipeReadAttempts = new PlainAttempt();
+  const recipeReads = new SvelteMap<string, JobSummary>();
   function selectRecipeSource(id: string) {
     if (id === layerSource) return;
     layerSource = id;
@@ -340,7 +342,7 @@
         {#if recipeSource}
           {#key recipeKey}
             <LayerRecipe source={recipeSource} format={recipeFormat} starter={recipeStarter}
-              readAttempts={recipeReadAttempts} bind:draft={recipeDraft} />
+              readAttempts={recipeReadAttempts} acceptedReads={recipeReads} bind:draft={recipeDraft} />
           {/key}
         {:else}
           <p class="hint">Select a source to see if it supports a layer recipe.</p>

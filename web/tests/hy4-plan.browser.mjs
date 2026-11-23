@@ -58,7 +58,7 @@ try {
   assert.equal(writes.length, 0);
   await button.click();
   await page.getByRole('alert').filter({ hasText: 'Response interrupted' }).waitFor();
-  await button.click();
+  await button.press('Enter');
   const link = panel.getByRole('link', { name: /job result/i });
   await link.waitFor();
   assert.equal(await link.getAttribute('href'), '#/jobs/plan-job');

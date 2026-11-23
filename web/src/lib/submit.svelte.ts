@@ -1,60 +1,81 @@
-import { api, submissionError } from './api';
+import { api, rejectedSubmission, submissionError } from './api';
 import { brewery } from './store.svelte';
 import type { JobSummary, NewJob } from './types';
-import { PlainAttempt, requestKey } from './submission-key';
+import { PlainAttempt, RequestHistory, requestKey } from './submission-key';
 import { route } from './route.svelte';
 import { captureResultFocus } from './focus';
 
 type AcceptedJob = JobSummary | Pick<JobSummary, 'id'>;
-type Click = Pick<MouseEvent, 'detail'> & Partial<Pick<PointerEvent, 'pointerId' | 'pointerType' | 'button'>>;
-type ClickStep = { detail: number; pointer: number; repeat: boolean; consumed: boolean };
+type Click = Pick<MouseEvent, 'detail'> & Partial<Pick<PointerEvent, 'pointerType' | 'button'>>;
+type ClickStep = { detail: number; previousLauncher?: string; launcher?: string };
 const pointerClicks = new Map<string, ClickStep>();
 const clickSteps = new WeakMap<Click, ClickStep>();
-const clickStream = (event: Click) => `${event.pointerType ?? 'mouse'}:${event.button ?? 0}`;
+const disabledPresses = new Map<string, { ended: boolean }>();
+const clickStream = (event: Click) => `${event.pointerType || 'mouse'}:${event.button ?? 0}`;
 
 function clickStep(event: Click): ClickStep | undefined {
   if (event.detail <= 0) return;
   const seen = clickSteps.get(event);
   if (seen) return seen;
   const stream = clickStream(event);
-  const pointer = event.pointerId ?? 0;
+  disabledPresses.delete(stream);
   const prior = pointerClicks.get(stream);
-  const repeat = event.detail > 1 && prior?.pointer === pointer && prior.detail === event.detail - 1 && prior.consumed;
-  const step = { detail: event.detail, pointer, repeat, consumed: false };
+  const step = {
+    detail: event.detail,
+    previousLauncher: event.detail > 1 && prior?.detail === event.detail - 1 ? prior.launcher : undefined,
+  };
   pointerClicks.set(stream, step);
   clickSteps.set(event, step);
   return step;
 }
 
 if (typeof window !== 'undefined') {
-  // Observe non-submit clicks and presses on disabled controls, which can
-  // suppress the click entirely. Neither has consumed a submit activation.
+  // If a disabled press ends without a click, reset before the next press.
+  // Blink can still click a button that was disabled on down but enabled on up.
   window.addEventListener('click', clickStep, { capture: true });
   window.addEventListener('pointerdown', event => {
-    if (event.target instanceof Element && event.target.closest(':disabled')) {
-      pointerClicks.delete(clickStream(event));
+    const stream = clickStream(event);
+    if (disabledPresses.get(stream)?.ended) pointerClicks.delete(stream);
+    disabledPresses.delete(stream);
+    if (event.target instanceof Element && event.target.closest(':disabled')) disabledPresses.set(stream, { ended: false });
+  }, { capture: true });
+  window.addEventListener('pointerup', event => {
+    const press = disabledPresses.get(clickStream(event));
+    if (press) press.ended = true;
+  }, { capture: true });
+  window.addEventListener('pointercancel', event => {
+    for (const stream of disabledPresses.keys()) {
+      if (!stream.startsWith(`${event.pointerType || 'mouse'}:`)) continue;
+      disabledPresses.delete(stream);
+      pointerClicks.delete(stream);
     }
   }, { capture: true });
 }
 
 /** Do not follow a read result link that appears under a repeat submit click. */
-export function guardReadLink(event: MouseEvent): void {
+export function guardReadLink(event: MouseEvent, launcher: string): void {
   const step = clickStep(event);
-  if (step?.repeat) {
-    step.consumed = true;
+  if (step?.previousLauncher === launcher) {
+    step.launcher = launcher;
     event.preventDefault();
   }
 }
 
+const DOUBLE_CLICK_MS = 800;
+const recent = new RequestHistory<{ sent: number; accepted?: number }>();
+let recentVisit: (() => boolean) | undefined;
+
 /**
  * Submission rules:
- * 1. Use the native click count, not elapsed time. A repeat click (detail > 1)
- *    cannot queue again after a submit in that pointer sequence, even if the
- *    control or request changes. If the preceding click was disabled or blocked
- *    and did not reach an enabled submit, the repeat may queue.
- * 2. Identify a request by launcher ID and its wire body, not UI metadata.
- *    Keep each key until acceptance is confirmed in this visit. A retry uses
- *    its original key even after other sends. A different body gets its own key.
+ * 1. Suppress a native repeat click (detail > 1) if the previous click reached
+ *    an enabled submit of the same launcher, even if the body changed. Touch
+ *    contacts in one sequence can have different pointer IDs. A disabled press
+ *    only clears the sequence if it ends without dispatching a click.
+ * 2. Also suppress the same launcher and wire body within 800 ms of send or
+ *    acceptance, a conservative bound for the platform double-click window.
+ *    A keyboard activation (detail = 0) only uses the acceptance window.
+ * 3. Reuse the key for an unconfirmed request on this visit, subject to bounded
+ *    history. Acceptance and definitive pre-enqueue rejections discard the key.
  */
 export class Submission {
   busy = $state(false);
@@ -69,21 +90,38 @@ export class Submission {
     event?: Click,
   ): Promise<Result | null> {
     const step = event && clickStep(event);
-    if (step?.repeat) {
-      step.consumed = true;
+    if (step?.previousLauncher === launcher) {
+      step.launcher = launcher;
       return null;
     }
     if (this.busy) return null;
 
-    const plain = this.attempts.take(launcher, body, route.capture().current);
+    const current = route.capture().current;
+    if (!recentVisit?.()) {
+      recent.clear();
+      recentVisit = current;
+    }
+    const request = requestKey(launcher, body);
+    const last = recent.get(request);
+    const now = performance.now();
+    const since = event?.detail === 0 ? last?.accepted : Math.max(last?.sent ?? -Infinity, last?.accepted ?? -Infinity);
+    if (step) step.launcher = launcher;
+    if (event && since !== undefined && now - since < DOUBLE_CLICK_MS) return null;
+
+    const plain = this.attempts.takeRequest(request, current);
+    recent.set(request, { sent: now, accepted: last?.accepted });
     this.busy = true;
     this.error = null;
-    if (step) step.consumed = true;
     try {
       const result = await post(body, plain.key);
       plain.complete();
+      if (current()) {
+        // A different submitter can send the same body before this reply arrives.
+        recent.set(request, { sent: recent.get(request)?.sent ?? now, accepted: performance.now() });
+      }
       return result;
     } catch (e) {
+      if (rejectedSubmission(e)) plain.complete();
       this.error = submissionError(e);
       return null;
     } finally {

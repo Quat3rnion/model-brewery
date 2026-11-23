@@ -204,9 +204,10 @@ try {
   const receipt = page.getByRole('article', { name: /Standalone weights.*GGUF layer recipe/ });
   await receipt.getByRole('link', { name: 'Verify job verify-stage' }).waitFor();
   assert.equal(await receipt.getByRole('link', { name: /in the Library/ }).count(), 0, 'convert completion is not registration');
+  await new Promise(resolve => setTimeout(resolve, 850));
   await runButton.click();
   await page.getByText(/Started conversion second-layer-workflow/).waitFor();
-  assert.equal(requests.length, 2, 'a second plain submission queues new work');
+  assert.equal(requests.length, 2, 'a deliberate submission outside the duplicate window queues new work');
   assert.notEqual(requests[1].key, requests[0].key);
   assert.deepEqual(requests[1].request, requests[0].request);
   verified = true;

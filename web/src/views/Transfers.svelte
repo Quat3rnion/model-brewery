@@ -185,6 +185,7 @@
         {/if}
       </fieldset>
       <SelectionReview {missing} acknowledge={(shown) => selection.remove(shown)}
+        focusRestored={() => checklist?.querySelector('legend')}
         focusRemaining={() => checklist?.querySelector<HTMLElement>('input:checked') ?? checklist?.querySelector('legend')} />
       <div class="row actions">
         <button type="button" class="btn" aria-describedby={copyBlockers.length || previewHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={preview.busy}

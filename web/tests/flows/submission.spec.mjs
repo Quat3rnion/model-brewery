@@ -18,12 +18,12 @@ function gate() {
 
 async function submit(page, label, path = '/api/jobs') {
   const pending = page.waitForResponse(r => r.url().endsWith(path) && r.request().method() === 'POST');
-  await button(page, label).click();
+  await button(page, label).press('Enter');
   const response = await pending;
   return [response.status(), (await response.json()).id];
 }
 
-test('Each confirmed Inspect press queues new work', async ({ page, controller: c }) => {
+test('Separate Inspect presses outside the duplicate window queue new work', async ({ page, controller: c }) => {
   const accepted = new Map();
   c.respond('POST', '/api/jobs', ({ body, headers }) => {
     const key = headers['idempotency-key'];
@@ -36,6 +36,7 @@ test('Each confirmed Inspect press queues new work', async ({ page, controller: 
     await queue.click();
     await expect.poll(() => posts(c).length).toBe(i);
     await expect(queue).toBeEnabled();
+    if (i === 1) await new Promise(resolve => setTimeout(resolve, 850));
   }
   expect(posts(c)[0].body).toEqual(posts(c)[1].body);
   expect([...accepted.values()].map(j => j.id)).toEqual(['inspect-1', 'inspect-2']);
@@ -55,7 +56,7 @@ test('Transfer preview resends with its unconfirmed key', async ({ page: p, cont
   });
   await button(p, 'Preview').click();
   await expect(p.getByRole('alert')).toContainText(/without reloading/);
-  await button(p, 'Preview').click();
+  await button(p, 'Preview').press('Enter');
   await expect.poll(() => posts(c).length).toBe(2);
   const [a, b] = posts(c);
   expect(b.body).toEqual(a.body);
@@ -146,7 +147,7 @@ for (const [kind, action] of [
   }
   await button(page, action).click();
   await expect(page.getByRole('alert').filter({ hasText: 'Reply lost.' })).toBeVisible();
-  await button(page, action).click();
+  await button(page, action).press('Enter');
   await expect.poll(() => posts(c).length).toBe(2);
   const [first, second] = posts(c);
   expect(second.body).toEqual(first.body);
@@ -154,7 +155,7 @@ for (const [kind, action] of [
   expect(second.headers['idempotency-key']).toBe(first.headers['idempotency-key']);
 });
 
-test('Weight Apply resends after a lost reply and does not apply a completed proposal twice', async ({ page, controller }) => {
+for (const lost of [true, false]) test(`Weight Apply does not requeue a reviewed proposal after ${lost ? 'a matched retry' : 'a 201'}`, async ({ page, controller }) => {
   const state = scenario('weight-reads');
   const proposalId = '6ecf76ee-0473-4544-ac77-106a37c05ddd';
   const proposal = detail(job(proposalId, 'weight_propose', { state: 'succeeded', input_ids: ['gguf-a'] }), {
@@ -165,7 +166,7 @@ test('Weight Apply resends after a lost reply and does not apply a completed pro
   controller.respond('GET', `/api/jobs/${proposalId}`, { json: proposal });
   controller.respond('GET', '/api/state', () => ({ json: state }));
   let finished;
-  await page.route('**/api/jobs', async route => {
+  if (lost) await page.route('**/api/jobs', async route => {
     const response = await route.fetch();
     expect(response.status()).toBe(201);
     finished = detail(job((await response.json()).id, 'weight_apply', {
@@ -178,8 +179,10 @@ test('Weight Apply resends after a lost reply and does not apply a completed pro
   const review = page.getByRole('checkbox', { name: /I reviewed all/ });
   await review.check();
   const action = 'Apply as new GGUF';
-  await button(page, action).click();
-  await expect(page.getByRole('alert').filter({ hasText: 'Accepted reply lost.' })).toBeVisible();
+  if (lost) {
+    await button(page, action).click();
+    await expect(page.getByRole('alert').filter({ hasText: 'Accepted reply lost.' })).toBeVisible();
+  }
   let release;
   const held = new Promise(resolve => { release = resolve; });
   await page.route('**/api/jobs', async route => {
@@ -193,20 +196,28 @@ test('Weight Apply resends after a lost reply and does not apply a completed pro
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     release();
     const accepted = await match;
-    expect([accepted.status(), (await accepted.json()).id]).toEqual([200, finished.id]);
-    await expect(page.getByRole('link', { name: finished.id, exact: true })).toBeFocused();
+    if (lost) expect([accepted.status(), (await accepted.json()).id]).toEqual([200, finished.id]);
+    else {
+      expect(accepted.status()).toBe(201);
+      finished = detail({ ...(await accepted.json()), state: 'succeeded' });
+    }
+    const status = page.getByText(/^(?:This request was already queued|Queued) as job /);
+    await expect(status.getByRole('link', { name: finished.id, exact: true })).toBeFocused();
+    await expect(button(page, action)).toBeDisabled({ timeout: 1500 });
   } finally { release(); }
-  await expect(page.getByText('No second job was queued.', { exact: false })).toBeVisible();
   const [first, second] = posts(controller);
-  expect(first.body).toEqual(second.body);
   expect(key(first)).toMatch(/^conv-/);
-  expect(key(first)).toBe(key(second));
+  if (lost) {
+    await expect(page.getByText('No second job was queued.', { exact: false })).toBeVisible();
+    expect(first.body).toEqual(second.body);
+    expect(key(first)).toBe(key(second));
+  }
   state.jobs.push(finished);
   controller.respond('GET', `/api/jobs/${finished.id}`, { json: finished });
   await page.evaluate(() => window.dispatchEvent(new Event('online')));
   await expect(page.getByText(/^Applied by/).getByRole('link')).toHaveText(finished.id);
   await expect(button(page, action)).toHaveCount(0);
-  expect(posts(controller)).toHaveLength(2);
+  expect(posts(controller)).toHaveLength(lost ? 2 : 1);
 });
 
 for (const mode of ['inventory', 'tile']) {
@@ -272,12 +283,40 @@ test('Library shows a download accepted after focus moves', async ({ page: p, co
     await expect(p.locator('#hf-revision')).toBeFocused();
     await expect(p).toHaveURL(url);
     expect(posts(c)).toHaveLength(1);
+    await new Promise(resolve => setTimeout(resolve, 850));
     await button(p, 'Start download').click();
     await expect.poll(() => posts(c).length).toBe(2);
     const [a, b] = posts(c);
     expect(b.body).toEqual(a.body);
     expect(key(b)).not.toBe(key(a));
     await expect(p).toHaveURL(/#\/jobs\/job-mock-2$/);
+  } finally { hold.release(); }
+});
+
+for (const moved of [false, true]) test(`Job detail ${moved ? 'keeps the operator’s focus' : 'keeps heading focus'} after a delayed download detail`, async ({ page, controller }) => {
+  const state = scenario('live-shaped');
+  state.hosts.push({ ...state.hosts[0], id: 'backend-hf', capabilities: { hf_download: true } });
+  controller.respond('GET', '/api/state', { json: state });
+  const hold = gate();
+  await page.route('**/api/jobs/job-mock-1', async route => {
+    const response = await route.fetch();
+    await hold.pending;
+    await route.fulfill({ response });
+  });
+  await controller.open(page);
+  await page.getByText('Download from Hugging Face', { exact: true }).click();
+  await page.locator('#hf-repo').fill('fixture/model');
+  await page.locator('#hf-filename').fill('model.gguf');
+  try {
+    await button(page, 'Start download').press(moved ? 'Space' : 'Enter');
+    await expect(page.getByRole('heading', { name: 'Job job-mock-1', exact: true })).toBeFocused();
+    const library = page.getByRole('navigation').getByRole('link', { name: 'Library' });
+    if (moved) await library.focus();
+    hold.release();
+    const ready = page.getByRole('heading', { name: 'Download from Hugging Face', exact: true });
+    await expect(ready).toBeVisible();
+    await expect(moved ? library : ready).toBeFocused({ timeout: 1500 });
+    expect(posts(controller)).toHaveLength(1);
   } finally { hold.release(); }
 });
 

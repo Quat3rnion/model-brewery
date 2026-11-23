@@ -28,27 +28,29 @@
   import Blockers from './Blockers.svelte';
   import Submit from './Submit.svelte';
   import SubmitStatus from './SubmitStatus.svelte';
-  import { acceptedJobSummary, guardReadLink, Submitter } from '../lib/submit.svelte';
+  import { acceptedJobSummary, guardReadLink, jobRequestKey, Submitter } from '../lib/submit.svelte';
   import { captureResultFocus } from '../lib/focus';
   import { trellisProblem } from '../lib/trellis-layer';
   import { bodyKey, type PlainAttempt } from '../lib/submission-key';
 
-  let { source, format, starter, readAttempts, draft = $bindable() }: {
-    source: Model; format: 'gguf' | 'hgn'; starter: ConversionStarter; readAttempts: PlainAttempt; draft: RecipeDraft;
+  let { source, format, starter, readAttempts, acceptedReads, draft = $bindable() }: {
+    source: Model; format: 'gguf' | 'hgn'; starter: ConversionStarter; readAttempts: PlainAttempt;
+    acceptedReads: SvelteMap<string, JobSummary>; draft: RecipeDraft;
   } = $props();
 
-  const submitted = new SvelteMap<number, JobSummary>();
+  const launcher = 'convert.recipe.inventory';
   const loaded = new SvelteMap<string, JobDetail | 'rejected' | null>();
   const attempted = new Map<string, Date | null>();
-  const reads = new Submitter('convert.recipe.inventory', untrack(() => readAttempts));
+  const reads = new Submitter(launcher, untrack(() => readAttempts));
   let error = $state('');
   const host = $derived(brewery.state?.hosts.find(h => h.id === source.host));
   const blocked = $derived(inventoryBlocker(source, host));
   const expectedSha = $derived(source.kind === 'hf'
     ? validSha(source.bundle_sha256) ?? validSha(source.sha256)
     : validSha(source.sha256));
-  const currentJobs = $derived([...submitted.values()].flatMap(job =>
-    job ? [brewery.state?.jobs.find(j => j.id === job.id) ?? job] : []));
+  const currentJobs = $derived([...acceptedReads.values()]
+    .filter(job => job.host === source.host && job.input_ids[0] === source.id)
+    .map(job => brewery.state?.jobs.find(j => j.id === job.id) ?? job));
   // Terminal inventory jobs may be reused only after their receipts have been
   // checked. The exporter verifies those bytes again before it writes.
   const jobs = $derived([
@@ -71,9 +73,11 @@
 
   async function readLayers(event: MouseEvent) {
     const next = inventory.need;
-    if (flash || blocked || error || !next || submitted.has(next.offset)) return;
+    if (flash || blocked || error || !next) return;
     const { offset, sha } = next;
     const request = inventoryJob(source.id, source.host, offset, sha);
+    const key = jobRequestKey(launcher, request);
+    if (acceptedReads.has(key)) return;
     const focus = captureResultFocus(event);
     const accepted = await reads.submit(request, event, false);
     if (!accepted) return;
@@ -83,7 +87,7 @@
         error = 'The inventory job does not match the selected source.';
         return;
       }
-      submitted.set(offset, job);
+      acceptedReads.set(key, job);
     }
     record(acceptedJobSummary(accepted, request));
     void focus?.(() => readLink);
@@ -228,7 +232,7 @@
 <p class="hint">Supported architectures: {format === 'gguf' ? 'GPT-2 and Qwen2' : 'dense Llama and Qwen2'}. The exporter checks the architecture and assets before it writes output.</p>
 {#if readJob && !flash}
   <div class="row" role="status">
-    <a bind:this={readLink} href="#/jobs/{encodeURIComponent(readJob.id)}" onclick={guardReadLink}>Layer read job</a>
+    <a bind:this={readLink} href="#/jobs/{encodeURIComponent(readJob.id)}" onclick={(event) => guardReadLink(event, launcher)}>Layer read job</a>
     <JobState job={readJob} />
   </div>
 {/if}

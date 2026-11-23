@@ -3,10 +3,11 @@
   import { focusAfterRemoval } from '../lib/focus';
 
   type Omission = { id: string; label: string };
-  let { missing, acknowledge, focusRemaining }: {
+  let { missing, acknowledge, focusRemaining, focusRestored }: {
     missing: readonly Omission[];
     acknowledge: (shown: readonly Omission[]) => void;
     focusRemaining: () => HTMLElement | null | undefined;
+    focusRestored: () => HTMLElement | null | undefined;
   } = $props();
 
   const ids = $derived(JSON.stringify(missing.map(item => item.id).sort()));
@@ -18,7 +19,8 @@
     if (previous !== document.activeElement) return;
     void tick().then(() => {
       if (!previous?.isConnected && document.activeElement === document.body) {
-        (reviewButton ?? focusRemaining())?.focus();
+        // A Space keyup must not toggle a restored selection.
+        (reviewButton ?? (spaceTarget ? focusRestored() : focusRemaining()))?.focus();
       }
     });
   });
@@ -34,6 +36,8 @@
     spaceTarget = undefined;
   }
 </script>
+
+<svelte:window onkeyup={(event) => { if (event.key === ' ') spaceTarget = undefined; }} />
 
 {#if missing.length}
   <!-- Replace the activation target when the IDs change. An in-progress press

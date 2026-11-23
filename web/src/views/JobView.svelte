@@ -76,18 +76,17 @@
 
 <div class="stack">
   <p class="small"><a href="#/queue">← All jobs</a></p>
+  <div class="head">
+    <div class="row">
+      <!-- Keep the focus target mounted when the loading title changes. -->
+      <h1 tabindex="-1">{#if notFound || !job}Job <span class="mono">{id}</span>{:else}{kindTitle(job.kind)}{/if}</h1>
+      {#if job && !notFound}<JobState {job} />{/if}
+    </div>
+    {#if job && !notFound}<p class="xs muted mono break">{job.id}</p>{/if}
+  </div>
   {#if notFound || !job}
-    <h1 tabindex="-1">Job <span class="mono">{id}</span></h1>
     {#if error}<p class="note bad" role="alert">{error}</p>{:else}<p class="muted">Loading…</p>{/if}
   {:else}
-    <div class="head">
-      <div class="row">
-        <h1 tabindex="-1">{kindTitle(job.kind)}</h1>
-        <JobState {job} />
-      </div>
-      <p class="xs muted mono break">{job.id}</p>
-    </div>
-
     {#if isActive(job.state)}
       <section class="panel">
         <div class="body stack">
