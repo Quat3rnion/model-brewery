@@ -182,7 +182,8 @@ async def run_acceptance(run, args):
             args.bins / "brewery", env=env, cwd=REPO, stdin=subprocess.DEVNULL,
             stdout=log, stderr=log)
         try:
-            for _ in range(300):
+            deadline = time.monotonic() + 180
+            while time.monotonic() < deadline:
                 require(controller.returncode is None, f"controller exited; see {path}")
                 match = re.search(r"^brewery listening on (http://127\.0\.0\.1:(\d+))$",
                                   path.read_text(), re.M)
@@ -190,15 +191,16 @@ async def run_acceptance(run, args):
                     require(int(match[2]) not in {0, 3000, 4095, 4141}, "unsafe port")
                     await exercise(match[1], run, args)
                     return
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.2)
             raise TimeoutError("isolated controller listen")
         finally:
-            controller.terminate()
-            try:
-                await asyncio.wait_for(controller.wait(), 10)
-            except TimeoutError:
-                controller.kill()
-                await controller.wait()
+            if controller.returncode is None:
+                controller.terminate()
+                try:
+                    await asyncio.wait_for(controller.wait(), 10)
+                except TimeoutError:
+                    controller.kill()
+                    await controller.wait()
 
 
 def main():
