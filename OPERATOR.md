@@ -1282,6 +1282,41 @@ For every write tool, set `idempotency_key` before the call. Use a new key
 for each intended write. Use the same key and arguments for a retry.
 The controller uses its normal admission, validation, and replay rules.
 
+Use `prune_model` with a scratch ID, its exact hash, and a `pruning` plan.
+The result is a new scratch child with a reversible delta. Rates use basis
+points: 1000 means 10%. The rate applies to each selected tensor or set of
+groups. It does not specify model-wide sparsity. The total size of the
+edited tensors cannot exceed 32 MiB.
+
+- `unstructured` ranks each listed matrix by absolute weight.
+- `mlp_neurons` ranks Qwen2 down-projection input columns by the sum of
+  absolute weights across each column. The mask zeros entire columns.
+- `attention_heads` ranks groups of columns in the Qwen2 attention output
+  projection by the sum of absolute weights. Set `heads` to
+  `num_attention_heads` from the source configuration. The mask zeros each
+  selected query head's contribution without changing shared key/value
+  heads.
+- `wanda_mlp` ranks Qwen2 neurons with a Wanda-style score. First convert
+  the parent to private GGUF. Run a trace of that exact parent with no
+  interventions. Select 1 to 64 consecutive `ffn_inp` positions from one
+  prompt at the requested layer. Set `rms_eps` to `rms_norm_eps` from the
+  source configuration. The editor applies RMS normalization to those
+  rows before using the activation norms to scale the absolute gate and
+  up weights. It zeros the selected down-projection columns.
+
+Dense masks do not reduce the model dimensions, file size, or compute cost
+in a dense runtime. Use the same private conversion, checks, and diffs as
+for a direct edit.
+
+Use `plan_experts` with a registered local GGUF and two independent
+`brewery.expert-activations.v1` JSON observations to generate a REAP map.
+The planner needs Python 3 at `/usr/bin/python3` on the controller. It
+checks the GGUF hash and does not run inference or write model weights.
+The plan is not proof of quality. Keep the exact map text and SHA-256.
+`prune_experts` accepts a reviewed map but returns 503 until a verified
+private scratch writer is available. It does not fall back to an operation
+that adds an unapproved revision to the Library.
+
 The server uses MCP protocol `2025-06-18`. It accepts one JSON-RPC message
 per POST. It does not keep sessions, open an MCP event stream, or offer a
 stdio transport. POST bodies are limited to 256 KiB. Tool data is limited

@@ -33,8 +33,12 @@ const LIMIT: u32 = 64;
 const PROVENANCE: &str = "provenance.json";
 #[path = "scratch_checks.rs"]
 mod checks;
+#[path = "scratch_experts.rs"]
+mod experts;
 #[path = "scratch_jobs.rs"]
 pub(crate) mod jobs;
+#[path = "scratch_prune.rs"]
+mod prune;
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,6 +86,10 @@ pub struct Provenance {
     worker: String,
     method: String,
     operations: Vec<Operation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pruning: Option<prune::Params>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pruning_trace: Option<prune::Evidence>,
     tensors: Vec<TensorInfo>,
     tool: String,
     tool_version: String,
@@ -125,6 +133,9 @@ pub fn router() -> Router<Arc<App>> {
         .route("/scratch", get(list).post(create))
         .route("/scratch/{id}", get(get_revision))
         .route("/scratch/{id}/edits", post(edit))
+        .route("/scratch/{id}/prune", post(prune::model))
+        .route("/scratch/experts/{id}/plan", post(experts::plan))
+        .route("/scratch/experts/{id}/prune", post(experts::prune))
         .route("/scratch/{id}/delta", get(delta))
         .route("/scratch/{id}/gguf", post(jobs::convert))
         .route("/scratch/{id}/checks", get(checks::get).post(checks::run))
@@ -376,6 +387,17 @@ fn build(
     operations: Vec<Operation>,
     key: Option<&Submission<'_>>,
 ) -> Mutation {
+    build_with_pruning(app, parent_id, supplied_pin, operations, None, key)
+}
+
+fn build_with_pruning(
+    app: &App,
+    parent_id: String,
+    supplied_pin: Option<String>,
+    operations: Vec<Operation>,
+    pruning: Option<prune::Params>,
+    key: Option<&Submission<'_>>,
+) -> Mutation {
     let (root, worker, source, expected, library_source, reserve) = {
         let store = app.store.lock().map_err(ApiError::storage)?;
         if store.scratch_count().map_err(ApiError::storage)? >= LIMIT {
@@ -438,7 +460,7 @@ fn build(
     let budget = bytes
         .saturating_add(reserve)
         .saturating_add(scratch::DELTA_OVERHEAD)
-        .saturating_add(if operations.is_empty() {
+        .saturating_add(if operations.is_empty() && pruning.is_none() {
             0
         } else {
             scratch::MAX_EDIT_BYTES
@@ -448,9 +470,24 @@ fn build(
             "not enough disk space for scratch and the configured reserve",
         ));
     }
+    let calibration = match &pruning {
+        Some(p) => p.calibration(app, &parent_id)?,
+        None => None,
+    };
     let id = id();
     let mut output = Uncommitted::new(root.join(&id))?;
-    let result = scratch::build(&source, &expected, &output.path, &operations).map_err(|e| {
+    let result = if let Some(p) = &pruning {
+        scratch::build_pruned(
+            &source,
+            &expected,
+            &output.path,
+            &p.plan,
+            calibration.as_ref().map(|c| c.rows.as_slice()),
+        )
+    } else {
+        scratch::build(&source, &expected, &output.path, &operations)
+    }
+    .map_err(|e| {
         if e.downcast_ref::<std::io::Error>().is_some() {
             ApiError::storage(e)
         } else {
@@ -464,13 +501,17 @@ fn build(
         revision_id: id.clone(),
         revision_sha256: result.sha256.clone(),
         worker,
-        method: if operations.is_empty() {
+        method: if pruning.is_some() {
+            "prune"
+        } else if operations.is_empty() {
             "copy"
         } else {
             "direct"
         }
         .into(),
         operations,
+        pruning,
+        pruning_trace: calibration.map(|c| c.evidence),
         tensors: result.tensors,
         tool: "brewery SafeTensors scratch editor".into(),
         tool_version: env!("CARGO_PKG_VERSION").into(),
@@ -558,7 +599,10 @@ fn change(
     if row.state != old {
         return Err(conflict("scratch state changed before commit"));
     }
-    if store.scratch_has_jobs(&id, None).map_err(ApiError::storage)? {
+    if store
+        .scratch_has_jobs(&id, None)
+        .map_err(ApiError::storage)?
+    {
         return Err(conflict("wait for active scratch jobs to finish"));
     }
     if new != Discarded {

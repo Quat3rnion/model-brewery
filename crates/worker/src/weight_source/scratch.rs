@@ -19,6 +19,7 @@ pub const DELTA_OVERHEAD: u64 = 8 + 64 + 64 + 8 + 4 + 32 * 16;
 const MAGIC: &[u8; 8] = b"BWDELTA1";
 
 pub mod diff;
+pub mod prune;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -200,6 +201,26 @@ pub fn build(
     dir: &Path,
     operations: &[Operation],
 ) -> Result<Output> {
+    build_inner(source, expected, dir, operations, None)
+}
+
+pub fn build_pruned(
+    source: &Path,
+    expected: &str,
+    dir: &Path,
+    plan: &prune::Plan,
+    activations: Option<&[Vec<f32>]>,
+) -> Result<Output> {
+    build_inner(source, expected, dir, &[], Some((plan, activations)))
+}
+
+fn build_inner(
+    source: &Path,
+    expected: &str,
+    dir: &Path,
+    operations: &[Operation],
+    pruning: Option<(&prune::Plan, Option<&[Vec<f32>]>)>,
+) -> Result<Output> {
     ensure!(crate::is_digest(expected), "expected a lowercase SHA-256");
     ensure!(
         operations.len() <= 32,
@@ -230,6 +251,14 @@ pub fn build(
         ensure!(native_tensor_name(op.name()), "invalid tensor name");
         groups.entry(op.name()).or_default().push(op);
     }
+    let masks = if let Some((plan, activations)) = pruning {
+        plan.masks(&mut child, &header, activations)?
+    } else {
+        BTreeMap::new()
+    };
+    for name in masks.keys() {
+        groups.entry(name.as_str()).or_default();
+    }
     let mut tensors = Vec::new();
     let mut records = Vec::new();
     let mut edited = 0;
@@ -249,6 +278,9 @@ pub fn build(
         let mut after = before.clone();
         for op in ops {
             op.apply(t, &mut after)?;
+        }
+        if let Some(mask) = masks.get(name) {
+            mask.apply(&mut after, editable_width(&t.dtype)?);
         }
         for (a, b) in before.iter_mut().zip(&after) {
             *a ^= *b;
@@ -270,11 +302,11 @@ pub fn build(
         });
     }
     ensure!(
-        operations.is_empty() || !records.is_empty(),
+        (operations.is_empty() && pruning.is_none()) || !records.is_empty(),
         "no stored weight changes"
     );
     child.sync_all()?;
-    let sha256 = if operations.is_empty() {
+    let sha256 = if records.is_empty() {
         expected.to_owned()
     } else {
         file_sha256(&mut child)?

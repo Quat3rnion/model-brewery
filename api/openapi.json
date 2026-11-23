@@ -380,6 +380,80 @@
         }
       }
     },
+    "/api/scratch/{id}/prune": {
+      "post": {
+        "operationId": "pruneScratch",
+        "summary": "Zero selected dense weights in a new scratch child",
+        "description": "Use the exact current scratch hash. A mask keeps tensor shapes and the model configuration. The fraction applies separately to each selected matrix or group set and rounds down. The existing 32 MiB edited tensor limit applies.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false, "required": ["sha256", "pruning"],
+          "properties": {"sha256": {"$ref": "#/components/schemas/ScratchHash"}, "pruning": {"$ref": "#/components/schemas/DensePruning"}}
+        }}}},
+        "responses": {
+          "200": {"$ref": "#/components/responses/ScratchRow"},
+          "201": {"$ref": "#/components/responses/ScratchRow"},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "503": {"$ref": "#/components/responses/ScratchBusy"}
+        }
+      }
+    },
+    "/api/scratch/experts/{id}/plan": {
+      "post": {
+        "operationId": "planScratchExperts",
+        "summary": "Propose a source-bound REAP map without changing model weights",
+        "description": "Use a registered GGUF on an enabled local editor. Submit independent calibration and held-out observations. This runs the existing REAP planner and returns its exact UTF-8 map text. It does not run inference, preview a write, or change the Library.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "requestBody": {"required": true, "x-brewery-max-body-bytes": 262144, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false, "required": ["source_sha256", "calibration", "held_out", "keep"],
+          "properties": {
+            "source_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "keep": {"type": "integer", "minimum": 1, "maximum": 1024},
+            "calibration": {"type": "string", "minLength": 1, "maxLength": 98304, "description": "Exact brewery.expert-activations.v1 JSON text for the calibration split. Byte limit: 96 KiB."},
+            "held_out": {"type": "string", "minLength": 1, "maxLength": 98304, "description": "Exact brewery.expert-activations.v1 JSON text for the held-out split. Byte limit: 96 KiB."}
+          }
+        }}}},
+        "responses": {
+          "200": {"description": "Exact proposed expert map with its SHA-256 and REAP planner identity.", "content": {"application/json": {"schema": {
+            "type": "object", "required": ["parent_id", "source_sha256", "plan", "plan_sha256", "planner_sha256", "expert_usage_sha256", "qualification"],
+            "properties": {"parent_id": {"$ref": "#/components/schemas/Id"}, "source_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+              "plan": {"type": "string", "maxLength": 131072}, "plan_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+              "planner_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "expert_usage_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+              "qualification": {"const": "not release-qualified"}}
+          }}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "413": {"$ref": "#/components/responses/PayloadTooLarge"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "503": {"description": "Local planner is busy or unavailable."}
+        }
+      }
+    },
+    "/api/scratch/experts/{id}/prune": {
+      "post": {
+        "operationId": "pruneScratchExperts",
+        "summary": "Apply a reviewed expert map to a private scratch child (pending writer)",
+        "description": "This returns 503 until a verified private scratch writer is available. It never invokes managed Library apply.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false, "required": ["plan", "plan_sha256", "reviewed"],
+          "properties": {"plan": {"type": "string", "minLength": 1, "maxLength": 131072, "description": "Use the exact plan text, including its final newline."},
+            "plan_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "reviewed": {"const": true}}
+        }}}},
+        "responses": {
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "503": {"description": "Verified private scratch writer is not available."}
+        }
+      }
+    },
     "/api/scratch/{id}/delta": {
       "get": {
         "operationId": "getScratchDelta",
@@ -1355,6 +1429,31 @@
           }}
         ]
       },
+      "DensePruningBasisPoints": {"type": "integer", "minimum": 1, "maximum": 9999, "description": "1000 means 10%. Ties use the lowest original index first."},
+      "DensePruningLayer": {"type": "integer", "minimum": 0, "maximum": 4095, "description": "Qwen2 layer index."},
+      "DensePruning": {
+        "oneOf": [
+          {"type": "object", "additionalProperties": false, "required": ["mode", "basis_points", "tensors"], "properties": {
+            "mode": {"const": "unstructured"}, "basis_points": {"$ref": "#/components/schemas/DensePruningBasisPoints"},
+            "tensors": {"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": {"type": "string"}, "description": "SafeTensors matrix names. Rank each matrix by absolute weight."}
+          }},
+          {"type": "object", "additionalProperties": false, "required": ["mode", "basis_points", "layer"], "properties": {
+            "mode": {"const": "mlp_neurons"}, "basis_points": {"$ref": "#/components/schemas/DensePruningBasisPoints"}, "layer": {"$ref": "#/components/schemas/DensePruningLayer"}
+          }},
+          {"type": "object", "additionalProperties": false, "required": ["mode", "basis_points", "layer", "heads"], "properties": {
+            "mode": {"const": "attention_heads"}, "basis_points": {"$ref": "#/components/schemas/DensePruningBasisPoints"}, "layer": {"$ref": "#/components/schemas/DensePruningLayer"},
+            "heads": {"type": "integer", "minimum": 2, "description": "Use num_attention_heads from the source model config, not num_key_value_heads."}
+          }},
+          {"type": "object", "additionalProperties": false, "required": ["mode", "basis_points", "layer", "trace", "rms_eps"], "properties": {
+            "mode": {"const": "wanda_mlp"}, "basis_points": {"$ref": "#/components/schemas/DensePruningBasisPoints"}, "layer": {"$ref": "#/components/schemas/DensePruningLayer"},
+            "rms_eps": {"type": "number", "exclusiveMinimum": 0, "maximum": 1, "description": "Use rms_norm_eps from the source Qwen2 config."},
+            "trace": {"type": "object", "additionalProperties": false, "required": ["id", "prompt", "start", "end"], "properties": {
+              "id": {"$ref": "#/components/schemas/Id"}, "prompt": {"type": "integer", "minimum": 0, "maximum": 3},
+              "start": {"type": "integer", "minimum": 0, "maximum": 4095}, "end": {"type": "integer", "minimum": 1, "maximum": 4096, "description": "Exclusive end. Supply 1 to 64 captured ffn_inp positions from an unmodified trace of the parent private GGUF."}
+            }}
+          }}
+        ]
+      },
       "ScratchDelta": {
         "type": "object", "required": ["schema", "parent_sha256", "revision_sha256", "changed_tensors", "changed_bytes", "delta_bytes", "delta_sha256"],
         "properties": {
@@ -1369,8 +1468,13 @@
         "properties": {
           "schema": {"const": "brewery.scratch-provenance.v1"}, "parent_id": {"$ref": "#/components/schemas/Id"},
           "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "revision_id": {"$ref": "#/components/schemas/Id"},
-          "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "worker": {"type": "string"}, "method": {"enum": ["copy", "direct"]},
+          "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "worker": {"type": "string"}, "method": {"enum": ["copy", "direct", "prune"]},
           "operations": {"type": "array", "items": {"$ref": "#/components/schemas/ScratchOperation"}},
+          "pruning": {"$ref": "#/components/schemas/DensePruning"},
+          "pruning_trace": {"type": "object", "required": ["gguf_sha256", "manifest_sha256", "lanternfish_sha256"], "properties": {
+            "gguf_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "manifest_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "lanternfish_sha256": {"$ref": "#/components/schemas/ScratchHash"}
+          }},
           "tensors": {"type": "array", "items": {"type": "object", "required": ["name", "shape", "dtype"], "properties": {
             "name": {"type": "string"}, "shape": {"type": "array", "items": {"type": "integer"}}, "dtype": {"enum": ["F32", "F16", "BF16"]}
           }}},

@@ -99,3 +99,39 @@ all metrics improved.
 The Trace list labels private scratch inputs `Removed entry` because
 they are not in the Library. The traces open and display their results.
 Use their job IDs to match them to the scratch revisions in the report.
+
+## Stage 5: pruning
+
+Use the same binaries and pinned CPU runtime as above. Give the script a
+new root under `/arboretum`:
+
+```sh
+TMPDIR=/arboretum/tmp python3 -B qualification/weight_space_pruning_acceptance.py \
+  --root /arboretum/w12-accept
+```
+
+The script uses the same held-out corpus for all dense cases. It applies
+10% and 30% unstructured masks to each of the three MLP matrices in
+Qwen2.5-0.5B-Instruct layer 8. It also runs separate layer 8 head,
+neuron, and Wanda-style neuron masks. It records W4 checks, the W5 tensor,
+trace, and behavior diffs, and the held-out perplexity curve. It deletes
+the private scratch copies after use. GSM8K is not run.
+
+The masks keep tensor shapes and configuration unchanged. Physical dense
+pruning needs a scratch artifact format that can pin the updated
+configuration and reverse or compare changes of shape. W3 uses a
+same-size XOR delta for one SafeTensors file.
+
+The tiny Qwen2MoE fixture uses synthetic observations to exercise REAP
+planning, not quality. The MCP plan keeps three of four experts at each
+routed layer. Apply returns 503 and does not create any artifact. The
+managed expert workflow in review can preview or reorder GGUF, but its
+apply adds a Library revision. It cannot be used for scratch. The offline
+GGUF writer can prune and verify, but does not produce scratch
+SafeTensors. The offline SafeTensors writer needs a separate configuration
+file and does not have an admitted private scratch verification path.
+Before MoE acceptance can run, a verified writer must emit a private
+scratch SafeTensors child and its pinned configuration, or the plan must
+approve a format-aware private GGUF child. The new child must pass
+integrity, generation, quality checks, and diffs without Library
+registration. These results are not release-qualified.
