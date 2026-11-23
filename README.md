@@ -6,7 +6,7 @@ Model Brewery is a Linux workbench for inspecting, editing, converting and evalu
 
 Model Brewery is a work in progress. [Issues](https://github.com/Quat3rnion/model-brewery/issues) and [pull requests](https://github.com/Quat3rnion/model-brewery/pulls) are welcome.
 
-**Start here:** [Install Model Brewery](INSTALL.md). The guide sets up a loopback user service, installs the three agent skills, and tells the installing agent to ask before adding extra worker hosts. You can start the controller without a GPU or a worker.
+**Start here:** [Install Model Brewery](INSTALL.md). The guide sets up a loopback user service, installs the agent skills, and tells the installing agent to ask before adding extra worker hosts. You can start the controller without a GPU or a worker.
 
 ## What you can do
 
@@ -63,4 +63,4 @@ For ROCmFPX formats and worker requirements, see [ROCmFPX GGUF qualification](qu
 - [Operator guide](OPERATOR.md): worker setup, supported formats, job rules, Settings and troubleshooting.
 - [Design guide](DESIGN.md): current web interface tokens, layout, interaction and accessibility patterns for contributors.
 - [API contract](api/openapi.json), [command-line client](tools/brewery-agent) and [MCP endpoint](OPERATOR.md#mcp-for-weight-space-work).
-- [Project skills](.opencode/skills/): workbench operation, calibration and benchmarking, and release qualification.
+- [Project skills](.opencode/skills/): workbench operation, weight-space work through MCP ([`brewery-weight-space`](.opencode/skills/brewery-weight-space/SKILL.md)), calibration and benchmarking, and release qualification.
