@@ -222,10 +222,11 @@ Settings page and current API contract before you make an authorized change.
 
 ## OpenCode skills
 
-The three project skills are already in `.opencode/skills/`. OpenCode can load
+The project skills are already in `.opencode/skills/`. OpenCode can load
 them by ID when it uses this clone:
 
 - `brewery-agent-operator`
+- `brewery-weight-space`
 - `brewery-calibration-benchmarks`
 - `brewery-release-qualification`
 
@@ -237,6 +238,7 @@ mkdir -p "$HOME/.config/opencode/skills"
 
 for skill in \
   brewery-agent-operator \
+  brewery-weight-space \
   brewery-calibration-benchmarks \
   brewery-release-qualification
 do

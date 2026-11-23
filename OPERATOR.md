@@ -1297,10 +1297,13 @@ The viewer keeps both reports separate; their order is not proof of a match.
 
 ## Agent interface
 
-Agents can operate the workbench without driving the browser. Start with
-[`AGENTS.md`](AGENTS.md) for the project skills. The running controller
-serves its [OpenAPI contract](api/openapi.json) at `GET /api/openapi.json`.
-Use the same loopback address and worker permissions as the web UI.
+Agents can operate the workbench without a browser. Use
+[`brewery-weight-space`](.opencode/skills/brewery-weight-space/SKILL.md) for
+traces, scratch edits, checks, and publish requests. See the
+[project skills](.opencode/skills/) for other workflows. The running
+controller serves its [OpenAPI contract](api/openapi.json) at
+`GET /api/openapi.json`. Use the same loopback address and worker permissions
+as the web UI.
 
 ### MCP for weight-space work
 

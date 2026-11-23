@@ -14,6 +14,7 @@ operator control.
 Contract: `tools/brewery-agent describe` (same as `GET /api/openapi.json`;
 source `api/openapi.json`). Help: `tools/brewery-agent COMMAND --help`.
 Job kinds, inputs, and options: `OPERATOR.md`, "Job rules".
+For weight-space experiments, use `brewery-weight-space`.
 
 ## Loop
 
@@ -77,7 +78,8 @@ file check is not generation or benchmark quality.
 | Goal | Job kind | Notes |
 | --- | --- | --- |
 | Move a bundle | `transfer_preview`, then `transfer` | Preview first: it shows missing bytes and free space. A preview is not transfer evidence. |
-| Trace two GGUFs | `compare` | Two `gguf` inputs, a prompt. |
+| Compare two GGUFs on GPU | `compare` | Two `gguf` inputs, a prompt, and GPU admission. |
+| Capture activations and logits on CPU | `trace` | One Library GGUF or scratch revision with private GGUF. |
 | Convert (default) | One conversion workflow | See "Convert a model" below. Do not queue the four stages by hand. |
 | Diagnose one stage | `inspect`, `plan`, `convert` or `verify` | Only when the user asks for one stage. `convert` writes a new directory. `host:"auto"` is for `convert` only. |
 | Generate / GSM8K | `generate`, `baseline`, `evaluate` | Need the operator opt-in on the host. Development subsets never count as release evidence. |
