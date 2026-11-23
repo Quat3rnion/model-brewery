@@ -9,6 +9,7 @@ use std::{
 pub const KINDS: &[&str] = &[
     "compare",
     brewery_worker::trace::JOB,
+    brewery_worker::sensitivity::JOB,
     "inspect",
     "plan",
     "convert",
@@ -666,6 +667,7 @@ impl Host {
                     | "benchmark"
                     | "hf_download"
                     | brewery_worker::trace::JOB
+                    | brewery_worker::sensitivity::JOB
                     | brewery_worker::exl3_layer::JOB
             ) || crate::weights::is_kind(kind);
             let enabled = options.remove(kind).unwrap_or(!opt_in)
@@ -679,6 +681,8 @@ impl Host {
                         "Configure Hugging Face downloads and opt in on this worker"
                     } else if kind == brewery_worker::trace::JOB {
                         "Configure pinned CPU Lanternfish and opt in on this worker"
+                    } else if kind == brewery_worker::sensitivity::JOB {
+                        "Configure pinned Lanternfish sensitivity and opt in on this worker"
                     } else if kind == brewery_worker::exl3_layer::JOB {
                         "Configure a native EXL3 helper and opt in on this worker"
                     } else if crate::weights::is_kind(kind) {
@@ -1076,8 +1080,8 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
                     && !host.scheduling_paused
                     && host.capabilities["weight_apply"]
                     && host.capabilities["weight_safetensors"]
-                    && (job.kind != brewery_worker::trace::JOB
-                        || host.capabilities[brewery_worker::trace::JOB])
+                    && (!matches!(job.kind.as_str(), brewery_worker::trace::JOB | brewery_worker::sensitivity::JOB)
+                        || host.capabilities[&job.kind])
             })
             .collect();
     }
@@ -1240,7 +1244,9 @@ impl NewJob {
         } else {
             match self.kind.as_str() {
                 "compare" => n == 2 && main == "gguf" && second == "gguf" && prompt.is_some(),
-                brewery_worker::trace::JOB => n == 1 && main == "gguf" && host == inputs[0].host,
+                brewery_worker::trace::JOB | brewery_worker::sensitivity::JOB => {
+                    n == 1 && main == "gguf" && host == inputs[0].host
+                }
                 "inspect" | "plan" | "convert" => (1..=5).contains(&n) && source,
                 "verify" => (2..=6).contains(&n) && source && second == "hgn",
                 "generate" => n == 1 && hgn(main) && prompt.is_some(),
@@ -1371,6 +1377,11 @@ fn check_options(job: &str, options: &Map<String, Value>, inputs: &[Model]) -> R
     // before enqueue and again by the scheduler before dispatch.
     if matches!(job, "benchmark" | brewery_worker::trace::JOB) {
         return Ok(());
+    }
+    if job == brewery_worker::sensitivity::JOB {
+        return brewery_worker::sensitivity::Request::parse(&Value::Object(options.clone()))
+            .map(|_| ())
+            .map_err(|err| format!("{err:#}"));
     }
     if job == "hf_download" {
         return brewery_worker::hf_download::Spec::parse(&Value::Object(options.clone()))

@@ -8,6 +8,7 @@ pub mod locate_edit;
 pub mod operational;
 pub mod resources;
 pub mod scratch_eval;
+pub mod sensitivity;
 pub mod source_grants;
 pub mod trace;
 pub mod weight_source;

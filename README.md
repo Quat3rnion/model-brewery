@@ -27,6 +27,7 @@ Agents and operators can read, change and test model weights. All changes go to 
 - **Merge models.** Use linear averages, task arithmetic, TIES, DARE-linear or DARE-TIES. See [Merge revisions](OPERATOR.md#merge-revisions).
 - **Prune.** Set weights to zero by magnitude, by MLP neuron, by attention head, or with a Wanda score. Plan REAP expert pruning for MoE models. Applying an expert plan to a scratch revision is not available yet.
 - **Use SAE features.** Train a TopK sparse autoencoder on the CPU or import a public one, read feature activations in a trace, and steer one feature. See [Sparse autoencoders](OPERATOR.md#sparse-autoencoders-saes).
+- **Measure tensor sensitivity.** Use empirical Fisher on the pinned W4 held-out corpus. Read tensor and layer scores in the Jobs heatmap or with MCP. See [Tensor sensitivity](OPERATOR.md#tensor-sensitivity).
 - **Compile programs.** Compile RASP programs with Tracr or ALTA into small standalone models, and check their outputs. See [Compiled programs](OPERATOR.md#compiled-programs).
 - **Check and compare.** Before an agent can request publication, the worker checks tensor integrity, loads and runs the model, measures target, paraphrase and locality scores on pinned CounterFact and zsRE subsets, and measures held-out perplexity. Compare two revisions by tensors, by traces or by behavior. See [Checks before a publish request](OPERATOR.md#checks-before-a-publish-request) and [Compare revisions and traces](OPERATOR.md#compare-revisions-and-traces).
 

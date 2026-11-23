@@ -7,6 +7,7 @@
   import ComponentEvidence from '../ComponentEvidence.svelte';
   import WeightReport from '../weights/WeightReport.svelte';
   import ConversionSummary from './ConversionSummary.svelte';
+  import SensitivityReport from './SensitivityReport.svelte';
   import { selectionFrom } from '../../lib/components';
   import { missingSuites, readBenchmarkReport, requestedOf } from '../../lib/benchmark';
   import { formatBytes, shortHash } from '../../lib/format';
@@ -31,6 +32,8 @@
   {:else}
     <p class="muted small">No result recorded.</p>
   {/if}
+{:else if kind === 'sensitivity' && result.schema_version === 1}
+  <SensitivityReport {result} />
 {:else}
   <div class="stack">
     {#if conversion}<ConversionSummary {job} {result} />{/if}

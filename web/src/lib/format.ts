@@ -208,6 +208,7 @@ const KIND_TITLES: Record<string, string> = {
   weight_tune: 'Weight tune proposal',
   weight_apply: 'Weight edit apply',
   trace: 'Activation trace',
+  sensitivity: 'Tensor sensitivity',
 };
 
 export function kindTitle(kind: string): string {

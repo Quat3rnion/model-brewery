@@ -201,6 +201,17 @@ else:
     if envelope["kind"] == "trace" and (root / "trace-interventions").exists():
         result.update(kind="trace", schema_version=1, model_id=envelope["inputs"][0]["id"],
                       model_sha256="a" * 64, prompts=[{}])
+    if action == "start" and envelope["kind"] == "sensitivity":
+        options = envelope["options"]
+        result = dict(kind="sensitivity", schema_version=1, qualification="not release-qualified",
+                      model_id=envelope["inputs"][0]["id"], model_sha256=options["model_sha256"],
+                      revision_sha256="b" * 64 if (root / "sensitivity-wrong-revision").exists()
+                      else options.get("revision_sha256", options["model_sha256"]),
+                      backend=options.get("backend", "cpu"), corpus_sha256=options["corpus_sha256"],
+                      observation_count=options.get("observations", 16), observations_sha256="a" * 64,
+                      executable_sha256="a" * 64, manifest_sha256="a" * 64,
+                      tensors=[dict(name="blk.0.attn_q.weight", layer=0, shape=[2, 2], fisher=0.25)],
+                      layers=[dict(layer=0, elements=4, fisher=0.25)])
     if action == "start" and envelope["kind"] == "hf_download":
         assert envelope["inputs"] == [] and "prompt" not in envelope
         options = envelope["options"]

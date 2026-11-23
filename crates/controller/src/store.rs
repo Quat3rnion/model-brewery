@@ -1011,6 +1011,19 @@ impl Store {
         if job.scratch_job && matches!(job.state, State::Failed | State::Cancelled) {
             crate::scratch::jobs::clean_failed_conversion(self, job);
         }
+        if job.state == State::Succeeded && job.kind == brewery_worker::sensitivity::JOB {
+            let envelope = self.envelope(&job.id)?;
+            match crate::sensitivity::check(job, &envelope, result.take().unwrap_or(Value::Null)) {
+                Ok(receipt) => result = Some(serde_json::to_value(receipt)?),
+                Err(error) => {
+                    eprintln!("Rejected sensitivity artifact for {}: {error}", job.id);
+                    job.state = State::Failed;
+                    job.progress = "Sensitivity artifact was not accepted".into();
+                    job.error = Some("Invalid sensitivity artifact".into());
+                    job.has_result = false;
+                }
+            }
+        }
         if job.state == State::Succeeded && job.kind == brewery_worker::exl3_layer::JOB {
             let receipt = result.as_ref().unwrap_or(&Value::Null);
             let envelope = self.envelope(&job.id)?;

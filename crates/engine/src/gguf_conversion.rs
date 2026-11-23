@@ -1,4 +1,4 @@
-mod inventory;
+pub(crate) mod inventory;
 mod layer_recipe;
 
 use crate::{
@@ -135,7 +135,12 @@ impl Tool {
     pub(crate) fn pinned_digest(
         work: &Path, var: &str, expected: &str, name: &str, label: &str,
     ) -> Result<Self> {
-        let configured = Tool::open(var)?;
+        Self::stage_digest(work, Tool::open(var)?, expected, name, label)
+    }
+
+    pub(crate) fn stage_digest(
+        work: &Path, configured: Self, expected: &str, name: &str, label: &str,
+    ) -> Result<Self> {
         ensure!(configured.sha == expected, "{label} SHA-256 mismatch");
         // Run private verified bytes, not the mutable configured pathname.
         // The tool cannot depend on libraries relative to the configured executable.
@@ -175,6 +180,12 @@ impl Tool {
     }
 
     pub(crate) fn capture(&self, cmd: &mut Command, work: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
+        self.capture_for(cmd, work, Duration::from_secs(12 * 3600))
+    }
+
+    pub(crate) fn capture_for(
+        &self, cmd: &mut Command, work: &Path, timeout: Duration,
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
         let mut out = tempfile::tempfile_in(work)?;
         let mut err = tempfile::tempfile_in(work)?;
         self.stamp.check(&self.path)?;
@@ -190,7 +201,7 @@ impl Tool {
                 .and_then(|o| err.metadata().map(|e| o.len().saturating_add(e.len())));
             if sampled.is_err()
                 || sampled? > LOG_LIMIT
-                || started.elapsed() >= Duration::from_secs(12 * 3600)
+                || started.elapsed() >= timeout
             {
                 let _ = child.kill();
                 let _ = child.wait();

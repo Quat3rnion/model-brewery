@@ -31,7 +31,7 @@ pub(crate) fn stage(work: &Path, key: &str, label: &str, pins: &[(&str, &str)]) 
     stage_from(work, &configured, key, label, pins)
 }
 
-fn stage_from(
+pub(crate) fn stage_from(
     work: &Path,
     configured: &Path,
     key: &str,

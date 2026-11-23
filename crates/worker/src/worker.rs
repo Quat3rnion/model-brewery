@@ -77,6 +77,14 @@ impl ScratchAccess {
                 &job.inputs[..]
             }
             trace::JOB if kinds().eq(["gguf"]) => &job.inputs[..],
+            sensitivity::JOB
+                if job.prompt.is_none()
+                    && job.options.get(sensitivity::REVISION_PIN).is_some()
+                    && sensitivity::Request::resolved(&job.options).is_ok()
+                    && kinds().eq(["gguf"]) =>
+            {
+                &job.inputs[..]
+            }
             locate_edit::JOB
                 if job.prompt.is_none()
                     && locate_edit::Request::parse(&job.options).is_ok()
@@ -574,7 +582,7 @@ impl Worker {
                     && r.action == "start"
                     && r.job
                         .as_ref()
-                        .is_none_or(|job| !scratch_eval::private_output(&job.kind))
+                        .is_none_or(|job| job.kind != sensitivity::JOB && !scratch_eval::private_output(&job.kind))
                     && !r.inputs.values().any(scratch_eval::granted),
                 "job output is not published"
             );
@@ -1024,6 +1032,22 @@ impl Worker {
                 );
             }
         }
+        if job.kind == sensitivity::JOB {
+            let allowed = action == "start"
+                && job.prompt.is_none()
+                && job.inputs.len() == 1
+                && job.inputs[0].kind == "gguf"
+                && (job.options.get(sensitivity::REVISION_PIN).is_some() == access.is_some())
+                && sensitivity::Request::resolved(&job.options).is_ok_and(|(req, _)| {
+                    sensitivity::configured(&self.cfg.engine_env, req.backend, self.cfg.admission.as_deref())
+                });
+            if !allowed {
+                return self.record_prepare(
+                    id, action, job,
+                    Reply::error("Invalid sensitivity request or unavailable pinned backend"),
+                );
+            }
+        }
         if job.options["output_format"] == hgn_recipe::FORMAT {
             if self.cfg.pinned_publication.is_some()
                 || self
@@ -1441,6 +1465,10 @@ impl Worker {
             "backend weight jobs do not accept staged inputs"
         );
         let mut pinned = false;
+        ensure!(
+            job.kind != sensitivity::JOB || (provided.is_none() && input.host == original.host),
+            "sensitivity requires a direct source"
+        );
         let (bundle, cached) = if let Some(b) = provided {
             b.validate()?;
             ensure!(
@@ -1504,7 +1532,7 @@ impl Worker {
                     &input.path,
                     pin,
                     &mut progress::Reporter::new(&mut emit, Some((index, count))),
-                )?;
+        )?;
                 ensure!(
                     input.path.extension().and_then(|ext| ext.to_str())
                         == Some(input.kind.as_str()),
@@ -1712,6 +1740,10 @@ impl Worker {
                 &job.options,
                 input.extra["sha256"].as_str().unwrap_or_default(),
             )?;
+        }
+        if job.kind == sensitivity::JOB {
+            sensitivity::Request::resolved(&job.options)?.0
+                .check_model(input.extra["sha256"].as_str().unwrap_or_default())?;
         }
         input.extra.extend([
             ("bundle_sha256".into(), json!(bundle.digest)),
@@ -1935,6 +1967,8 @@ impl Worker {
                 } else if job.kind == locate_edit::JOB {
                     locate_edit::Request::parse(&job.options)
                         .is_ok_and(|request| request.edit.backend.is_gpu())
+                } else if job.kind == sensitivity::JOB {
+                    sensitivity::Request::resolved(&job.options).is_ok_and(|(request, _)| request.backend.is_gpu())
                 } else if job.kind == trace::JOB || scratch_eval::private_output(&job.kind) {
                     false
                 } else {

@@ -22,7 +22,7 @@ fn fixture(t: &Test, values: &[f32]) -> std::path::PathBuf {
     fs::write(
         t.root.path().join("dispatch.json"),
         json!({"hosts":{"existing":{"local":true,"config":config,
-          "capabilities":{"benchmark":true,"trace":true},
+          "capabilities":{"benchmark":true,"trace":true,"sensitivity":true},
           "benchmark_targets":[{"id":"cpu","label":"CPU"}],
           "benchmarks":[{"id":"gsm8k","label":"GSM8K"}]}}})
         .to_string(),
@@ -466,6 +466,26 @@ print(json.dumps({"state":"succeeded","progress":"done","result":{"kind":"trace"
         printf '%s\n' '{"state":"running","progress":"mock scratch trace"}'
         exit
     fi
+    if echo "$body" | grep -q '"kind":"sensitivity"'; then
+        printf '%s' "$body" | python3 -c 'import hashlib,json,pathlib,sys
+job=json.load(sys.stdin); model=job["inputs"][0]; options=job["options"]
+cfg=json.load(open(sys.argv[1]))["hosts"][model["host"]]["config"]
+grant=json.load(open(cfg))["scratch_access"]
+gguf=pathlib.Path(model["path"])
+sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+assert grant == {"job_id":sys.argv[2],"paths":{str(gguf):sha(gguf)}}
+assert options["revision_sha256"] == sha(gguf.with_name("model.safetensors"))
+assert options["model_sha256"] == sha(gguf)
+result=dict(kind="sensitivity",schema_version=1,qualification="not release-qualified",backend="cpu",
+    model_id=model["id"],model_sha256=sha(gguf),revision_sha256=options["revision_sha256"],
+    corpus_sha256=options["corpus_sha256"],observation_count=1,observations_sha256="a"*64,
+    executable_sha256="b"*64,manifest_sha256="c"*64,
+    tensors=[dict(name="blk.0.attn_q.weight",layer=0,shape=[2,2],fisher=0.25)],
+    layers=[dict(layer=0,elements=4,fisher=0.25)])
+print(json.dumps(dict(state="succeeded",progress="done",result=result)))' "$BREWERY_DISPATCH_CONFIG" "$3" > "$dir/result"
+        printf '%s\n' '{"state":"running","progress":"mock scratch sensitivity"}'
+        exit
+    fi
     echo "$body" | grep -q '"kind":"scratch_gguf"'
     printf GGUFmock > "$dir/converted.gguf"
     rev=$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["inputs"][0]["path"])')
@@ -588,6 +608,27 @@ fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
     let (_, revision) = t.request(&path, "", None);
     assert_eq!(revision["gguf"]["revision_sha256"], scratch["sha256"]);
     assert_eq!(revision["gguf"]["sha256"], sha(b"GGUFmock"));
+    let mut fisher = json!({"kind":"sensitivity","input_ids":[id],"options":{
+        "model_sha256":revision["sha256"],
+        "corpus_sha256":brewery_worker::sensitivity::CORPUS_SHA256,
+        "tensors":["blk.0.attn_q.weight"],"observations":1,
+    }});
+    assert_eq!(t.request("/api/jobs", "", Some(fisher.clone())).0, 400);
+    fisher["options"]["model_sha256"] = revision["gguf"]["sha256"].clone();
+    let (status, sensitivity) = t.request("/api/jobs", "", Some(fisher));
+    assert_eq!(status, 201, "{sensitivity}");
+    let artifact_url = format!("/api/jobs/{}/sensitivity", sensitivity["id"].as_str().unwrap());
+    loop {
+        let (status, artifact) = t.request(&artifact_url, "", None);
+        if status == 200 {
+            assert_eq!(artifact["model_sha256"], revision["gguf"]["sha256"]);
+            assert_eq!(artifact["revision_sha256"], revision["sha256"]);
+            assert!(!artifact.to_string().contains(".gguf"));
+            break;
+        }
+        assert!(Instant::now() < until, "{artifact}");
+        sleep(Duration::from_millis(25));
+    }
     let locate = |backend| {
         t.request(
             &format!("{path}/rome"),
@@ -899,6 +940,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "run_program",
             "start_trace",
             "steer_feature",
+            "tensor_sensitivity",
         ]
     );
     for tool in listed {
@@ -918,7 +960,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
                     .contains(&json!("backend"))
             );
         }
-        if matches!(tool["name"].as_str(), Some("start_trace" | "steer_feature")) {
+        if matches!(tool["name"].as_str(), Some("start_trace" | "steer_feature" | "tensor_sensitivity")) {
             let flag = &schema["properties"]["allow_duplicate"];
             assert_eq!(flag["type"], "boolean");
             assert_eq!(flag["default"], false);

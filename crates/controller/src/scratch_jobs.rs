@@ -162,6 +162,10 @@ pub(crate) fn prepare_enqueue(app: &App, mut job: Job, envelope: &Envelope) -> R
             .map_err(ApiError::storage)?
             .edit
             .backend
+    } else if job.kind == brewery_worker::sensitivity::JOB {
+        brewery_worker::sensitivity::Request::resolved(&Value::Object(envelope.options.clone()))
+            .map_err(ApiError::storage)?
+            .0.backend
     } else {
         locate_edit::Backend::Cpu
     };
@@ -188,6 +192,12 @@ pub(crate) fn finish(
                 != envelope.scratch_pins.get(&model.path).map(String::as_str)
         {
             return Err("scratch trace result does not match the pinned model".into());
+        }
+        return Ok(None);
+    }
+    if job.kind == brewery_worker::sensitivity::JOB {
+        if result["revision_sha256"].as_str() != Some(&row.sha256) {
+            return Err("sensitivity artifact does not match the current scratch revision".into());
         }
         return Ok(None);
     }
