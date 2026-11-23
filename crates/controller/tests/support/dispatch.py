@@ -232,7 +232,7 @@ else:
         result.update(kind="trace", schema_version=1, model_id=model["id"],
                       model_sha256=("a" if model["path"].endswith("parent.gguf") else "b") * 64,
                       executable_sha256="0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f",
-                       prompts=[dict(manifest_sha256=hashlib.sha256(job_id.encode()).hexdigest())])
+                      prompts=[dict(manifest_sha256=hashlib.sha256(job_id.encode()).hexdigest())])
     if action == "start" and envelope["kind"] == "hf_download":
         assert envelope["inputs"] == [] and "prompt" not in envelope
         options = envelope["options"]

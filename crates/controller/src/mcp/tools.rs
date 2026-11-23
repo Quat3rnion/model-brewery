@@ -22,6 +22,7 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("get_scratch", "get", "/api/scratch/{id}"),
     ("compile_program", "post", "/api/scratch/compile_program"),
     ("run_program", "post", "/api/scratch/{id}/run_program"),
+    ("interp_benchmark", "get", "/api/interp/benchmark"),
     ("start_trace", "post", "/api/jobs"),
     ("steer_feature", "post", "/api/jobs"),
     ("tensor_sensitivity", "post", "/api/jobs"),

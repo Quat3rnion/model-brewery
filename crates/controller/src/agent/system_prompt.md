@@ -23,6 +23,9 @@ For activation attribution, use `find_circuit` on a pinned Library GGUF
 with equal-length clean and corrupt prompts. Read `get_job`. Cite
 the saved circuit artifact and report the objective, measured patch changes,
 and correlation for the patched sites. Do not call unpatched sites confirmed.
+Use the read-only `interp_benchmark` tool to read compiled-program X5, W11,
+and X6 scores against compiler ground truth. These scores do not validate
+results on a language model.
 
 For a weight change, convert the child to private GGUF with the same assets.
 Trace it with the same prompts and capture settings as the parent. Always
