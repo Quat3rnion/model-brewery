@@ -15,6 +15,51 @@ pub(super) fn call(t: &Fixture, name: &str, arguments: Value) -> Value {
 }
 
 #[test]
+fn mcp_queue_duplicate_requires_explicit_opt_out() {
+    let mut t = Fixture::new();
+    fs::write(
+        t.path("dispatch.json"),
+        r#"{"hosts":{"alpha":{"local":true,"capabilities":{"trace":true}}}}"#,
+    )
+    .unwrap();
+    t.touch("hold");
+    t.launch();
+    let model = t.register("alpha", "gguf", "/models/trace.gguf");
+    let mut args = json!({"idempotency_key":"trace-first","input_ids":[model],"prompt":"one two",
+        "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":3}});
+    let queue = |args: Value| {
+        let reply = call(&t, "start_trace", args);
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+        reply["result"]["structuredContent"].clone()
+    };
+    let original = queue(args.clone());
+    assert_eq!(original["kind"], "trace");
+    args["idempotency_key"] = json!("trace-match");
+    let duplicate = json!({"id":original["id"],"duplicate_of":true});
+    assert_eq!(queue(args.clone()), duplicate);
+
+    args["idempotency_key"] = json!("trace-false");
+    args["allow_duplicate"] = json!(false);
+    assert_eq!(queue(args.clone()), duplicate);
+    args["idempotency_key"] = json!("trace-repeat");
+    args["allow_duplicate"] = json!(true);
+    let repeat = queue(args.clone());
+    assert_eq!(repeat["kind"], "trace");
+    assert_ne!(repeat["id"], original["id"]);
+    assert_eq!(queue(args.clone()), json!({"id":repeat["id"]}));
+    assert_eq!(
+        t.json("GET", "/api/state", None, 200)["jobs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    args["allow_duplicate"] = json!("true");
+    assert_eq!(call(&t, "start_trace", args)["error"]["code"], -32602);
+}
+
+#[test]
 fn mcp_stateless_transport_uses_workbench_guards() {
     let mut t = Fixture::new();
     t.launch();

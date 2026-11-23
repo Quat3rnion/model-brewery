@@ -872,7 +872,24 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
         ]
     );
     for tool in listed {
-        assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
+        let schema = &tool["inputSchema"];
+        assert_eq!(schema["type"], "object", "{tool}");
+        if matches!(tool["name"].as_str(), Some("start_trace" | "steer_feature")) {
+            let flag = &schema["properties"]["allow_duplicate"];
+            assert_eq!(flag["type"], "boolean");
+            assert_eq!(flag["default"], false);
+            assert!(
+                !schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("allow_duplicate"))
+            );
+        } else {
+            assert!(
+                schema["properties"].get("allow_duplicate").is_none(),
+                "{tool}"
+            );
+        }
     }
     let apply = listed
         .iter()

@@ -92,9 +92,21 @@ fn sae_version_pins_feature_reads_and_decoder_steering() {
     let mut args = request.clone();
     args.as_object_mut().unwrap().remove("kind");
     args["idempotency_key"] = json!("feature-steering");
-    let mcp = super::mcp::call(&app, "steer_feature", args);
+    let mcp = super::mcp::call(&app, "steer_feature", args.clone());
     assert_eq!(mcp["result"]["isError"], false, "{mcp}");
     let trace = id(&mcp["result"]["structuredContent"]).to_string();
+    args["idempotency_key"] = json!("feature-match");
+    let matched = super::mcp::call(&app, "steer_feature", args.clone());
+    assert_eq!(matched["result"]["isError"], false, "{matched}");
+    assert_eq!(
+        matched["result"]["structuredContent"],
+        json!({"id":trace,"duplicate_of":true})
+    );
+    args["idempotency_key"] = json!("feature-repeat");
+    args["allow_duplicate"] = json!(true);
+    let repeated = super::mcp::call(&app, "steer_feature", args);
+    assert_eq!(repeated["result"]["isError"], false, "{repeated}");
+    assert_ne!(id(&repeated["result"]["structuredContent"]), trace);
     let done = app.await_job(&trace, |job| job["state"] == "succeeded");
     let sent = &done["result"]["envelope"]["options"];
     assert!(sent.get("sae").is_none() && sent.get("feature_steering").is_none());

@@ -1339,6 +1339,15 @@ For every write tool, set `idempotency_key` before the call. Use a new key
 for each intended write. Use the same key and arguments for a retry.
 The controller uses its normal admission, validation, and replay rules.
 
+Tools that submit to `/api/jobs` or `/api/conversions`, including
+`start_trace` and `steer_feature`, accept the optional boolean
+`allow_duplicate`. The default is `false`. If the controller finds
+matching work, the tool returns the existing `id` and `duplicate_of: true`.
+No new job starts. To submit the same work again on purpose, set
+`allow_duplicate` to `true` and use a new `idempotency_key`. The tool sends
+`Brewery-Allow-Duplicate: 1`. The controller still applies the admission
+and same-key replay rules.
+
 Use `prune_model` with a scratch ID, its exact hash, and a `pruning` plan.
 The result is a new scratch child with a reversible delta. Rates use basis
 points: 1000 means 10%. The rate applies to each selected tensor or set of

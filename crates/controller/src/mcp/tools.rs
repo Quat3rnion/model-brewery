@@ -203,11 +203,14 @@ impl Server {
         {
             return Err("steer_feature requires options.feature_steering");
         }
-        let (path, key, body) =
+        let (path, key, allow_duplicate, body) =
             route.request(args, matches!(name, "start_trace" | "steer_feature"))?;
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
         let result = loop {
-            let result = match self.send(route, &path, key.as_deref(), body.clone()).await {
+            let result = match self
+                .send(route, &path, key.as_deref(), allow_duplicate, body.clone())
+                .await
+            {
                 Ok(result) => result,
                 Err(result) => return Ok(result),
             };
@@ -233,6 +236,7 @@ impl Server {
         route: &Route,
         path: &str,
         key: Option<&str>,
+        allow_duplicate: bool,
         body: Vec<u8>,
     ) -> Result<Value, Value> {
         let mut request = Request::builder()
@@ -247,6 +251,9 @@ impl Server {
         }
         if let Some(key) = key {
             request = request.header("Idempotency-Key", key);
+        }
+        if allow_duplicate {
+            request = request.header("Brewery-Allow-Duplicate", "1");
         }
         let request = request
             .body(Body::from(body))
@@ -322,7 +329,12 @@ impl Route {
                         "idempotency_key"
                     }
                     Some("header") if write && original_name == "Brewery-Allow-Duplicate" => {
-                        continue;
+                        definition = json!({
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Set to true with a new idempotency key to submit identical work again."
+                        });
+                        "allow_duplicate"
                     }
                     _ => panic!("unsupported tool parameter"),
                 };
@@ -330,7 +342,9 @@ impl Route {
                     definition["description"] = json!(
                         "Choose one unique key per intended write. Reuse it only for a retry of that write."
                     );
-                } else if let Some(description) = parameter["description"].as_str() {
+                } else if name != "allow_duplicate"
+                    && let Some(description) = parameter["description"].as_str()
+                {
                     definition["description"] = json!(description);
                 }
                 properties.insert(name.into(), definition);
@@ -361,7 +375,7 @@ impl Route {
         &self,
         mut args: Map<String, Value>,
         trace: bool,
-    ) -> Result<(String, Option<String>, Vec<u8>), &'static str> {
+    ) -> Result<(String, Option<String>, bool, Vec<u8>), &'static str> {
         if !args
             .keys()
             .all(|key| object(&self.schema["properties"]).contains_key(key))
@@ -386,6 +400,9 @@ impl Route {
         } else {
             None
         };
+        let allow_duplicate = args.remove("allow_duplicate").map_or(Ok(false), |flag| {
+            flag.as_bool().ok_or("allow_duplicate must be a boolean")
+        })?;
         let mut path = self.path.to_owned();
         for name in &self.path_params {
             let value = args.remove(name).ok_or("missing path argument")?;
@@ -441,7 +458,7 @@ impl Route {
         } else {
             Vec::new()
         };
-        Ok((path, key, body))
+        Ok((path, key, allow_duplicate, body))
     }
 }
 
