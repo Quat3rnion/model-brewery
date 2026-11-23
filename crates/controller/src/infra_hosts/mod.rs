@@ -536,6 +536,7 @@ mod tests {
             settings: Default::default(),
             trace_policy: Default::default(),
             hf_tokens: crate::hf_tokens::Store::from_config(None, &data),
+            agent: crate::agent::Service::new(&data, &dir.path().join("dist")).unwrap(),
             backend_download: false,
             backend_calibration: None,
             backend_edit_formats: Default::default(),
