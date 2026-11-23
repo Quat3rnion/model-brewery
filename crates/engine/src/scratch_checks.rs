@@ -1,12 +1,13 @@
 use crate::{
     child_budget, child_threads, gguf_conversion::Tool, integrity, native_json_admitted,
-    progress::Progress, Job,
+    progress::Progress, w0_libraries, Job,
 };
 use anyhow::{ensure, Context, Result};
 use brewery_worker::{is_digest, scratch_eval};
 use serde_json::Value;
 use std::{
-    env,
+    env, fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -19,12 +20,33 @@ fn configured(key: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(test)]
+mod tests;
+
 pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
+    run_with_libraries(job, cwd, progress, w0_libraries::PINS)
+}
+
+fn run_with_libraries(
+    job: &Job,
+    cwd: &Path,
+    progress: &Progress,
+    libraries: &[(&str, &str)],
+) -> Result<Value> {
     ensure!(
-        job.options.as_object().is_some_and(|options| options.is_empty())
+        job.options
+            .as_object()
+            .is_some_and(|options| options.is_empty())
             && job.prompt.is_none()
-            && job.inputs.iter().map(|i| i.kind.as_str()).eq(scratch_eval::CHECK_INPUTS)
-            && job.inputs.iter().all(|i| i.sha256.as_deref().is_some_and(is_digest) && i.path.is_file()),
+            && job
+                .inputs
+                .iter()
+                .map(|i| i.kind.as_str())
+                .eq(scratch_eval::CHECK_INPUTS)
+            && job
+                .inputs
+                .iter()
+                .all(|i| i.sha256.as_deref().is_some_and(is_digest) && i.path.is_file()),
         "scratch checks need four pinned files in parent/child GGUF, parent/child SafeTensors order"
     );
     let script = configured(scratch_eval::SCRIPT)?;
@@ -35,6 +57,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     );
     let private = tempfile::Builder::new()
         .prefix(".scratch-checks-")
+        .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in(cwd)?;
     let runner = Tool::pinned(
         private.path(),
@@ -42,6 +65,12 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         scratch_eval::RUNNER_SHA,
         "scratch-check-logits",
         "scratch checks runner",
+    )?;
+    let libs = w0_libraries::stage(
+        private.path(),
+        scratch_eval::RUNNER_LIB_DIR,
+        "scratch checks",
+        libraries,
     )?;
     let ids = integrity::check_inputs(&job.inputs, progress)?;
     ensure!(
@@ -51,6 +80,8 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let threads = child_threads(None)?.min(16);
     let mut cmd = Command::new(Path::new("/usr/bin/python3").canonicalize()?);
     cmd.env_clear()
+        // Python passes this search path to each native runner invocation.
+        .env("LD_LIBRARY_PATH", &libs)
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", private.path())
         .env("TMPDIR", private.path())

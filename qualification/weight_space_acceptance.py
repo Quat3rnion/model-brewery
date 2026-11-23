@@ -25,6 +25,7 @@ HF = ARB / "models/qwen2.5-0.5b-instruct-w4-hf"
 SAFE = HF / "model.safetensors"
 BASE = ARB / "models/qwen2.5-0.5b-instruct-w0/Qwen2.5-0.5B-Instruct.bf16.gguf"
 LANTERN = ARB / "lanternfish-w0/target/headless/release/lanternfish"
+W0_LIBS = ARB / "llama-w0/build/bin"
 LLAMA = ARB / "llama.cpp"
 QUANT = ARB / "brewery-standalone-admit-integration.s4xL9Wu0/stage/bin/llama-quantize"
 PYTHON = ARB / "brewery-flash-gguf.tXbsagtV/standalone/runtime/bin/python3"
@@ -179,9 +180,11 @@ def setup(args, run):
             "BREWERY_GGUF_HF_EXPORTER": str(REPO / "tools/gguf-export-hf"),
             "BREWERY_GGUF_PYTHON": str(PYTHON), "BREWERY_LLAMA_CPP": str(LLAMA),
             "BREWERY_CONVERTER_DISK_RESERVE_BYTES": "0", "BREWERY_LANTERNFISH_TRACE": str(LANTERN),
+            "BREWERY_LANTERNFISH_TRACE_LIB_DIR": str(W0_LIBS),
             "BREWERY_CPU_THREADS": "4", "BREWERY_SCRATCH_CHECKS_SCRIPT": str(REPO / "tools/scratch_checks.py"),
             "BREWERY_SCRATCH_CHECKS_RUNNER": str(RUNNER),
             "BREWERY_SCRATCH_CHECKS_RUNNER_SHA256": PINS[RUNNER],
+            "BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR": str(W0_LIBS),
             "BREWERY_SCRATCH_CHECKS_CACHE": str(FIXTURES),
         },
     })

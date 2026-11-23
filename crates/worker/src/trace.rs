@@ -16,6 +16,7 @@ pub mod diff;
 
 pub const JOB: &str = "trace";
 pub const EXECUTABLE: &str = "BREWERY_LANTERNFISH_TRACE";
+pub const LIB_DIR: &str = "BREWERY_LANTERNFISH_TRACE_LIB_DIR";
 pub const COMMIT: &str = "0ea30b37729a136a76b8412e7ad1ec91bd7de9b5";
 pub const SHA256: &str = "0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f";
 pub const HARD_BYTE_CAP: u64 = 32 << 20;

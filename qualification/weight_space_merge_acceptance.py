@@ -165,6 +165,7 @@ def main():
         env = w8.setup(args, run)
         worker = json.loads((run / "worker.json").read_text())
         del worker["engine_env"]["BREWERY_LANTERNFISH_TRACE"]
+        del worker["engine_env"]["BREWERY_LANTERNFISH_TRACE_LIB_DIR"]
         w8.save(run, "worker", worker)
         (run / "worker.json").chmod(0o600)
         dispatch = json.loads((run / "dispatch.json").read_text())

@@ -6,6 +6,7 @@ pub const CHECKS: &str = "scratch_checks";
 pub const SCRIPT: &str = "BREWERY_SCRATCH_CHECKS_SCRIPT";
 pub const RUNNER: &str = "BREWERY_SCRATCH_CHECKS_RUNNER";
 pub const RUNNER_SHA: &str = "BREWERY_SCRATCH_CHECKS_RUNNER_SHA256";
+pub const RUNNER_LIB_DIR: &str = "BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR";
 pub const CACHE: &str = "BREWERY_SCRATCH_CHECKS_CACHE";
 pub const GRANT: &str = "scratch_grant";
 pub const CHECK_INPUTS: [&str; 4] = ["gguf", "gguf", "safetensors", "safetensors"];

@@ -1,8 +1,11 @@
-use crate::{child_threads, gguf_conversion::Tool, integrity, progress::Progress, write_json, Job};
+use crate::{
+    child_threads, gguf_conversion::Tool, integrity, progress::Progress, w0_libraries, write_json,
+    Job,
+};
 use anyhow::{ensure, Context, Result};
 use brewery_worker::trace::{self, Request};
 use serde_json::{json, Value};
-use std::{fs, path::Path};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
 pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let request = Request::worker(&job.options, job.prompt.as_deref())?;
@@ -25,13 +28,22 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     );
     let root = cwd.join(trace::JOB);
     ensure!(!root.exists(), "trace output already exists");
-    let private = tempfile::Builder::new().prefix(".trace-").tempdir_in(cwd)?;
+    let private = tempfile::Builder::new()
+        .prefix(".trace-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir_in(cwd)?;
     let tool = Tool::pinned_digest(
         private.path(),
         trace::EXECUTABLE,
         trace::SHA256,
         "lanternfish",
         "Lanternfish",
+    )?;
+    let libs = w0_libraries::stage(
+        private.path(),
+        trace::LIB_DIR,
+        "Lanternfish trace",
+        w0_libraries::PINS,
     )?;
     let ids = integrity::check_inputs(&job.inputs, progress)?;
     let id = &ids[0];
@@ -46,7 +58,10 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let intervention = private.path().join("interventions.json");
     let has_intervention = !request.interventions.is_empty();
     if has_intervention {
-        write_json(&intervention, &serde_json::to_value(&request.interventions)?)?;
+        write_json(
+            &intervention,
+            &serde_json::to_value(&request.interventions)?,
+        )?;
     }
     let mut capture = request.capture;
     let mut receipts = Vec::new();
@@ -58,6 +73,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         let out = staging.join(i.to_string());
         let mut command = tool.command(private.path(), threads);
         command
+            .env("LD_LIBRARY_PATH", &libs)
             .arg("trace")
             .arg("--model")
             .arg(&input.path)

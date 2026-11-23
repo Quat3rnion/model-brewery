@@ -331,18 +331,28 @@ It does not change the model or qualify a release.
    `0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f`.
    The engine rejects other binaries.
 2. Install the matching CPU libraries from llama.cpp `184f653` with
-   Lanternfish patches `0001` and `0002`. This binary uses
-   `/arboretum/llama-w0/build/bin` as its library search path. Keep that path
-   and its libraries under operator control. Use `readelf -d` and `ldd` to
-   check the library paths before you enable the worker. The engine runs a
-   verified copy of the binary with no inherited `LD_LIBRARY_PATH`.
-3. Add `"BREWERY_LANTERNFISH_TRACE": "/absolute/path/to/lanternfish"` to the
-   worker JSON `engine_env`. Add `"trace": true` to the host `capabilities`
+   Lanternfish patches `0001` and `0002`. Put the four files below in an
+   operator-controlled release directory. The engine copies and checks each
+   file in the private job directory. It sets `LD_LIBRARY_PATH` to those
+   copies. It does not need the build directory in the binary's RUNPATH.
+3. Add `BREWERY_LANTERNFISH_TRACE` and `BREWERY_LANTERNFISH_TRACE_LIB_DIR` to
+   the worker JSON `engine_env`. Set them to the absolute paths of the
+   binary and library directory. Add `"trace": true` to the host `capabilities`
    in dispatch JSON. The capability is off by default. Use a regular worker
    with access to the registered GGUF. For scratch, the controller uses its
    local CPU worker. Dedicated download and remote weight editor workers do
    not run traces. The existing GPU `compare` job still uses
    `BREWERY_LANTERNFISH` and its `run` command.
+
+Save this list as `w0-libraries.sha256` in the release library directory.
+In that directory, run `sha256sum -c w0-libraries.sha256`:
+
+```text
+bb94467edcc18c8fb875f86628d89c112adedcfea1e8f6c5549c706adf5f25cc  libllama.so.0
+04a3a199429b02e6e4bce9a8cbc465530bcffe4b0539be561dedfcfd476957be  libggml.so.0
+1fef6e5b16b4b03e8255cf5f3c446cc76005515e0bb261b4d0ee333ea399fbad  libggml-base.so.0
+29390b353b7931bce11926598773eb052bbe53506b903f2140a13ea1f54ead6e  libggml-cpu.so.0
+```
 
 To set the limits, add this top-level object to the controller dispatch JSON:
 
@@ -568,6 +578,8 @@ worker environment applies to jobs that run on that worker.
 | `BREWERY_HASH_THREADS` | worker, engine | Optional limit for concurrent file hashes (`1`–`16`). Hashing uses the CPU budget by default, up to `16` files at a time. |
 | `BREWERY_LANTERNFISH` | engine | Configured Lanternfish `run` binary for `compare`. This lookup does not check the trace pin. |
 | `BREWERY_LANTERNFISH_TRACE` | engine | Absolute path to the pinned CPU Lanternfish binary for `trace`. |
+| `BREWERY_LANTERNFISH_TRACE_LIB_DIR` | engine | Absolute path to the directory with the four pinned CPU trace libraries. |
+| `BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR` | engine | Absolute path to the directory with the four pinned CPU scratch-check libraries. |
 | `BREWERY_LANTERNFISH_EDIT` | engine | Absolute path to the pinned CPU Lanternfish binary for locate-then-edit jobs. |
 | `BREWERY_LANTERNFISH_EDIT_LIB_DIR` | engine | Absolute path to the directory with the four pinned llama.cpp and ggml libraries. |
 | `BREWERY_LANTERNFISH_EDIT_CUDA` | engine | Absolute path to the pinned W14b Lanternfish binary for CUDA locate-then-edit jobs. |
@@ -1285,10 +1297,13 @@ The viewer keeps both reports separate; their order is not proof of a match.
 
 ## Agent interface
 
-Agents can operate the workbench without driving the browser. Start with
-[`AGENTS.md`](AGENTS.md) for the project skills. The running controller
-serves its [OpenAPI contract](api/openapi.json) at `GET /api/openapi.json`.
-Use the same loopback address and worker permissions as the web UI.
+Agents can operate the workbench without a browser. Use
+[`brewery-weight-space`](.opencode/skills/brewery-weight-space/SKILL.md) for
+traces, scratch edits, checks, and publish requests. See the
+[project skills](.opencode/skills/) for other workflows. The running
+controller serves its [OpenAPI contract](api/openapi.json) at
+`GET /api/openapi.json`. Use the same loopback address and worker permissions
+as the web UI.
 
 ### MCP for weight-space work
 
@@ -1760,6 +1775,9 @@ pinned dataset files in a local cache. Set these keys in the worker's
 - `BREWERY_SCRATCH_CHECKS_SCRIPT`: Absolute path of `tools/scratch_checks.py`.
 - `BREWERY_SCRATCH_CHECKS_RUNNER`: Absolute path of the CPU runner.
 - `BREWERY_SCRATCH_CHECKS_RUNNER_SHA256`: SHA-256 of the runner.
+- `BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR`: Absolute path of the directory
+  with the four libraries listed in [CPU trace jobs](#cpu-trace-jobs). The
+  scratch-check runner and the trace binary use the same four libraries.
 - `BREWERY_SCRATCH_CHECKS_CACHE`: Absolute path of the local dataset cache.
 
 The worker does not download data during a check. Restart the controller

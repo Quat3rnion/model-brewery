@@ -165,6 +165,15 @@ fn last_result(kind: &str, body: &Value, turn: usize) -> Value {
 
 #[test]
 fn hosted_agent_reuses_mcp_scratch_workflow_without_approval() {
+    fn system_prompt<'a>(kind: &str, body: &'a Value) -> &'a str {
+        if kind == "anthropic" {
+            body["system"].as_str().unwrap()
+        } else {
+            assert_eq!(body["messages"][0]["role"], "system");
+            body["messages"][0]["content"].as_str().unwrap()
+        }
+    }
+
     for kind in ["anthropic", "openai"] {
         let mut t = Test::new();
         let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
@@ -232,6 +241,19 @@ fn hosted_agent_reuses_mcp_scratch_workflow_without_approval() {
             assert_eq!(first.headers["authorization"], format!("Bearer {TOKEN}"));
             assert_eq!(first.body["max_tokens"], 1024);
         }
+        let prompt = system_prompt(kind, &first.body).to_owned();
+        for instruction in [
+            "Model Brewery",
+            "operator-only",
+            "`run_checks`",
+            "`request_publish`",
+            "not release-qualified",
+        ] {
+            assert!(
+                prompt.contains(instruction),
+                "missing {instruction}: {prompt}"
+            );
+        }
         let projected: Vec<_> = first.body["tools"]
             .as_array()
             .unwrap()
@@ -265,6 +287,7 @@ fn hosted_agent_reuses_mcp_scratch_workflow_without_approval() {
                 .unwrap()
                 .reply("200 OK", "", use_tool(kind, turn, name, args));
             let incoming = next(&rx);
+            assert_eq!(system_prompt(kind, &incoming.body), prompt);
             let result = last_result(kind, &incoming.body, turn);
             request = Some(incoming);
             turn += 1;
