@@ -110,10 +110,14 @@ fn complete_pair_with_small_drift_passes() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("PASS (fixed-v1)"));
 }
 
-fn assert_rejected(out: Output, expected: &str) {
+fn rejected_stderr(out: Output) -> String {
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn assert_rejected(out: Output, expected: &str) {
+    let stderr = rejected_stderr(out);
     assert!(
         stderr.contains(expected),
         "expected {expected:?}; got {stderr}"
@@ -310,8 +314,13 @@ fn malformed_and_nonfinite_values_are_rejected() {
     assert_rejected(run("{"), "EOF");
     let json = fixture(true).to_string();
     assert_rejected(run(&format!("{json}{{}}")), "trailing characters");
-    assert_rejected(
-        run(&json.replacen("\"logits\":[0.25", "\"logits\":[3.5e38", 1)),
-        "logits",
+    let overflow = json.replacen("\"logits\":[0.25", "\"logits\":[3.5e38", 1);
+    let stderr = rejected_stderr(run(&overflow));
+    // With float_roundtrip, serde_json rejects f32 overflow during parsing.
+    // Without it, the comparator rejects the infinite logit.
+    assert!(
+        stderr.contains("gpu.json: number out of range")
+            || (stderr.contains("position 0 logits[0]") && stderr.contains("GPU=inf")),
+        "expected GPU logit overflow; got {stderr}"
     );
 }
