@@ -15,18 +15,19 @@ and five lower ranks with independent W2 replacement runs. The lower-rank
 sample uses a fixed seed.
 
 Copy the controller, dispatch, worker, and engine binaries from the same
-build to a private directory. Use the disk queue during the test because
-each BF16 gradient can need a temporary F32 copy of the model. Do not point
-the script at a running workbench.
+build to a private directory. Use the dedicated scratch disk shown below
+because each BF16 gradient can need a temporary F32 copy of the model.
+Use the disk queue if you must run on the shared system disk instead.
+Do not point the script at a running workbench.
 
 ```sh
-export TMPDIR=/arboretum/tmp
-~/.local/bin/resource-queue run --resource disk-xa --holder x5-accept \
-  --wait 600 --max-hold 2000 -- python3 -B qualification/circuit_acceptance.py \
+export TMPDIR=/arboretum/xa-scratch/x5
+mkdir -p "$TMPDIR"
+python3 -B qualification/circuit_acceptance.py \
   --bins /arboretum/brewery-x5-bins \
   --pin /arboretum/pins/lanternfish-x3-fa0e8c5 \
   --evidence /arboretum/brewery-x5-evidence \
-  --scratch /arboretum/xa-scratch/x5
+  --scratch "$TMPDIR"
 ```
 
 The script checks the model and runtime pins, submits `find_circuit` to the
