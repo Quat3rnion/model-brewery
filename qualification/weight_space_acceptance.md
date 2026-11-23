@@ -172,3 +172,4 @@ The script checks the 16 flags, the aggregate over-refusal rate, and that the
 report has no replies from that set. It writes `evidence/report.json` only
 when two distinct CPU worker jobs return the same scores and W5 diff. The
 evidence omits all completion text. The result is not release-qualified.
+Set `--job-timeout` in seconds if the CPU checks need more time.

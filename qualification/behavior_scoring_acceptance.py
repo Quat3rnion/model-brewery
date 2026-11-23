@@ -17,7 +17,7 @@ from weight_space_acceptance import ARB, ASSETS, HF, PINS, REPO, RUNNER, SAFE, S
 from weight_space_acceptance import require, save, setup, sha
 
 
-def exercise(base, run, pins, runner):
+def exercise(base, run, pins, runner, job_timeout):
     http = build_opener(ProxyHandler({}))
 
     def call(path, body=None, key=None, status=200):
@@ -33,13 +33,14 @@ def exercise(base, run, pins, runner):
             return json.load(reply)
 
     def wait(job):
-        for _ in range(600):
+        deadline = time.monotonic() + job_timeout
+        while time.monotonic() < deadline:
             current = call("/api/jobs/" + job["id"])
             if current["state"] not in ("queued", "running"):
                 require(current["state"] == "succeeded", str(current))
                 return current
             time.sleep(2)
-        raise TimeoutError(job["id"])
+        raise TimeoutError(f"job {job['id']} did not finish within {job_timeout} seconds")
 
     require(not call("/api/scratch"), "expected an empty isolated scratch store")
     call("/api/admin/actions", {"action": "set_weight_editor", "worker": "local",
@@ -89,6 +90,8 @@ def exercise(base, run, pins, runner):
         require(len(diff["metrics"]) == 23 and
                 all(m["delta"] == 0 and m["flag"] == "unchanged" for m in diff["metrics"]),
                 "W5 did not return all 23 metrics as unchanged")
+        print(f"check {run}: parent benign refusal {sum(pair['parent'] for pair in flags)}/{len(flags)}",
+              flush=True)
         reports.append(report)
         diffs.append(diff)
         jobs.append(job["id"])
@@ -120,7 +123,10 @@ def main():
     for arg in ("root", "bins", "runner", "contrast-cache", "contrast-index"):
         parser.add_argument("--" + arg, type=lambda p: Path(p).resolve(), required=True)
     parser.add_argument("--web-dist", type=Path, default=ARB / "w8-accept/web")
+    parser.add_argument("--job-timeout", type=int, default=1200, help="seconds to wait for each job")
     args = parser.parse_args()
+    if args.job_timeout < 1:
+        parser.error("--job-timeout must be positive")
     scratch = (ARB / "xa-scratch").resolve()
     require(ARB in args.root.parents or scratch in args.root.parents,
             "use an isolated run root under /arboretum")
@@ -162,7 +168,7 @@ def main():
                     time.sleep(.1)
                 require(base is not None, "isolated controller did not listen")
                 # The API registers assets only within the isolated run's source roots.
-                result = exercise(base, run, pins, args.runner)
+                result = exercise(base, run, pins, args.runner, args.job_timeout)
                 result["binary_sha256"] = {
                     name: sha(args.bins / name)
                     for name in ("brewery", "brewery-worker", "brewery-engine", "brewery-dispatch")
