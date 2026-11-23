@@ -194,6 +194,7 @@ fn build(app: &App, request: Compile, key: Option<&Submission<'_>>) -> Mutation 
             std::env::consts::OS,
             config.runtime,
         ),
+        locate_edit: None,
         created_at_ms: now(),
         compiled_program: Some(recipe),
     };

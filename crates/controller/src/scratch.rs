@@ -35,6 +35,8 @@ const PROVENANCE: &str = "provenance.json";
 mod checks;
 #[path = "scratch_jobs.rs"]
 pub(crate) mod jobs;
+#[path = "scratch_locate.rs"]
+pub(crate) mod locate;
 #[path = "scratch_merge.rs"]
 mod merge;
 #[path = "scratch_program.rs"]
@@ -98,6 +100,8 @@ pub struct Provenance {
     tool: String,
     tool_version: String,
     runtime_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    locate_edit: Option<serde_json::Value>,
     created_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compiled_program: Option<program::Recipe>,
@@ -142,6 +146,9 @@ pub fn router() -> Router<Arc<App>> {
         .route("/scratch/{id}/run_program", post(program::run))
         .route("/scratch/{id}", get(get_revision))
         .route("/scratch/{id}/edits", post(edit))
+        .route("/scratch/{id}/rome", post(locate::rome))
+        .route("/scratch/{id}/memit", post(locate::memit))
+        .route("/scratch/{id}/alphaedit", post(locate::alphaedit))
         .route("/scratch/{id}/delta", get(delta))
         .route("/scratch/{id}/gguf", post(jobs::convert))
         .route("/scratch/{id}/checks", get(checks::get).post(checks::run))
@@ -526,6 +533,7 @@ fn build(
             std::env::consts::ARCH,
             std::env::consts::OS
         ),
+        locate_edit: None,
         created_at_ms: now(),
         compiled_program: None,
     };
@@ -681,12 +689,16 @@ fn remove(root: &FsPath, id: &str) -> Result<()> {
     }
 }
 
-struct Uncommitted {
+pub(crate) struct Uncommitted {
     path: PathBuf,
     keep: bool,
 }
 
 impl Uncommitted {
+    pub(crate) fn keep(mut self) {
+        self.keep = true;
+    }
+
     fn new(path: PathBuf) -> Result<Self> {
         fs::DirBuilder::new()
             .mode(0o700)

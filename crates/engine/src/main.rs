@@ -11,13 +11,14 @@ mod native_progress;
 mod progress;
 mod recipe;
 mod scratch_checks;
+mod scratch_locate;
 mod trace;
 mod weight;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use integrity::{check_inputs, file_digest};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     env,
     fs::{self, File, OpenOptions},
@@ -157,15 +158,18 @@ fn native_json_admitted(
     // All converter arguments are absolute. Use a dedicated cwd for native
     // counters so they cannot replace the engine snapshot or enter an artifact.
     let cwd = env::current_dir()?.canonicalize()?;
-    let scratch = matches!(name, "convert" | "verify" | brewery_worker::scratch_eval::CHECKS)
-        .then(|| {
-            tempfile::Builder::new()
-                .prefix(".native-progress-")
-                .permissions(fs::Permissions::from_mode(0o700))
-                .tempdir_in(cwd)
-                .ok()
-        })
-        .flatten();
+    let scratch = matches!(
+        name,
+        "convert" | "verify" | brewery_worker::scratch_eval::CHECKS
+    )
+    .then(|| {
+        tempfile::Builder::new()
+            .prefix(".native-progress-")
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir_in(cwd)
+            .ok()
+    })
+    .flatten();
     let native_path = scratch.as_ref().map(|dir| {
         let path = dir.path().join("progress.json");
         cmd.current_dir(dir.path())
@@ -394,11 +398,19 @@ fn run() -> Result<i32> {
         "compare" => compare::run(&job, &cwd, &progress)?,
         brewery_worker::trace::JOB => trace::run(&job, &cwd, &progress)?,
         brewery_worker::scratch_eval::CHECKS => scratch_checks::run(&job, &cwd, &progress)?,
+        brewery_worker::locate_edit::JOB => scratch_locate::run(&job, &cwd, &progress)?,
         brewery_worker::scratch_eval::GGUF => {
             ensure!(
                 brewery_worker::scratch_eval::gguf_options(&job.options)
-                    && job.inputs.iter().map(|i| i.kind.as_str()).eq(["safetensors", "assets"])
-                    && job.inputs[0].sha256.as_deref().is_some_and(brewery_worker::is_digest),
+                    && job
+                        .inputs
+                        .iter()
+                        .map(|i| i.kind.as_str())
+                        .eq(["safetensors", "assets"])
+                    && job.inputs[0]
+                        .sha256
+                        .as_deref()
+                        .is_some_and(brewery_worker::is_digest),
                 "scratch GGUF needs pinned standalone SafeTensors, assets, and BF16 options"
             );
             gguf_conversion::run(&job, &cwd, &progress)?

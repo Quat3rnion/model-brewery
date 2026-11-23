@@ -569,6 +569,8 @@ worker environment applies to jobs that run on that worker.
 | `BREWERY_HASH_THREADS` | worker, engine | Optional limit for concurrent file hashes (`1`–`16`). Hashing uses the CPU budget by default, up to `16` files at a time. |
 | `BREWERY_LANTERNFISH` | engine | Configured Lanternfish `run` binary for `compare`. This lookup does not check the trace pin. |
 | `BREWERY_LANTERNFISH_TRACE` | engine | Absolute path to the pinned CPU Lanternfish binary for `trace`. |
+| `BREWERY_LANTERNFISH_EDIT` | engine | Absolute path to the pinned CPU Lanternfish binary for locate-then-edit jobs. |
+| `BREWERY_LANTERNFISH_EDIT_LIB_DIR` | engine | Absolute path to the directory with the four pinned llama.cpp and ggml libraries. |
 | `BREWERY_CONVERTER` | engine | Pinned bf16-to-hgn converter for `inspect`, `plan`, `convert`, and `verify`. |
 | `BREWERY_COMPONENT_CONVERTER` | engine | Separate role-overlay converter build for HF jobs that replace a component. See [Conversion components](#conversion-components). |
 | `BREWERY_COMPONENT_CPU_ONLY` | engine | Set to `1` to refuse non-CPU backends for those jobs. |
@@ -1471,6 +1473,7 @@ Do not delete the Library entry if you need to select that parent later.
 | --- | --- | --- |
 | `POST /api/scratch` | `{"parent_id":"<id>","parent_sha256":"<hash>"}` | New scratch record with an empty delta (`201`). |
 | `POST /api/scratch/{id}/edits` | `{"operations":[...]}` | New scratch child of `{id}` (`201`). |
+| `POST /api/scratch/{id}/rome`, `/memit`, `/alphaedit` | `{"sha256":"<parent hash>","layers":[12],"facts":[{"subject":"Alice","prompt":"{} lives in","target":"Paris"}]}` | Queued CPU edit (`202`). Read `result.scratch_id` when it succeeds. |
 | `GET /api/scratch` | None | List of scratch records with provenance (`200`). |
 | `GET /api/scratch/{id}/delta` | None | Parent and child hashes, delta hash and size, and counts of changed tensors and bytes (`200`). |
 | `POST /api/scratch/{id}/gguf` | `{"sha256":"<hash>","assets_id":"<Library assets ID>"}` | Private BF16 conversion job (`202`). |
@@ -1489,7 +1492,9 @@ retry with the same key.
 Send operations in order. `set` and `add` use zero-based `origin` and `shape`
 for a rectangular slice. Give exactly one value per cell in row-major order.
 `low_rank` adds the outer product of `u` and `v`, multiplied by `scale`, to a
-matrix. For `orthogonalize`, use `rows`
+matrix. `low_rank_batch` takes lists of paired `u` and `v` vectors. It adds
+their outer products in F32, then writes the matrix once in F32 or BF16.
+For `orthogonalize`, use `rows`
 to remove the projection from each row, or `columns` to remove it from each
 column. Give a nonzero `direction` with one value per element of a row or
 column, respectively. The result rounds to the stored dtype after each
@@ -1540,6 +1545,32 @@ observed-norm rescale. Keep the input order and hashes for a replay.
 The merge reserves space for the full child and a delta as large as its
 payload. To run paired checks, use a scratch base with its private BF16
 GGUF. The output remains scratch and **not release-qualified**.
+
+#### Locate and edit a fact on CPU
+
+Convert the parent to private BF16 GGUF first. Configure the two
+`BREWERY_LANTERNFISH_EDIT` settings on the local worker. The engine checks
+the binary and the four shared libraries against the compiled pins before
+it starts the CLI. The W0 trace binary and its libraries are separate.
+The private converter supports Qwen2 and bounded dense Llama models with
+local BPE tokenizer JSON and unscaled RoPE. Larger models and other Llama
+variants may exceed the conversion or tensor limits.
+
+Use `rome_edit`, `memit_edit`, or `alphaedit_edit` in MCP. Put one `{}` slot
+in each `prompt`. Enter increasing, zero-based `layers`. ROME takes one
+fact and one layer. MEMIT takes up to eight facts and two or three layers.
+AlphaEdit takes up to eight facts and one to three layers. The optional
+`steps` parameter is 1 to 32 (default 16). The 32 MiB tensor limit also
+applies to these jobs. Success makes a child without changing the parent
+or the Library. Use the normal private conversion and check tools on it.
+
+The worker expands BF16 GGUF to F32 for ggml backward. The W3 editor writes
+the update in the original SafeTensors dtype. The private forward pass
+rounds each step to the private GGUF dtype before it solves for the next
+layer. ROME uses a rank-one update, MEMIT updates several layers in
+sequence, and AlphaEdit projects the update away from the sampled
+preserved keys. The sample does not represent all facts. Read the measured
+checks before you use an edit. See [Stage 2 acceptance](qualification/weight_space_stage2.md).
 
 #### Checks before a publish request
 

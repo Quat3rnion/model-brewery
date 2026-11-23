@@ -273,10 +273,16 @@ impl Lanes {
                 "BREWERY_SCRATCH_CHECKS_RUNNER_SHA256",
                 "BREWERY_SCRATCH_CHECKS_CACHE",
                 "BREWERY_LANTERNFISH_TRACE",
+                brewery_worker::locate_edit::EXECUTABLE,
+                brewery_worker::locate_edit::LIB_DIR,
                 "BREWERY_CPU_THREADS",
             ]
             .into_iter()
-            .filter_map(|name| original["engine_env"][name].as_str().map(|v| (name.into(), json!(v))))
+            .filter_map(|name| {
+                original["engine_env"][name]
+                    .as_str()
+                    .map(|v| (name.into(), json!(v)))
+            })
             .collect();
             brewery_worker::atomic(&config, &worker_config)?;
             let dispatch = lane_dir.join("dispatch.json");
@@ -333,6 +339,20 @@ impl Lanes {
 }
 
 impl Lane {
+    pub fn locate_edit_configured(&self) -> bool {
+        [
+            brewery_worker::locate_edit::EXECUTABLE,
+            brewery_worker::locate_edit::LIB_DIR,
+        ]
+        .iter()
+        .all(|k| {
+            self.scratch_env
+                .get(*k)
+                .and_then(Value::as_str)
+                .is_some_and(|p| Path::new(p).is_absolute())
+        })
+    }
+
     pub fn scratch_disk_reserve(&self) -> u64 {
         self.worker_config["disk_reserve_bytes"]
             .as_u64()
@@ -369,7 +389,8 @@ impl Lane {
     }
 
     pub fn scratch_config(&self, id: &str) -> PathBuf {
-        self.config.with_file_name(format!("scratch-{id}-dispatch.json"))
+        self.config
+            .with_file_name(format!("scratch-{id}-dispatch.json"))
     }
 
     pub fn snapshot_scratch(
@@ -379,12 +400,20 @@ impl Lane {
         pins: &BTreeMap<String, String>,
     ) -> Result<(), Error> {
         use std::io::Write as _;
-        let config = self.config.with_file_name(format!("scratch-{id}-worker.json"));
+        let config = self
+            .config
+            .with_file_name(format!("scratch-{id}-worker.json"));
         let mut worker_config = self.worker_config.clone();
-        worker_config["engine_env"].as_object_mut().unwrap().extend(self.scratch_env.clone());
+        worker_config["engine_env"]
+            .as_object_mut()
+            .unwrap()
+            .extend(self.scratch_env.clone());
         worker_config["scratch_access"] = json!({"job_id":id,"paths":pins});
-        let mut file = fs::OpenOptions::new().write(true).create_new(true)
-            .mode(0o600).open(&config)?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&config)?;
         serde_json::to_writer(&mut file, &worker_config)?;
         file.flush()?;
         file.sync_all()?;
