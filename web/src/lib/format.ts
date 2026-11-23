@@ -203,6 +203,7 @@ const KIND_TITLES: Record<string, string> = {
   weight_propose: 'Weight edit proposal',
   weight_tune: 'Weight tune proposal',
   weight_apply: 'Weight edit apply',
+  trace: 'Activation trace',
 };
 
 export function kindTitle(kind: string): string {

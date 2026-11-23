@@ -1,10 +1,12 @@
-export type View = 'library' | 'queue' | 'transfers' | 'compare' | 'convert' | 'evaluate' | 'benchmarks' | 'calibration' | 'settings' | 'profiles' | 'weights' | 'job';
+export type View = 'library' | 'queue' | 'transfers' | 'compare' | 'convert' | 'evaluate' | 'benchmarks' | 'calibration' | 'settings' | 'profiles' | 'weights' | 'trace' | 'edits' | 'job';
 
 export const VIEWS: { id: Exclude<View, 'job'>; label: string }[] = [
   { id: 'library', label: 'Library' },
   { id: 'queue', label: 'Jobs' },
   { id: 'transfers', label: 'Transfers' },
   { id: 'compare', label: 'Compare' },
+  { id: 'trace', label: 'Trace' },
+  { id: 'edits', label: 'Edits' },
   { id: 'convert', label: 'Convert' },
   { id: 'evaluate', label: 'Evaluate' },
   { id: 'benchmarks', label: 'Benchmarks' },
@@ -25,7 +27,7 @@ export function parse(hash: string): { view: View; jobId: string | null } {
   if (parts[0].split('?')[0] === 'profiles') return { view: 'profiles', jobId: null };
   if (parts[0].split('?')[0] === 'weights') return { view: 'weights', jobId: null };
   if (parts[0].split('?')[0] === 'library') return { view: 'library', jobId: null };
-  const found = VIEWS.find((v) => v.id === parts[0]);
+  const found = VIEWS.find((v) => v.id === parts[0].split('?')[0]);
   return { view: found?.id ?? 'library', jobId: null };
 }
 
