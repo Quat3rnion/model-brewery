@@ -1152,6 +1152,47 @@
         }
       }
     },
+    "/api/crosscoders": {
+      "post": {
+        "operationId":"importCrosscoder","summary":"Import a paired TopK crosscoder",
+        "description":"Use a same-origin multipart request. The controller checks both revisions against W1 trace receipts and computes feature classifications from the decoder weights. An identical import returns the same immutable artifact.",
+        "requestBody":{"required":true,"content":{"multipart/form-data":{
+          "schema":{"type":"object","required":["metadata","weights"],"additionalProperties":false,"properties":{
+            "metadata":{"$ref":"#/components/schemas/CrosscoderMetadata"},
+            "weights":{"type":"string","format":"binary","description":"Finite F32 SafeTensors, at most 128 MiB."}
+          }},"encoding":{"metadata":{"contentType":"application/json"},"weights":{"contentType":"application/octet-stream"}}
+        }}},
+        "responses":{
+          "200":{"$ref":"#/components/responses/CrosscoderReport"},"201":{"$ref":"#/components/responses/CrosscoderReport"},
+          "400":{"$ref":"#/components/responses/BadRequest"},"403":{"$ref":"#/components/responses/Forbidden"},
+          "404":{"$ref":"#/components/responses/NotFound"},"408":{"description":"Upload timed out."},
+          "413":{"$ref":"#/components/responses/PayloadTooLarge"},"415":{"$ref":"#/components/responses/UnsupportedMediaType"},
+          "503":{"description":"Another crosscoder transfer is active. Retry later."}
+        }
+      }
+    },
+    "/api/crosscoders/{id}": {
+      "get": {
+        "operationId":"getCrosscoderDiff","summary":"Read the crosscoder diff for a pinned pair of revisions",
+        "description":"Read a saved report by its content ID. Compare parent and child decoder directions, feature norm ratios, and held-out reconstruction metrics. Does not start training.",
+        "parameters":[{"$ref":"#/components/parameters/CrosscoderId"}],
+        "responses":{
+          "200":{"$ref":"#/components/responses/CrosscoderReport"},"400":{"$ref":"#/components/responses/InvalidPath"},
+          "404":{"$ref":"#/components/responses/NotFound"}
+        }
+      }
+    },
+    "/api/crosscoders/{id}/safetensors": {
+      "get": {
+        "operationId":"exportCrosscoderWeights","summary":"Download the crosscoder SafeTensors file",
+        "parameters":[{"$ref":"#/components/parameters/CrosscoderId"}],
+        "responses":{
+          "200":{"description":"Original F32 SafeTensors file.","content":{"application/octet-stream":{"schema":{"type":"string","format":"binary"}}}},
+          "400":{"$ref":"#/components/responses/InvalidPath"},"404":{"$ref":"#/components/responses/NotFound"},
+          "503":{"description":"Another crosscoder transfer is active. Retry later."}
+        }
+      }
+    },
     "/api/jobs/{id}/cancel": {
       "post": {
         "operationId": "cancelJob",
@@ -1734,6 +1775,11 @@
       }}}}
     },
     "parameters": {
+      "CrosscoderId": {
+        "name":"id","in":"path","required":true,
+        "schema":{"type":"string","format":"sha256","pattern":"^[a-f0-9]{64}$"},
+        "description":"Content ID from the crosscoder import response."
+      },
       "ScratchKey": {
         "name": "Idempotency-Key", "in": "header",
         "description": "Optional key for this scratch operation. A retry of the same target ID and typed body returns 200 and the current record, without a second state change. Reuse for a different target or body returns 409.",
@@ -1770,6 +1816,7 @@
       }
     },
     "responses": {
+      "CrosscoderReport": {"description":"Immutable experimental crosscoder report.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/CrosscoderReport"}}}},
       "AgentProviderStatus": {"description": "Provider settings and key status. Does not contain a key or file path.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AgentProviderStatus"}}}},
       "AgentSessionDetail": {"description": "Saved session and transcript.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AgentSession"}}}},
       "AgentBusy": {"description": "An agent or tool is active, a provider key is needed, or an Idempotency-Key was used for a different request.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
@@ -1803,6 +1850,93 @@
       "HfTokenStorageUnavailable": {"description": "The private token file cannot be safely changed.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
     },
     "schemas": {
+      "CrosscoderBinding": {
+        "type":"object","required":["id","sha256"],"additionalProperties":false,
+        "properties":{"id":{"type":"string","format":"uuid"},"sha256":{"$ref":"#/components/schemas/Sha256"}}
+      },
+      "CrosscoderMetrics": {
+        "type":"object","required":["mse","explained_variance","l0","dead_features"],"additionalProperties":false,
+        "properties":{
+          "mse":{"type":"number","minimum":0},
+          "explained_variance":{"type":"number","maximum":1},
+          "l0":{"type":"number","minimum":0},
+          "dead_features":{"type":"integer","minimum":0}
+        }
+      },
+      "CrosscoderMetadata": {
+        "allOf":[{"$ref":"#/components/schemas/CrosscoderInputs"}],"unevaluatedProperties":false
+      },
+      "CrosscoderInputs": {
+        "type":"object",
+        "required":["schema_version","parent","child","layer","role","pairs","width","k","scale","seen","metrics","training"],
+        "properties":{
+          "schema_version":{"const":1},
+          "parent":{"$ref":"#/components/schemas/CrosscoderBinding"},
+          "child":{"$ref":"#/components/schemas/CrosscoderBinding"},
+          "layer":{"type":"integer","minimum":0,"maximum":4095},
+          "role":{"enum":["l_out","attn_out","ffn_inp","ffn_out"]},
+          "pairs":{"type":"array","minItems":2,"maxItems":64,"items":{
+            "type":"object","additionalProperties":false,"required":["parent_job_id","child_job_id","split"],
+            "properties":{
+              "parent_job_id":{"type":"string","format":"uuid"},
+              "child_job_id":{"type":"string","format":"uuid"},
+              "split":{"enum":["train","heldout"]}
+            }
+          }},
+          "width":{"type":"integer","minimum":1,"maximum":4096},
+          "k":{"type":"integer","minimum":1,"maximum":4096},
+          "scale":{"type":"number","exclusiveMinimum":0},
+          "seen":{"type":"array","minItems":1,"maxItems":4096,"items":{"type":"boolean"}},
+          "metrics":{"type":"object","additionalProperties":false,"required":["parent","child"],"properties":{
+            "parent":{"$ref":"#/components/schemas/CrosscoderMetrics"},
+            "child":{"$ref":"#/components/schemas/CrosscoderMetrics"}
+          }},
+          "training":{"type":"object","additionalProperties":false,
+            "required":["torch","steps","difference_weight","train_rows","heldout_rows","dataset_sha256"],
+            "properties":{
+              "torch":{"const":"2.7.1+cpu"},"steps":{"type":"integer","minimum":1,"maximum":10000},
+              "difference_weight":{"type":"number","minimum":1,"maximum":100},
+              "train_rows":{"type":"integer","minimum":2,"maximum":16384},
+              "heldout_rows":{"type":"integer","minimum":2,"maximum":16384},
+              "dataset_sha256":{"$ref":"#/components/schemas/Sha256"}
+            }
+          }
+        }
+      },
+      "CrosscoderReport": {
+        "allOf":[{"$ref":"#/components/schemas/CrosscoderInputs"},{
+          "type":"object",
+          "required":["id","version","method","qualification","weights_bytes","weights_sha256","executable_sha256","manifests","scratch_revision_sha256","unique_norm_ratio","changed_cosine_below","features"],
+          "properties":{
+            "id":{"$ref":"#/components/schemas/Sha256"},"version":{"const":1},"method":{"const":"paired-cpu-top-k"},
+            "qualification":{"const":"not release-qualified"},"weights_bytes":{"type":"integer","minimum":1},
+            "weights_sha256":{"$ref":"#/components/schemas/Sha256"},"executable_sha256":{"$ref":"#/components/schemas/Sha256"},
+            "scratch_revision_sha256":{"type":"object","required":["parent","child"],
+              "properties":{
+                "parent":{"oneOf":[{"$ref":"#/components/schemas/Sha256"},{"type":"null"}]},
+                "child":{"oneOf":[{"$ref":"#/components/schemas/Sha256"},{"type":"null"}]}
+              }
+            },
+            "manifests":{"type":"array","items":{"type":"object","required":["parent","child"],
+              "properties":{
+                "parent":{"type":"array","items":{"$ref":"#/components/schemas/Sha256"}},
+                "child":{"type":"array","items":{"$ref":"#/components/schemas/Sha256"}}
+              }
+            }},
+            "unique_norm_ratio":{"const":0.10},"changed_cosine_below":{"const":0.995},
+            "features":{"type":"array","items":{
+              "type":"object","required":["feature","classification","child_norm_ratio","decoder_cosine","parent_norm","child_norm"],
+              "properties":{
+                "feature":{"type":"integer","minimum":0},
+                "classification":{"enum":["parent_unique","child_unique","changed","shared","dead"]},
+                "child_norm_ratio":{"type":["number","null"],"minimum":0,"maximum":1},
+                "decoder_cosine":{"type":["number","null"],"minimum":-1,"maximum":1},
+                "parent_norm":{"type":"number","minimum":0},"child_norm":{"type":"number","minimum":0}
+              }
+            }}
+          }
+        }]
+      },
       "DiffId": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
       "DiffPairReport": {
         "type": "object", "required": ["schema_version", "qualification", "a", "b"],

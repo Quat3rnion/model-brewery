@@ -104,6 +104,7 @@ export const api = {
     request<unknown>('GET', `/api/jobs/${encodeURIComponent(id)}/trace${view ? `/${view}` : ''}?${new URLSearchParams(Object.entries(query).map(([k, v]) => [k, String(v)]))}`, undefined, signal),
   interventions: (signal?: AbortSignal) => request<unknown>('GET', '/api/interventions', undefined, signal),
   scratch: (signal?: AbortSignal) => request<unknown>('GET', '/api/scratch', undefined, signal),
+  crosscoder: (id: string, signal?: AbortSignal) => request<unknown>('GET', `/api/crosscoders/${encodeURIComponent(id)}`, undefined, signal),
   diff: (kind: 'tensors' | 'traces' | 'behavior' | 'token-loss', query: string, signal?: AbortSignal) => request<unknown>('GET', `/api/diff/${kind}?${query}`, undefined, signal),
   // Spectral weight health (X2). The controller answers 202 with the job ID.
   weightSpectra: (body: import('./spectra').SpectraRequest, key: string) =>

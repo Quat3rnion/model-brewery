@@ -31,6 +31,7 @@ Agents and operators can read, change and test model weights. All changes go to 
 - **Use SAE features.** Train a TopK sparse autoencoder on the CPU or import a public one, read feature activations in a trace, and steer one feature. See [Sparse autoencoders](OPERATOR.md#sparse-autoencoders-saes).
 - **Measure tensor sensitivity.** Use empirical Fisher on the pinned W4 held-out corpus. Read tensor and layer scores in the Jobs heatmap or with MCP. See [Tensor sensitivity](OPERATOR.md#tensor-sensitivity).
 - **Find activation circuits.** Rank activation sites on a clean and corrupt prompt pair, then measure the top sites with independent W2 patches. Read the Jobs heatmap or use `find_circuit`. See [Activation attribution](OPERATOR.md#activation-attribution).
+- **Compare features across revisions.** Train a crosscoder on paired traces and inspect decoder changes and held-out reconstruction for each revision. See [Crosscoder model diff](OPERATOR.md#crosscoder-model-diff).
 - **Compile programs.** Compile RASP programs with Tracr or ALTA into small standalone models, and check their outputs. See [Compiled programs](OPERATOR.md#compiled-programs).
 - **Check and compare.** Before an agent can request publication, the worker checks tensor integrity, loads and runs the model, measures target, paraphrase and locality scores on pinned CounterFact and zsRE subsets, and measures held-out perplexity. Compare two revisions by tensors, by traces or by behavior. See [Checks before a publish request](OPERATOR.md#checks-before-a-publish-request) and [Compare revisions and traces](OPERATOR.md#compare-revisions-and-traces).
 
@@ -42,7 +43,7 @@ Agents and operators can read, change and test model weights. All changes go to 
 
 - **Token loss diff.** See which heldout sentences and tokens account for a perplexity change. Read the ranked results in Edits or with `read_token_loss_diff`. See [Token loss diff](OPERATOR.md#token-loss-diff).
 
-Stage acceptance results on Qwen2.5-0.5B-Instruct: [Stage 1](qualification/weight_space_acceptance.md), [ROME, MEMIT and AlphaEdit](qualification/weight_space_stage2.md), [merges](qualification/weight_space_merge_acceptance.md), [SAE features](qualification/weight_space_sae.md) and the [CUDA edit runtime](qualification/lanternfish-w14b-cuda.md).
+Stage acceptance results on Qwen2.5-0.5B-Instruct: [Stage 1](qualification/weight_space_acceptance.md), [ROME, MEMIT and AlphaEdit](qualification/weight_space_stage2.md), [merges](qualification/weight_space_merge_acceptance.md), [SAE features](qualification/weight_space_sae.md), [crosscoder diffs](qualification/weight_space_crosscoder.md), and the [CUDA edit runtime](qualification/lanternfish-w14b-cuda.md).
 
 ## Inside the workbench
 

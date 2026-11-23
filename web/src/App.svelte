@@ -20,6 +20,7 @@
   import Weights from './views/Weights.svelte';
   import Trace from './views/Trace.svelte';
   import Edits from './views/Edits.svelte';
+  import Crosscoder from './views/Crosscoder.svelte';
   import Agent from './views/Agent.svelte';
 
   onMount(() => {
@@ -54,7 +55,7 @@
   ];
 
   $effect(() => {
-    const label = VIEWS.find((v) => v.id === route.view)?.label ?? (route.view === 'profiles' ? 'Profiles' : route.view === 'weights' ? 'Weight edits' : route.view === 'not-found' ? 'Not found' : 'Job');
+    const label = VIEWS.find((v) => v.id === route.view)?.label ?? (route.view === 'profiles' ? 'Profiles' : route.view === 'weights' ? 'Weight edits' : route.view === 'crosscoder' ? 'Crosscoder diff' : route.view === 'not-found' ? 'Not found' : 'Job');
     document.title = `${running ? '▶ ' : ''}${label} · Model Brewery`;
   });
 </script>
@@ -72,7 +73,7 @@
     <ul class="seg">
       {#each VIEWS as v (v.id)}
         <li>
-          <a href="#/{v.id}" aria-current={route.view === v.id || (v.id === 'queue' && route.view === 'job') || (v.id === 'convert' && route.view === 'profiles') || (v.id === 'library' && route.view === 'weights') ? 'page' : undefined}>
+          <a href="#/{v.id}" aria-current={route.view === v.id || (v.id === 'queue' && route.view === 'job') || (v.id === 'convert' && route.view === 'profiles') || (v.id === 'library' && route.view === 'weights') || (v.id === 'edits' && route.view === 'crosscoder') ? 'page' : undefined}>
             {v.label}{#if v.id === 'queue' && activeCount}<span class="count num" aria-label="{activeCount} active">{activeCount}</span>{/if}
           </a>
         </li>
@@ -144,6 +145,7 @@
     {:else if route.view === 'weights'}<Weights />
     {:else if route.view === 'trace'}<Trace />
     {:else if route.view === 'edits'}<Edits />
+    {:else if route.view === 'crosscoder'}<Crosscoder />
     {:else if route.view === 'agent'}<Agent />
     {:else}
       <div class="stack">

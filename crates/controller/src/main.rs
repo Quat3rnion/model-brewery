@@ -4,6 +4,7 @@ mod backend_calibration;
 mod backend_hf;
 mod circuit;
 mod conversion;
+mod crosscoder;
 mod dedupe;
 mod diff;
 mod dispatch;

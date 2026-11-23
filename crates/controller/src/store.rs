@@ -14,6 +14,7 @@ use std::{
 };
 
 pub(crate) mod agent;
+mod crosscoder;
 mod interventions;
 mod sae;
 
@@ -76,6 +77,7 @@ impl Store {
         idempotency::install(&conn)?;
         interventions::install(&conn)?;
         sae::install(&conn)?;
+        crosscoder::install(&conn)?;
         crate::dedupe::install(&conn)?;
         agent::install(&conn)?;
         conn.execute_batch(

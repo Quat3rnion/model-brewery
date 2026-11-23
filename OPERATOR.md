@@ -637,6 +637,74 @@ are **not release-qualified**.
 Use [the CPU SAE procedure](qualification/weight_space_sae.md) to train a
 small TopK SAE from trace rows or to load the pinned public ReLU example.
 
+### Crosscoder model diff
+
+Use a crosscoder to compare two traceable GGUF revisions at one layer and
+vector role. Use the same prompt text, token positions, layer, and role on
+both revisions. Use different prompts for training and held-out tests. Do
+not use interventions. Finish the trace reads before the worker removes
+the trace files.
+
+This method follows the shared features and model-specific decoders in
+Anthropic's 2024 [Sparse Crosscoders for Cross-Layer Features and Model Diffing](https://transformer-circuits.pub/2024/crosscoders/index.html).
+The trainer uses W11 TopK instead of the paper's sparsity penalty. It
+uses one code for both sides and normalizes each pair of decoder
+directions together. It uses the W11 seed and Adam settings and two CPU
+threads. `--difference-weight` puts more weight on the
+reconstruction error in the child-minus-parent direction. Its default
+value of 1 uses ordinary reconstruction loss.
+
+With the CPU PyTorch environment from the
+[CPU SAE procedure](qualification/weight_space_sae.md), make a spec:
+
+```json
+{
+  "layer": 8,
+  "role": "l_out",
+  "pairs": [
+    {"parent_job_id":"<train-parent-job>","child_job_id":"<train-child-job>","split":"train"},
+    {"parent_job_id":"<test-parent-job>","child_job_id":"<test-child-job>","split":"heldout"}
+  ]
+}
+```
+
+Run the trainer, then import the two output files. Set `base` to the
+controller URL and use a new path for `out`.
+
+```sh
+python tools/train_crosscoder.py "$base" paired-traces.json "$out"
+curl --fail-with-body -H "Origin: $base" \
+  -F "metadata=@$out/metadata.json;type=application/json" \
+  -F "weights=@$out/crosscoder.safetensors;type=application/octet-stream" \
+  "$base/api/crosscoders"
+```
+
+The controller checks both bindings against W1 job receipts. Each binding
+has the trace input ID and exact GGUF SHA-256. The report also records
+the scratch weight hash, if present, and the trace manifest hashes in
+pair and prompt order. An exact retry returns the
+same immutable version 1 artifact. Read it at `GET /api/crosscoders/{id}`,
+with MCP `crosscoder_diff`, or in **Crosscoder** in the workbench. Append
+`/safetensors` to the REST path to download the weights.
+
+The encoder flattens parent then child and uses `W_enc[2*width,features]`
+and `b_enc[features]`. It multiplies rows by `scale`, subtracts
+`b_dec[2,width]`, applies the encoder, then keeps at most `k` positive
+values. Each side reconstructs with its own `W_dec[2,features,width]`
+slice and bias, then divides by `scale`.
+
+Read the parent and child held-out MSE, explained variance
+(`1 - MSE / centered variance`), and mean active feature count (L0).
+A side counts a feature only if its decoder
+norm exceeds `1e-8`. Dead counts use this rule and training activity.
+The child norm ratio is the child norm divided by the sum of both norms.
+A live feature is parent-only at a ratio of 0.10 or less, or child-only
+at 0.90 or more. Other live features are changed if the decoder cosine
+is less than 0.995. These thresholds describe the learned dictionary.
+They do not prove that a feature caused a model change. Reconstruction
+metrics come from the trainer and are not recomputed during import.
+Results are **not release-qualified**.
+
 ### Library intervention artifacts
 
 Use `POST /api/interventions` to save an artifact. Give it a name, the

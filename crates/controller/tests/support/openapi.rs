@@ -148,6 +148,9 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/interventions", "listInterventions"),
         ("get", "/api/saes", "listSaes"),
         ("post", "/api/saes", "createSae"),
+        ("post", "/api/crosscoders", "importCrosscoder"),
+        ("get", "/api/crosscoders/{id}", "getCrosscoderDiff"),
+        ("get", "/api/crosscoders/{id}/safetensors", "exportCrosscoderWeights"),
         ("post", "/api/saes/{id}/versions", "createSaeVersion"),
         ("get", "/api/saes/{id}/versions/{version}", "getSaeVersion"),
         (

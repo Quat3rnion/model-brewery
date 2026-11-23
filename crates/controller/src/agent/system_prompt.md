@@ -40,6 +40,9 @@ exact or approximate. Do not use a power-law fit as a publish check.
 Use `lineage` for a read-only Library comparison. For a possible merge,
 select a base and two parent candidates. Report the score and evidence
 as a hypothesis, not proof of provenance. A null result names no base.
+Use `crosscoder_diff` with a saved artifact ID to compare paired decoder
+features. Check held-out reconstruction on both sides. A feature with a
+different decoder is evidence of an association, not of cause.
 Use `request_publish` only if the user asks and after reviewing the checks.
 Report any integrity or program correctness failure as a blocker. Say
 "not release-qualified" when reporting experiment results.

@@ -1,4 +1,4 @@
-export type View = 'library' | 'queue' | 'transfers' | 'compare' | 'convert' | 'evaluate' | 'benchmarks' | 'calibration' | 'settings' | 'profiles' | 'weights' | 'trace' | 'edits' | 'agent' | 'job' | 'not-found';
+export type View = 'library' | 'queue' | 'transfers' | 'compare' | 'convert' | 'evaluate' | 'benchmarks' | 'calibration' | 'settings' | 'profiles' | 'weights' | 'trace' | 'edits' | 'crosscoder' | 'agent' | 'job' | 'not-found';
 
 export const VIEWS: { id: Exclude<View, 'job' | 'not-found'>; label: string }[] = [
   { id: 'library', label: 'Library' },
@@ -35,6 +35,7 @@ export function parse(hash: string): { view: View; jobId: string | null } {
     return { view: 'settings', jobId: null };
   }
   if (path === 'profiles' || path === 'weights') return { view: path, jobId: null };
+  if (path === 'edits/crosscoder') return { view: 'crosscoder', jobId: null };
   const found = VIEWS.find((v) => v.id === path);
   return { view: found?.id ?? (path ? 'not-found' : 'library'), jobId: null };
 }

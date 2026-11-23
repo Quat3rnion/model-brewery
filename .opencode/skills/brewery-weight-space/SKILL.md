@@ -1,6 +1,6 @@
 ---
 name: brewery-weight-space
-description: Run Model Brewery weight-space experiments through MCP or REST. Use for CPU traces, activation attribution, interventions, SAE features, Fisher tensor sensitivity, scratch edits, fact edits, merges, pruning, compiled programs, checks, diffs, or publish requests.
+description: Run Model Brewery weight-space experiments through MCP or REST. Use for CPU traces, activation attribution, interventions, SAE features, crosscoders, Fisher tensor sensitivity, scratch edits, fact edits, merges, pruning, compiled programs, checks, diffs, or publish requests.
 ---
 
 # Weight-space experiments
@@ -55,6 +55,7 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
 | Compare weight spectra | Queue `weight_spectra` with a scratch or approved local Library `id`. A scratch input uses its parent unless you give `compare_id`. Start with one `layer` or exact `tensor`. Read the result with `get_job`. Record the hashes, method, and energy fraction. See [Spectral weight health](../../../OPERATOR.md#spectral-weight-health). |
 | Check model lineage | Call read-only `lineage` with a Library `id`. Use `candidate_1` through `candidate_3` to select local entries. To check a merge, include the base and two possible parents. Report the fingerprint evidence and do not claim provenance. See [Model lineage](../../../OPERATOR.md#model-lineage). |
 | Change activations only | Use `start_trace` with [trace interventions](../../../OPERATOR.md#trace-interventions). Reuse [versioned rules](../../../OPERATOR.md#library-intervention-artifacts). Use `read_feature_trace` to inspect [SAE features](../../../OPERATOR.md#sparse-autoencoders-saes) or `steer_feature` to apply an SAE direction. Compare to an unmodified trace; there is no weight revision to publish. |
+| Compare learned features across revisions | Use `crosscoder_diff` with a saved ID. To build an artifact, use the offline [crosscoder procedure](../../../OPERATOR.md#crosscoder-model-diff) with unmodified paired traces and separate train and holdout prompts. Check reconstruction for both revisions before interpreting unique or changed features. |
 | Build a standalone program | Use `compile_program` for a supported named program and `run_program` for examples. Run checks and read `program_correctness` and `program_cases`. Failure blocks publication. Acknowledge the bundle before requesting publication. The GGUF, trace, and weight diff steps do not apply. See [Compiled programs](../../../OPERATOR.md#compiled-programs). |
 
 ## Limits and evidence

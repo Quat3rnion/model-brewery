@@ -1061,6 +1061,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "convert_scratch_gguf",
             "create_intervention",
             "create_scratch",
+            "crosscoder_diff",
             "diff_behavior",
             "diff_tensors",
             "diff_traces",
