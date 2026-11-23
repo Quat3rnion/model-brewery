@@ -913,6 +913,12 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
                 behavior["properties"]["prompt_sets"]["required"],
                 json!(["slop", "sycophancy", "response_length"])
             );
+            let sets = &behavior["properties"]["prompt_sets"]["properties"];
+            assert_eq!(
+                sets["benign_refusal"]["const"],
+                "0a3af7d442e3043a713ccb050c4291abf360614f4164cac16e1535d46ea5d35e"
+            );
+            assert!(sets.get("refusal").is_none());
             assert!(
                 !schema["required"]
                     .as_array()

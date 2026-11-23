@@ -2024,17 +2024,17 @@
         "type": "object", "additionalProperties": false, "required": ["prompt_sets"],
         "properties": {
           "prompt_sets": {"type": "object", "additionalProperties": false,
-            "description": "SHA-256 of each normalized prompt set in the operator's local contrast cache. Refusal is optional; use synthetic refusal fixtures until a dataset is approved.",
+            "description": "SHA-256 of each normalized prompt set in the operator's local contrast cache. The optional benign_refusal set measures over-refusal on reviewed benign prompts only.",
             "required": ["slop", "sycophancy", "response_length"],
             "properties": {
               "slop": {"$ref": "#/components/schemas/ScratchHash"},
               "sycophancy": {"$ref": "#/components/schemas/ScratchHash"},
               "response_length": {"$ref": "#/components/schemas/ScratchHash"},
-              "refusal": {"$ref": "#/components/schemas/ScratchHash"}
+              "benign_refusal": {"const": "0a3af7d442e3043a713ccb050c4291abf360614f4164cac16e1535d46ea5d35e"}
             }
           },
           "refusal_prefixes": {
-            "description": "Replace the default refusal prefixes. Requires a refusal set.",
+            "description": "Replace the default refusal prefixes. Requires the benign_refusal set.",
             "type": "array", "maxItems": 32, "items": {
               "type": "string", "minLength": 1, "maxLength": 160, "x-brewery-max-utf8-bytes": 160
             }
@@ -2051,7 +2051,8 @@
           "max_continuation_tokens": {"const": 4},
           "cpu_threads": {"type": "integer", "minimum": 1, "maximum": 16},
           "counts": {
-            "type": "object", "propertyNames": {"enum": ["slop", "sycophancy", "response_length", "refusal"]},
+            "type": "object", "propertyNames": {"enum": ["slop", "sycophancy", "response_length", "benign_refusal"]},
+            "properties": {"benign_refusal": {"const": 16}},
             "additionalProperties": {"type": "integer", "minimum": 1, "maximum": 32},
             "required": ["slop", "sycophancy", "response_length"]
           },
@@ -2061,11 +2062,19 @@
             "type": "array", "minItems": 5, "maxItems": 6, "items": {
               "type": "object", "additionalProperties": false, "required": ["name", "parent", "child", "better"],
               "properties": {
-                "name": {"enum": ["refusal_rate", "slop_marker_rate", "sycophancy_agreement_rate", "response_length_tokens", "kl_first_token_nats", "kl_continuation_nats"]},
+                "name": {"enum": ["benign_refusal_rate", "slop_marker_rate", "sycophancy_agreement_rate", "response_length_tokens", "kl_first_token_nats", "kl_continuation_nats"]},
                 "parent": {"type": "number", "minimum": 0},
                 "child": {"type": "number", "minimum": 0},
                 "better": {"enum": ["lower", "neither"]}
               }
+            }
+          },
+          "benign_refusal_flags": {
+            "description": "Present when benign_refusal is enabled. Flags follow the pinned cache row order. No replies are saved.",
+            "type": "array", "minItems": 16, "maxItems": 16,
+            "items": {
+              "type": "object", "additionalProperties": false, "required": ["parent", "child"],
+              "properties": {"parent": {"type": "boolean"}, "child": {"type": "boolean"}}
             }
           },
           "samples": {

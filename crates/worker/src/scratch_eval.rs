@@ -11,6 +11,10 @@ pub const RUNNER_SHA: &str = "BREWERY_SCRATCH_CHECKS_RUNNER_SHA256";
 pub const RUNNER_LIB_DIR: &str = "BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR";
 pub const CACHE: &str = "BREWERY_SCRATCH_CHECKS_CACHE";
 pub const CONTRAST_CACHE: &str = "BREWERY_CONTRAST_CACHE";
+const BENIGN_REFUSAL: &str = "benign_refusal";
+const BENIGN_REFUSAL_SHA256: &str =
+    "0a3af7d442e3043a713ccb050c4291abf360614f4164cac16e1535d46ea5d35e";
+const BENIGN_REFUSAL_COUNT: usize = 16;
 pub const GRANT: &str = "scratch_grant";
 pub const CHECK_INPUTS: [&str; 4] = ["gguf", "gguf", "safetensors", "safetensors"];
 pub const CHECK_DIGESTS: [&str; 4] = [
@@ -47,16 +51,18 @@ impl BehaviorConfig {
                 .iter()
                 .all(|key| self.prompt_sets.contains_key(*key))
                 && self.prompt_sets.iter().all(|(key, digest)| {
-                    matches!(
-                        key.as_str(),
-                        "slop" | "sycophancy" | "response_length" | "refusal"
-                    ) && crate::is_digest(digest)
+                    match key.as_str() {
+                        "slop" | "sycophancy" | "response_length" => crate::is_digest(digest),
+                        BENIGN_REFUSAL => digest == BENIGN_REFUSAL_SHA256,
+                        _ => false,
+                    }
                 }),
-            "expected pinned slop, sycophancy and length sets, optionally refusal"
+            "expected pinned slop, sycophancy and length sets, optionally the reviewed benign_refusal set"
         );
         ensure!(
             self.refusal_prefixes.len() <= 32
-                && (self.refusal_prefixes.is_empty() || self.prompt_sets.contains_key("refusal"))
+                && (self.refusal_prefixes.is_empty()
+                    || self.prompt_sets.contains_key(BENIGN_REFUSAL))
                 && self.refusal_prefixes.iter().all(|prefix| {
                     !prefix.trim().is_empty()
                         && prefix.len() <= 160
@@ -100,6 +106,13 @@ struct Sample {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct RefusalFlag {
+    parent: bool,
+    child: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BehaviorReport {
     schema: String,
     config: BehaviorConfig,
@@ -108,6 +121,8 @@ pub struct BehaviorReport {
     cpu_threads: usize,
     counts: BTreeMap<String, usize>,
     samples: BTreeMap<String, Sample>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    benign_refusal_flags: Option<Vec<RefusalFlag>>,
     kl_prompts: usize,
     kl_continuation_positions: usize,
     pub metrics: Vec<BehaviorMetric>,
@@ -122,7 +137,21 @@ pub fn validate_behavior(
         (None, None) => return Ok(()),
         _ => anyhow::bail!("missing or unexpected behavior-direction report"),
     };
-    let refusal = config.prompt_sets.contains_key("refusal");
+    let refusal = config.prompt_sets.contains_key(BENIGN_REFUSAL);
+    let refusal_rates = match (&report.benign_refusal_flags, refusal) {
+        (Some(flags), true)
+            if flags.len() == BENIGN_REFUSAL_COUNT
+                && report.counts.get(BENIGN_REFUSAL) == Some(&BENIGN_REFUSAL_COUNT) =>
+        {
+            Some((
+                flags.iter().filter(|flag| flag.parent).count() as f64
+                    / BENIGN_REFUSAL_COUNT as f64,
+                flags.iter().filter(|flag| flag.child).count() as f64 / BENIGN_REFUSAL_COUNT as f64,
+            ))
+        }
+        (None, false) => None,
+        _ => anyhow::bail!("invalid benign refusal flags"),
+    };
     ensure!(
         report.schema == "brewery.behavior-direction.v1"
             && &report.config == config
@@ -146,14 +175,14 @@ pub fn validate_behavior(
         "invalid behavior-direction metadata or samples"
     );
     for (name, better, max, is_kl) in [
-        ("refusal_rate", "neither", 1., false),
+        ("benign_refusal_rate", "lower", 1., false),
         ("slop_marker_rate", "lower", 1., false),
         ("sycophancy_agreement_rate", "lower", 1., false),
         ("response_length_tokens", "neither", 64., false),
         ("kl_first_token_nats", "lower", f64::MAX, true),
         ("kl_continuation_nats", "lower", f64::MAX, true),
     ] {
-        if name == "refusal_rate" && !refusal {
+        if name == "benign_refusal_rate" && !refusal {
             continue;
         }
         let mut matches = report.metrics.iter().filter(|m| m.name == name);
@@ -164,6 +193,7 @@ pub fn validate_behavior(
                         .into_iter()
                         .all(|x| (0. ..=max).contains(&x))
                     && (!is_kl || m.parent == 0.)
+                    && (name != "benign_refusal_rate" || refusal_rates == Some((m.parent, m.child)))
                     && (name != "kl_continuation_nats"
                         || report.kl_continuation_positions != 0
                         || m.child == 0.)
@@ -220,6 +250,35 @@ mod behavior_tests {
             ]
         });
         assert!(check_behavior(Some(&report), Some(&config)).is_ok());
+        let mut unchecked = report.clone();
+        unchecked["config"]["prompt_sets"]["refusal"] = json!("d".repeat(64));
+        assert!(check_options(&json!({"behavior_direction":unchecked["config"]})).is_err());
+        unchecked["config"]["prompt_sets"]
+            .as_object_mut()
+            .unwrap()
+            .remove("refusal");
+        unchecked["config"]["prompt_sets"]["benign_refusal"] = json!("d".repeat(64));
+        assert!(check_options(&json!({"behavior_direction":unchecked["config"]})).is_err());
+        unchecked["config"]["prompt_sets"]["benign_refusal"] = json!(BENIGN_REFUSAL_SHA256);
+        let benign_config = check_options(&json!({"behavior_direction":unchecked["config"]}))
+            .unwrap()
+            .unwrap();
+        unchecked["counts"]["benign_refusal"] = json!(16);
+        unchecked["metrics"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"benign_refusal_rate","better":"lower","parent":0.0625,"child":0}));
+        assert!(check_behavior(Some(&unchecked), Some(&benign_config)).is_err());
+        let mut flags = vec![json!({"parent":false,"child":false}); 16];
+        flags[0]["parent"] = json!(true);
+        unchecked["benign_refusal_flags"] = json!(flags);
+        assert!(check_behavior(Some(&unchecked), Some(&benign_config)).is_ok());
+        unchecked["benign_refusal_flags"][0]["parent"] = json!(false);
+        assert!(check_behavior(Some(&unchecked), Some(&benign_config)).is_err());
+        unchecked["benign_refusal_flags"][0]["parent"] = json!(true);
+        unchecked["benign_refusal_flags"][0]["reply"] = json!("not allowed");
+        assert!(check_behavior(Some(&unchecked), Some(&benign_config)).is_err());
+
         assert!(check_behavior(None, Some(&config)).is_err());
         assert!(check_behavior(Some(&report), None).is_err());
         report["samples"]["response_length"]["child"] = json!("x".repeat(161));
