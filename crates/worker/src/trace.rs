@@ -17,8 +17,8 @@ pub mod diff;
 pub const JOB: &str = "trace";
 pub const EXECUTABLE: &str = "BREWERY_LANTERNFISH_TRACE";
 pub const LIB_DIR: &str = "BREWERY_LANTERNFISH_TRACE_LIB_DIR";
-pub const COMMIT: &str = "0ea30b37729a136a76b8412e7ad1ec91bd7de9b5";
-pub const SHA256: &str = "0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f";
+pub const COMMIT: &str = "d8420857ed1ab2e29c527f1ffde09aeef19f36c4";
+pub const SHA256: &str = "3009f4b0c362ddc04d955e40efac9e1d88659b9a0bc393fdc8ea6da287bde010";
 pub const HARD_BYTE_CAP: u64 = 32 << 20;
 pub const RESPONSE_CAP: usize = 4 << 20;
 const MAX_POSITIONS: usize = 4096;
@@ -104,6 +104,20 @@ pub enum Operation {
     Scale { factor: f32 },
     Add { vector: Vec<f32> },
     Replace { vector: Vec<f32> },
+    ProjectOut { vector: Vec<f32> },
+    Subtract { vector: Vec<f32>, scale: f32 },
+}
+
+impl Operation {
+    pub fn vector(&self) -> Option<&[f32]> {
+        match self {
+            Self::Add { vector }
+            | Self::Replace { vector }
+            | Self::ProjectOut { vector }
+            | Self::Subtract { vector, .. } => Some(vector),
+            _ => None,
+        }
+    }
 }
 
 impl Rule {
@@ -121,13 +135,25 @@ impl Rule {
                         .all(|&p| p < MAX_POSITIONS && edited.insert((rule.layer, rule.role, p))),
                 "invalid or overlapping trace intervention"
             );
-            match &rule.op {
-                Operation::Scale { factor } => ensure!(factor.is_finite(), "invalid trace factor"),
-                Operation::Add { vector } | Operation::Replace { vector } => ensure!(
+            if let Some(vector) = rule.op.vector() {
+                ensure!(
                     (1..=16384).contains(&vector.len()) && vector.iter().all(|v| v.is_finite()),
                     "invalid trace intervention vector"
+                );
+            }
+            match &rule.op {
+                Operation::Scale { factor } => ensure!(factor.is_finite(), "invalid trace factor"),
+                Operation::ProjectOut { vector } => ensure!(
+                    vector.iter().any(|&v| v != 0.0),
+                    "projection direction must be nonzero"
                 ),
-                Operation::Zero => {}
+                Operation::Subtract { vector, scale } => ensure!(
+                    scale.is_finite()
+                        && *scale >= 0.0
+                        && vector.iter().all(|v| (v * scale).is_finite()),
+                    "invalid subtraction scale or scaled vector"
+                ),
+                _ => {}
             }
         }
         Ok(())

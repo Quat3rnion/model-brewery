@@ -221,6 +221,18 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("post", "/api/profiles", "saveProfile"),
     ]);
     assert_eq!(operations, expected);
+    for (route, schema) in [
+        ("/api/interventions", "CreateIntervention"),
+        ("/api/interventions/{id}/versions", "NewInterventionVersion"),
+    ] {
+        let request = &contract["paths"][route]["post"]["requestBody"]["content"]["application/json"]
+            ["schema"];
+        assert_eq!(request["$ref"], format!("#/components/schemas/{schema}"));
+        assert_eq!(
+            contract["components"]["schemas"][schema]["properties"]["direction_rules"]["$ref"],
+            "#/components/schemas/DirectionInterventionRules"
+        );
+    }
     let check = &contract["paths"]["/api/scratch/{id}/checks"]["post"]["requestBody"]["content"]["application/json"]
         ["schema"];
     assert_eq!(check["required"], json!(["sha256"]));

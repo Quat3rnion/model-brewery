@@ -24,7 +24,8 @@ REPO = Path(__file__).resolve().parents[1]
 HF = ARB / "models/qwen2.5-0.5b-instruct-w4-hf"
 SAFE = HF / "model.safetensors"
 BASE = ARB / "models/qwen2.5-0.5b-instruct-w0/Qwen2.5-0.5B-Instruct.bf16.gguf"
-LANTERN = ARB / "lanternfish-w0/target/headless/release/lanternfish"
+LANTERN = ARB / "pins/lanternfish-d842085/lanternfish"
+TRACE_LIBS = ARB / "llama-a4/build/bin"
 W0_LIBS = ARB / "llama-w0/build/bin"
 LLAMA = ARB / "llama.cpp"
 QUANT = ARB / "brewery-standalone-admit-integration.s4xL9Wu0/stage/bin/llama-quantize"
@@ -40,7 +41,7 @@ SNAPSHOT_PIN = "e702c869285f94912fd8f9bcd717750649f6876070dbaadfbe4e22181852696f
 PINS = {
     SAFE: "fdf756fa7fcbe7404d5c60e26bff1a0c8b8aa1f72ced49e7dd0210fe288fb7fe",
     BASE: "a33250ab73bbef0d876bf04e01517f5f43292dd8ede34e12d3a3a886e49f36f0",
-    LANTERN: "0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f",
+    LANTERN: "3009f4b0c362ddc04d955e40efac9e1d88659b9a0bc393fdc8ea6da287bde010",
     QUANT: "7ceb0e39e4f7e207fe8c55215368163bb5734072dc871a66b45527e1a5c9c672",
     RUNNER: "505759d6749dc5c593e74749689edbfe3d8ff0d833c91db8c11a051781e631a3",
     FIXTURES / "counterfact.json": "d017056125178a13728594e66a801357a8db9ed7973a7425554bb4271de9fc6f",
@@ -180,7 +181,7 @@ def setup(args, run):
             "BREWERY_GGUF_HF_EXPORTER": str(REPO / "tools/gguf-export-hf"),
             "BREWERY_GGUF_PYTHON": str(PYTHON), "BREWERY_LLAMA_CPP": str(LLAMA),
             "BREWERY_CONVERTER_DISK_RESERVE_BYTES": "0", "BREWERY_LANTERNFISH_TRACE": str(LANTERN),
-            "BREWERY_LANTERNFISH_TRACE_LIB_DIR": str(W0_LIBS),
+            "BREWERY_LANTERNFISH_TRACE_LIB_DIR": str(TRACE_LIBS),
             "BREWERY_CPU_THREADS": "4", "BREWERY_SCRATCH_CHECKS_SCRIPT": str(REPO / "tools/scratch_checks.py"),
             "BREWERY_SCRATCH_CHECKS_RUNNER": str(RUNNER),
             "BREWERY_SCRATCH_CHECKS_RUNNER_SHA256": PINS[RUNNER],

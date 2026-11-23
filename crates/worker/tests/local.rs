@@ -350,8 +350,8 @@ data = json.dumps(manifest).encode()
 (path / "manifest.json").write_bytes(data)
 size = len(data) + len(b)
 print(json.dumps(dict(kind="trace",schema_version=1,model_id=src["id"],model_sha256=src["sha256"],
-    lanternfish_commit="0ea30b37729a136a76b8412e7ad1ec91bd7de9b5",
-    executable_sha256="0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f",
+    lanternfish_commit="d8420857ed1ab2e29c527f1ffde09aeef19f36c4",
+    executable_sha256="3009f4b0c362ddc04d955e40efac9e1d88659b9a0bc393fdc8ea6da287bde010",
     bytes=size,prompts=[dict(bytes=size,manifest_sha256=sha(data))])))
 "#,
     )

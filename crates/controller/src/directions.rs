@@ -1,5 +1,5 @@
 //! An immutable direction artifact is stored atomically as its job result.
-use crate::{App, domain::State as JobState, web::ApiError};
+use crate::{App, domain::State as JobState, store::Store, web::ApiError};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -25,24 +25,36 @@ async fn get_version(
     Path((id, version)): Path<(String, u32)>,
     Query(selection): Query<Selection>,
 ) -> Result<Json<Value>, ApiError> {
+    let store = app.store.lock().map_err(ApiError::storage)?;
+    let result = artifact(&store, &id, version, selection.layer)?;
+    Ok(Json(
+        json!({"id":id, "version":version, "direction":result}),
+    ))
+}
+
+pub(crate) fn artifact(
+    store: &Store,
+    id: &str,
+    version: u32,
+    layer: Option<usize>,
+) -> Result<Value, ApiError> {
     if !matches!(version, 1 | direction::VERSION) {
         return Err(ApiError::not_found("direction version"));
     }
-    let store = app.store.lock().map_err(ApiError::storage)?;
     let job = store
-        .job(&id)
+        .job(id)
         .map_err(ApiError::storage)?
         .filter(|job| job.kind == direction::JOB && job.state == JobState::Succeeded)
         .ok_or_else(|| ApiError::not_found("direction"))?;
     let mut result = store
-        .job_result(&id)
+        .job_result(id)
         .map_err(ApiError::storage)?
         .ok_or_else(|| ApiError::not_found("direction result"))?;
     if result["schema_version"] != version {
         return Err(ApiError::not_found("direction version"));
     }
     let request = direction::Request::parse(&json!(job.options)).map_err(ApiError::storage)?;
-    let envelope = store.envelope(&id).map_err(ApiError::storage)?;
+    let envelope = store.envelope(id).map_err(ApiError::storage)?;
     let input = envelope
         .inputs
         .first()
@@ -50,14 +62,12 @@ async fn get_version(
     request
         .verify_version(&result, &input.id, &request.model_sha256, version)
         .map_err(ApiError::storage)?;
-    if let Some(layer) = selection.layer {
+    if let Some(layer) = layer {
         let row = result["fit"]["layers"]
             .as_array()
             .and_then(|rows| rows.iter().find(|row| row["layer"] == layer))
             .ok_or_else(|| ApiError::not_found("direction layer"))?;
         result["fit"]["layers"] = json!([row]);
     }
-    Ok(Json(
-        json!({"id":id, "version":version, "direction":result}),
-    ))
+    Ok(result)
 }

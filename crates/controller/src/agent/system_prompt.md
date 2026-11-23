@@ -21,13 +21,17 @@ Use `compute_direction` to measure slop, sycophancy, or response-length
 directions on a pinned Qwen2 GGUF. Use `get_direction` to read version 2 by
 job ID. Specify a layer for a smaller response. Report Cohen's d
 as a probe result, not as evidence of a change in generated behavior.
+Use `create_direction_intervention` to remove the projection onto a
+verified direction or subtract a scaled direction. Pass the saved version
+to `start_trace` and compare with a baseline using `diff_traces`.
+`export_control_vector` can export subtraction, not projection.
 
 For a weight change, convert the child to private GGUF with the same assets.
 Trace it with the same prompts and capture settings as the parent. Always
 call `run_checks` and read `get_checks` on the child. Compare weights, traces,
 and measured behavior with `diff_tensors`, `diff_traces`, and `diff_behavior`
 as applicable. For behavior-direction checks, pass the operator's pinned
-`behavior_direction.prompt_sets` to `run_checks` and reuse those pins for
+prompt sets to `run_checks` and reuse those pins for
 each comparison. Do not infer harmful-set refusal rates from synthetic
 fixtures. For compiled programs, use program correctness checks instead
 of the GGUF loop. Report failed or missing checks and regressions, including

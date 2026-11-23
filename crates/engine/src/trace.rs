@@ -11,6 +11,25 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const TRACE_LIBRARIES: &[(&str, &str)] = &[
+    (
+        "libllama.so.0",
+        "f4a59a07c8ebea5d02779f82e16cf23d5815a288fede9cdbf851f73b1854c005",
+    ),
+    (
+        "libggml.so.0",
+        "c51f659bc7c64ab3b675fb56cdddf1beab54c75818ace8325c7e49ff1a60e3e4",
+    ),
+    (
+        "libggml-base.so.0",
+        "c445afaddb3d37bbb8ef6d979786f66f4cae71b5597fee0feb398f9b961289b8",
+    ),
+    (
+        "libggml-cpu.so.0",
+        "fd7b911f677b93bef0b2fd31877da45bc5e78bd7197fe33df5ed4b76f75b08cd",
+    ),
+];
+
 pub(crate) struct Runtime {
     private: tempfile::TempDir,
     tool: Tool,
@@ -35,7 +54,7 @@ impl Runtime {
             private.path(),
             trace::LIB_DIR,
             "Lanternfish trace",
-            w0_libraries::PINS,
+            TRACE_LIBRARIES,
         )?;
         Ok(Self {
             private,
