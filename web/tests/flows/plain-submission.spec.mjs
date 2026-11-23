@@ -99,7 +99,7 @@ for (const [view, label, setup, path = '/api/jobs'] of [
     // Force the fast-reply ordering: the browser delivers detail=2 after the
     // first request has finished. With no guard, this sends a new request.
     const post = r => r.method() === 'POST' && r.url().endsWith(path);
-    const premature = page.waitForRequest(post, { timeout: 500 }).catch(() => null);
+    const premature = page.waitForRequest(post, { timeout: 850 }).catch(() => null);
     await click(2);
     expect(await premature).toBeNull();
     expect(controller.requests('POST', path)).toHaveLength(1);
@@ -155,6 +155,56 @@ test('the first enabled activation submits even with a native click count of two
   expect((await pending).status()).toBe(201);
 });
 
+test('a repeat mouse press that starts disabled stays suppressed if enabled before release', async ({ page, controller }) => {
+  const state = scenario('live-shaped');
+  state.hosts[0].benchmarks.push({ id: 'second', label: 'Second suite' });
+  controller.respond('GET', '/api/state', { json: state });
+  await controller.open(page, 'benchmarks');
+  await benchmarks(page);
+  const action = button(page, 'Queue benchmark run');
+  await action.scrollIntoViewIfNeeded();
+  const rect = await action.boundingBox();
+  const at = { x: rect.x + 30, y: rect.y + rect.height / 2 };
+  const cdp = await page.context().newCDPSession(page);
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  await page.route('**/api/jobs', async route => {
+    const accepted = await route.fetch();
+    await held;
+    await route.fulfill({ response: accepted });
+  }, { times: 1 });
+  const first = response(page);
+  try {
+    await clickPoint(cdp, at, 1);
+    await expect(button(page, 'Submitting…')).toBeDisabled();
+    expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest('button')?.matches(':disabled'), at)).toBe(true);
+    await cdp.send('Input.dispatchMouseEvent', {
+      ...at, type: 'mousePressed', button: 'left', buttons: 1, clickCount: 2,
+    });
+    // Use a different body so only the native click rule can suppress this.
+    await check(page, /^Second suite/).evaluate(el => el.click());
+    await expect(check(page, /^Second suite/)).toBeChecked();
+    release();
+    expect((await first).status()).toBe(201);
+    await expect(action).toBeEnabled();
+    await action.scrollIntoViewIfNeeded();
+    const ready = await action.boundingBox();
+    const up = { x: ready.x + 30, y: ready.y + ready.height / 2 };
+    await page.evaluate(() => {
+      window.repeatDetail = null;
+      window.addEventListener('click', event => {
+        window.repeatDetail = [event.detail, event.target.closest('button')?.textContent.trim()];
+      }, { once: true, capture: true });
+    });
+    const duplicate = page.waitForResponse(r => r.url().endsWith('/api/jobs') && r.request().method() === 'POST',
+      { timeout: 500 }).catch(() => null);
+    await cdp.send('Input.dispatchMouseEvent', { ...up, type: 'mouseReleased', button: 'left', clickCount: 2 });
+    expect(await page.evaluate(() => window.repeatDetail)).toEqual([2, 'Queue benchmark run']);
+    expect(await duplicate).toBeNull();
+    expect(posts(controller)).toHaveLength(1);
+  } finally { release(); }
+});
+
 test('a disabled first click resets an older native submit sequence', async ({ page, controller }) => {
   await controller.open(page, 'benchmarks');
   await benchmarks(page);
@@ -167,6 +217,7 @@ test('a disabled first click resets an older native submit sequence', async ({ p
   await clickPoint(cdp, point, 1);
   expect((await first).status()).toBe(201);
   await expect(action).toBeEnabled();
+  await new Promise(resolve => setTimeout(resolve, 850));
   await suite.evaluate(el => el.click());
   await expect(action).toBeDisabled();
   await clickPoint(cdp, point, 1);
@@ -396,6 +447,41 @@ for (const kind of ['recipe inventory', 'visual inventory', 'visual tile']) {
     expect(again.body).toEqual(a.body);
     expect(again.headers['idempotency-key']).toBe(a.headers['idempotency-key']);
   });
+
+  if (!tile) test(`${kind} shows an accepted read received while another source is selected`, async ({ page, controller }) => {
+    await setup(page, controller);
+    if (recipe) {
+      await page.request.post(`${controller.origin}/api/models`, { data: {
+        name: 'Second checkpoint', kind: 'hf', host: 'worker-a', path: '/fixtures/second-checkpoint',
+      } });
+      await refresh(page);
+    }
+    const picker = page.locator(recipe ? '#recipe-source' : '#w-source');
+    await freezeState(page, controller);
+    let release, report;
+    const held = new Promise(resolve => { release = resolve; });
+    const stored = new Promise(resolve => { report = resolve; });
+    await page.route('**/api/jobs', async route => {
+      const accepted = await route.fetch();
+      report(await accepted.json());
+      await held;
+      await route.fulfill({ response: accepted });
+    }, { times: 1 });
+    const pending = response(page);
+    try {
+      await button(page, label).press('Enter');
+      await stored;
+      await choose(page, picker, recipe ? /^Second checkpoint/ : /^Fixture checkpoint/);
+      release();
+      expect((await pending).status()).toBe(201);
+      await twoFrames(page);
+      await choose(page, picker, recipe ? /^Fixture checkpoint/ : /^Fixture GGUF GGUF/);
+      const { id } = await stored;
+      await expect(page.getByRole('link', { name: link, exact: true })).toHaveAttribute('href', `#/jobs/${id}`);
+      await expect(button(page, label)).toHaveCount(0);
+      expect(posts(controller)).toHaveLength(1);
+    } finally { release(); }
+  });
 }
 
 for (const isTransfer of [true, false]) {
@@ -428,11 +514,16 @@ for (const isTransfer of [true, false]) {
     await expect(alert).toContainText(labels[1]);
     await expect.soft(review).toBeFocused({ timeout: 1000 });
     await review.focus();
+    await page.keyboard.down('Space');
     await update([]);
     const restored = check(page, new RegExp(`^${labels[0]}`));
     await expect(restored).toBeChecked();
+    await expect(review).toHaveCount(0);
+    expect.soft(await page.locator('input[type=checkbox]:focus').count()).toBe(0);
+    await page.keyboard.up('Space');
+    await expect(restored).toBeChecked();
     await expect(check(page, new RegExp(`^${labels[1]}`))).toBeChecked();
-    await expect.soft(page.locator('input[type=checkbox]:checked:focus')).toBeVisible({ timeout: 1000 });
+    await expect(page.locator('legend:focus')).toHaveText(isTransfer ? 'Entries to copy' : /Suites/);
     await expect(button(page, isTransfer ? 'Transfer' : 'Queue benchmark run')).toBeEnabled();
     expect(posts(controller)).toHaveLength(0);
   });

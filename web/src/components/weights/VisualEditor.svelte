@@ -12,7 +12,7 @@
   import SubmitStatus from '../SubmitStatus.svelte';
   import JobState from '../JobState.svelte';
   import { brewery } from '../../lib/store.svelte';
-  import { acceptedJobSummary, guardReadLink, Submitter } from '../../lib/submit.svelte';
+  import { acceptedJobSummary, guardReadLink, jobRequestKey, Submitter } from '../../lib/submit.svelte';
   import type { PlainAttempt } from '../../lib/submission-key';
   import { captureResultFocus } from '../../lib/focus';
   import { route } from '../../lib/route.svelte';
@@ -52,6 +52,7 @@
     onproposal,
     pending,
     readAttempts,
+    acceptedReads,
   }: {
     source: Model;
     canVisual: boolean;
@@ -64,10 +65,12 @@
     onproposal: (jobId: string) => void;
     pending: SvelteMap<string, DraftEdit>;
     readAttempts: PlainAttempt;
+    acceptedReads: SvelteMap<string, JobSummary>;
   } = $props();
 
   const stateJobs = $derived(brewery.state?.jobs ?? []);
-  let submitted = $state<JobSummary[]>([]);
+  const submitted = $derived([...acceptedReads.values()]
+    .filter(job => job.host === source.host && job.input_ids[0] === source.id).reverse());
   const jobs = $derived([...stateJobs, ...submitted.filter(j => !stateJobs.some(row => row.id === j.id))]);
   const models = $derived(brewery.state?.models ?? []);
 
@@ -76,8 +79,10 @@
   const packedHost = $derived(!isSafeSource(source.kind) && brewery.state?.hosts.find(h => h.id === source.host)?.capabilities?.weight_packed === true);
   const usable = $derived(jobs.filter((j) => !ignored.has(j.id)));
   const sourceHost = $derived(hostName(brewery.state?.hosts ?? [], source.host));
-  const reads = new Submitter(job => job.options?.mode === 'tile' ? 'weights.visual.tile' : 'weights.visual.inventory',
-    untrack(() => readAttempts));
+  const tileLauncher = 'weights.visual.tile';
+  const inventoryLauncher = 'weights.visual.inventory';
+  const readLauncher = (job: ReturnType<typeof inventoryJob>) => job.options?.mode === 'tile' ? tileLauncher : inventoryLauncher;
+  const reads = new Submitter(readLauncher, untrack(() => readAttempts));
   let readKey = $state('');
   let acceptedReadMode = $state<'inventory' | 'tile'>();
   let inventoryLink: HTMLAnchorElement | undefined = $state();
@@ -87,18 +92,23 @@
     if (job?.state === 'succeeded' && !brewery.details[job.id]) void brewery.loadJob(job.id).catch(() => {});
   }
   async function read(job: ReturnType<typeof inventoryJob>, event: MouseEvent) {
+    const key = jobRequestKey(readLauncher(job), job);
     readKey = JSON.stringify(job.options);
     const focus = captureResultFocus(event);
     const created = await reads.submit(job, event, false);
     if (!created) return;
+    const id = created.id;
     acceptedReadMode = job.options?.mode === 'tile' ? 'tile' : 'inventory';
     function record(summary: JobSummary) {
-      if (summary.id !== created?.id || !findRead([summary], source.id, job.options!, source.host)) return;
-      submitted = [summary, ...submitted.filter(item => item.id !== summary.id)];
+      if (summary.id !== id || !findRead([summary], job.input_ids[0], job.options!, job.host)) return;
+      acceptedReads.delete(key);
+      acceptedReads.set(key, summary);
     }
     record(acceptedJobSummary(created, job));
     void focus?.(() => job.options?.mode === 'tile' ? tileLink : inventoryLink);
-    if (!('state' in created)) void brewery.loadJob(created.id).then(record).catch(() => {});
+    if (!('state' in created)) void brewery.loadJob(id).then(detail => {
+      if (acceptedReads.get(key)?.id === id) record(detail);
+    }).catch(() => {});
   }
   function ignoreReads(match: (job: JobSummary) => boolean) {
     const next = new Set(ignored);
@@ -376,7 +386,7 @@
       </div>
       {#if inventoryJobFound}
         <div class="row" role="status">
-          <a bind:this={inventoryLink} href="#/jobs/{encodeURIComponent(inventoryJobFound.id)}" onclick={guardReadLink}>Tensor list read job</a>
+          <a bind:this={inventoryLink} href="#/jobs/{encodeURIComponent(inventoryJobFound.id)}" onclick={(event) => guardReadLink(event, inventoryLauncher)}>Tensor list read job</a>
           <JobState job={inventoryJobFound} />
         </div>
       {/if}
@@ -460,7 +470,7 @@
 
         {#if tileJobFound}
           <div class="row" role="status">
-            <a bind:this={tileLink} href="#/jobs/{encodeURIComponent(tileJobFound.id)}" onclick={guardReadLink}>Tile read job</a>
+            <a bind:this={tileLink} href="#/jobs/{encodeURIComponent(tileJobFound.id)}" onclick={(event) => guardReadLink(event, tileLauncher)}>Tile read job</a>
             <JobState job={tileJobFound} />
           </div>
         {/if}

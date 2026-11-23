@@ -15,7 +15,7 @@
   import Blockers from '../components/Blockers.svelte';
   import { brewery } from '../lib/store.svelte';
   import { errorText } from '../lib/api';
-  import { Submitter } from '../lib/submit.svelte';
+  import { acceptedJobSummary, Submitter } from '../lib/submit.svelte';
   import { PlainAttempt } from '../lib/submission-key';
   import { hashParam, route } from '../lib/route.svelte';
   import { fieldError, visibleBlockers, type Blocker } from '../lib/blockers';
@@ -51,12 +51,13 @@
     type EditRow,
     type Op,
   } from '../lib/weights';
-  import type { JobDetail, Model } from '../lib/types';
+  import type { JobDetail, JobSummary, Model } from '../lib/types';
 
   const models = $derived(brewery.state?.models ?? []);
   const hosts = $derived(brewery.state?.hosts ?? []);
   const jobs = $derived(brewery.state?.jobs ?? []);
   const visualReadAttempts = new PlainAttempt();
+  const visualReads = new SvelteMap<string, JobSummary>();
 
   // ---- Source (shared by both modes). ----
   const sourceId = $derived(hashParam(route.hash, 'source') ?? '');
@@ -295,7 +296,17 @@
   });
   const proposal = $derived(detail ? readProposal(detail.result) : null);
   const tuneRegress = $derived(detail ? (readTuneReport(detail.result)?.held_out.regression ?? false) : false);
-  const applies = $derived(reviewed ? newestFirst(appliesOf(jobs, reviewed.id)) : []);
+  const acceptedApplies = new SvelteMap<string, JobSummary>();
+  const applies = $derived.by(() => {
+    if (!reviewed) return [];
+    const observed = appliesOf(jobs, reviewed.id);
+    const pending = acceptedApplies.get(reviewed.id);
+    if (pending && !observed.some(job => job.id === pending.id)) {
+      const known = brewery.details[pending.id];
+      observed.push(known?.id === pending.id && isTerminal(known.state) ? known : pending);
+    }
+    return newestFirst(observed);
+  });
   const activeApply = $derived(applies.find((j) => isActive(j.state)));
   const doneApply = $derived(applies.find((j) => j.state === 'succeeded'));
   let confirmed = $state(false);
@@ -317,9 +328,15 @@
     return out;
   });
   async function applyNow(event: MouseEvent) {
-    if (!applyRequest || applyBlockers.length) return;
+    const request = applyRequest;
+    const proposalId = reviewed?.id;
+    if (!request || !proposalId || applyBlockers.length) return;
     // The controller requires the exact source of the proposal job.
-    await applySub.submit(applyRequest, event);
+    const accepted = await applySub.submit(request, event);
+    if (accepted) {
+      acceptedApplies.set(proposalId, acceptedJobSummary(accepted, request));
+      if (!jobs.some(job => job.id === accepted.id)) void brewery.loadJob(accepted.id).catch(() => {});
+    }
   }
   let appliedDetail = $state<JobDetail | null>(null);
   $effect(() => {
@@ -450,6 +467,7 @@
           bind:mode
           {pending}
           readAttempts={visualReadAttempts}
+          acceptedReads={visualReads}
           onproposal={openReview}
         />
         {/key}

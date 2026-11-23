@@ -5,7 +5,8 @@
   import { SvelteMap } from 'svelte/reactivity';
   import { api, errorText } from '../../lib/api';
   import { captureResultFocus } from '../../lib/focus';
-  import { acceptedJobSummary, jobRequestKey, Submitter } from '../../lib/submit.svelte';
+  import { acceptedJobSummary, guardReadLink, jobRequestKey, Submitter } from '../../lib/submit.svelte';
+  import { PlainAttempt } from '../../lib/submission-key';
   import { brewery } from '../../lib/store.svelte';
   import { profileStore } from '../../lib/profiles.svelte';
   import { WEIGHT_SOURCES, hostName, isSafeSource, formatBytes, formatTime } from '../../lib/format';
@@ -63,6 +64,7 @@
   const packed = $derived(!!source && !isSafeSource(source.kind) && host?.capabilities?.weight_packed === true);
   const submitted = new SvelteMap<string, JobSummary>();
   const launcher = 'profiles.gguf.inventory';
+  const readAttempts = new PlainAttempt();
   const reads = new SvelteMap<string, Submitter>();
   const detailErrors = new SvelteMap<string, string>();
   const inventoryJobs = $derived([...jobs, ...[...submitted.values()].filter(j => !jobs.some(row => row.id === j.id))]);
@@ -92,7 +94,7 @@
     const focus = captureResultFocus(event);
     let read = reads.get(key);
     if (!read) {
-      read = new Submitter(launcher);
+      read = new Submitter(launcher, readAttempts);
       reads.set(key, read);
     }
     const accepted = await read.submit(request, event, false);
@@ -278,7 +280,7 @@
       {/if}
       {#if readJob}
         <div class="row" role="status">
-          <a bind:this={readLink} href="#/jobs/{encodeURIComponent(readJob.id)}">Tensor list read job</a>
+          <a bind:this={readLink} href="#/jobs/{encodeURIComponent(readJob.id)}" onclick={(event) => guardReadLink(event, launcher)}>Tensor list read job</a>
           <JobState job={readJob} />
           {#if lastRead?.matched && lastRead.job.id === readJob.id}
             <span class="hint">This request already has a job. No second job was queued.</span>

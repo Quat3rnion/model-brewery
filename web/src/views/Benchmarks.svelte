@@ -210,6 +210,7 @@
       </fieldset>
 
       <SelectionReview {missing} acknowledge={(shown) => selection.remove(shown)}
+        focusRestored={() => checklist?.querySelector('legend')}
         focusRemaining={() => checklist?.querySelector<HTMLElement>('input:checked') ?? checklist?.querySelector('legend')} />
       <div><button type="button" class="btn primary" disabled={!built.job || run.busy || missing.length > 0} aria-busy={run.busy} onclick={queueBenchmark}>{run.busy ? 'Submitting…' : 'Queue benchmark run'}</button></div>
       <SubmitStatus s={run} />

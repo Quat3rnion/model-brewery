@@ -110,7 +110,7 @@
   <div class="grid-2">
     <ModelSelect bind:value={() => source, selectSource} kinds={['hf','gguf','safetensors']} label="Source checkpoint" hint="HF checkpoint, standalone SafeTensors file, or GGUF. Worker support depends on the input format." id="gg-source" />
     <div class="field">
-      <label for="gg-choice">GGUF type</label>
+      <label for="gg-choice" tabindex="-1">GGUF type</label>
       <select id="gg-choice" class="input" bind:this={typeSelect} bind:value={draft.choice} aria-describedby="gg-choice-h" aria-required="true">
         <option value="" disabled>Choose a preset or profile</option>
         <optgroup label="llama.cpp presets">
@@ -159,7 +159,7 @@
   </div>
   <SelectionReview missing={missingMatrix} acknowledge={(shown) => {
     if (shown.some(item => item.id === draft.imatrix)) selectMatrix('');
-  }} focusRemaining={() => typeSelect} />
+  }} focusRemaining={() => typeSelect} focusRestored={() => typeSelect?.labels?.[0]} />
   <p class="xs muted">The output is a single .gguf file on the worker, registered in the Library when the workflow finishes. The workflow runs inspect, plan, convert and verify like an HGN conversion.</p>
   <Submit {blockers} busy={starter.busy} onclick={start}>Start GGUF conversion</Submit>
   <div aria-live="polite" class="xs">

@@ -26,17 +26,51 @@ const hex = (bytes: Uint8Array) => [...bytes].map(x => x.toString(16).padStart(2
 
 export const requestKey = (launcher: string, body: object): string => bodyKey([launcher, body])!;
 
+const MAX_REQUESTS = 64;
+// Bound exact wire strings without requiring Web Crypto's secure context.
+const MAX_HISTORY_CHARS = 1024 * 1024;
+
+/** Keep the most recent entries up to both limits. */
+export class RequestHistory<T> {
+  #entries = new Map<string, T>();
+  #size = 0;
+
+  get(request: string) { return this.#entries.get(request); }
+
+  set(request: string, value: T) {
+    if (request.length > MAX_HISTORY_CHARS) return;
+    this.delete(request);
+    this.#entries.set(request, value);
+    this.#size += request.length;
+    while (this.#entries.size > MAX_REQUESTS || this.#size > MAX_HISTORY_CHARS) {
+      this.delete(this.#entries.keys().next().value!);
+    }
+  }
+
+  delete(request: string) {
+    if (this.#entries.delete(request)) this.#size -= request.length;
+  }
+
+  clear() {
+    this.#entries.clear();
+    this.#size = 0;
+  }
+}
+
 /** Keep unconfirmed requests in the current visit. */
 export class PlainAttempt {
-  #pending = new Map<string, string>();
+  #pending = new RequestHistory<string>();
   #current?: () => boolean;
 
   take(launcher: string, body: object, current: () => boolean) {
+    return this.takeRequest(requestKey(launcher, body), current);
+  }
+
+  takeRequest(request: string, current: () => boolean) {
     if (!this.#current?.()) {
       this.#pending.clear();
       this.#current = current;
     }
-    const request = requestKey(launcher, body);
     const key = this.#pending.get(request) ?? `conv-${hex(crypto.getRandomValues(new Uint8Array(16)))}`;
     this.#pending.set(request, key);
     return {
