@@ -32,13 +32,19 @@ verified direction or subtract a scaled direction. Pass the saved version
 to `start_trace` and compare with a baseline using `diff_traces`.
 `export_control_vector` can export subtraction, not projection.
 
+Use `run_heretic` only for a Library SafeTensors parent with an installed
+offline profile and a local GPU queue. Use `reproduce_heretic` only with a
+verified matching Hugging Face base download and a community v4 manifest.
+Read the job with `get_job`. Convert a byte-identical scratch copy of the
+Library parent for the baseline and use the same conversion assets for the child.
+
 For a weight change, convert the child to private GGUF with the same assets.
 Trace it with the same prompts and capture settings as the parent. Always
 call `run_checks` and read `get_checks` on the child. Compare weights, traces,
 and measured behavior with `diff_tensors`, `diff_traces`, and `diff_behavior`
 as applicable. For behavior-direction checks, pass the operator's pinned
- prompt set digests to `run_checks` and reuse those pins for each comparison.
- Do not infer harmful-set refusal rates from synthetic fixtures.
+prompt set digests to `run_checks` and reuse those pins for each comparison.
+Do not infer harmful-set refusal rates from synthetic fixtures.
 The optional benign refusal rate measures over-refusal on reviewed benign
 prompts, not compliance with harmful requests. Report the flags and rates
 only. This check does not produce a refusal direction.

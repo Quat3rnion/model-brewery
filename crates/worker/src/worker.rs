@@ -86,6 +86,13 @@ impl ScratchAccess {
             {
                 &job.inputs[..]
             }
+            kind if heretic::job(kind)
+                && job.prompt.is_none()
+                && (kinds().eq(["safetensors"]) || kinds().eq(["safetensors", "assets"]))
+                && heretic::Options::parse(kind, &job.options).is_ok() =>
+            {
+                &job.inputs[..1]
+            }
             _ => return false,
         };
         job.inputs.iter().all(|i| i.host == pinned[0].host)
@@ -934,6 +941,26 @@ impl Worker {
                 if let Some(error) = error {
                     return self.record_prepare(id, action, job, Reply::error(error));
                 }
+            }
+            if heretic::job(&job.kind)
+                && (self.cfg.admission.is_none()
+                    || self
+                        .cfg
+                        .engine_env
+                        .get(locate_edit::GPU_GATE)
+                        .is_none_or(|v| v != "1")
+                    || self
+                        .cfg
+                        .engine_env
+                        .get(heretic::RUNTIME)
+                        .is_none_or(|p| !Path::new(p).is_absolute()))
+            {
+                return self.record_prepare(
+                    id,
+                    action,
+                    job,
+                    Reply::error("Heretic requires a pinned runtime and GPU admission"),
+                );
             }
         }
         if !job.resources.is_empty() {
@@ -1991,6 +2018,8 @@ impl Worker {
                 } else if job.kind == locate_edit::JOB {
                     locate_edit::Request::parse(&job.options)
                         .is_ok_and(|request| request.edit.backend.is_gpu())
+                } else if heretic::job(&job.kind) {
+                    true
                 } else if job.kind == trace::JOB || scratch_eval::private_output(&job.kind) {
                     false
                 } else {

@@ -375,7 +375,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     } else {
         locate_edit::Backend::Cpu
     };
-    let gpu_edit = edit_backend.is_gpu();
+    let gpu_edit = edit_backend.is_gpu() || heretic::job(&job.kind);
     if gpu_edit {
         ensure!(
             scratch_job
@@ -384,8 +384,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                     .engine_env
                     .get(locate_edit::GPU_GATE)
                     .is_some_and(|v| v == "1"),
-            "{} edit requires GPU load permission and a GPU admission wrapper",
-            edit_backend.label()
+            "This edit requires GPU load permission and a GPU admission wrapper"
         );
     }
     fs::create_dir(&work)?;
@@ -468,6 +467,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 scratch_eval::CONTRAST_CACHE,
             ],
             locate_edit::JOB => &[],
+            kind if heretic::job(kind) => &[heretic::RUNTIME],
             behavior_direction::JOB => {
                 &[trace::EXECUTABLE, trace::LIB_DIR, behavior_direction::CACHE]
             }
@@ -486,6 +486,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                         .flatten(),
                 )
                 .chain(["BREWERY_CPU_THREADS"])
+                .chain(heretic::job(&job.kind).then_some(locate_edit::CUDA_DEVICES))
                 .filter_map(|key| w.cfg.engine_env.get(key).map(|value| (key, value))),
         );
         if gpu_edit {
@@ -764,6 +765,22 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 && value["executable_sha256"] == pin.sha256
                 && value["lanternfish_commit"] == pin.commit,
             "private edit receipt does not match input or executable pin"
+        );
+        return Ok(value);
+    }
+    if heretic::job(&job.kind) {
+        let spec = heretic::Options::parse(&job.kind, &job.options)?;
+        let runtime = Path::new(
+            w.cfg
+                .engine_env
+                .get(heretic::RUNTIME)
+                .context("Missing Heretic runtime")?,
+        )
+        .canonicalize()?;
+        spec.verify(&value, Some(&runtime.join("runs")))?;
+        ensure!(
+            job.inputs[0].extra["sha256"] == spec.base_sha256,
+            "Heretic base input changed"
         );
         return Ok(value);
     }

@@ -166,6 +166,8 @@ pub(crate) fn prepare_enqueue(app: &App, mut job: Job, envelope: &Envelope) -> R
             .map_err(ApiError::storage)?
             .edit
             .backend
+    } else if brewery_worker::heretic::job(&job.kind) {
+        locate_edit::Backend::Cuda
     } else {
         locate_edit::Backend::Cpu
     };

@@ -372,6 +372,59 @@
         }
       }
     },
+    "/api/scratch/heretic": {
+      "post": {
+        "operationId": "runHeretic",
+        "summary": "Queue a pinned Heretic run that imports a private scratch child",
+        "description": "Use one Library SafeTensors file on an enabled local GPU lane. Select an operator-installed offline profile. Read the returned job with getJob, then convert and check the scratch child. This operation does not publish.",
+        "parameters": [{"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false,
+          "required": ["parent_id", "base_sha256", "profile", "trials", "trial_index", "seed"],
+          "properties": {
+            "parent_id": {"$ref": "#/components/schemas/Id"},
+            "base_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "profile": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+            "assets_id": {"$ref": "#/components/schemas/Id"},
+            "trials": {"type": "integer", "minimum": 1, "maximum": 64},
+            "trial_index": {"type": "integer", "minimum": 0, "maximum": 63},
+            "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+          }
+        }}}},
+        "responses": {
+          "200": {"description": "Previously accepted Heretic job", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "202": {"description": "Queued Heretic job", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"}
+        }
+      }
+    },
+    "/api/scratch/heretic_reproduce": {
+      "post": {
+        "operationId": "reproduceHeretic",
+        "summary": "Reproduce a community v4 Heretic manifest into a private scratch child",
+        "description": "The Library SafeTensors base must have a verified Hugging Face download receipt for the repository, base commit, and file SHA-256. The worker runs offline and verifies the exported weights against the manifest. This operation does not publish.",
+        "parameters": [{"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false,
+          "required": ["parent_id", "base_sha256", "manifest"],
+          "properties": {
+            "parent_id": {"$ref": "#/components/schemas/Id"},
+            "base_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "manifest": {"type": "object", "description": "Community Heretic v4 reproduce.json object; a URL or path is not accepted."},
+            "assets_id": {"$ref": "#/components/schemas/Id"}
+          }
+        }}}},
+        "responses": {
+          "200": {"description": "Previously accepted reproduction job", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "202": {"description": "Queued reproduction job", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"}
+        }
+      }
+    },
     "/api/scratch/compile_program": {
       "post": {
         "operationId": "compileProgram",
@@ -1990,8 +2043,9 @@
           "schema": {"const": "brewery.scratch-provenance.v1"}, "parent_id": {"$ref": "#/components/schemas/Id"},
           "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "revision_id": {"$ref": "#/components/schemas/Id"},
           "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "worker": {"type": "string"},
-          "method": {"enum": ["copy", "direct", "compile_program", "linear", "task_arithmetic", "ties", "dare_linear", "dare_ties", "rome", "memit", "alphaedit", "prune", "ablate_direction"]},
+          "method": {"enum": ["copy", "direct", "compile_program", "linear", "task_arithmetic", "ties", "dare_linear", "dare_ties", "rome", "memit", "alphaedit", "prune", "ablate_direction", "heretic", "heretic_reproduce"]},
           "locate_edit": {"type": "object", "description": "Edit request, covariance digest, runtime library digests and optimization losses. CUDA receipts include backend and device in the nested provenance object."},
+          "heretic": {"type": "object", "description": "Brewery Heretic journal: base and export digests, input and effective config, seed, selected trial index, offline prompt and asset digests, and runtime and lock digests."},
           "operations": {"type": "array", "items": {"$ref": "#/components/schemas/ScratchOperation"}},
           "merge": {"type": "object", "required": ["algorithm", "inputs"], "properties": {
             "algorithm": {"$ref": "#/components/schemas/ScratchMergeAlgorithm"},
@@ -2408,7 +2462,7 @@
         "type": "object",
         "required": ["id", "kind", "host", "pool_slot", "state", "progress", "input_ids", "options", "cancel_requested", "has_result", "created_at", "updated_at"],
         "properties": {
-          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf","scratch_checks","scratch_locate_edit","search_ablation","screen_ablation"]}]},
+          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf","scratch_checks","scratch_locate_edit","search_ablation","screen_ablation","heretic","heretic_reproduce"]}]},
           "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}], "description": "Concrete worker ID, or auto before assignment of a pool conversion."},
           "requested_host": {"const": "auto", "description": "Present if auto conversion routing was requested."},
           "pool_slot": {"type": "boolean"}, "state": {"$ref": "#/components/schemas/JobState"}, "progress": {"type": "string"},
@@ -2423,6 +2477,7 @@
               {"$ref": "#/components/schemas/CacheCleanupOptions"}, {"$ref": "#/components/schemas/EmptyOptions"},
               {"$ref": "#/components/schemas/GgufLayerRecipeOptions"},
               {"$ref": "#/components/schemas/Exl3LayerOptions"},
+              {"type": "object", "required": ["kind", "base_sha256"], "properties": {"kind": {"enum": ["heretic", "heretic_reproduce"]}, "base_sha256": {"$ref": "#/components/schemas/ScratchHash"}}},
               {"$ref": "#/components/schemas/HgnLayerRecipeOptions"},
               {"$ref": "#/components/schemas/AblationSearchRequest"}
             ]

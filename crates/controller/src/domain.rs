@@ -341,6 +341,8 @@ pub struct Envelope {
     pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scratch_pins: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heretic_runs: Option<std::path::PathBuf>,
 }
 
 fn serialize_worker_inputs<S: serde::Serializer>(
@@ -1340,6 +1342,7 @@ impl NewJob {
             options: self.options.clone(),
             prompt,
             scratch_pins: Default::default(),
+            heretic_runs: None,
         };
         let requested_host = (host == "auto").then(|| host.clone());
         let job = Job {

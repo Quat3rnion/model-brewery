@@ -227,6 +227,8 @@ impl Operation {
     }
 }
 
+pub use merge::import;
+
 pub fn build(
     source: &Path,
     expected: &str,

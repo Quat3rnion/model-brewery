@@ -64,6 +64,7 @@ impl Dispatcher {
                 } else {
                     let mut wire = serde_json::to_value(envelope)?;
                     wire.as_object_mut().unwrap().remove("scratch_pins");
+                    wire.as_object_mut().unwrap().remove("heretic_runs");
                     if !job.dispatch_resources.is_empty() {
                         wire["resources"] = serde_json::to_value(job.dispatch_resources)?;
                     }

@@ -5,6 +5,7 @@ mod converter;
 mod exl3_layer;
 mod gguf;
 mod gguf_conversion;
+mod heretic;
 mod hf_download;
 mod hgn_recipe;
 mod integrity;
@@ -403,6 +404,7 @@ fn run() -> Result<i32> {
         brewery_worker::behavior_direction::JOB => behavior_direction::run(&job, &cwd, &progress)?,
         brewery_worker::scratch_eval::CHECKS => scratch_checks::run(&job, &cwd, &progress)?,
         brewery_worker::locate_edit::JOB => scratch_locate::run(&job, &cwd, &progress)?,
+        kind if brewery_worker::heretic::job(kind) => heretic::run(&job, &cwd)?,
         brewery_worker::scratch_eval::GGUF => {
             ensure!(
                 brewery_worker::scratch_eval::gguf_options(&job.options)
