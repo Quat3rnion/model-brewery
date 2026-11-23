@@ -8,9 +8,6 @@
   import WorkflowGate from '../components/WorkflowGate.svelte';
   import { hostOptions, visibleChecklist } from '../lib/pickers';
   import { globalJobEligibility, hostWorkflowEligibility } from '../lib/eligibility';
-  import { availableId, loadRetryJob, omittedInputs, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
-  import RetryOffer from '../components/RetryOffer.svelte';
-  import RetryRecovery from '../components/RetryRecovery.svelte';
   import type { Blocker } from '../lib/blockers';
   import type { Host, NewJob } from '../lib/types';
   import SubmitStatus from '../components/SubmitStatus.svelte';
@@ -52,7 +49,6 @@
   $effect(() => {
     const ok = new Set(candidates.map((m) => m.id));
     if (selected.some((id) => !ok.has(id))) {
-      retry.prune('selected', values => values.filter(id => ok.has(id)));
       selected = selected.filter(id => ok.has(id));
     }
   });
@@ -61,7 +57,6 @@
     const out: Blocker[] = [];
     if (!destHost) out.push({ text: 'Select a destination host.' });
     if (selected.length === 0) out.push({ text: 'Select at least one entry to copy.' });
-    if (omitted.length && !retry.acknowledged('transfer')) out.push({ text: 'Confirm the omitted entries before you continue.' });
     return out;
   }
 
@@ -102,36 +97,6 @@
     return out;
   });
 
-  const retry = new RetryPrefill({
-    slot: 'transfers', defaults: { dest: '', selected: [] as string[], cleanHost: '', digest: '' },
-    read: () => ({ dest, selected, cleanHost, digest }),
-    write: value => { ({ dest, selected, cleanHost, digest } = value); },
-    load: loadRetryJob(['transfer', 'transfer_preview', 'cache_cleanup']),
-    restore: job => {
-      if (job.kind === 'cache_cleanup') {
-        const sha = job.options?.bundle_sha256;
-        return { actions: ['cache_cleanup'], patch: { cleanHost: availableId(job.host, hosts), digest: typeof sha === 'string' ? sha : '' }, context: true, focus: 'cl-host' };
-      }
-      const dest = destinationOptions.some(item => item.value === job.host) ? job.host ?? '' : '';
-      const selected = job.input_ids.filter(id => models.some(model => model.id === id && model.host !== dest && model.available !== false));
-      return {
-        actions: ['transfer_preview', 'transfer'], retryActions: [job.kind], patch: { dest, selected }, context: true, focus: 'tx-host',
-        retains: draft => draft.selected.some(id => job.input_ids.includes(id)),
-        omissions: draft => omittedInputs(job.input_ids, draft.selected).map(id => {
-          const model = models.find(m => m.id === id);
-          return { id, text: `${id}: ${!model ? 'Not in Library.' : model.available === false ? 'Unavailable.'
-            : model.host === draft.dest ? 'Already on the destination host.' : 'Not selected.'}` };
-        }),
-      };
-    },
-    applied: () => { confirmClean = false; },
-    clear: () => { confirmClean = false; },
-  });
-  watchPrefill(retry, () => !!brewery.state);
-  const omitted = $derived(retry.omissions('transfer'));
-  const copyRetry = $derived(retry.action('transfer'));
-  const previewRetry = $derived(retry.action('transfer_preview'));
-  const cleanRetry = $derived(retry.action('cache_cleanup'));
   const previewJob = $derived<NewJob>({ kind: 'transfer_preview', host: dest, input_ids: selected });
   const transferJob = $derived<NewJob>({ kind: 'transfer', host: dest, input_ids: selected });
   const cleanupJob = $derived<NewJob>({
@@ -157,14 +122,14 @@
     };
     document.addEventListener('focusin', observe);
     document.addEventListener('pointerdown', observe);
-    const job = await cleaner.submit(cleanupJob, cleanRetry);
+    const job = await cleaner.submit(cleanupJob);
     document.removeEventListener('focusin', observe);
     document.removeEventListener('pointerdown', observe);
     if (job && visit.current() && confirmation === group) await closeCleanup(visit, stayed);
   }
 </script>
 
-<div class="stack" oninputcapture={retry.touchField} onchangecapture={retry.touchField} onclickcapture={retry.touchField} onkeydowncapture={retry.touchField}>
+<div class="stack">
   <div class="head">
     <h1 tabindex="-1">Transfers</h1>
     <p class="muted small">
@@ -172,20 +137,14 @@
     </p>
   </div>
 
-  {#if retry.failed}
-    <RetryRecovery reason={retry.failure} reload={retry.reload} startNew={retry.startNew} />
-  {:else if retry.loading || retry.context}
-    <p class="small muted" role="status">{retry.loading ? 'Loading the previous job options.' : 'Review the previous job options before you queue a job.'}</p>
-  {/if}
-  {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
   <section class="panel" aria-labelledby="tx-h">
     <header><h2 id="tx-h">Copy to a host</h2></header>
     <WorkflowGate workflow="transfer" decision={setup}>
     <div class="body stack">
       <div class="grid-2">
-        <Combobox id="tx-host" bind:value={dest} options={destinationOptions} label="Destination host" disabled={retry.loading} placeholder="Select or type a host" emptyText="No eligible destination matches." />
+        <Combobox id="tx-host" bind:value={dest} options={destinationOptions} label="Destination host" placeholder="Select or type a host" emptyText="No eligible destination matches." />
       </div>
-      <fieldset class="pick" disabled={retry.loading}>
+      <fieldset class="pick">
         <legend class="small">Entries to copy</legend>
         {#if !dest}
           <p class="xs muted">Select a destination first.</p>
@@ -213,26 +172,19 @@
           {#if listed.length === 0}<p class="xs muted">No entry matches the filter.</p>{/if}
         {/if}
       </fieldset>
-      {#if omitted.length}
-        <div class="note warn">
-          <p>These entries from the previous request will not be copied:</p>
-          <ul>{#each omitted as { id, text } (id)}<li class="break">{text}</li>{/each}</ul>
-          <label class="inline"><input type="checkbox" checked={retry.acknowledged('transfer')} onchange={e => retry.acknowledge('transfer', e.currentTarget.checked)} /> Continue without these entries</label>
-        </div>
-      {/if}
       <div class="row actions">
         <button type="button" class="btn" aria-describedby={copyBlockers.length || previewHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={preview.busy}
-          disabled={previewRetry.blocked || preview.busy || copyBlockers.length > 0 || previewHostBlockers.length > 0}
-          onclick={() => preview.submit(previewJob, previewRetry)}>{preview.busy ? 'Submitting…' : 'Preview'}</button>
+          disabled={preview.busy || copyBlockers.length > 0 || previewHostBlockers.length > 0}
+          onclick={() => preview.submit(previewJob)}>{preview.busy ? 'Submitting…' : 'Preview'}</button>
         <button type="button" class="btn primary" aria-describedby={copyBlockers.length || transferHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={transfer.busy}
-          disabled={copyRetry.blocked || transfer.busy || copyBlockers.length > 0 || transferHostBlockers.length > 0}
-          onclick={() => transfer.submit(transferJob, copyRetry)}>{transfer.busy ? 'Submitting…' : 'Transfer'}</button>
+          disabled={transfer.busy || copyBlockers.length > 0 || transferHostBlockers.length > 0}
+          onclick={() => transfer.submit(transferJob)}>{transfer.busy ? 'Submitting…' : 'Transfer'}</button>
       </div>
       {#if copyBlockers.length || previewHostBlockers.length || transferHostBlockers.length}
         <Blockers id="copy-blockers" blockers={[...copyBlockers, ...previewHostBlockers, ...transferHostBlockers]} />
       {/if}
-      <SubmitStatus s={preview} current={previewJob} />
-      <SubmitStatus s={transfer} current={transferJob} />
+      <SubmitStatus s={preview} />
+      <SubmitStatus s={transfer} />
       <p class="xs muted">Preview and transfer are queued jobs. Open a job to see the preview result, progress and cancel.</p>
     </div>
     </WorkflowGate>
@@ -256,18 +208,18 @@
         <div class="note warn" role="group" aria-label="Confirm cleanup" bind:this={confirmation}>
           <p class="small">Remove {digest.trim() ? 'this cached bundle' : 'all unused cached copies'} on {hostName(hosts, cleanHost)}? Later jobs copy the files again.</p>
           <div class="row" style="margin-top:8px">
-          <button type="button" class="btn danger" disabled={cleanRetry.blocked || cleaner.busy || cleanBlockers.length > 0} onclick={runCleanup}>{cleaner.busy ? 'Submitting…' : 'Queue cleanup'}</button>
+          <button type="button" class="btn danger" disabled={cleaner.busy || cleanBlockers.length > 0} onclick={runCleanup}>{cleaner.busy ? 'Submitting…' : 'Queue cleanup'}</button>
             <button type="button" class="btn ghost" onclick={() => closeCleanup(route.capture(), !!confirmation?.contains(document.activeElement))}>Keep cache</button>
           </div>
         </div>
       {:else}
         <div class="row">
           <button type="button" class="btn" bind:this={cleanButton} aria-describedby={cleanBlockers.length ? 'cleanup-blockers' : undefined}
-            disabled={cleanRetry.blocked || cleanBlockers.length > 0} onclick={() => (confirmClean = true)}>Clean cache…</button>
+            disabled={cleanBlockers.length > 0} onclick={() => (confirmClean = true)}>Clean cache…</button>
         </div>
       {/if}
       <Blockers id="cleanup-blockers" blockers={cleanBlockers} />
-      <SubmitStatus s={cleaner} current={cleanupJob} />
+      <SubmitStatus s={cleaner} />
     </div>
   </section>
 

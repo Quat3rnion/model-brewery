@@ -8,22 +8,17 @@
   import { globalJobEligibility, hostWorkflowEligibility } from '../lib/eligibility';
   import { unsavedChanges } from '../lib/unsaved-changes.svelte';
   import { focusAfterRemoval } from '../lib/focus';
-  import { availableId, historicalPrompt, loadRetryJob, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
-  import RetryOffer from '../components/RetryOffer.svelte';
-  import RetryWarnings from '../components/RetryWarnings.svelte';
   import WorkflowGate from '../components/WorkflowGate.svelte';
   import Blockers from '../components/Blockers.svelte';
   import FieldError from '../components/FieldError.svelte';
   import HostSelect from '../components/HostSelect.svelte';
   import ModelSelect from '../components/ModelSelect.svelte';
   import SubmitStatus from '../components/SubmitStatus.svelte';
-  import RetryRecovery from '../components/RetryRecovery.svelte';
   import RecentJobs from '../components/RecentJobs.svelte';
   import Advanced from '../components/Advanced.svelte';
   import BuildDiffReport from '../components/results/BuildDiffReport.svelte';
   import PairedQualityReport from '../components/results/PairedQualityReport.svelte';
   import { readBuildFileBounded, MAX_BUILD_FILE_BYTES, BUILD_DIFF_SCHEMA, PAIRED_QUALITY_SCHEMA, type BuildParsed } from '../lib/buildreports';
-  import type { JobDetail } from '../lib/types';
 
   const GGUF = ['gguf'];
   const prompts = $derived(brewery.state?.prompts ?? []);
@@ -53,60 +48,11 @@
   let lastSubmittedPrompt = $state('');
   unsavedChanges(() => promptText !== '' && promptText !== lastSubmittedPrompt);
 
-  const defaults = { a: '', b: '', host: '', promptId: '', promptText: '', promptMode: 'saved' as typeof promptMode,
-    n: 16 as number | undefined, threads: undefined as number | undefined, think: false, raw: false, useGpu: false,
-    gpuDevice: '', gpuLayers: undefined as number | undefined };
-  const retry = new RetryPrefill<typeof defaults, JobDetail, { prompt: string; snapshot: string | null | undefined }>({
-    slot: 'compare', defaults,
-    read: () => ({ a, b, host, promptId, promptText, promptMode, n, threads, think, raw, useGpu, gpuDevice, gpuLayers }),
-    write: value => { ({ a, b, host, promptId, promptText, promptMode, n, threads, think, raw, useGpu, gpuDevice, gpuLayers } = value); },
-    load: loadRetryJob(['compare']),
-    restore: job => {
-      const [first, second] = job.input_ids;
-      const available = (id: string) => availableId(id, models.filter(m => m.kind === 'gguf'));
-      const a = available(first), b = available(second);
-      const prompt = historicalPrompt(job, prompts);
-      const priorHost = job.requested_host ?? job.host;
-      const host = availableId(priorHost, hosts);
-      const o = job.options;
-      const gpuDevice = typeof o?.gpu_device === 'string' ? o.gpu_device : '';
-      const gpuLayers = typeof o?.gpu_layers === 'number' ? o.gpu_layers : undefined;
-      return { actions: ['compare'], patch: { a, b, host, promptId: prompt.id, promptText: prompt.text, promptMode: prompt.mode,
-        n: typeof o?.n === 'number' ? o.n : 16, threads: typeof o?.threads === 'number' ? o.threads : undefined,
-        think: o?.think === true, raw: o?.raw === true, gpuDevice, gpuLayers, useGpu: !!gpuDevice || gpuLayers !== undefined },
-        context: { prompt: prompt.id, snapshot: job.prompt_text }, focus: 'cmp-a',
-        omissions: draft => [
-          ...([[first, draft.a, 'A'], [second, draft.b, 'B']] as const).flatMap(([id, value, side]) =>
-            id && !available(value) ? [{ id: `${side}:${id}`, text: `Previous model ${side} ${id} was not restored. Select another model.`, required: true }] : []),
-          ...(priorHost && !host && !availableId(draft.host, hosts)
-            ? [{ id: priorHost, text: `Previous host ${priorHost} is not available. Select another host.`, required: true }] : []),
-          ...(job.prompt_id && job.prompt_text == null && !draft.promptText.trim() && !availableId(draft.promptId, prompts)
-            ? [{ id: job.prompt_id, text: `Previous prompt ${job.prompt_id} is not available. Select or enter a prompt.`, required: true }] : []),
-        ],
-      };
-    },
-    applied: patch => { lastSubmittedPrompt = patch.promptText ?? ''; },
-    clear: () => {
-      if (promptText && promptText !== lastSubmittedPrompt) promptMode = 'text';
-      lastSubmittedPrompt = '';
-    },
-  });
-  watchPrefill(retry, () => !!brewery.state);
-  $effect(() => {
-    const prior = retry.context;
-    if (prior?.prompt && promptId === prior.prompt && promptMode === 'saved' &&
-        prior.snapshot != null && prior.snapshot !== selectedPrompt?.text) {
-      promptMode = 'text';
-      promptId = '';
-    }
-  });
-  const launch = $derived(retry.action('compare'));
-
   const blockers = $derived.by((): Blocker[] => {
     const out: Blocker[] = [];
-    const available = models.filter(m => m.kind === 'gguf');
-    if (!availableId(a, available)) out.push({ field: 'model-a', text: 'Select model A.' });
-    if (!availableId(b, available)) out.push({ field: 'model-b', text: 'Select model B.' });
+    const available = (id: string) => models.some(m => m.id === id && m.kind === 'gguf' && m.available !== false);
+    if (!available(a)) out.push({ field: 'model-a', text: 'Select model A.' });
+    if (!available(b)) out.push({ field: 'model-b', text: 'Select model B.' });
     else if (a === b) out.push({ field: 'model-b', text: 'Select a different model.' });
     if (promptMode === 'saved' && !selectedPrompt) out.push({ field: 'saved', text: 'Select a saved prompt.' });
     if (promptMode === 'text' && !promptText.trim()) out.push({ field: 'text', text: 'Enter a prompt.' });
@@ -172,11 +118,10 @@
   });
   async function submit() {
     attempted = true;
-    if (blockers.length || s.busy || launch.blocked) return;
+    if (blockers.length || s.busy) return;
     const submitted = request;
-    const job = await s.submit(submitted, launch);
+    const job = await s.submit(submitted);
     if (job) {
-      retry.markClean();
       if (submitted.prompt !== undefined) lastSubmittedPrompt = submitted.prompt;
     }
   }
@@ -192,15 +137,8 @@
 
   <section class="panel" aria-labelledby="cmp-h">
     <header><h2 id="cmp-h">New comparison</h2></header>
-    {#if retry.failed}<div class="body"><RetryRecovery reason={retry.failure} reload={retry.reload} startNew={retry.startNew} /></div>{/if}
     <WorkflowGate workflow="compare" decision={setup}>
-    <div class="body stack" oninputcapture={retry.touchField} onchangecapture={retry.touchField} onclickcapture={retry.touchField} onkeydowncapture={retry.touchField}>
-      {#if retry.loading || retry.context}
-        <p class="small muted" role="status">{retry.loading ? 'Loading the previous job options.' : 'Review the previous job options before you queue a comparison.'}</p>
-      {/if}
-      {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
-      <RetryWarnings items={retry.omissions('compare')} />
-      <fieldset class="retry-fields" disabled={retry.loading}>
+    <div class="body stack">
       <div class="grid-2">
         <ModelSelect id="cmp-a" bind:value={a} kinds={GGUF} label="Model A" exclude={b ? [b] : []} error={error('model-a')} onblur={touch('model-a')} />
         <ModelSelect bind:value={b} kinds={GGUF} label="Model B" exclude={a ? [a] : []} error={error('model-b')} onblur={touch('model-b')} />
@@ -268,11 +206,10 @@
       </Advanced>
 
       <div class="row">
-        <button type="button" class="btn primary" onclick={submit} disabled={s.busy || launch.blocked} aria-busy={s.busy}>{s.busy ? 'Submitting…' : 'Queue comparison'}</button>
+        <button type="button" class="btn primary" onclick={submit} disabled={s.busy} aria-busy={s.busy}>{s.busy ? 'Submitting…' : 'Queue comparison'}</button>
       </div>
       <Blockers blockers={visible} />
-      <SubmitStatus {s} current={request} />
-      </fieldset>
+      <SubmitStatus {s} />
     </div>
     </WorkflowGate>
   </section>
@@ -310,15 +247,6 @@
 </div>
 
 <style>
-  .retry-fields {
-    display: flex;
-    flex-direction: column;
-    gap: var(--s-3);
-    margin: 0;
-    padding: 0;
-    border: 0;
-    min-width: 0;
-  }
   .rh {
     display: flex;
     flex-wrap: wrap;

@@ -1,22 +1,17 @@
 <script lang="ts">
   import { brewery } from '../lib/store.svelte';
   import { Submitter } from '../lib/submit.svelte';
-  import type { RetrySubmission } from '../lib/retry-prefill.svelte';
   import type { NewJob } from '../lib/types';
   import ModelSelect from './ModelSelect.svelte';
   import Submit from './Submit.svelte';
   import SubmitStatus from './SubmitStatus.svelte';
 
-  let { sourceId = $bindable(''), encode = $bindable(false), restored, retry, loading }: {
-    sourceId?: string; encode: boolean; restored: boolean; retry?: RetrySubmission; loading: boolean;
+  let { sourceId = $bindable(''), encode = $bindable(false) }: {
+    sourceId?: string; encode: boolean;
   } = $props();
-  let open = $state(false);
   const action = $derived(encode ? 'conversion' : 'plan');
   const capability = $derived(encode ? 'hy4_encode' : 'hy4_plan');
   const tensor = $derived(encode ? 'blk.1.attn_gate.weight' : 'blk.1.ffn_down_exps.weight');
-  $effect(() => {
-    if (restored) open = true;
-  });
   const source = $derived(brewery.state?.models.find(m => m.id === sourceId));
   const host = $derived(brewery.state?.hosts.find(h => h.id === source?.host));
   const problem = $derived(!source || source.kind !== 'hf' ? 'Select the registered HF directory for the pinned revision.'
@@ -29,12 +24,12 @@
     input_ids: [source.id], options: { hy4_overrides: { [tensor]: 'Q8_0' } } } : null);
 
   async function queue() {
-    if (loading || retry?.blocked || submission.busy || problem || !request) return;
-    await submission.submit(request, retry);
+    if (submission.busy || problem || !request) return;
+    await submission.submit(request);
   }
 </script>
 
-<details class="disclosure" bind:open>
+<details class="disclosure">
   <summary><strong>{encode ? 'Hy4 gate conversion' : 'Hy4 metadata plan'}</strong> <span class="xs muted">Text-only GGUF layout</span></summary>
   <div class="body stack">
     <p class="small">Target: <strong>tencent/Hy4-flash</strong>, revision <code>b2498eba6a1a3f9bbcab4190bc1313a3c7010c2f</code>. The worker checks the pinned metadata, not the Library name.</p>
@@ -54,8 +49,8 @@
       <p class="small">Expected file size: <strong>224,927,386,624 bytes</strong>, including the <abbr title="Tables that store values for sequences of tokens">Engram</abbr> tables. The region that stays in memory grows by 603,979,776 bytes in the plan. These are layout sizes, not measured memory use.</p>
       <p class="xs muted">Reads metadata only. Does not read or verify weight payloads, write a GGUF file, or test runtime support or quality.</p>
     {/if}
-    <Submit blockers={problem ? [problem] : []} busy={submission.busy} disabled={loading || retry?.blocked} onclick={queue}>Queue Hy4 {action}</Submit>
-    <SubmitStatus s={submission} current={request}
+    <Submit blockers={problem ? [problem] : []} busy={submission.busy} onclick={queue}>Queue Hy4 {action}</Submit>
+    <SubmitStatus s={submission}
       resultLinkLabel={submission.job ? 'View job result: ' + submission.job.id : undefined} />
   </div>
 </details>

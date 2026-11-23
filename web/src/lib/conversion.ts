@@ -11,7 +11,7 @@ import { buildConvertJob, type ConvertForm } from './convert';
 import { obj } from './reports';
 import type { Model } from './types';
 import { rejectedSubmission, submissionError } from './api';
-import { PlainAttempt, retryKey, type RetrySubmission } from './retry-keys';
+import { PlainAttempt } from './submission-key';
 
 export const STAGES = ['inspect', 'plan', 'convert', 'verify'] as const;
 export type Stage = (typeof STAGES)[number];
@@ -35,14 +35,6 @@ export const DEFAULT_PROFILE = 'converter-default';
 export function conversionRunHref(id: string, mode = 'hgn'): string {
   const params = new URLSearchParams(mode === 'hgn' ? { run: id } : { format: mode, run: id });
   return `#/convert?${params}`;
-}
-
-export function canRetryManagedHgn(run: Conversion): boolean {
-  return run.state === 'failed' && (run.format == null || run.format === 'hgn') && !run.options.layer_recipe;
-}
-
-export function managedRetryHref(id: string): string {
-  return `#/convert?${new URLSearchParams({ retry_run: id })}`;
 }
 
 export interface Conversion {
@@ -172,25 +164,23 @@ export class ConversionSubmitter {
 
   constructor(private launcher: string, private post: PostConversion) {}
 
-  async submit(body: ConversionBody, retry?: RetrySubmission, current = () => true): Promise<Conversion | null> {
-    if (this.busy || retry?.blocked) return null;
+  async submit(body: ConversionBody, current = () => true): Promise<Conversion | null> {
+    if (this.busy) return null;
     this.error = null;
     this.busy = true;
-    const failedId = retry?.failedId;
     let plain: ReturnType<PlainAttempt['take']> | undefined;
     try {
       const snapshot: ConversionBody = JSON.parse(JSON.stringify(body));
-      if (!failedId) plain = this.#plain.take(this.launcher, snapshot, current);
-      const key = plain?.key ?? await retryKey(failedId!, this.launcher, snapshot);
-      const { data, status } = await this.post(snapshot, key);
+      plain = this.#plain.take(this.launcher, snapshot, current);
+      const { data, status } = await this.post(snapshot, plain.key);
       const c = parseConversion(data);
       if (!c?.id) throw new Error('The controller answered without a conversion record.');
-      plain?.complete();
+      plain.complete();
       this.replayed = status === 200;
       return c;
     } catch (e) {
       if (rejectedSubmission(e)) plain?.complete();
-      this.error = submissionError(e, !!failedId);
+      this.error = submissionError(e);
       return null;
     } finally {
       this.busy = false;

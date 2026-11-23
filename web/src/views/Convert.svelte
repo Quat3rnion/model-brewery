@@ -8,33 +8,24 @@
   import ModelSelect from '../components/ModelSelect.svelte';
   import Submit from '../components/Submit.svelte';
   import SubmitStatus from '../components/SubmitStatus.svelte';
-  import ResultAttribution from '../components/ResultAttribution.svelte';
-  import NewRun from '../components/NewRun.svelte';
-  import RetryRecovery from '../components/RetryRecovery.svelte';
-  import { bodyKey, resultOfPreviousSubmission } from '../lib/retry-keys';
   import RecentJobs from '../components/RecentJobs.svelte';
   import ConversionRun from '../components/ConversionRun.svelte';
   import ComponentPicker from '../components/ComponentPicker.svelte';
-  import { COMPONENT_ROLES, componentBlockers, roleLabel, selectionFrom } from '../lib/components';
+  import { componentBlockers } from '../lib/components';
   import { profileStore } from '../lib/profiles.svelte';
   import { BASE_LABEL, shortRev } from '../lib/profiles';
   import { DEFAULT_PROFILE, REV_PREFIX } from '../lib/conversion';
   import GgufConvert, { type GgufDraft } from '../components/GgufConvert.svelte';
-  import LayerRecipe, { recipeTypes, trellis, type OutputType, type RecipeDraft } from '../components/LayerRecipe.svelte';
+  import LayerRecipe, { type RecipeDraft } from '../components/LayerRecipe.svelte';
   import Hy4Plan from '../components/Hy4Plan.svelte';
   import { conversions, ConversionStarter } from '../lib/conversions.svelte';
-  import { buildConversion, canRetryManagedHgn, conversionRunHref, isActiveConversion, parseConversion, parseConversions, STAGES, type Conversion } from '../lib/conversion';
+  import { buildConversion, conversionRunHref, isActiveConversion, STAGES } from '../lib/conversion';
   import { api, errorText } from '../lib/api';
   import { fieldError, visibleBlockers, type Blocker } from '../lib/blockers';
   import { hostWorkflowEligibility } from '../lib/eligibility';
   import { validSha } from '../lib/ggufSource';
   import { hashParam, route } from '../lib/route.svelte';
-  import { IMATRIX_KIND } from '../lib/gguf';
-  import { obj } from '../lib/reports';
-  import { availableId, loadRetryJob, submittedJob, type RetryOmission, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
-  import RetryOffer from '../components/RetryOffer.svelte';
-  import RetryWarnings from '../components/RetryWarnings.svelte';
-  import type { EligibilityEntry, Host, JobDetail, Workflow } from '../lib/types';
+  import type { EligibilityEntry, Host, Workflow } from '../lib/types';
   import Blockers from '../components/Blockers.svelte';
   import FieldError from '../components/FieldError.svelte';
   import WorkflowGate from '../components/WorkflowGate.svelte';
@@ -119,205 +110,6 @@
   let hy4Encode = $state(false);
   const recipeFormat = $derived(hashParam(route.hash, 'output') === 'gguf' ? 'gguf' : 'hgn');
   let diagnosticsOpen = $state(false);
-  const loadStage = loadRetryJob(STAGES);
-  type Prior = { run: Conversion } | { job: JobDetail; parent?: Conversion };
-  type RetryContext = { imatrix?: string; recipeSha?: string; source?: string;
-    managedExtras?: ConvertForm['extras']; diagnosticExtras?: ConvertForm['extras'] };
-  const defaults = {
-    form: emptyForm(), diagnostic: emptyForm(), wfHost: '', wfAny: false, step: 'inspect' as ConvertStep,
-    ggufSource: '', ggufDraft: emptyGguf(), layerSource: '', recipeDraft: emptyRecipe(), hy4Source: '', hy4Encode: false, diagnosticsOpen: false,
-  };
-  const retry = new RetryPrefill<typeof defaults, Prior, RetryContext>({
-    slot: 'convert', defaults,
-    read: () => ({ form, diagnostic, wfHost, wfAny, step, ggufSource, ggufDraft, layerSource, recipeDraft, hy4Source, hy4Encode, diagnosticsOpen }),
-    write: value => { ({ form, diagnostic, wfHost, wfAny, step, ggufSource, ggufDraft, layerSource, recipeDraft, hy4Source, hy4Encode, diagnosticsOpen } = value); },
-    load: async (id, signal) => {
-      if (id.startsWith('run:')) {
-        const runId = id.slice(4);
-        const result = await api.conversion(runId, signal);
-        const run = parseConversion(result);
-        if (!run || run.id !== runId || !canRetryManagedHgn(run)) throw new Error('Cannot reopen this conversion.');
-        return { run };
-      }
-      const job = await loadStage(id.slice(4), signal);
-      // GGUF stage records store the preset, not the full conversion request.
-      const parent = job.format === 'gguf' || job.profile_revision || job.options?.layer_recipe
-        ? parseConversions(await api.conversions(signal)).find(run => Object.values(run.jobIds).includes(job.id))
-        : undefined;
-      return { job, parent };
-    },
-    fromSubmission: body => {
-      if ('kind' in body) return (STAGES as readonly string[]).includes(body.kind) ? { job: submittedJob(body) } : undefined;
-      if (body.format === 'gguf' || body.options?.layer_recipe)
-        return { job: { ...submittedJob({ kind: 'convert', ...body }), format: body.format, profile_revision: body.profile_revision } };
-      const run = parseConversion({ ...body, id: '', state: 'running' });
-      return run ? { run } : undefined;
-    },
-    restore: prior => {
-      if ('run' in prior) {
-        const { run } = prior;
-        const target = run.requestedHost ?? run.host ?? '';
-        return {
-          actions: ['managed'], failedId: run.id,
-          patch: { ...managedPatch(run.inputIds, run.options, run.profileRevision, target, run.decodeBackend), diagnosticsOpen: false },
-          context: { managedExtras: selectionFrom(run.inputIds, run.options) },
-          focus: 'wf-source', autoFocus: 'wf-h',
-          omissions: draft => convertOmissions(run.inputIds, run.options, target, draft.form, draft.wfAny ? 'auto' : draft.wfHost),
-          retains: draft => !!draft.form.source && draft.form.source === run.inputIds[0],
-        };
-      }
-      const { job, parent } = prior;
-      const verify = !parent && job.kind === 'verify';
-      const inputs = parent?.inputIds ?? (verify ? [job.input_ids[0] ?? '', ...job.input_ids.slice(2)] : job.input_ids);
-      const options = parent?.options ?? job.options ?? {};
-      const profile = parent?.profileRevision ?? (typeof job.profile_revision === 'string' ? job.profile_revision : '');
-      const source = models.find(m => m.id === inputs[0]);
-      const assets = models.find(m => m.kind === 'assets' && m.host === source?.host && m.available !== false && m.id === inputs[1])?.id ?? '';
-      const recipe = obj(options.layer_recipe);
-      if (recipe) {
-        const types = [...recipeTypes(job.format === 'gguf' ? 'gguf' : 'hgn'), ...trellis];
-        const type = (value: unknown): value is OutputType => types.some(option => option === value);
-        const defaultType = type(recipe.default_type) ? recipe.default_type : 'BF16';
-        const overrides = Object.fromEntries(Object.entries(obj(recipe.layers) ?? {})
-          .filter(([index, value]) => /^(0|[1-9]\d*)$/.test(index) && type(value))) as RecipeDraft['overrides'];
-        const validSource = (id: string) => availableId(id, models.filter(m => isSafeSource(m.kind)));
-        const asset = inputs[1];
-        return {
-          actions: ['recipe'], failedId: parent?.id ?? job.id, patch: { layerSource: validSource(inputs[0]), recipeDraft: { defaultType, overrides, assetId: assets } },
-          context: { recipeSha: typeof recipe.source_sha256 === 'string' ? recipe.source_sha256 : undefined, source: inputs[0] },
-          focus: 'recipe-source',
-          omissions: draft => [
-            ...missing(inputs[0], validSource(draft.layerSource), 'source checkpoint', true),
-            ...(draft.layerSource === inputs[0] ? missing(asset, assetOn(draft.layerSource, draft.recipeDraft.assetId), 'assets', true) : []),
-          ],
-          retains: draft => !!draft.layerSource && draft.layerSource === inputs[0],
-        };
-      }
-      if (job.format === 'gguf') {
-        // The controller records inputs in this order, even if the matrix was deleted.
-        const standalone = source?.kind === 'safetensors' || inputs.length > 2 || models.some(m => m.id === inputs[1] && m.kind === 'assets');
-        const previousMatrix = inputs[standalone ? 2 : 1];
-        const imatrix = models.find(m => m.id === previousMatrix && m.kind === IMATRIX_KIND && m.host === source?.host && m.available !== false)?.id ?? '';
-        const ggufDraft = {
-          choice: profile ? `rev:${profile}` : typeof options.preset === 'string' ? `preset:${options.preset}` : '',
-          threads: typeof options.threads === 'number' ? options.threads : null, assets, imatrix,
-        };
-        const validSource = (id: string) => availableId(id, models.filter(m => ['hf', 'gguf', 'safetensors'].includes(m.kind)));
-        return {
-          actions: ['gguf'], failedId: parent?.id ?? job.id, patch: { ggufSource: validSource(inputs[0]), ggufDraft },
-          context: { source: inputs[0], imatrix: previousMatrix }, focus: 'gg-source',
-          omissions: draft => [
-            ...missing(inputs[0], validSource(draft.ggufSource), 'source checkpoint', true),
-            ...(draft.ggufSource === inputs[0] ? [
-              ...(standalone ? missing(inputs[1], assetOn(draft.ggufSource, draft.ggufDraft.assets), 'assets', true) : []),
-              ...(previousMatrix && !componentOn(draft.ggufSource, draft.ggufDraft.imatrix, IMATRIX_KIND)
-                ? [{ id: `matrix:${previousMatrix}`, text: `Previous importance matrix ${previousMatrix} was not restored. It was not available on the source host.` }] : []),
-            ] : []),
-          ],
-          retains: draft => !!draft.ggufSource && draft.ggufSource === inputs[0],
-        };
-      }
-      if (job.options?.hy4_overrides && (job.kind === 'plan' || job.kind === 'convert')) {
-        const validSource = (id: string) => availableId(id, models.filter(m => m.kind === 'hf'));
-        const hy4Encode = job.kind === 'convert';
-        return { actions: [hy4Encode ? 'hy4:encode' : 'hy4:plan'], failedId: job.id,
-          patch: { diagnosticsOpen: true, hy4Source: validSource(inputs[0]), hy4Encode },
-          focus: 'hy4-source',
-          omissions: draft => missing(inputs[0], validSource(draft.hy4Source), 'Hy4 source', true) };
-      }
-      // A saved custom profile can only be restored in the managed form.
-      const target = job.requested_host ?? job.host ?? '';
-      if (profile) {
-        if (!parent) throw new Error('Cannot identify the managed conversion for this stage.');
-        const worker = parent.requestedHost ?? parent.host ?? target;
-        return {
-          actions: ['managed'], failedId: parent.id, patch: managedPatch(inputs, options, profile, worker, parent.decodeBackend),
-          context: { managedExtras: selectionFrom(inputs, options) },
-          focus: 'wf-source',
-          omissions: draft => convertOmissions(inputs, options, worker, draft.form, draft.wfAny ? 'auto' : draft.wfHost),
-          retains: draft => !!draft.form.source && draft.form.source === inputs[0],
-        };
-      }
-      const diagnostic = restoredForm(job.input_ids, job.options ?? {}, null, target);
-      if (verify) diagnostic.bundle = availableId(job.input_ids[1], models.filter(m => VERIFY_OUTPUT_KINDS.has(m.kind)));
-      return {
-        actions: STAGES.map(stage => `diagnostic:${stage}`), retryActions: [`diagnostic:${job.kind}`], failedId: job.id,
-        patch: { step: STAGES.find(stage => stage === job.kind) ?? 'inspect', diagnosticsOpen: true, diagnostic },
-        context: { diagnosticExtras: selectionFrom(job.input_ids, job.options ?? {}) },
-        focus: 'cv-source',
-        omissions: draft => [
-          ...convertOmissions(job.input_ids, job.options ?? {}, target, draft.diagnostic,
-            draft.diagnostic.anyHost ? 'auto' : draft.diagnostic.host),
-          ...(verify && draft.step === 'verify' ?
-            missing(job.input_ids[1], availableId(draft.diagnostic.bundle, models.filter(m => VERIFY_OUTPUT_KINDS.has(m.kind))), 'bundle', true) : []),
-        ],
-        retains: draft => !!draft.diagnostic.source && draft.diagnostic.source === job.input_ids[0],
-      };
-    },
-  });
-  watchPrefill(retry, () => stateReady, hash => {
-    const run = hashParam(hash, 'retry_run');
-    const job = hashParam(hash, 'retry');
-    return run ? `run:${run}` : job ? `job:${job}` : null;
-  });
-  const retryRunLoading = $derived(retry.loading && !!hashParam(route.hash, 'retry_run'));
-  const managedRetry = $derived(retry.action('managed'));
-  const ggufRetry = $derived(retry.action('gguf'));
-  const recipeRetry = $derived(retry.action('recipe'));
-  const hy4Action = $derived(hy4Encode ? 'hy4:encode' : 'hy4:plan');
-  const restoredHy4 = $derived(retry.restoredAction('hy4:encode') || retry.restoredAction('hy4:plan'));
-  const diagnosticAction = $derived(`diagnostic:${step}`);
-  const diagnosticRetry = $derived(retry.action(diagnosticAction));
-  $effect(() => {
-    if (profileStore.gguf) void tick().then(() => retry.resumeFocus());
-  });
-  const sourceId = (id: string) => availableId(id, models.filter(m => CONVERT_SOURCE_KINDS.has(m.kind)));
-  function componentOn(source: string, id: string, kind: string) {
-    const host = models.find(m => m.id === source)?.host;
-    return availableId(id, models.filter(m => m.kind === kind && m.host === host));
-  }
-  const assetOn = (source: string, id: string) => componentOn(source, id, 'assets');
-  function missing(before: string | undefined, now: string, name: string, required: boolean): RetryOmission[] {
-    return before && !now ? [{ id: `${name}:${before}`, text: `Previous ${name} ${before} is not available. Select another entry.`, required }] : [];
-  }
-  function convertOmissions(ids: string[], opts: Record<string, unknown>, target: string, draft: ConvertForm, host: string) {
-    const original = selectionFrom(ids, opts);
-    return [
-      ...missing(ids[0], sourceId(draft.source), 'source checkpoint', true),
-      ...(target && target !== 'auto' && !availableId(target, hosts) ?
-        missing(target, host === 'auto' ? host : availableId(host, hosts), 'host', true) : []),
-      ...COMPONENT_ROLES.flatMap(({ kind }) =>
-        !draft.source || draft.source === ids[0]
-          ? missing(original[kind], availableId(draft.extras[kind], models.filter(m => m.kind === kind)), roleLabel(kind), false) : []),
-    ];
-  }
-  function restoredForm(inputIds: string[], opts: Record<string, unknown>, profile: string | null, target: string): ConvertForm {
-    const draft = emptyForm();
-    draft.source = sourceId(inputIds[0]);
-    draft.host = target === 'auto' ? '' : availableId(target, hosts);
-    draft.anyHost = target === 'auto';
-    draft.profile = profile ? `${REV_PREFIX}${profile}` : typeof opts.profile === 'string' ? opts.profile : '';
-    for (const key of ['ht_backend', 'i4r_backend', 'q4cp_backend', 'decode_backend'] as const) {
-      const value = opts[key];
-      if (typeof value === 'string') draft[key] = value;
-    }
-    for (const key of ['threads', 'seed', 'ht_beam'] as const) {
-      const value = opts[key];
-      if (typeof value === 'number') draft[key] = value;
-    }
-    const original = selectionFrom(inputIds, opts);
-    for (const { kind } of COMPONENT_ROLES) draft.extras[kind] = availableId(original[kind], models.filter(m => m.kind === kind));
-    return draft;
-  }
-  function managedPatch(inputIds: string[], opts: Record<string, unknown>, profile: string | null, target: string, decode: string | null) {
-    const draft = restoredForm(inputIds, opts, profile, target);
-    if (!draft.profile) draft.profile = DEFAULT_PROFILE;
-    if (decode) draft.decode_backend = decode;
-    const { anyHost: wfAny, host: wfHost } = draft;
-    draft.host = '';
-    draft.anyHost = false;
-    return { form: draft, wfAny, wfHost };
-  }
   $effect(() => {
     const hash = route.hash;
     const source = hashParam(hash, 'model');
@@ -325,7 +117,7 @@
     const profile = hashParam(hash, 'profile');
     const requestedStep = STAGES.find((value) => value === hashParam(hash, 'step'));
     // Resolve IDs against inventory before putting them in visible pickers.
-    if ((source || host || profile || requestedStep) && stateReady && !hashParam(hash, 'retry') && !hashParam(hash, 'retry_run')) {
+    if ((source || host || profile || requestedStep) && stateReady) {
       untrack(() => {
         if (requestedStep) {
           step = requestedStep;
@@ -360,18 +152,6 @@
     if (layerSource && !recipeSource) layerSource = '';
     if (ggufSource && !models.some((m) => m.id === ggufSource)) ggufSource = '';
     if (diagnostic.source && !models.some((m) => m.id === diagnostic.source)) diagnostic.source = '';
-  });
-  $effect(() => {
-    if (!stateReady) return;
-    // Historical selections have an omission policy. Keep a later
-    // replacement in the draft so the builder can block and name it.
-    for (const [original, draft] of [[retry.context?.managedExtras, form], [retry.context?.diagnosticExtras, diagnostic]] as const) {
-      if (!original) continue;
-      for (const { kind } of COMPONENT_ROLES) {
-        const id = draft.extras[kind];
-        if (id && id === original[kind] && !availableId(id, models.filter(m => m.kind === kind))) draft.extras[kind] = '';
-      }
-    }
   });
   $effect(() => {
     if (profileStore.pendingUse?.startsWith('gguf:') && mode !== 'gguf') setMode('gguf');
@@ -435,7 +215,7 @@
     if (hostChecks.length && hostChecks.every((reasons) => reasons.length)) out.push(...hostChecks.flat());
     return out;
   });
-  const checkBody = $derived(mode === 'hgn' && !managedRetry.blocked && conversions.status !== 'unavailable' && !localBlockers.length && wfBuilt.body ? JSON.stringify(wfBuilt.body) : null);
+  const checkBody = $derived(mode === 'hgn' && conversions.status !== 'unavailable' && !localBlockers.length && wfBuilt.body ? JSON.stringify(wfBuilt.body) : null);
   // Compare by value: polling an unchanged snapshot must not repeat the check.
   const checkState = $derived(checkBody ? JSON.stringify([hosts, snapshot,
     models.filter((model) => wfBuilt.body?.input_ids.includes(model.id))]) : '');
@@ -474,13 +254,7 @@
     // Submit only on a click, never from an effect.
     attempted = true;
     if (!wfBuilt.body || starter.busy || !checkKey || checked?.key !== checkKey || !checked.decision?.eligible) return;
-    const { hash } = route;
-    const visit = route.capture();
-    const run = await starter.start(wfBuilt.body, managedRetry);
-    if (run) {
-      if (visit.current() && starter.acceptedBodyKey === bodyKey(wfBuilt.body)) retry.markClean();
-      if (!starter.replayed && visit.canPresent() && hashParam(hash, 'retry_run')) route.replaceQuery('#/convert');
-    }
+    await starter.start(wfBuilt.body);
   }
   $effect(() => conversions.watch());
   const runs = $derived(conversions.list);
@@ -513,7 +287,7 @@
 
   const s = new Submitter(job => `convert.${job.kind}`);
   function submit() {
-    if (built.job && !blockers.length && !s.busy) s.submit(built.job, diagnosticRetry);
+    if (built.job && !blockers.length && !s.busy) s.submit(built.job);
   }
   const usesBackends = $derived(step === 'inspect' || step === 'plan' || step === 'convert');
   const usesPlanOpts = $derived(step === 'plan' || step === 'convert');
@@ -526,12 +300,9 @@
   );
 </script>
 
-<div class="stack" oninputcapture={retry.touchField} onchangecapture={retry.touchField} onclickcapture={retry.touchField} onkeydowncapture={retry.touchField}>
+<div class="stack">
   <div class="head">
     <h1 tabindex="-1">Convert</h1>
-    {#if retry.failed}<RetryRecovery id="cv-retry-loading" reason={retry.failure} reload={retry.reload} startNew={retry.startNew} />{/if}
-    {#if retry.loadingReason}<p id="cv-retry-loading" class="hint" role="status">{retryRunLoading ? 'Loading the previous conversion.' : retry.loadingReason}</p>{/if}
-    {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
     <p class="muted small">Convert a source checkpoint to an HGN bundle or a GGUF file.</p>
   </div>
 
@@ -550,22 +321,13 @@
     <p id="convert-mode-help" class="body small muted">{MODES.find((item) => item.id === mode)?.help}</p>
     {#if mode === 'recipe'}
       <div class="body stack">
-        <RetryWarnings items={retry.omissions('recipe')} />
         <div class="grid-2">
           <ModelSelect bind:value={() => layerSource, selectRecipeSource} kinds={['hf', 'safetensors']} label="Source checkpoint" hint="Choose a SafeTensors file or an indexed HF directory." id="recipe-source" />
           <div class="field">
             <label for="recipe-format">Recipe output</label>
             <select class="input" id="recipe-format" value={recipeFormat} onchange={(event) => {
               const output = event.currentTarget.value;
-              if (hashParam(route.hash, 'retry')) {
-                // Output is part of this recipe draft, not a different retry.
-                const query = new URLSearchParams(route.hash.split('?')[1]);
-                if (output === 'gguf') query.set('output', 'gguf');
-                else query.delete('output');
-                route.replaceQuery(`#/convert?${query}`);
-              } else {
-                location.hash = output === 'gguf' ? '#/convert?format=recipe&output=gguf' : '#/convert?format=recipe';
-              }
+              location.hash = output === 'gguf' ? '#/convert?format=recipe&output=gguf' : '#/convert?format=recipe';
             }}>
               <option value="hgn">Structural HGN archive</option>
               <option value="gguf">GGUF file</option>
@@ -574,8 +336,7 @@
         </div>
         {#if recipeSource}
           {#key recipeKey}
-            <LayerRecipe source={recipeSource} format={recipeFormat} starter={recipeStarter} bind:draft={recipeDraft}
-              retry={recipeRetry} originalSha={retry.context?.source === layerSource ? retry.context?.recipeSha : undefined} loading={retry.unavailable} />
+            <LayerRecipe source={recipeSource} format={recipeFormat} starter={recipeStarter} bind:draft={recipeDraft} />
           {/key}
         {:else}
           <p class="hint">Select a source to see if it supports a layer recipe.</p>
@@ -584,10 +345,7 @@
     {:else if mode === 'gguf'}
     <WorkflowGate workflow="gguf_output">
     <div class="body">
-      {#if profileStore.gguf}<GgufConvert catalog={profileStore.gguf} bind:source={ggufSource} bind:draft={ggufDraft}
-        retry={ggufRetry} omissions={retry.omissions('gguf')} acknowledged={retry.acknowledged('gguf')}
-        acknowledge={() => retry.acknowledge('gguf')}
-        previousMatrix={retry.context?.source === ggufSource ? retry.context?.imatrix : undefined} loading={retry.unavailable} />
+      {#if profileStore.gguf}<GgufConvert catalog={profileStore.gguf} bind:source={ggufSource} bind:draft={ggufDraft} />
       {:else if profileStore.ggufStatus === 'unavailable'}<p class="note warn">This controller does not offer GGUF output.</p>
       {:else if profileStore.status === 'loading' || profileStore.status === 'idle'}<p class="muted">Loading GGUF types…</p>
       {:else}<p class="note bad" role="alert">The GGUF catalog could not be loaded.</p>{/if}
@@ -596,9 +354,6 @@
     {:else}
     <WorkflowGate workflow="managed_conversion">
     <div class="body stack">
-      <RetryWarnings items={retry.omissions('managed')} acknowledged={retry.acknowledged('managed')} acknowledge={() => {
-        retry.acknowledge('managed'); document.getElementById('wf-source')?.focus();
-      }} />
       <div class="grid-2">
         <ModelSelect bind:value={form.source} kinds={CONVERT_SOURCE_KINDS} label="Source checkpoint" hint="Hugging Face BF16 directory, GGUF or HGN." id="wf-source" error={fieldError(visible, 'source')} onblur={() => (touched.source = true)} />
         <div class="field">
@@ -689,14 +444,9 @@
       <div aria-live="polite" class="xs">
         {#if starter.error}<p class="note bad" role="alert">{starter.error} Pressing Start again retries the same request; it will not start a second conversion.</p>
         {:else if starter.last}
-          <ResultAttribution accepted={starter.acceptedBodyKey} current={wfBuilt.body} />
           <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a href={conversionRunHref(starter.last.id)}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : 'The run continues if you leave this page.'}</p>
         {/if}
       </div>
-      {#if !starter.error && starter.replayed && starter.newRun}
-        <NewRun prepare={starter.newRun} current={() => starter.newRun?.('current') ?? false}
-          changed={resultOfPreviousSubmission(starter.acceptedBodyKey, wfBuilt.body)} disabled={starter.busy} />
-      {/if}
     </div>
     </WorkflowGate>
     {/if}
@@ -845,15 +595,11 @@
         </Advanced>
       {/if}
 
-      <RetryWarnings items={retry.omissions(diagnosticAction)} acknowledged={retry.acknowledged(diagnosticAction)} acknowledge={() => {
-        retry.acknowledge(diagnosticAction); document.getElementById('cv-source')?.focus();
-      }} />
-      <Submit {blockers} busy={s.busy} disabled={diagnosticRetry.blocked} onclick={submit}>Queue {STEPS.find((x) => x.id === step)?.label.toLowerCase()}</Submit>
-      <SubmitStatus {s} current={built.job} />
+      <Submit {blockers} busy={s.busy} onclick={submit}>Queue {STEPS.find((x) => x.id === step)?.label.toLowerCase()}</Submit>
+      <SubmitStatus {s} />
     </div>
   </div>
-      <RetryWarnings items={retry.omissions(hy4Action)} />
-      <Hy4Plan bind:sourceId={hy4Source} bind:encode={hy4Encode} restored={restoredHy4} retry={retry.action(hy4Action)} loading={retry.unavailable} />
+      <Hy4Plan bind:sourceId={hy4Source} bind:encode={hy4Encode} />
     </div>
   </details>
 

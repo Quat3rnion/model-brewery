@@ -433,22 +433,10 @@ enter an absolute path. The worker checks it when a job uses it.
 6. Read the result. `GET /api/jobs/{id}` returns the full result and the
    controller event log.
 
-**Run again** and the links that reopen a failed job in its form do not queue
-work. The form checks the previous inputs against the current Library and
-worker settings. If an input is missing, replace it or acknowledge the
-omission if the form permits it. An edited selection can still have omissions
-when you return to the plain form. If you edited the form while the previous
-request loaded, select **Use previous inputs** to replace the draft.
+To run a failed job again, open its view and enter the inputs.
 
-If the submission response is lost, check **Jobs** first. To resend a
-request from a retry form, open the same failed job or conversion. Submit
-with the same inputs. If the controller already queued the request, the
-form shows a link to that job, even after a reload. To queue another run
-with those inputs, select **Start a new run**. Review the inputs on the
-plain form, then select its queue button. If the previous request does not
-load, select **Reload previous request** or **Start a new run instead**.
-If you lose a reply from the plain form, resend without leaving or
-reloading the page.
+If you lose a reply after you submit a job, check **Jobs** first. If you
+submit again, use the same inputs and do not leave or reload the page.
 
 ### Convert a model
 

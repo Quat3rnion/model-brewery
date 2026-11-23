@@ -8,6 +8,8 @@ This guide records the current Model Brewery web interface. It is not a redesign
 
 Keep nested routes under their parent section. Profiles uses Convert in the header. Weight edits uses Library. Job details use Jobs. Infrastructure settings stay under Settings. `App.svelte` marks the parent link with `aria-current="page"`.
 
+To run a failed job again, open its view and enter the inputs.
+
 Show the connection state with text, not only a dot. The header reports Connecting, Connected, or Retrying. Keep running-job progress and cancellation available in the shared shell. On small screens, let the operator hide the job details without hiding the counts.
 
 ## Visual tokens

@@ -74,3 +74,14 @@ test('retries Settings after an endpoint error without disconnecting the shell',
   await expect(page.getByRole('heading', { name: 'Evaluation readiness' })).toBeVisible();
   expect(controller.requests('GET', '/api/settings')).toHaveLength(2);
 });
+
+test('mock controller matches canonically identical submissions and rejects conflicting keys', async ({ request, controller: c }) => {
+  const post = data => request.post(`${c.origin}/api/jobs`, { data, headers: { 'Idempotency-Key': 'mock-check' } });
+  const a = await post({ kind: 'inspect', input_ids: ['source-a'], options: { seed: 1, threads: 2 } });
+  const b = await post({ options: { threads: 2, seed: 1 }, input_ids: ['source-a'], kind: 'inspect' });
+  const d = await post({ kind: 'inspect', input_ids: ['source-a'], options: { seed: 2, threads: 2 } });
+  expect(a.status()).toBe(201);
+  expect(b.status()).toBe(200);
+  expect(await b.json()).toEqual({ id: (await a.json()).id });
+  expect(d.status()).toBe(409);
+});

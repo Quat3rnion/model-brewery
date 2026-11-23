@@ -14,7 +14,7 @@
   import { profileStore } from '../lib/profiles.svelte';
   import { conversionRunHref, STAGES, type ConversionBody } from '../lib/conversion';
   import { hostWorkflowEligibility } from '../lib/eligibility';
-  import { type Blocker, blockerText } from '../lib/blockers';
+  import type { Blocker } from '../lib/blockers';
   import { validSha } from '../lib/ggufSource';
   import { roleLabel } from '../lib/components';
   import { conversions, ConversionStarter } from '../lib/conversions.svelte';
@@ -24,16 +24,9 @@
   import ComponentPicker from './ComponentPicker.svelte';
   import Blockers from './Blockers.svelte';
   import Submit from './Submit.svelte';
-  import NewRun from './NewRun.svelte';
-  import ResultAttribution from './ResultAttribution.svelte';
-  import { resultOfPreviousSubmission } from '../lib/retry-keys';
-  import RetryWarnings from './RetryWarnings.svelte';
-  import type { RetryOmission, RetrySubmission } from '../lib/retry-prefill.svelte';
 
-  let { catalog, source = $bindable(''), draft = $bindable(), retry, omissions, acknowledge, acknowledged, previousMatrix, loading }: {
+  let { catalog, source = $bindable(''), draft = $bindable() }: {
     catalog: GgufCatalog; source?: string; draft: GgufDraft;
-    retry: RetrySubmission; omissions: readonly RetryOmission[]; acknowledge: () => void; acknowledged: boolean;
-    previousMatrix?: string; loading: boolean;
   } = $props();
   const hosts = $derived(brewery.state?.hosts ?? []);
   const models = $derived(brewery.state?.models ?? []);
@@ -99,8 +92,8 @@
   });
   const starter = new ConversionStarter('convert.gguf');
   async function start() {
-    if (loading || retry.blocked || !built.body || starter.busy || blockers.length) return;
-    await starter.start(built.body as unknown as ConversionBody, retry);
+    if (!built.body || starter.busy || blockers.length) return;
+    await starter.start(built.body as unknown as ConversionBody);
   }
 </script>
 
@@ -145,11 +138,8 @@
     <p class="xs muted">The weights alone do not identify a complete model. The exporter checks the weights, config, tokenizer and architecture; worker support does not guarantee that this model can be exported.</p>
   {:else if src}<ComponentPicker source={src} idPrefix="gg-comp" gguf />{/if}
   {#if src?.kind==='hf' || standalone}<p class="xs muted">The GGUF exporter does not support the Flash-Next layout. For a Flash-Next HF checkpoint, choose Managed HGN instead.</p>{/if}
-  <RetryWarnings items={omissions} {acknowledged} label="Acknowledge omitted matrix" acknowledge={needsImatrix ? undefined : () => {
-    acknowledge(); document.getElementById('gg-choice')?.focus();
-  }} />
   <div class="grid-2">
-    {#if needsImatrix || draft.imatrix || (previousMatrix && sameHostMatrix.length)}
+    {#if needsImatrix || draft.imatrix}
       <ModelSelect bind:value={draft.imatrix} kinds={[IMATRIX_KIND]} exclude={models.filter(m=>!sameHostMatrix.some(x=>x.id===m.id)).map(m=>m.id)} label="Importance matrix (imatrix)" optional={!needsImatrix} hint="Register a matching importance matrix on the source host." id="gg-imatrix" />
   {/if}
     <div class="field">
@@ -159,18 +149,13 @@
     </div>
   </div>
   <p class="xs muted">The output is a single .gguf file on the worker, registered in the Library when the workflow finishes. The workflow runs inspect, plan, convert and verify like an HGN conversion.</p>
-  <Submit {blockers} busy={starter.busy} disabled={loading || retry.blocked} onclick={start}>Start GGUF conversion</Submit>
+  <Submit {blockers} busy={starter.busy} onclick={start}>Start GGUF conversion</Submit>
   <div aria-live="polite" class="xs">
-    {#if starter.error}<p class="note bad" role="alert">{starter.error} Pressing Start again retries the same request.</p>
+    {#if starter.error}<p class="note bad" role="alert">{starter.error}</p>
     {:else if starter.last}
-      <ResultAttribution accepted={starter.acceptedBodyKey} current={built.body} />
       <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a href={conversionRunHref(starter.last.id, 'gguf')}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : ''}</p>
     {/if}
   </div>
-  {#if !starter.error && starter.replayed && starter.newRun}
-    <NewRun prepare={starter.newRun} current={() => starter.newRun?.('current') ?? false}
-      changed={resultOfPreviousSubmission(starter.acceptedBodyKey, built.body)} disabled={starter.busy} />
-  {/if}
 </div>
 
 <style>
