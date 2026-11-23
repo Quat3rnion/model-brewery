@@ -116,11 +116,11 @@
       gpu_layers: useGpu ? (gpuLayers ?? undefined) : undefined,
     },
   });
-  async function submit() {
+  async function submit(event: MouseEvent) {
     attempted = true;
     if (blockers.length || s.busy) return;
     const submitted = request;
-    const job = await s.submit(submitted);
+    const job = await s.submit(submitted, event);
     if (job) {
       if (submitted.prompt !== undefined) lastSubmittedPrompt = submitted.prompt;
     }

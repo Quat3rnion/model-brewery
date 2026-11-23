@@ -169,11 +169,11 @@
     if (draftPin) request.options = { ...request.options, source_sha256: draftPin, ...(draftPacked ? { packed: true } : {}) };
     return request;
   });
-  async function propose() {
+  async function propose(event: MouseEvent) {
     if (!proposeRequest || proposeBlockers.length) return;
     const visit = route.capture();
     const submitted = draft;
-    const job = await proposeSub.submit(proposeRequest);
+    const job = await proposeSub.submit(proposeRequest, event);
     if (job && !proposeSub.replayed && visit.canPresent()) {
       for (const edit of submitted) {
         const key = editKey(edit);
@@ -200,9 +200,9 @@
   ]);
   const inspectRequest = $derived(source && inspectParsed.t.ok && inspectParsed.i.ok
     ? inspectJob(source.id, source.host, inspectParsed.t.value, inspectParsed.i.value) : null);
-  async function inspect() {
+  async function inspect(event: MouseEvent) {
     if (!inspectRequest || inspectBlockers.length) return;
-    await inspectSub.submit(inspectRequest);
+    await inspectSub.submit(inspectRequest, event);
   }
   const lastInspect = $derived(newestFirst(jobsFor(jobs, sourceId, new Set(['weight_inspect'])))[0]);
   let inspectDetail = $state<JobDetail | null>(null);
@@ -254,10 +254,10 @@
   });
   const tuneRequest = $derived(source && tuneParsed.t.ok && tuneParsed.c.ok && tuneParsed.m.ok
     ? tuneJob(source.id, source.host, calibrationId, heldOutId, tuneParsed.t.value, tuneParsed.c.value, tuneParsed.m.value) : null);
-  async function tune() {
+  async function tune(event: MouseEvent) {
     if (!tuneRequest || tuneBlockers.length) return;
     const visit = route.capture();
-    const job = await tuneSub.submit(tuneRequest);
+    const job = await tuneSub.submit(tuneRequest, event);
     if (job && !tuneSub.replayed && visit.canPresent()) openReview(job.id);
   }
 
@@ -305,10 +305,10 @@
     if (!confirmed) out.push('Confirm that you reviewed the values.');
     return out;
   });
-  async function applyNow() {
+  async function applyNow(event: MouseEvent) {
     if (!applyRequest || applyBlockers.length) return;
     // The controller requires the exact source of the proposal job.
-    await applySub.submit(applyRequest);
+    await applySub.submit(applyRequest, event);
   }
   let appliedDetail = $state<JobDetail | null>(null);
   $effect(() => {

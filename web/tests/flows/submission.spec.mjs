@@ -107,7 +107,8 @@ for (const moveFocus of [false, true]) {
 test('keeping the cache returns keyboard focus without queueing cleanup', async ({ page, controller }) => {
   await openCleanup(page, controller);
   const clean = button(page, 'Clean cache…');
-  await button(page, 'Keep cache').press('Enter');
+  await expect(button(page, 'Keep cache')).toBeFocused();
+  await page.keyboard.press('Enter');
   await expect(clean).toBeFocused();
   expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
 });

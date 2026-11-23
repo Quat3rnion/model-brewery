@@ -4,6 +4,8 @@
   import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { api, errorText } from '../../lib/api';
+  import { captureResultFocus } from '../../lib/focus';
+  import { acceptedJobSummary, Submitter } from '../../lib/submit.svelte';
   import { brewery } from '../../lib/store.svelte';
   import { profileStore } from '../../lib/profiles.svelte';
   import { WEIGHT_SOURCES, hostName, isSafeSource, formatBytes, formatTime } from '../../lib/format';
@@ -60,6 +62,7 @@
   const blocked = $derived(source ? inventoryBlocker(source, host) : null);
   const packed = $derived(!!source && !isSafeSource(source.kind) && host?.capabilities?.weight_packed === true);
   const submitted = new SvelteMap<string, JobSummary | string | null>();
+  const reads = new Submitter('profiles.gguf.inventory');
   const detailErrors = new SvelteMap<string, string>();
   const inventoryJobs = $derived([...jobs, ...[...submitted.values()].filter((j): j is JobSummary =>
     !!j && typeof j !== 'string' && !jobs.some(row => row.id === j.id))]);
@@ -70,7 +73,8 @@
   const need = $derived(source && inv?.need ? inventoryJob(source.id, source.host, inv.need.offset, inv.need.sha, packed) : null);
   const needKey = $derived(need ? JSON.stringify([sourceKey, need.options]) : '');
   const readPending = $derived(!!needKey && submitted.get(needKey) === null);
-  let lastRead = $state<{ key: string; job: JobSummary } | null>(null);
+  let lastRead = $state<{ key: string; job: JobSummary; matched: boolean } | null>(null);
+  let readLink: HTMLAnchorElement | undefined = $state();
   const readJob = $derived(inv?.job ?? (lastRead?.key === sourceKey
     ? jobs.find(j => j.id === lastRead?.job.id) ?? lastRead.job : null));
   const invError = $derived(inv?.error || (inv?.job && detailErrors.get(inv.job.id)) ||
@@ -80,17 +84,23 @@
     if (job?.state !== 'succeeded' || brewery.details[job.id]) return;
     void loadDetail(job.id).catch(error => detailErrors.set(job.id, errorText(error)));
   });
-  function readTensors() {
+  async function readTensors(event: MouseEvent) {
     const key = needKey;
     const request = need;
-    if (!key || !request || blocked || readPending) return;
+    if (!key || !request || blocked || reads.busy || event.detail > 1) return;
     const modelKey = sourceKey;
+    const focus = captureResultFocus(event);
     submitted.set(key, null);
-    void api.submitJob(request).then(job => {
-      submitted.set(key, job);
-      lastRead = { key: modelKey, job };
-      void brewery.refresh();
-    }).catch(error => submitted.set(key, errorText(error)));
+    const accepted = await reads.submit(request, event, false);
+    if (!accepted) {
+      if (reads.error) submitted.set(key, reads.error);
+      else submitted.delete(key);
+      return;
+    }
+    const job = acceptedJobSummary(accepted, request);
+    submitted.set(key, job);
+    lastRead = { key: modelKey, job, matched: reads.replayed };
+    if (modelKey === sourceKey) void focus?.(() => readLink);
   }
   const native = $derived(inv?.pages.flatMap(p => p.tensors) ?? []);
   const nativeNames = $derived(new Set(source?.kind === 'gguf' ? [] : native.map(t => t.name)));
@@ -256,7 +266,7 @@
       <ModelSelect bind:value={sourceId} kinds={WEIGHT_SOURCES} label="Source model" hint="Choose a Library model. You can also add overrides by exact name without a source." />
       {#if source && need && !blocked}
         <div class="row">
-          <button type="button" class="btn" onclick={readTensors} disabled={readPending}>
+          <button type="button" class="btn" onclick={readTensors} disabled={reads.busy}>
             {inv?.pages.length ? 'Read next tensors' : 'Read tensor list'}
           </button>
           <span class="hint">This queues a <code>weight_inspect</code> job on {hostName(brewery.state?.hosts ?? [], source.host)}.</span>
@@ -264,8 +274,11 @@
       {/if}
       {#if readJob}
         <div class="row" role="status">
-          <a href="#/jobs/{encodeURIComponent(readJob.id)}">Tensor list read job</a>
+          <a bind:this={readLink} href="#/jobs/{encodeURIComponent(readJob.id)}">Tensor list read job</a>
           <JobState job={readJob} />
+          {#if lastRead?.matched && lastRead.job.id === readJob.id}
+            <span class="hint">This request already has a job. No second job was queued.</span>
+          {/if}
         </div>
       {/if}
       <span class="hint" role="status">

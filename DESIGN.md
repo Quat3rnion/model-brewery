@@ -8,7 +8,10 @@ This guide records the current Model Brewery web interface. It is not a redesign
 
 Keep nested routes under their parent section. Profiles uses Convert in the header. Weight edits uses Library. Job details use Jobs. Infrastructure settings stay under Settings. `App.svelte` marks the parent link with `aria-current="page"`.
 
-To run a failed job again, open its view and enter the inputs.
+For jobs that the workbench can submit, open the job's view and enter the
+inputs again. A failed `hf_download` on a named remote worker can use the
+same `host` only through the controller API (`POST /api/jobs`). The Library
+form uses the controller's download service.
 
 Show the connection state with text, not only a dot. The header reports Connecting, Connected, or Retrying. Keep running-job progress and cancellation available in the shared shell. On small screens, let the operator hide the job details without hiding the counts.
 

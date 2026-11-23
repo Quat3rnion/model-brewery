@@ -8,7 +8,7 @@
     onclick,
     variant = 'primary',
     children,
-  }: { blockers?: string[]; busy?: boolean; disabled?: boolean; onclick: () => void; variant?: 'primary' | 'secondary'; children: Snippet } = $props();
+  }: { blockers?: string[]; busy?: boolean; disabled?: boolean; onclick: (event: MouseEvent) => void; variant?: 'primary' | 'secondary'; children: Snippet } = $props();
 
   const id = $props.id();
   const blocked = $derived(blockers.length > 0);

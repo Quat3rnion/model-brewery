@@ -2,6 +2,7 @@
   import Advanced from '../components/Advanced.svelte';
   import { brewery } from '../lib/store.svelte';
   import { Submitter } from '../lib/submit.svelte';
+  import { captureResultFocus } from '../lib/focus';
   import { CONVERT_SOURCE_KINDS, capability, hostName, isSafeSource } from '../lib/format';
   import { CONVERT_ENUMS, VERIFY_OUTPUT_KINDS, buildConvertJob, poolHosts, type ConvertForm, type ConvertStep } from '../lib/convert';
   import HostSelect from '../components/HostSelect.svelte';
@@ -250,11 +251,13 @@
   let attempted = $state(false);
   const visible = $derived(visibleBlockers(wfBlockers, touched, attempted || !!checkBody || (!!wfSource && !!form.profile)));
   const starter = new ConversionStarter('convert.managed');
-  async function startConversion() {
+  let runLink: HTMLAnchorElement | undefined = $state();
+  async function startConversion(event: MouseEvent) {
     // Submit only on a click, never from an effect.
     attempted = true;
-    if (!wfBuilt.body || starter.busy || !checkKey || checked?.key !== checkKey || !checked.decision?.eligible) return;
-    await starter.start(wfBuilt.body);
+    if (!wfBuilt.body || starter.busy || !checkKey || checked?.key !== checkKey || !checked.decision?.eligible || event.detail > 1) return;
+    const focus = captureResultFocus(event);
+    if (await starter.start(wfBuilt.body)) void focus?.(() => runLink);
   }
   $effect(() => conversions.watch());
   const runs = $derived(conversions.list);
@@ -286,8 +289,8 @@
   );
 
   const s = new Submitter(job => `convert.${job.kind}`);
-  function submit() {
-    if (built.job && !blockers.length && !s.busy) s.submit(built.job);
+  function submit(event: MouseEvent) {
+    if (built.job && !blockers.length && !s.busy) s.submit(built.job, event);
   }
   const usesBackends = $derived(step === 'inspect' || step === 'plan' || step === 'convert');
   const usesPlanOpts = $derived(step === 'plan' || step === 'convert');
@@ -442,9 +445,9 @@
         {/if}
       </div>
       <div aria-live="polite" class="xs">
-        {#if starter.error}<p class="note bad" role="alert">{starter.error} Pressing Start again retries the same request; it will not start a second conversion.</p>
+        {#if starter.error}<p class="note bad" role="alert">{starter.error}</p>
         {:else if starter.last}
-          <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a href={conversionRunHref(starter.last.id)}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : 'The run continues if you leave this page.'}</p>
+          <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a bind:this={runLink} href={conversionRunHref(starter.last.id)}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : 'The run continues if you leave this page.'}</p>
         {/if}
       </div>
     </div>

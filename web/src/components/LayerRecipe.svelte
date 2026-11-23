@@ -28,6 +28,7 @@
   import Submit from './Submit.svelte';
   import SubmitStatus from './SubmitStatus.svelte';
   import { acceptedJobSummary, Submitter } from '../lib/submit.svelte';
+  import { captureResultFocus } from '../lib/focus';
   import { trellisProblem } from '../lib/trellis-layer';
   import { bodyKey } from '../lib/submission-key';
 
@@ -65,14 +66,16 @@
 
   const readPending = $derived(!!inventory.need && submitted.get(inventory.need.offset) === null);
   const readJob = $derived(inventory.job ?? currentJobs.at(-1));
+  let readLink: HTMLAnchorElement | undefined = $state();
 
-  async function readLayers() {
+  async function readLayers(event: MouseEvent) {
     const next = inventory.need;
-    if (flash || blocked || error || !next || submitted.has(next.offset)) return;
+    if (flash || blocked || error || !next || submitted.has(next.offset) || event.detail > 1) return;
     const { offset, sha } = next;
     const request = inventoryJob(source.id, source.host, offset, sha);
     submitted.set(offset, null);
-    const accepted = await reads.submit(request);
+    const focus = captureResultFocus(event);
+    const accepted = await reads.submit(request, event, false);
     if (!accepted) {
       submitted.delete(offset);
       return;
@@ -86,6 +89,7 @@
       submitted.set(offset, job);
     }
     record(acceptedJobSummary(accepted, request));
+    void focus?.(() => readLink);
     // A match can return only the ID. If the detail GET fails, wait for the
     // state poll to replace the placeholder instead of latching an error.
     if (!('state' in accepted)) void brewery.loadJob(id).then(record).catch(() => {});
@@ -195,10 +199,12 @@
   let attemptedBody = $state<string>();
   const currentAttempt = $derived(body !== null && attemptedBody === bodyKey(body));
 
-  async function run() {
-    if (!body || starter.busy) return;
+  let runLink: HTMLAnchorElement | undefined = $state();
+  async function run(event: MouseEvent) {
+    if (!body || starter.busy || event.detail > 1) return;
     attemptedBody = bodyKey(body);
-    await starter.start(body);
+    const focus = captureResultFocus(event);
+    if (await starter.start(body)) void focus?.(() => runLink);
   }
 
   function download() {
@@ -226,7 +232,7 @@
 <p class="hint">Supported architectures: {format === 'gguf' ? 'GPT-2 and Qwen2' : 'dense Llama and Qwen2'}. The exporter checks the architecture and assets before it writes output.</p>
 {#if readJob && !flash}
   <div class="row" role="status">
-    <a href="#/jobs/{encodeURIComponent(readJob.id)}">Layer read job</a>
+    <a bind:this={readLink} href="#/jobs/{encodeURIComponent(readJob.id)}">Layer read job</a>
     <JobState job={readJob} />
   </div>
 {/if}
@@ -295,6 +301,6 @@
   {#if currentAttempt && starter.error}
     <p class="note bad" role="alert">{starter.error}</p>
   {:else if !starter.busy && starter.last}
-    <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a href={conversionRunHref(starter.last.id, 'recipe')}>{starter.last.id}</a>. {#if starter.replayed}No second conversion was started.{/if}</p>
+    <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a bind:this={runLink} href={conversionRunHref(starter.last.id, 'recipe')}>{starter.last.id}</a>. {#if starter.replayed}No second conversion was started.{/if}</p>
   {/if}
 </div>

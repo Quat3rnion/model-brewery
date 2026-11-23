@@ -41,6 +41,7 @@ test('Library warns before removing a download and returns focus after Keep and 
   const group = page.getByRole('group', { name: 'Confirm removal' });
   await remove.press('Enter');
   await expect(group).toContainText('You cannot register it again by hand.');
+  await expect(group).toContainText('start a verified download');
   const keep = group.getByRole('button', { name: 'Keep' });
   await expect(keep).toBeFocused();
   await keep.press('Enter');
@@ -50,6 +51,22 @@ test('Library warns before removing a download and returns focus after Keep and 
   await group.getByRole('button', { name: 'Remove entry' }).press('Enter');
   await expect(remove).toHaveCount(0);
   await expect(page.getByRole('searchbox', { name: 'Filter entries' })).toBeFocused();
+});
+
+test('Library explains how to restore a removed backend weight revision', async ({ page, controller }) => {
+  const data = scenario('weight-reads');
+  data.jobs.push(job('apply-a', 'weight_apply', { host: 'backend-hf', state: 'succeeded' }));
+  data.models.push({
+    id: 'edited-a', name: 'Edited HF', host: 'backend-hf', kind: 'hf',
+    path: '/fixtures/edits/apply-a/edited.hf', job_id: 'apply-a', available: true,
+  });
+  controller.respond('GET', '/api/state', { json: data });
+  await controller.open(page);
+  await page.getByRole('button', { name: 'Remove Edited HF from library' }).press('Enter');
+  const group = page.getByRole('group', { name: 'Confirm removal' });
+  await expect(group).toContainText('The files stay on the host.');
+  await expect(group).toContainText('review a new weight edit proposal');
+  await expect(group).not.toContainText('download');
 });
 
 test('Library updates a saved prompt and shows the controller job conflict before deletion', async ({ page, controller }) => {

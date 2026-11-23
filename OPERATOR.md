@@ -433,7 +433,10 @@ enter an absolute path. The worker checks it when a job uses it.
 6. Read the result. `GET /api/jobs/{id}` returns the full result and the
    controller event log.
 
-To run a failed job again, open its view and enter the inputs.
+For jobs that the workbench can submit, open the job's view and enter the
+inputs again. To repeat a failed `hf_download` on a named remote worker,
+submit it through `POST /api/jobs` with the same `host`. The Library form
+uses the controller's download service and cannot select a remote worker.
 
 If you lose a reply after you submit a job, check **Jobs** first. If you
 submit again, use the same inputs and do not leave or reload the page.

@@ -75,8 +75,26 @@ test('Failed comparison explains the fix and links to infrastructure settings', 
   await expect(log.getByText('Failed', { exact: true })).toBeVisible();
   await expect(log.getByText(/Failed · failed/i)).toHaveCount(0);
   await expect(page.getByText('Free space on the host before you try again.', { exact: false })).toBeVisible();
-  await expect(page.getByRole('main').getByRole('link', { name: 'Infrastructure settings' })).toHaveAttribute('href', '#/settings/infrastructure');
+  await expect(page.getByRole('main').getByRole('link', { name: 'Infrastructure settings' })).toHaveAttribute('href', '#/settings/infrastructure?host=worker-a&section=policy');
   expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
+});
+
+for (const [error, label, href] of [
+  ['Target disk space is insufficient; check free space and the configured reserve', 'Infrastructure settings', '#/settings/infrastructure?host=worker-b&section=policy'],
+  ['SafeTensors immutable publication could not be verified', 'Weights', '#/weights'],
+]) test(`Job detail links to a fix for: ${error}`, async ({ page, controller }) => {
+  setJob(controller, { ...failedCompare, error, host: 'worker-b' });
+  await controller.open(page, `jobs/${failedCompare.id}`);
+  await expect(page.getByText(error, { exact: true })).toBeVisible();
+  const link = page.getByRole('main').getByRole('link', { name: label, exact: true });
+  await expect(link).toHaveAttribute('href', href);
+  await link.press('Enter');
+  if (label === 'Infrastructure settings') {
+    await expect(page.getByLabel('Defined host')).toHaveValue('worker-b');
+    await expect(page.getByRole('heading', { name: 'Admission and resource limits' })).toBeFocused();
+  } else {
+    await expect(page.getByRole('heading', { name: 'Weight edits', exact: true })).toBeFocused();
+  }
 });
 
 test('Job detail distinguishes the submitted prompt from the current Library text', async ({ page, controller }) => {

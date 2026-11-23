@@ -7,6 +7,8 @@
   import Blockers from '../components/Blockers.svelte';
   import WorkflowGate from '../components/WorkflowGate.svelte';
   import { hostOptions, visibleChecklist } from '../lib/pickers';
+  import { Checklist } from '../lib/checklist';
+  import SelectionReview from '../components/SelectionReview.svelte';
   import { globalJobEligibility, hostWorkflowEligibility } from '../lib/eligibility';
   import type { Blocker } from '../lib/blockers';
   import type { Host, NewJob } from '../lib/types';
@@ -14,6 +16,7 @@
   import RecentJobs from '../components/RecentJobs.svelte';
   import { tick } from 'svelte';
   import { route } from '../lib/route.svelte';
+  import { focusAfterRemoval } from '../lib/focus';
 
   const models = $derived(brewery.state?.models ?? []);
   const hosts = $derived(brewery.state?.hosts ?? []);
@@ -33,9 +36,11 @@
   });
 
   let dest = $state('');
-  let selected = $state<string[]>([]);
+  const selection = new Checklist();
   const destHost = $derived(hosts.find((h) => h.id === dest));
   const candidates = $derived(models.filter((m) => m.host !== dest && m.available !== false));
+  const missing = $derived(selection.missing(candidates));
+  const selected = $derived(selection.ids.filter(id => !missing.some(item => item.id === id)));
   let txFilter = $state('');
   const listed = $derived(
     visibleChecklist(
@@ -45,18 +50,11 @@
     ),
   );
 
-  // Drop selections that are no longer in the library or are already on the destination.
-  $effect(() => {
-    const ok = new Set(candidates.map((m) => m.id));
-    if (selected.some((id) => !ok.has(id))) {
-      selected = selected.filter(id => ok.has(id));
-    }
-  });
-
   function blockers(): Blocker[] {
     const out: Blocker[] = [];
     if (!destHost) out.push({ text: 'Select a destination host.' });
     if (selected.length === 0) out.push({ text: 'Select at least one entry to copy.' });
+    if (missing.length) out.push({ text: 'Review the change to the selection.' });
     return out;
   }
 
@@ -104,6 +102,12 @@
     options: digest.trim() ? { bundle_sha256: digest.trim() } : undefined,
   });
 
+  function queueCopy(kind: CopyKind, event: MouseEvent) {
+    if (copyBlockers.length) return;
+    if (kind === 'transfer_preview' && !previewHostBlockers.length) void preview.submit(previewJob, event);
+    if (kind === 'transfer' && !transferHostBlockers.length) void transfer.submit(transferJob, event);
+  }
+
   async function closeCleanup(visit: ReturnType<typeof route.capture>, restoreFocus: boolean) {
     confirmClean = false;
     await tick();
@@ -113,7 +117,7 @@
     }
   }
 
-  async function runCleanup() {
+  async function runCleanup(event: MouseEvent) {
     const visit = route.capture();
     const group = confirmation;
     let stayed = group?.contains(document.activeElement) ?? false;
@@ -122,7 +126,7 @@
     };
     document.addEventListener('focusin', observe);
     document.addEventListener('pointerdown', observe);
-    const job = await cleaner.submit(cleanupJob);
+    const job = await cleaner.submit(cleanupJob, event, false);
     document.removeEventListener('focusin', observe);
     document.removeEventListener('pointerdown', observe);
     if (job && visit.current() && confirmation === group) await closeCleanup(visit, stayed);
@@ -160,7 +164,8 @@
             {#each listed as { m } (m.id)}
               <li>
                 <label>
-                  <input type="checkbox" value={m.id} bind:group={selected} />
+                  <input type="checkbox" checked={selection.has(m.id)}
+                    onchange={(event) => selection.set(m.id, modelLabel(m), event.currentTarget.checked)} />
                   <span class="entry">
                     <span>{modelLabel(m)}</span>
                     <span class="xs muted">{kindLabel(m.kind)} · from {hostName(hosts, m.host)}</span>
@@ -172,13 +177,14 @@
           {#if listed.length === 0}<p class="xs muted">No entry matches the filter.</p>{/if}
         {/if}
       </fieldset>
+      <SelectionReview {missing} acknowledge={() => selection.remove(missing)} />
       <div class="row actions">
         <button type="button" class="btn" aria-describedby={copyBlockers.length || previewHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={preview.busy}
           disabled={preview.busy || copyBlockers.length > 0 || previewHostBlockers.length > 0}
-          onclick={() => preview.submit(previewJob)}>{preview.busy ? 'Submitting…' : 'Preview'}</button>
+          onclick={(event) => queueCopy('transfer_preview', event)}>{preview.busy ? 'Submitting…' : 'Preview'}</button>
         <button type="button" class="btn primary" aria-describedby={copyBlockers.length || transferHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={transfer.busy}
           disabled={transfer.busy || copyBlockers.length > 0 || transferHostBlockers.length > 0}
-          onclick={() => transfer.submit(transferJob)}>{transfer.busy ? 'Submitting…' : 'Transfer'}</button>
+          onclick={(event) => queueCopy('transfer', event)}>{transfer.busy ? 'Submitting…' : 'Transfer'}</button>
       </div>
       {#if copyBlockers.length || previewHostBlockers.length || transferHostBlockers.length}
         <Blockers id="copy-blockers" blockers={[...copyBlockers, ...previewHostBlockers, ...transferHostBlockers]} />
@@ -208,14 +214,16 @@
         <div class="note warn" role="group" aria-label="Confirm cleanup" bind:this={confirmation}>
           <p class="small">Remove {digest.trim() ? 'this cached bundle' : 'all unused cached copies'} on {hostName(hosts, cleanHost)}? Later jobs copy the files again.</p>
           <div class="row" style="margin-top:8px">
-          <button type="button" class="btn danger" disabled={cleaner.busy || cleanBlockers.length > 0} onclick={runCleanup}>{cleaner.busy ? 'Submitting…' : 'Queue cleanup'}</button>
-            <button type="button" class="btn ghost" onclick={() => closeCleanup(route.capture(), !!confirmation?.contains(document.activeElement))}>Keep cache</button>
+            <button type="button" class="btn ghost" data-keep-cache onclick={() => closeCleanup(route.capture(), !!confirmation?.contains(document.activeElement))}>Keep cache</button>
+            <button type="button" class="btn danger" disabled={cleaner.busy || cleanBlockers.length > 0} onclick={runCleanup}>{cleaner.busy ? 'Submitting…' : 'Queue cleanup'}</button>
           </div>
         </div>
       {:else}
         <div class="row">
           <button type="button" class="btn" bind:this={cleanButton} aria-describedby={cleanBlockers.length ? 'cleanup-blockers' : undefined}
-            disabled={cleanBlockers.length > 0} onclick={() => (confirmClean = true)}>Clean cache…</button>
+            disabled={cleanBlockers.length > 0} onclick={() => focusAfterRemoval(
+              () => { confirmClean = true; }, () => confirmation?.querySelector<HTMLElement>('[data-keep-cache]'),
+            )}>Clean cache…</button>
         </div>
       {/if}
       <Blockers id="cleanup-blockers" blockers={cleanBlockers} />
