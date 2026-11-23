@@ -4,6 +4,41 @@ This check measures transfer between two fixed corpora. It is not a release
 qualification. It uses the X4c model pair, exchange rule, equal-size target,
 and full-vocabulary evaluator. It does not change the production damage job.
 
+## Result
+
+The advantage transferred in both directions on this model and these
+corpora. The corpus recipe beat uniform, both random-group medians,
+five of six original controls, and all three exchange-matched controls
+on **both** perplexity and mean KL in each fold. Original seed 3 beat
+the corpus recipe on both metrics in both folds. The corpus recipe was
+not the best recipe tested.
+
+| Recipe | Dolly selects, W4 scores: PPL | Mean KL | W4 selects, Dolly scores: PPL | Mean KL |
+| --- | ---: | ---: | ---: | ---: |
+| BF16 reference | 81.12227 | 0 | 33.50838 | 0 |
+| Uniform | 90.06855 | 0.375718 | 53.70331 | 0.571136 |
+| **Corpus** | **86.36626** | **0.154259** | **36.31007** | **0.186088** |
+| Original seed 1 | 90.07882 | 0.378534 | 54.19539 | 0.571694 |
+| Original seed 2 | 112.99528 | 0.673466 | 69.71426 | 0.875180 |
+| Original seed 3 | 85.58890 | 0.139994 | 35.68960 | 0.181538 |
+| Original seed 4 | 104.63930 | 0.455617 | 60.80433 | 0.703501 |
+| Original seed 5 | 88.71597 | 0.372978 | 52.34030 | 0.569742 |
+| Original seed 6 | 86.86215 | 0.376720 | 52.86358 | 0.568639 |
+| Original median | 89.39740 | 0.377627 | 53.52948 | 0.570718 |
+| Matched seed 4 | 106.80018 | 0.464118 | 62.54780 | 0.705240 |
+| Matched seed 5 | 90.24736 | 0.374544 | 53.01559 | 0.573013 |
+| Matched seed 6 | 88.17690 | 0.376129 | 54.35321 | 0.569624 |
+| Matched median | 90.24736 | 0.376129 | 54.35321 | 0.573013 |
+
+All 15 distinct quantized artifacts passed managed verification and
+weighed exactly 346,757,888 bytes. Full CPU and CUDA gradient sweeps
+selected identical exchanges in both folds. The worst per-tensor relative
+gradient error was 0.000137 on Dolly and 0.000291 on W4. W4 selection
+recreated the earlier X4c override map exactly; the uniform and original
+controls reproduced their earlier W4 scores. The two folds reuse the
+same small corpora and model. They do not establish transfer to other
+models or broader text collections.
+
 ## Inputs and controls
 
 - **Dolly:** Databricks, [databricks-dolly-15k, revision
