@@ -160,11 +160,11 @@ fn current_runtime(result: &Value) -> bool {
     result["lanternfish_commit"] == trace::COMMIT && result["executable_sha256"] == trace::SHA256
 }
 
-// The previous pin remains valid only when reading an already stored artifact.
+// Older direction jobs used the projection runtime even without an intervention.
+// Keep those receipts readable without accepting that pin for a new fit.
 fn original_runtime(result: &Value) -> bool {
-    result["lanternfish_commit"] == "0ea30b37729a136a76b8412e7ad1ec91bd7de9b5"
-        && result["executable_sha256"]
-            == "0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f"
+    result["lanternfish_commit"] == trace::PROJECTION_COMMIT
+        && result["executable_sha256"] == trace::PROJECTION_SHA256
 }
 
 #[derive(Deserialize)]

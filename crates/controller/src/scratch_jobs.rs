@@ -39,7 +39,12 @@ pub(super) async fn convert(
     submit_convert(&app, &id, &request, submission.as_ref())
 }
 
-pub(super) fn submit_convert(app: &App, id: &str, request: &Convert, submission: Option<&Submission<'_>>) -> Result<Response> {
+pub(super) fn submit_convert(
+    app: &App,
+    id: &str,
+    request: &Convert,
+    submission: Option<&Submission<'_>>,
+) -> Result<Response> {
     let mut store = app.store.lock().map_err(ApiError::storage)?;
     if let Some(response) = replay(&store, submission)? {
         return Ok(response);
@@ -193,11 +198,14 @@ pub(crate) fn finish(
         .filter(|r| r.state != RevisionState::Discarded)
         .ok_or("private revision is no longer available")?;
     if job.kind == brewery_worker::ablation_search::SCREEN {
-        let req = brewery_worker::ablation_search::ScreenRequest::parse(&Value::Object(envelope.options.clone()))?;
+        let req = brewery_worker::ablation_search::ScreenRequest::parse(&Value::Object(
+            envelope.options.clone(),
+        ))?;
         if envelope.scratch_pins.get(&envelope.inputs[0].path) != Some(&req.model_sha256) {
             return Err("screen result does not match the pinned model".into());
         }
-        serde_json::from_value::<brewery_worker::ablation_search::ScreenReport>(result.clone())?.verify(&req)?;
+        serde_json::from_value::<brewery_worker::ablation_search::ScreenReport>(result.clone())?
+            .verify(&req)?;
         return Ok(None);
     }
     if job.kind == brewery_worker::trace::JOB {

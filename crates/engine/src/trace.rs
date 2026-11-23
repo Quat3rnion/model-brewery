@@ -44,7 +44,13 @@ impl Runtime {
 
     pub(crate) fn stage_screen(cwd: &Path) -> Result<Self> {
         use brewery_worker::ablation_search as search;
-        Self::stage_for(cwd, search::EXECUTABLE, search::SHA256, trace::PROJECTION_LIB_DIR, PROJECTION_LIBRARIES)
+        Self::stage_for(
+            cwd,
+            search::EXECUTABLE,
+            search::SHA256,
+            trace::PROJECTION_LIB_DIR,
+            PROJECTION_LIBRARIES,
+        )
     }
 
     fn stage_trace(cwd: &Path, runtime: LanternfishRuntime) -> Result<Self> {
@@ -75,12 +81,7 @@ impl Runtime {
             "lanternfish",
             "Lanternfish",
         )?;
-        let libs = w0_libraries::stage(
-            private.path(),
-            lib_dir,
-            "Lanternfish trace",
-            pins,
-        )?;
+        let libs = w0_libraries::stage(private.path(), lib_dir, "Lanternfish trace", pins)?;
         Ok(Self {
             private,
             tool,
@@ -174,12 +175,24 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     );
     let root = cwd.join(trace::JOB);
     ensure!(!root.exists(), "trace output already exists");
-    let selection = if is_hgn { None } else { Some(request.lanternfish_runtime()?) };
-    let runtime = selection.map(|r| Runtime::stage_trace(cwd, r)).transpose()?;
-    let hgn_dir = if is_hgn { Some(tempfile::Builder::new()
-        .prefix(".trace-hgn-")
-        .permissions(fs::Permissions::from_mode(0o700))
-        .tempdir_in(cwd)?) } else { None };
+    let selection = if is_hgn {
+        None
+    } else {
+        Some(request.lanternfish_runtime()?)
+    };
+    let runtime = selection
+        .map(|r| Runtime::stage_trace(cwd, r))
+        .transpose()?;
+    let hgn_dir = if is_hgn {
+        Some(
+            tempfile::Builder::new()
+                .prefix(".trace-hgn-")
+                .permissions(fs::Permissions::from_mode(0o700))
+                .tempdir_in(cwd)?,
+        )
+    } else {
+        None
+    };
     let work = if let Some(hgn_dir) = &hgn_dir {
         hgn_dir.path()
     } else {
@@ -192,7 +205,9 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         id.files.len() == 1 && input.path.is_file(),
         "trace needs a single-file GGUF or HGN checkpoint"
     );
-    let hgn = is_hgn.then(|| hgn::Runtime::stage(work, &id.sha256)).transpose()?;
+    let hgn = is_hgn
+        .then(|| hgn::Runtime::stage(work, &id.sha256))
+        .transpose()?;
     let staging = work.join("export");
     fs::create_dir(&staging)?;
     let intervention = work.join("interventions.json");
@@ -216,19 +231,29 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             let threads = child_threads(None)?.min(64);
             let mut command = runtime.command(work, threads);
             command
-                .arg("--model").arg(&input.path)
+                .arg("--model")
+                .arg(&input.path)
                 .arg(format!("--prompt={prompt}"))
-                .arg("--spec").arg(&spec)
-                .arg("--out").arg(&out)
-                .arg("--threads").arg(threads.to_string());
+                .arg("--spec")
+                .arg(&spec)
+                .arg("--out")
+                .arg(&out)
+                .arg("--threads")
+                .arg(threads.to_string());
             runtime.capture(&mut command, work)?;
             fs::remove_file(&spec)?;
             trace::verify(&out, &capture)?
         } else {
-            runtime.as_ref().context("missing Lanternfish runtime")?.capture(
-                &input.path, prompt, &capture, &out,
-                has_intervention.then_some(intervention.as_path()),
-            )?
+            runtime
+                .as_ref()
+                .context("missing Lanternfish runtime")?
+                .capture(
+                    &input.path,
+                    prompt,
+                    &capture,
+                    &out,
+                    has_intervention.then_some(intervention.as_path()),
+                )?
         };
         id.check()?;
         trace::verify_interventions(&out, &verified, &request.interventions)?;

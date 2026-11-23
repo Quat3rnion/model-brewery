@@ -1,8 +1,8 @@
 use crate::{
-    child_budget, child_threads, gguf_conversion::Tool, integrity, native_json_admitted,
-    progress::Progress, w0_libraries, Job,
+    Job, child_budget, child_threads, gguf_conversion::Tool, integrity, native_json_admitted,
+    progress::Progress, w0_libraries,
 };
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use brewery_worker::{is_digest, scratch_eval};
 use serde_json::Value;
 use std::{

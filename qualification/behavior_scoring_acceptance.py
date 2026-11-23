@@ -148,6 +148,7 @@ def main():
             "BREWERY_CONTRAST_CACHE": str(cache),
             "BREWERY_SCRATCH_CHECKS_RUNNER": str(args.runner),
             "BREWERY_SCRATCH_CHECKS_RUNNER_SHA256": sha(args.runner),
+            "BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR": str(args.runner.parent / "lib"),
         })
         save(run, "worker", worker)
         config.chmod(0o600)

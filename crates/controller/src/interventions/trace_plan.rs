@@ -99,8 +99,13 @@ impl TracePlan {
                     "Intervention artifact is bound to a different model",
                 ));
             }
-            if digest.as_ref().is_some_and(|sha| sha != &saved.binding.model_sha256) {
-                return Err(ApiError::bad("Intervention artifact is bound to a different GGUF hash"));
+            if digest
+                .as_ref()
+                .is_some_and(|sha| sha != &saved.binding.model_sha256)
+            {
+                return Err(ApiError::bad(
+                    "Intervention artifact is bound to a different GGUF hash",
+                ));
             }
             digest = Some(saved.binding.model_sha256);
             rules.extend(saved.interventions);

@@ -1,7 +1,7 @@
-use crate::{bounded, Job};
-use anyhow::{ensure, Context, Result};
+use crate::{Job, bounded};
+use anyhow::{Context, Result, ensure};
 use brewery_worker::heretic;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     env,

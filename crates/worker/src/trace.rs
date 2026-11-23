@@ -121,7 +121,9 @@ impl Capture {
         }
     }
 }
-fn is_false(value: &bool) -> bool { !value }
+fn is_false(value: &bool) -> bool {
+    !value
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -234,8 +236,18 @@ impl LanternfishRuntime {
     pub fn pins(self) -> (&'static str, &'static str, &'static str, &'static str) {
         match self {
             Self::Base => (EXECUTABLE, LIB_DIR, SHA256, COMMIT),
-            Self::Projection => (PROJECTION_EXECUTABLE, PROJECTION_LIB_DIR, PROJECTION_SHA256, PROJECTION_COMMIT),
-            Self::Routing => (ROUTING_EXECUTABLE, ROUTING_LIB_DIR, ROUTING_SHA256, ROUTING_COMMIT),
+            Self::Projection => (
+                PROJECTION_EXECUTABLE,
+                PROJECTION_LIB_DIR,
+                PROJECTION_SHA256,
+                PROJECTION_COMMIT,
+            ),
+            Self::Routing => (
+                ROUTING_EXECUTABLE,
+                ROUTING_LIB_DIR,
+                ROUTING_SHA256,
+                ROUTING_COMMIT,
+            ),
         }
     }
 }
@@ -243,10 +255,16 @@ impl LanternfishRuntime {
 impl Request {
     pub fn lanternfish_runtime(&self) -> Result<LanternfishRuntime> {
         let projection = self.interventions.iter().any(|rule| {
-            matches!(rule.op, Operation::ProjectOut { .. } | Operation::Subtract { .. })
+            matches!(
+                rule.op,
+                Operation::ProjectOut { .. } | Operation::Subtract { .. }
+            )
         });
         let routing = self.routing();
-        ensure!(!(projection && routing), "cannot combine MoE routing and projection in one trace");
+        ensure!(
+            !(projection && routing),
+            "cannot combine MoE routing and projection in one trace"
+        );
         Ok(if projection {
             LanternfishRuntime::Projection
         } else if routing {
@@ -499,8 +517,13 @@ fn inspect(dir: &Path, spec: &Capture) -> Result<(Manifest, Export)> {
                     row.layer.is_none()
                 })
                 && (if spec.all_logits {
-                    !lens && (2..=262144).contains(&row.top.len())
-                        && row.top.iter().enumerate().all(|(i, x)| x.token_id == i as i32 && x.logit.is_finite())
+                    !lens
+                        && (2..=262144).contains(&row.top.len())
+                        && row
+                            .top
+                            .iter()
+                            .enumerate()
+                            .all(|(i, x)| x.token_id == i as i32 && x.logit.is_finite())
                 } else {
                     seen_row_top(&row.top, spec.top_k)
                 })
@@ -509,7 +532,9 @@ fn inspect(dir: &Path, spec: &Capture) -> Result<(Manifest, Export)> {
             rows.iter()
                 .all(|row| valid(row) && seen.insert((row.layer, row.position)))
                 && (spec.top_k != 0 || spec.all_logits || rows.is_empty())
-                && (lens || (spec.top_k == 0 && !spec.all_logits) || rows.len() == spec.positions.len()),
+                && (lens
+                    || (spec.top_k == 0 && !spec.all_logits)
+                    || rows.len() == spec.positions.len()),
             "invalid trace logits"
         );
     }
@@ -731,24 +756,53 @@ pub fn ablation_logits(position: usize) -> Capture {
     }
 }
 
-pub fn ablation_rows(dir: &Path, spec: &Capture, verified: &Export, rules: &[crate::weight_source::scratch::ablation::TraceRule]) -> Result<(Vec<i32>, Vec<f32>)> {
+pub fn ablation_rows(
+    dir: &Path,
+    spec: &Capture,
+    verified: &Export,
+    rules: &[crate::weight_source::scratch::ablation::TraceRule],
+) -> Result<(Vec<i32>, Vec<f32>)> {
     let (m, found) = manifest(dir, spec.byte_cap)?;
-    let expected: BTreeSet<_> = rules.iter().flat_map(|rule| rule.positions.iter().map(|&position| Key {
-        layer: rule.layer, role: rule.role, position,
-    })).collect();
-    ensure!(found.manifest_sha256 == verified.manifest_sha256
-        && m.model["arch"] == "qwen2"
-        && m.interventions.len() == expected.len()
-        && m.interventions.iter().all(|applied| applied.expert.is_none())
-        && m.interventions.iter().map(|applied| applied.key).collect::<BTreeSet<_>>() == expected,
-        "screen trace did not apply exactly the requested rules");
+    let expected: BTreeSet<_> = rules
+        .iter()
+        .flat_map(|rule| {
+            rule.positions.iter().map(|&position| Key {
+                layer: rule.layer,
+                role: rule.role,
+                position,
+            })
+        })
+        .collect();
+    ensure!(
+        found.manifest_sha256 == verified.manifest_sha256
+            && m.model["arch"] == "qwen2"
+            && m.interventions.len() == expected.len()
+            && m.interventions
+                .iter()
+                .all(|applied| applied.expert.is_none())
+            && m.interventions
+                .iter()
+                .map(|applied| applied.key)
+                .collect::<BTreeSet<_>>()
+                == expected,
+        "screen trace did not apply exactly the requested rules"
+    );
     let logits = if spec.all_logits {
-        m.model_logits.into_iter().next().context("missing screen logits")?
-            .top.into_iter().map(|score| score.logit).collect()
+        m.model_logits
+            .into_iter()
+            .next()
+            .context("missing screen logits")?
+            .top
+            .into_iter()
+            .map(|score| score.logit)
+            .collect()
     } else {
         Vec::new()
     };
-    Ok((m.tokens.into_iter().map(|token| token.token_id).collect(), logits))
+    Ok((
+        m.tokens.into_iter().map(|token| token.token_id).collect(),
+        logits,
+    ))
 }
 
 /// Read the directions' rows and residual norms from a verified CPU trace. Keep token IDs in

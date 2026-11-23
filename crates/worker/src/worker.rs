@@ -94,8 +94,13 @@ impl ScratchAccess {
             {
                 &job.inputs[..]
             }
-            ablation_search::SCREEN if job.prompt.is_none() && kinds().eq(["gguf"])
-                && ablation_search::ScreenRequest::parse(&job.options).is_ok() => &job.inputs[..],
+            ablation_search::SCREEN
+                if job.prompt.is_none()
+                    && kinds().eq(["gguf"])
+                    && ablation_search::ScreenRequest::parse(&job.options).is_ok() =>
+            {
+                &job.inputs[..]
+            }
             locate_edit::JOB
                 if job.prompt.is_none()
                     && locate_edit::Request::parse(&job.options).is_ok()
@@ -1081,12 +1086,25 @@ impl Worker {
             );
         }
         if job.kind == ablation_search::SCREEN
-            && ![ablation_search::EXECUTABLE, trace::PROJECTION_LIB_DIR, behavior_direction::CACHE]
-                .iter().all(|key| self.cfg.engine_env.get(*key)
-                    .is_some_and(|p| Path::new(p).is_absolute()))
+            && ![
+                ablation_search::EXECUTABLE,
+                trace::PROJECTION_LIB_DIR,
+                behavior_direction::CACHE,
+            ]
+            .iter()
+            .all(|key| {
+                self.cfg
+                    .engine_env
+                    .get(*key)
+                    .is_some_and(|p| Path::new(p).is_absolute())
+            })
         {
-            return self.record_prepare(id, action, job,
-                Reply::error("Configure the pinned CPU ablation runtime and contrast cache"));
+            return self.record_prepare(
+                id,
+                action,
+                job,
+                Reply::error("Configure the pinned CPU ablation runtime and contrast cache"),
+            );
         }
         if job.kind == trace::JOB {
             let absolute = |var| {
@@ -1102,9 +1120,9 @@ impl Worker {
                     .as_ref()
                     .is_ok_and(|request| match job.inputs[0].kind.as_str() {
                         "gguf" => request.lanternfish_runtime().is_ok_and(|runtime| {
-                             let (executable, lib_dir, _, _) = runtime.pins();
-                             absolute(executable) && absolute(lib_dir)
-                         }),
+                            let (executable, lib_dir, _, _) = runtime.pins();
+                            absolute(executable) && absolute(lib_dir)
+                        }),
                         trace::HGN_KIND => {
                             Path::new(&job.inputs[0].path)
                                 .extension()
@@ -2134,8 +2152,10 @@ impl Worker {
                         .is_ok_and(|request| request.backend.is_gpu())
                 } else if heretic::job(&job.kind) {
                     true
-                } else if matches!(job.kind.as_str(), trace::JOB | circuit::JOB | behavior_direction::JOB)
-                    || scratch_eval::private_output(&job.kind)
+                } else if matches!(
+                    job.kind.as_str(),
+                    trace::JOB | circuit::JOB | behavior_direction::JOB
+                ) || scratch_eval::private_output(&job.kind)
                 {
                     false
                 } else {

@@ -258,7 +258,9 @@ pub async fn run(app: Arc<App>, dispatch: Arc<Dispatcher>) -> Result<(), Error> 
             job.error = None;
             store.update(job, None)?;
         }
-        running.retain(|job| job.state == State::Running && job.kind != brewery_worker::ablation_search::JOB);
+        running.retain(|job| {
+            job.state == State::Running && job.kind != brewery_worker::ablation_search::JOB
+        });
         running
     };
     for job in recovered {

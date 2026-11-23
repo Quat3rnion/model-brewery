@@ -415,8 +415,11 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         )?;
     }
     if job.kind == ablation_search::SCREEN {
-        resources::disk_check(&w.cfg.root,
-            w.disk_floor(job.resources.disk_reserve_bytes).saturating_add(ablation_search::RESERVE))?;
+        resources::disk_check(
+            &w.cfg.root,
+            w.disk_floor(job.resources.disk_reserve_bytes)
+                .saturating_add(ablation_search::RESERVE),
+        )?;
     }
     let edit_backend = if job.kind == locate_edit::JOB {
         let backend = locate_edit::Request::parse(&job.options)?.edit.backend;
@@ -498,9 +501,12 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         }
         c
     } else if let Some(wrapper) = w.cfg.admission.as_ref().filter(|_| {
-        gradient_backend.map_or(gpu_edit || (!matches!(job.kind.as_str(), trace::JOB | behavior_direction::JOB) && !scratch_job), |b| {
-            b.is_gpu()
-        })
+        gradient_backend.map_or(
+            gpu_edit
+                || (!matches!(job.kind.as_str(), trace::JOB | behavior_direction::JOB)
+                    && !scratch_job),
+            |b| b.is_gpu(),
+        )
     }) {
         let mut c = Command::new(wrapper);
         c.args(["--wait", "--"]).arg(&w.cfg.engine);
@@ -509,10 +515,16 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         Command::new(&w.cfg.engine)
     };
     let hgn_trace = job.kind == trace::JOB && job.inputs[0].kind == trace::HGN_KIND;
-    if !hgn_trace && (scratch_job || gradient_backend.is_some() || matches!(job.kind.as_str(), trace::JOB | behavior_direction::JOB)) {
+    if !hgn_trace
+        && (scratch_job
+            || gradient_backend.is_some()
+            || matches!(job.kind.as_str(), trace::JOB | behavior_direction::JOB))
+    {
         let trace_keys = if job.kind == trace::JOB {
-            let (executable, libraries, _, _) = trace::Request::worker(&job.options, job.prompt.as_deref())?
-                .lanternfish_runtime()?.pins();
+            let (executable, libraries, _, _) =
+                trace::Request::worker(&job.options, job.prompt.as_deref())?
+                    .lanternfish_runtime()?
+                    .pins();
             [executable, libraries]
         } else {
             [trace::EXECUTABLE, trace::LIB_DIR]
@@ -545,9 +557,11 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             behavior_direction::JOB => {
                 &[trace::EXECUTABLE, trace::LIB_DIR, behavior_direction::CACHE]
             }
-            ablation_search::SCREEN => {
-                &[ablation_search::EXECUTABLE, trace::PROJECTION_LIB_DIR, behavior_direction::CACHE]
-            }
+            ablation_search::SCREEN => &[
+                ablation_search::EXECUTABLE,
+                trace::PROJECTION_LIB_DIR,
+                behavior_direction::CACHE,
+            ],
             _ => &trace_keys,
         };
         command.env_clear().envs(
@@ -820,7 +834,10 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     }
     if job.kind == ablation_search::SCREEN {
         let req = ablation_search::ScreenRequest::parse(&job.options)?;
-        ensure!(job.inputs[0].extra["sha256"] == req.model_sha256, "screen input hash mismatch");
+        ensure!(
+            job.inputs[0].extra["sha256"] == req.model_sha256,
+            "screen input hash mismatch"
+        );
         serde_json::from_value::<ablation_search::ScreenReport>(value.clone())?.verify(&req)?;
         return Ok(value);
     }

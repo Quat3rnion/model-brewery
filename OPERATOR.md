@@ -486,9 +486,25 @@ absolute path of the pinned runtime directory. Set
 its `SHA256SUMS` file. The engine verifies the manifest and stages verified
 copies of the CLI and the selected libraries from `lib/cpu`, `lib/cuda` or
 `lib/rocm`. It uses the CPU libraries for tokenization. For example, the
-Lanternfish X3 pin `lanternfish-x3-fa0e8c5` has manifest SHA-256
-`a6b0816755e6030d22fdce0a140911a3e0d64b407bac6043289a5f090ae85eb6`.
+Lanternfish pin `lanternfish-x4c-e0fd1b7` has manifest SHA-256
+`9d82395374092c9794389c6833e0d8389230e87fc4e4c4c8c4de150082cef8dd`.
+Use it for selected and corpus gradients. The selected-gradient finite
+differences and CPU, CUDA, and ROCm parity checks passed. Scalar values and
+gradient hashes matched the X3 pin for all 36 cases per objective.
 Keep this runtime separate from the trace and fact-edit runtimes.
+
+### X/A worker upgrade
+
+Before you activate the merged worker, keep the W0 trace keys and paths.
+Add the projection keys for `d842085`. Set the ablation binary key to the
+`1bcb466` executable and use the same projection library path for both.
+Do not change the routing, CPU edit, CUDA edit, or ROCm edit pins. Set the
+sensitivity directory and manifest digest together to the X4c pin above.
+If the worker serves HGN traces, configure its Python, interpreter digest,
+and asset registry as shown in [HGN CPU setup](#hgn-cpu-setup).
+Install the combined scratch-check runner, library path, hash, and matching
+script together. Keep the prior worker configuration and binaries for
+rollback. See [Checks before a publish request](#checks-before-a-publish-request).
 
 For `cuda` or `rocm`, also set `BREWERY_ALLOW_GPU_LOAD` to `"1"` and
 configure an `admission` wrapper that gets the GPU queue before it starts
@@ -2394,15 +2410,18 @@ pinned dataset files in a local cache. Set these keys in the worker's
 `engine_env`:
 
 - `BREWERY_SCRATCH_CHECKS_SCRIPT`: Absolute path of `tools/scratch_checks.py`.
-- `BREWERY_SCRATCH_CHECKS_RUNNER`: Absolute path of the CPU runner.
-- `BREWERY_SCRATCH_CHECKS_RUNNER_SHA256`: SHA-256 of the runner.
+- `BREWERY_SCRATCH_CHECKS_RUNNER`: Use
+  `/arboretum/pins/scratch-check-logits-xa-f5abfc6/scratch-check-logits` on the local host.
+- `BREWERY_SCRATCH_CHECKS_RUNNER_SHA256`:
+  `f5abfc6d29a150f2f08c6366c277bfa2a1a22094b7190b6ba0fce71842ce6465`.
 - `BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR`: Absolute path of the directory
-  with the four libraries listed in [CPU trace jobs](#cpu-trace-jobs). The
-  scratch-check runner and the trace binary use the same four libraries.
+  with the four libraries listed in [CPU trace jobs](#cpu-trace-jobs). Use
+  `/arboretum/pins/scratch-check-logits-xa-f5abfc6/lib` on the local host.
 - `BREWERY_SCRATCH_CHECKS_CACHE`: Absolute path of the local dataset cache.
 
-The worker does not download data during a check. Restart the controller
-after a change to the local worker's runtime configuration.
+Before you install these settings, run `sha256sum -c SHA256SUMS` in the pin
+directory. The worker does not download data during a check. Restart the
+controller after a change to the local worker's runtime configuration.
 
 ### Heretic jobs
 

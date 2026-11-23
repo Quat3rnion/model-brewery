@@ -116,6 +116,8 @@ For worker jobs, set `BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR` in `engine_env`
 to the directory with the [four pinned CPU libraries](../../OPERATOR.md#cpu-trace-jobs).
 The engine checks private copies of the libraries before it starts the
 runner. It does not load them from the build directory.
+For the combined X/A pin, use the runner and `lib` directory together.
+See [Checks before a publish request](../../OPERATOR.md#checks-before-a-publish-request).
 
 `--fetch` gets missing files only. Omit it to use only the local cache. The
 runner checks the full source hashes before it reads rows. It then checks

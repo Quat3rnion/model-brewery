@@ -21,7 +21,11 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("list_scratch", "get", "/api/scratch"),
     ("get_scratch", "get", "/api/scratch/{id}"),
     ("run_heretic", "post", "/api/scratch/heretic"),
-    ("reproduce_heretic", "post", "/api/scratch/heretic_reproduce"),
+    (
+        "reproduce_heretic",
+        "post",
+        "/api/scratch/heretic_reproduce",
+    ),
     ("compile_program", "post", "/api/scratch/compile_program"),
     ("run_program", "post", "/api/scratch/{id}/run_program"),
     ("interp_benchmark", "get", "/api/interp/benchmark"),
@@ -73,8 +77,16 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ),
     ("create_scratch", "post", "/api/scratch"),
     ("apply_edit", "post", "/api/scratch/{id}/edits"),
-    ("ablate_direction", "post", "/api/scratch/{id}/ablate_direction"),
-    ("search_ablation", "post", "/api/scratch/{id}/search_ablation"),
+    (
+        "ablate_direction",
+        "post",
+        "/api/scratch/{id}/ablate_direction",
+    ),
+    (
+        "search_ablation",
+        "post",
+        "/api/scratch/{id}/search_ablation",
+    ),
     ("merge_models", "post", "/api/scratch/merge"),
     ("rome_edit", "post", "/api/scratch/{id}/rome"),
     ("memit_edit", "post", "/api/scratch/{id}/memit"),
@@ -129,19 +141,19 @@ impl Server {
         let routes: BTreeMap<_, _> = ROUTES
             .iter()
             .map(|&(name, method, path)| {
-                let mut route =                     Route::new(
-                        &contract,
-                        method,
-                        path,
-                        match name {
-                            "start_trace" | "steer_feature" => Some("trace"),
-                            "tensor_sensitivity" => Some("sensitivity"),
-                            "find_circuit" => Some("circuit"),
-                            "quantization_damage_map" => Some("quantization_damage"),
-                            "compute_direction" => Some(brewery_worker::behavior_direction::JOB),
-                            _ => None,
-                        },
-);
+                let mut route = Route::new(
+                    &contract,
+                    method,
+                    path,
+                    match name {
+                        "start_trace" | "steer_feature" => Some("trace"),
+                        "tensor_sensitivity" => Some("sensitivity"),
+                        "find_circuit" => Some("circuit"),
+                        "quantization_damage_map" => Some("quantization_damage"),
+                        "compute_direction" => Some(brewery_worker::behavior_direction::JOB),
+                        _ => None,
+                    },
+                );
                 if name == "create_direction_intervention" {
                     route.schema["required"]
                         .as_array_mut()

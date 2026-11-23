@@ -10,7 +10,7 @@ import tempfile
 import time
 from urllib.parse import urlencode
 
-from weight_space_acceptance import ARB, PINS, REPO, SAFE, W0_LIBS, require, save, setup, sha
+from weight_space_acceptance import ARB, PINS, REPO, SAFE, require, save, setup, sha
 from weight_space_pruning_acceptance import Agent, PERCENTAGES
 
 
@@ -50,7 +50,7 @@ def main():
         worker["engine_env"].update(
             BREWERY_SCRATCH_CHECKS_RUNNER=str(args.runner),
             BREWERY_SCRATCH_CHECKS_RUNNER_SHA256=runner_sha,
-            BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR=str(W0_LIBS),
+            BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR=str(args.runner.parent / "lib"),
         )
         # Keep the worker config mode from setup().
         (run / "worker.json").write_text(json.dumps(worker))

@@ -70,6 +70,7 @@ as applicable. If the bundle has token scores, use `read_token_loss_diff`
 to find which heldout sentences and tokens account for the change in
 perplexity. Report the signed share of the net gain, not a share of absolute
 changes.
+
 Pass behavior-direction prompt set digests to `run_checks`
 to score slop, sycophancy, length and KL. Reuse identical holdout digests
 across children in a comparison. Do not overlap fit or screen prompts.

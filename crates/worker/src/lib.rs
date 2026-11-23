@@ -1,10 +1,10 @@
 use anyhow::{Context, Result, ensure};
-pub mod circuit;
 pub mod behavior_direction;
-pub mod heretic;
+pub mod circuit;
 pub mod compiled_program;
 pub mod damage;
 pub mod exl3_layer;
+pub mod heretic;
 pub mod hf_download;
 pub mod hgn_recipe;
 pub mod hy4;

@@ -24,15 +24,16 @@ REPO = Path(__file__).resolve().parents[1]
 HF = ARB / "models/qwen2.5-0.5b-instruct-w4-hf"
 SAFE = HF / "model.safetensors"
 BASE = ARB / "models/qwen2.5-0.5b-instruct-w0/Qwen2.5-0.5B-Instruct.bf16.gguf"
-LANTERN = ARB / "pins/lanternfish-d842085/lanternfish"
-TRACE_LIBS = ARB / "llama-a4/build/bin"
+LANTERN = ARB / "pins/lanternfish-0ea30b3/lanternfish"
+TRACE_LIBS = ARB / "llama-w0/build/bin"
 W0_LIBS = ARB / "llama-w0/build/bin"
 LLAMA = ARB / "llama.cpp"
 QUANT = ARB / "brewery-standalone-admit-integration.s4xL9Wu0/stage/bin/llama-quantize"
 PYTHON = ARB / "brewery-flash-gguf.tXbsagtV/standalone/runtime/bin/python3"
 HELPER = ARB / "weight-runtime-smoke.09h393rr/release-a/brewery-weight-edit"
 FIXTURES = ARB / "tmp/w4-data/new-cache"
-RUNNER = FIXTURES.parent / "scratch-check-logits-v1"
+RUNNER_PIN = ARB / "pins/scratch-check-logits-xa-f5abfc6"
+RUNNER = RUNNER_PIN / "scratch-check-logits"
 ASSETS = (
     "config.json", "generation_config.json", "merges.txt", "tokenizer.json",
     "tokenizer_config.json", "vocab.json",
@@ -41,9 +42,9 @@ SNAPSHOT_PIN = "e702c869285f94912fd8f9bcd717750649f6876070dbaadfbe4e22181852696f
 PINS = {
     SAFE: "fdf756fa7fcbe7404d5c60e26bff1a0c8b8aa1f72ced49e7dd0210fe288fb7fe",
     BASE: "a33250ab73bbef0d876bf04e01517f5f43292dd8ede34e12d3a3a886e49f36f0",
-    LANTERN: "3009f4b0c362ddc04d955e40efac9e1d88659b9a0bc393fdc8ea6da287bde010",
+    LANTERN: "0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f",
     QUANT: "7ceb0e39e4f7e207fe8c55215368163bb5734072dc871a66b45527e1a5c9c672",
-    RUNNER: "505759d6749dc5c593e74749689edbfe3d8ff0d833c91db8c11a051781e631a3",
+    RUNNER: "f5abfc6d29a150f2f08c6366c277bfa2a1a22094b7190b6ba0fce71842ce6465",
     FIXTURES / "counterfact.json": "d017056125178a13728594e66a801357a8db9ed7973a7425554bb4271de9fc6f",
     FIXTURES / "zsre.json": "8a371d512f8a6ab175db4ef672181d5c0e52da23298cb51e5a2eeea2f89aa9cd",
     REPO / "crates/eval/data/gsm8k-test.jsonl": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
@@ -185,7 +186,7 @@ def setup(args, run):
             "BREWERY_CPU_THREADS": "4", "BREWERY_SCRATCH_CHECKS_SCRIPT": str(REPO / "tools/scratch_checks.py"),
             "BREWERY_SCRATCH_CHECKS_RUNNER": str(RUNNER),
             "BREWERY_SCRATCH_CHECKS_RUNNER_SHA256": PINS[RUNNER],
-            "BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR": str(W0_LIBS),
+            "BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR": str(RUNNER_PIN / "lib"),
             "BREWERY_SCRATCH_CHECKS_CACHE": str(FIXTURES),
         },
     })

@@ -110,10 +110,20 @@ fn search_ablation_rejects_unbounded_budget_and_requires_a_scratch_parent() {
         "trial_budget":33, "max_children":1, "disk_budget_bytes":8589934592_u64,
         "behavior_direction":{"prompt_sets":{"sycophancy":sha,"slop":sha,"response_length":sha}}
     });
-    let (status, body) = t.request("POST", "/api/scratch/missing/search_ablation", Some(request.clone()), "");
+    let (status, body) = t.request(
+        "POST",
+        "/api/scratch/missing/search_ablation",
+        Some(request.clone()),
+        "",
+    );
     assert_eq!(status, 400, "{body}");
     request["trial_budget"] = json!(6);
-    let (status, body) = t.request("POST", "/api/scratch/missing/search_ablation", Some(request.clone()), "");
+    let (status, body) = t.request(
+        "POST",
+        "/api/scratch/missing/search_ablation",
+        Some(request.clone()),
+        "",
+    );
     assert_eq!(status, 404, "{body}");
     request["id"] = json!("00000000-0000-0000-0000-000000000001");
     request["idempotency_key"] = json!("a5-test");

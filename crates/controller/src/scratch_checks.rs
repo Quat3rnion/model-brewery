@@ -238,7 +238,12 @@ pub(super) async fn run(
     .map_err(ApiError::storage)?
 }
 
-pub(super) fn check(app: &App, id: String, request: Run, key: Option<&Submission<'_>>) -> Result<Response> {
+pub(super) fn check(
+    app: &App,
+    id: String,
+    request: Run,
+    key: Option<&Submission<'_>>,
+) -> Result<Response> {
     let (row, directory, parent) = {
         let store = app.store.lock().map_err(ApiError::storage)?;
         if let Some(key) = key

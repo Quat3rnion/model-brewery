@@ -207,8 +207,10 @@ fn heretic_cannot_queue_without_a_local_gpu_lane() {
     let (status, response) = t.request(
         "/api/scratch/heretic",
         "Idempotency-Key: heretic-run\r\n",
-        Some(json!({"parent_id":model["id"],"base_sha256":sha(&fs::read(&path).unwrap()),
-                    "profile":"noslop","trials":2,"trial_index":0,"seed":12})),
+        Some(
+            json!({"parent_id":model["id"],"base_sha256":sha(&fs::read(&path).unwrap()),
+                    "profile":"noslop","trials":2,"trial_index":0,"seed":12}),
+        ),
     );
     assert_eq!(status, 409, "{response}");
 }
@@ -1253,8 +1255,8 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "compile_program",
             "compute_direction",
             "convert_scratch_gguf",
-            "create_finding",
             "create_direction_intervention",
+            "create_finding",
             "create_intervention",
             "create_scratch",
             "crosscoder_diff",
@@ -1311,7 +1313,10 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
                 options["properties"]["objective"]["enum"],
                 json!(["target_logit", "corpus_nll"])
             );
-            assert_eq!(options["properties"]["objective"]["default"], "target_logit");
+            assert_eq!(
+                options["properties"]["objective"]["default"],
+                "target_logit"
+            );
             assert_eq!(options["then"]["not"]["required"], json!(["observations"]));
         }
         assert_eq!(schema["type"], "object", "{tool}");
@@ -1332,7 +1337,12 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
         if tool["name"] == "create_direction_intervention" {
             assert_eq!(schema["properties"]["direction_rules"]["maxItems"], 8);
             assert!(schema["properties"].get("interventions").is_none());
-            assert!(schema["required"].as_array().unwrap().contains(&json!("direction_rules")));
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("direction_rules"))
+            );
         }
         if tool["name"] == "run_checks" {
             let behavior = &schema["properties"]["behavior_direction"];

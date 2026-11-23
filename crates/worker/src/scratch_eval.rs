@@ -27,8 +27,10 @@ pub const CHECK_DIGESTS: [&str; 4] = [
 ];
 
 pub fn private_output(kind: &str) -> bool {
-    matches!(kind, GGUF | CHECKS | crate::locate_edit::JOB | crate::ablation_search::SCREEN)
-        || crate::heretic::job(kind)
+    matches!(
+        kind,
+        GGUF | CHECKS | crate::locate_edit::JOB | crate::ablation_search::SCREEN
+    ) || crate::heretic::job(kind)
 }
 
 pub fn granted(input: &crate::Input) -> bool {
