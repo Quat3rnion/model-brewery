@@ -1,3 +1,4 @@
+mod corpus;
 mod gguf;
 
 use crate::{
@@ -12,7 +13,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use brewery_worker::{
-    damage::{self as wire, MAX_GRADIENT_BYTES},
+    damage::{self as wire, MAX_GRADIENT_BYTES, Objective},
     locate_edit::{Backend, GPU_GATE},
     sensitivity, trace,
     weight_source::open_regular,
@@ -52,7 +53,7 @@ impl Runtime {
             .arg("--model")
             .arg(model)
             .args(args);
-        if method == "grad-select" {
+        if matches!(method, "grad-select" | "grad-corpus") {
             command.args([
                 "--backend",
                 self.backend.key(),
@@ -75,9 +76,14 @@ impl Runtime {
         let timeout = JOB_TIMEOUT
             .checked_sub(self.started.elapsed())
             .context("damage map exceeded time budget")?;
+        let timeout = if method == "grad-corpus" {
+            timeout
+        } else {
+            TOOL_TIMEOUT.min(timeout)
+        };
         Ok(self
             .tool
-            .capture_for(&mut command, dir, TOOL_TIMEOUT.min(timeout))
+            .capture_for(&mut command, dir, timeout)
             .with_context(|| format!("Lanternfish {method} failed"))?
             .0)
     }
@@ -147,7 +153,10 @@ struct Score<'a> {
     shape: &'a [u64],
     reference_type: &'static str,
     quantized_type: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     predicted_recovery: Vec<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    predicted_nll_increase: Option<f64>,
     mean_absolute_damage: f64,
     measured_recovery: Option<Vec<f64>>,
 }
@@ -176,11 +185,6 @@ fn dot(
     a: &Tensor,
     b: &Tensor,
 ) -> Result<f64> {
-    let bytes = a.bytes(0, STOCK)?;
-    ensure!(
-        bytes <= MAX_GRADIENT_BYTES,
-        "gradient exceeds damage map budget"
-    );
     let meta: Value = serde_json::from_slice(&bounded(
         open_regular(&out.join("gradient.json"))?,
         16 << 10,
@@ -208,7 +212,32 @@ fn dot(
         obs.reference_logit,
         meta["logit"]
     );
-    let file = open_regular(&out.join("gradient.f32"))?;
+    dot_payload(
+        &out.join("gradient.f32"),
+        sha,
+        files,
+        reference,
+        quantized,
+        a,
+        b,
+    )
+}
+
+fn dot_payload(
+    path: &Path,
+    sha: &str,
+    files: &mut [File; 2],
+    reference: &Model,
+    quantized: &Model,
+    a: &Tensor,
+    b: &Tensor,
+) -> Result<f64> {
+    let bytes = a.bytes(0, STOCK)?;
+    ensure!(
+        bytes <= MAX_GRADIENT_BYTES,
+        "gradient exceeds damage map budget"
+    );
+    let file = open_regular(path)?;
     ensure!(
         file.metadata()?.len() == bytes,
         "gradient payload size mismatch"
@@ -384,7 +413,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let work = tempfile::tempdir_in(cwd)?;
     let work = work.path();
     let mut files = [open_regular(&a.path)?, open_regular(&b.path)?];
-    let (mut names, mut largest) = (Vec::new(), 0);
+    let (mut names, mut largest, mut total) = (Vec::new(), 0, 0u64);
     for (n, t) in &quantized.tensors {
         if req.tensors.is_empty() && matches!(t.ty, 0 | 1 | 30) {
             continue;
@@ -398,6 +427,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             "gradient exceeds damage map budget for {n}"
         );
         largest = size.max(largest);
+        total = total.checked_add(size).context("gradient size overflow")?;
         names.push(n.as_str());
     }
     ensure!(
@@ -429,10 +459,12 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
                     .context("F32 GGUF size overflow")?,
             )
         })?;
+    let is_corpus = req.objective == Objective::CorpusNll;
+    let gradient_bytes = if is_corpus { total } else { largest };
     ensure!(
         disk_preflight(
             cwd,
-            (expanded_bytes + largest).max(ids[1].bytes + largest / 2)
+            (expanded_bytes + gradient_bytes).max(ids[1].bytes + largest / 2)
                 + (128 << 20)
                 + req.backend.runtime_stage_reserve()
         )?["fits"]
@@ -449,6 +481,68 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     check_ids()?;
     let pin = Pin::load()?;
     let threads = child_threads(None)?.min(16);
+    let report = |grad: &Runtime| {
+        json!({"kind":wire::JOB,"schema_version":1,"qualification":sensitivity::QUALIFICATION,
+            "reference_id":model_ids[0],"quantized_id":model_ids[1],"reference_sha256":ids[0].sha256,"quantized_sha256":ids[1].sha256,
+            "backend":req.backend,"corpus_sha256":sensitivity::CORPUS_SHA256,"untied_reference_head":untie,
+            "manifest_sha256":pin.sha,"executable_sha256":grad.tool.sha})
+    };
+    if is_corpus {
+        let (tool, libs) = pin.stage(req.backend, work)?;
+        let runtime = Runtime {
+            tool,
+            libs,
+            threads,
+            backend: req.backend,
+            started,
+        };
+        let mut report = report(&runtime);
+        let gradients = corpus::run(&runtime, work, gradient_model, &names)?;
+        check_ids()?;
+        let mut phase = progress.start("damage_gradients", "items", Some(names.len() as u64));
+        let mut scores = Vec::new();
+        let mut layers = BTreeMap::<u32, f64>::new();
+        for name in names {
+            let (a, b) = (reference_tensor(name).unwrap(), &quantized.tensors[name]);
+            let loss = gradients.attribute(name, &mut files, &reference, &quantized, a, b)?;
+            let layer = sensitivity::layer(name);
+            if let Some(layer) = layer {
+                *layers.entry(layer).or_default() += loss;
+            }
+            scores.push(Score {
+                name,
+                layer,
+                shape: &a.shape,
+                reference_type: gguf::name(a.ty),
+                quantized_type: gguf::name(b.ty),
+                mean_absolute_damage: loss.abs(),
+                predicted_recovery: Vec::new(),
+                predicted_nll_increase: Some(loss),
+                measured_recovery: None,
+            });
+            phase.advance(1);
+        }
+        phase.finish();
+        check_ids()?;
+        rank(&mut scores);
+        let mut layers = layers.into_iter().collect::<Vec<_>>();
+        layers.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()).then_with(|| a.0.cmp(&b.0)));
+        report["objective"] = json!("corpus_nll");
+        report["corpus"] = json!({
+            "line_count": wire::CORPUS_LINES,
+            "observation_count": gradients.observation_count,
+            "reference_mean_nll": gradients.loss,
+            "predicted_nll_increase": scores.iter().filter_map(|s| s.predicted_nll_increase).sum::<f64>()
+        });
+        report["tensors"] = json!(scores);
+        report["layers"] = json!(layers.into_iter().map(|(layer, loss)|
+            json!({"layer":layer, "mean_absolute_damage":loss.abs(), "predicted_nll_increase":loss})
+        ).collect::<Vec<_>>());
+        report["observations"] = json!([]);
+        report["recipe_proposal"] = proposal(&scores, &reference, &quantized, &req)?;
+        wire::check_result(&req, &report, [&model_ids[0], &model_ids[1]])?;
+        return Ok(report);
+    }
     let (tool, libs) = pin.stage(Backend::Cpu, work)?;
     let cpu = Runtime {
         tool,
@@ -546,6 +640,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             quantized_type: gguf::name(b.ty),
             mean_absolute_damage: mean_abs(&predictions),
             predicted_recovery: predictions,
+            predicted_nll_increase: None,
             measured_recovery: None,
         });
     }
@@ -553,11 +648,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     if expanded.exists() {
         fs::remove_file(&expanded)?;
     }
-    scores.sort_by(|a, b| {
-        b.mean_absolute_damage
-            .total_cmp(&a.mean_absolute_damage)
-            .then_with(|| a.name.cmp(b.name))
-    });
+    rank(&mut scores);
     let mut phase = progress.start(
         "damage_swaps",
         "items",
@@ -629,11 +720,21 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         .collect::<Vec<_>>();
     layers.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let layers = layers.into_iter().map(|(layer,score,signed)| json!({"layer":layer,"mean_absolute_damage":score,"predicted_recovery":signed})).collect::<Vec<_>>();
-    let report = json!({"kind":wire::JOB,"schema_version":1,"qualification":sensitivity::QUALIFICATION,
-        "reference_id":model_ids[0],"quantized_id":model_ids[1],"reference_sha256":ids[0].sha256,"quantized_sha256":ids[1].sha256,
-        "backend":req.backend,"trace_backend":"cpu","corpus_sha256":sensitivity::CORPUS_SHA256,"untied_reference_head":untie,
-        "manifest_sha256":pin.sha,"executable_sha256":grad.tool.sha,"observations":observations,"tensors":scores,"layers":layers,
-        "recipe_proposal":proposal(&scores,&reference,&quantized,&req)?});
+    let mut report = report(grad);
+    report["objective"] = json!("target_logit");
+    report["trace_backend"] = json!("cpu");
+    report["observations"] = json!(observations);
+    report["tensors"] = json!(scores);
+    report["layers"] = json!(layers);
+    report["recipe_proposal"] = proposal(&scores, &reference, &quantized, &req)?;
     wire::check_result(&req, &report, [&model_ids[0], &model_ids[1]])?;
     Ok(report)
+}
+
+fn rank(scores: &mut [Score<'_>]) {
+    scores.sort_by(|a, b| {
+        b.mean_absolute_damage
+            .total_cmp(&a.mean_absolute_damage)
+            .then_with(|| a.name.cmp(b.name))
+    });
 }

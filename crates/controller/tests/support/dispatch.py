@@ -230,6 +230,12 @@ else:
                                            baseline_sha256=options["quantized_sha256"], payload_bytes_delta=0,
                                            options=base, uniform_options=base,
                                            profile=profile, uniform_profile=profile))
+        if options.get("objective") == "corpus_nll":
+            result.update(objective="corpus_nll", observations=[],
+                          corpus=dict(observation_count=222, line_count=16, reference_mean_nll=4.4,
+                                      predicted_nll_increase=1),
+                          tensors=[dict(name="blk.0.attn_q.weight", layer=0, mean_absolute_damage=1,
+                                        predicted_nll_increase=1, measured_recovery=None)])
     if action == "start" and envelope["kind"] == "hf_download":
         assert envelope["inputs"] == [] and "prompt" not in envelope
         options = envelope["options"]

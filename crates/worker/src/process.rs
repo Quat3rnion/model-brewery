@@ -368,9 +368,13 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         let size = |input: &Input| -> Result<u64> { Ok(weight_source::open_regular(&input.path)?.metadata()?.len()) };
         let (a,b) = (size(a)?, size(b)?);
         ensure!([a,b].into_iter().all(|size| size <= damage::MAX_MODEL_BYTES), "damage map input exceeds disk budget");
-        // At most one expanded head and one gradient (or one swap file).
-        let scratch = (a * 2 + damage::MAX_GRADIENT_BYTES * 2)
-            .max(b + damage::MAX_GRADIENT_BYTES / 2)
+        // Each F32 model or corpus bundle may include one extra untied head.
+        let expanded = a * 2 + damage::MAX_GRADIENT_BYTES;
+        let scratch = if req.objective == damage::Objective::CorpusNll {
+            expanded * 2
+        } else {
+            (expanded + damage::MAX_GRADIENT_BYTES).max(b + damage::MAX_GRADIENT_BYTES / 2)
+        }
             + (128 << 20) + req.backend.runtime_stage_reserve();
         resources::disk_check(&w.cfg.root, w.disk_floor(job.resources.disk_reserve_bytes).saturating_add(scratch))?;
         Some(req.backend)

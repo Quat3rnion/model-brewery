@@ -9,12 +9,21 @@ pub const JOB: &str = "quantization_damage";
 pub const MAX_MODEL_BYTES: u64 = 2 << 30;
 pub const MAX_GRADIENT_BYTES: u64 = 768 << 20;
 pub const MAX_TENSORS: usize = 512;
+pub const CORPUS_LINES: usize = 16;
 
 fn one() -> usize {
     1
 }
 fn three() -> usize {
     3
+}
+
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Objective {
+    #[default]
+    TargetLogit,
+    CorpusNll,
 }
 
 #[derive(Deserialize)]
@@ -25,6 +34,8 @@ pub struct Request {
     pub gguf_type: String,
     #[serde(default)]
     pub backend: Backend,
+    #[serde(default)]
+    pub objective: Objective,
     #[serde(default = "one")]
     pub observations: usize,
     #[serde(default = "three")]
@@ -49,6 +60,10 @@ impl Request {
                 && r.tensors.iter().collect::<BTreeSet<_>>().len() == r.tensors.len(),
             "select two distinct pinned GGUFs, a Q4_K_M base, 1 to 4 prompts and 1 to 5 swaps"
         );
+        ensure!(
+            r.objective != Objective::CorpusNll || value.get("observations").is_none(),
+            "corpus_nll always uses the full corpus; omit observations"
+        );
         Ok(r)
     }
 
@@ -66,6 +81,7 @@ pub fn configured(
 }
 
 pub fn check_result(request: &Request, result: &Value, ids: [&str; 2]) -> Result<()> {
+    let corpus = request.objective == Objective::CorpusNll;
     let tensors = result["tensors"]
         .as_array()
         .context("missing damage map tensors")?;
@@ -114,7 +130,12 @@ pub fn check_result(request: &Request, result: &Value, ids: [&str; 2]) -> Result
                 .iter()
                 .all(|k| result[k].as_str().is_some_and(is_digest))
             && (1..=MAX_TENSORS).contains(&tensors.len())
-            && observations.len() == request.observations
+            && if corpus {
+                result["objective"] == "corpus_nll" && observations.is_empty()
+            } else {
+                (result.get("objective").is_none() || result["objective"] == "target_logit")
+                    && observations.len() == request.observations
+            }
             && proposal["applied"] == false
             && proposal["reference_sha256"] == request.reference_sha256
             && proposal["baseline_sha256"] == request.quantized_sha256
@@ -140,11 +161,17 @@ pub fn check_result(request: &Request, result: &Value, ids: [&str; 2]) -> Result
                 && row["mean_absolute_damage"]
                     .as_f64()
                     .is_some_and(|f| f.is_finite() && f >= 0.)
-                && valid_values("predicted_recovery", row)
-                && if i < request.swaps {
-                    valid_values("measured_recovery", row)
+                && if corpus {
+                    number(&row["predicted_nll_increase"])
+                        && row["predicted_recovery"].is_null()
+                        && row["measured_recovery"].is_null()
                 } else {
-                    row["measured_recovery"].is_null()
+                    valid_values("predicted_recovery", row)
+                        && if i < request.swaps {
+                            valid_values("measured_recovery", row)
+                        } else {
+                            row["measured_recovery"].is_null()
+                        }
                 },
             "invalid damage map tensor row"
         );
@@ -159,6 +186,27 @@ pub fn check_result(request: &Request, result: &Value, ids: [&str; 2]) -> Result
                 == seen,
         "damage map result tensor selection mismatch"
     );
+    if corpus {
+        let summary = &result["corpus"];
+        ensure!(
+            summary["line_count"] == CORPUS_LINES
+                && summary["observation_count"]
+                    .as_u64()
+                    .is_some_and(|n| (1..=(CORPUS_LINES as u64 * 127)).contains(&n))
+                && summary["reference_mean_nll"]
+                    .as_f64()
+                    .is_some_and(|f| f.is_finite() && f >= 0.)
+                && number(&summary["predicted_nll_increase"])
+                && result["layers"].as_array().unwrap().iter().all(|r| {
+                    r["layer"].as_u64().is_some()
+                        && number(&r["predicted_nll_increase"])
+                        && r["mean_absolute_damage"]
+                            .as_f64()
+                            .is_some_and(|f| f.is_finite() && f >= 0.)
+                }),
+            "invalid corpus loss damage map summary or layers"
+        );
+    }
     ensure!(
         observations
             .iter()
@@ -184,4 +232,8 @@ pub fn check_result(request: &Request, result: &Value, ids: [&str; 2]) -> Result
         "damage map recipe inventory differs from baseline"
     );
     Ok(())
+}
+
+fn number(value: &Value) -> bool {
+    value.as_f64().is_some_and(f64::is_finite)
 }

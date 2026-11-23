@@ -35,6 +35,33 @@ fn quantization_damage_rejects_prompts_and_returns_only_an_unapplied_proposal() 
     assert_eq!(artifact, job["result"]);
     assert_eq!(artifact["recipe_proposal"]["applied"], false);
     assert_eq!(artifact["recipe_proposal"]["profile"]["preset"], "Q4_K_M");
+    let mut corpus_options = options.clone();
+    corpus_options["objective"] = json!("corpus_nll");
+    let result = mcp::call(
+        &app,
+        "quantization_damage_map",
+        json!({"input_ids":[a,b],"options":corpus_options,"idempotency_key":"damage-corpus"}),
+    );
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    let id = result["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap();
+    app.await_job(id, |j| j["state"] == "succeeded");
+    let artifact = app.json(
+        "GET",
+        &format!("/api/jobs/{id}/quantization-damage"),
+        None,
+        200,
+    );
+    assert_eq!(artifact["objective"], "corpus_nll");
+    assert_eq!(artifact["corpus"]["observation_count"], 222);
+    corpus_options["observations"] = json!(1);
+    app.json(
+        "POST",
+        "/api/jobs",
+        Some(json!({"kind":"quantization_damage","input_ids":[a,b],"options":corpus_options})),
+        400,
+    );
     app.touch("damage-bad-receipt");
     let mut options = options;
     options["swaps"] = json!(1);

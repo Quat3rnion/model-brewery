@@ -947,6 +947,15 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
     );
     for tool in listed {
         let schema = &tool["inputSchema"];
+        if tool["name"] == "quantization_damage_map" {
+            let options = &schema["properties"]["options"];
+            assert_eq!(
+                options["properties"]["objective"]["enum"],
+                json!(["target_logit", "corpus_nll"])
+            );
+            assert_eq!(options["properties"]["objective"]["default"], "target_logit");
+            assert_eq!(options["then"]["not"]["required"], json!(["observations"]));
+        }
         assert_eq!(schema["type"], "object", "{tool}");
         if matches!(
             tool["name"].as_str(),

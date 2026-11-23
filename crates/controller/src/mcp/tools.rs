@@ -133,7 +133,7 @@ impl Server {
                     "Queue empirical Fisher sensitivity on the pinned W4 held-out corpus for one GGUF or private scratch GGUF. Select layers or exact tensor names. Poll with get_job. Results are not release-qualified."
                 }
                 "quantization_damage_map" => {
-                    "Compare pinned Library BF16 and quantized GGUFs on the same worker. Read the damage map after the job finishes. The job does not apply its recipe proposal."
+                    "Compare pinned Library BF16 and quantized GGUFs on the same worker. Choose target_logit for logit drift or corpus_nll for mean next-token loss on all W4 held-out lines. Read the damage map after the job finishes. The job does not apply its recipe proposal."
                 }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({

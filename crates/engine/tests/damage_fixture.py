@@ -24,6 +24,26 @@ if command == "trace":
         "model_logits": [{"position": 1, "top": [{"token_id": 3, "logit": logit}] +
                          [{"token_id": 100 + i, "logit": -i} for i in range(99)]}],
     }))
+elif command == "grad-corpus":
+    corpus = pathlib.Path(opts["--corpus"]).read_bytes()
+    assert hashlib.sha256(corpus).hexdigest() == spec["corpus_sha256"]
+    assert spec["weights"] == ["blk.0.attn_q.weight"]
+    assert opts["--backend"] == "cpu"
+    assert model.endswith(struct.pack("<32f", *[2.0] * 32))
+    data = struct.pack("<32f", *[0.25] * 32)
+    mode = "__FIXTURE_MODE__"
+    (out / "grad-0.f32").write_bytes(data)
+    (out / "gradient.json").write_text(json.dumps({
+        "schema_version": 1, "objective": "mean_next_token_nll",
+        "corpus_sha256": spec["corpus_sha256"],
+        "tokens": [[1] * 15] * 15 + [[1] * 13], "observation_count": 222, "loss": 1.25,
+        "backend": "cpu", "placement": {"strict": True, "device": "CPU"}, "dtype": "f32_le",
+        "gradients": [{
+            "name": spec["weights"][0], "shape": [1, 32] if mode == "bad-shape" else [32, 1],
+            "file": "../grad-0.f32" if mode == "bad-path" else "grad-0.f32",
+            "sha256": "a" * 64 if mode == "bad-hash" else hashlib.sha256(data).hexdigest(),
+        }],
+    }))
 else:
     assert command == "grad-select" and spec["objective"] == "target_logit"
     data = struct.pack("<32f", *[0.25] * 32)

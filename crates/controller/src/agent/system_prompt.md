@@ -20,9 +20,12 @@ For empirical Fisher, use `tensor_sensitivity` on a pinned GGUF with a
 small tensor selection and the pinned held-out corpus. Read `get_job`.
 Report the revision hash, backend, and observation count with the scores.
 For quantization damage, use `quantization_damage_map` with the pinned
-reference and quantized GGUFs from the same revision. Use
-`read_quantization_damage` after success. Report the measured swaps and any
-disagreement with the estimates. Do not apply the recipe proposal.
+reference and quantized GGUFs from the same revision. Use the default
+objective for logit drift and measured swaps. Select the corpus loss
+objective to rank mean next-token loss over all W4 held-out lines. Use
+`read_quantization_damage` after success. Report signed estimates and any
+measured swaps. Do not apply the
+recipe proposal.
 
 For a weight change, convert the child to private GGUF with the same assets.
 Trace it with the same prompts and capture settings as the parent. Always
