@@ -182,7 +182,9 @@ def exercise(run, evidence, proc, prompt_pins, resume):
         return value
 
     def wait(job, label):
-        deadline = time.monotonic() + 1800
+        # The 32-prompt CPU check can take longer than 30 minutes when
+        # other isolated acceptance jobs share the host.
+        deadline = time.monotonic() + (7200 if label == "a2-w4-held-out" else 1800)
         while time.monotonic() < deadline:
             state = request("/api/jobs/" + job["id"])
             if state["state"] not in ("queued", "running"):
