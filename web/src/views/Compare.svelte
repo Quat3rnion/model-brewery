@@ -17,6 +17,7 @@
   import HostSelect from '../components/HostSelect.svelte';
   import ModelSelect from '../components/ModelSelect.svelte';
   import SubmitStatus from '../components/SubmitStatus.svelte';
+  import RetryRecovery from '../components/RetryRecovery.svelte';
   import RecentJobs from '../components/RecentJobs.svelte';
   import Advanced from '../components/Advanced.svelte';
   import BuildDiffReport from '../components/results/BuildDiffReport.svelte';
@@ -190,11 +191,11 @@
 
   <section class="panel" aria-labelledby="cmp-h">
     <header><h2 id="cmp-h">New comparison</h2></header>
+    {#if retry.failed}<div class="body"><RetryRecovery reason={retry.failure} reload={retry.reload} startNew={retry.startNew} /></div>{/if}
     <WorkflowGate workflow="compare" decision={setup}>
     <div class="body stack" oninputcapture={retry.touchField} onchangecapture={retry.touchField} onclickcapture={retry.touchField} onkeydowncapture={retry.touchField}>
-      {#if retry.loading || retry.failed || retry.context}
-        <p class="small muted" role="status">{retry.loading ? 'Loading the previous job options.' : retry.failed
-          ? 'Could not open the previous job options. Enter the options again.' : 'Review the previous job options before you queue a comparison.'}</p>
+      {#if retry.loading || retry.context}
+        <p class="small muted" role="status">{retry.loading ? 'Loading the previous job options.' : 'Review the previous job options before you queue a comparison.'}</p>
       {/if}
       {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
       <RetryWarnings items={retry.omissions('compare')} />

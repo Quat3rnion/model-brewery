@@ -441,12 +441,14 @@ when you return to the plain form. If you edited the form while the previous
 request loaded, select **Use previous inputs** to replace the draft.
 
 If the submission response is lost, check **Jobs** first. To resend a
-request from a retry form, open the same failed job and submit with the same
-inputs. If the controller already queued the request, the form shows a link
-to that job, even after a reload. This also applies if you enter the same
-inputs by hand on the retry form. To start new work with those inputs, use
-the plain form. If you lose a reply from the plain form, resend without
-leaving or reloading the page.
+request from a retry form, open the same failed job or conversion. Submit
+with the same inputs. If the controller already queued the request, the
+form shows a link to that job, even after a reload. To queue another run
+with those inputs, select **Start a new run**. Review the inputs on the
+plain form, then select its queue button. If the previous request does not
+load, select **Reload previous request** or **Start a new run instead**.
+If you lose a reply from the plain form, resend without leaving or
+reloading the page.
 
 ### Convert a model
 

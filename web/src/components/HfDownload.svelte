@@ -5,6 +5,7 @@
   import { loadRetryJob, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
   import SubmitStatus from './SubmitStatus.svelte';
   import RetryOffer from './RetryOffer.svelte';
+  import RetryRecovery from './RetryRecovery.svelte';
   import { unsavedChanges } from '../lib/unsaved-changes.svelte';
   import { hostName } from '../lib/format';
   import Submit from './Submit.svelte';
@@ -73,7 +74,7 @@
   <summary><strong>Download from Hugging Face</strong></summary>
   <div class="stack fields" oninputcapture={retry.touchField} onchangecapture={retry.touchField}>
     {#if retry.loading}<p class="hint" role="status">Loading the previous download.</p>{/if}
-    {#if retry.failed}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
+    {#if retry.failed}<RetryRecovery reason={retry.failure} reload={retry.reload} startNew={retry.startNew} />{/if}
     {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
     <div class="grid-2">
       <div class="field">
@@ -102,7 +103,7 @@
     </div>
     {#if host !== 'backend-hf'}<p class="hint">Download on {hostName(hosts, host)}.</p>{/if}
     <p class="hint">Track progress or cancel in Jobs. The download service verifies the files before it adds the entry to Library.</p>
-    <Submit {blockers} busy={submitter.busy} disabled={retry.loading} onclick={start}>Start download</Submit>
+    <Submit {blockers} busy={submitter.busy} disabled={retry.unavailable} onclick={start}>Start download</Submit>
     <SubmitStatus s={submitter} />
   </div>
 </details>

@@ -124,6 +124,15 @@ export function isActiveConversion(c: Conversion): boolean {
   return c.state === 'running';
 }
 
+export function newerConversion(current: Conversion, received: Conversion): Conversion {
+  if (!isActiveConversion(current) && isActiveConversion(received)) return current;
+  if (current.updatedAt !== null && (received.updatedAt === null || current.updatedAt > received.updatedAt)) return current;
+  if (isActiveConversion(current) && isActiveConversion(received) && current.stage &&
+      STAGES.indexOf(current.stage) > (received.stage ? STAGES.indexOf(received.stage) : -1)) return current;
+  if (current.cancelRequested && !received.cancelRequested && isActiveConversion(received)) return current;
+  return received;
+}
+
 export type StageStatus = 'pending' | 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'skipped' | 'unknown';
 
 /**

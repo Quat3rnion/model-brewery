@@ -11,7 +11,7 @@
   import SubmitStatus from '../SubmitStatus.svelte';
   import JobState from '../JobState.svelte';
   import { brewery } from '../../lib/store.svelte';
-  import { Submitter } from '../../lib/submit.svelte';
+  import { acceptedJobSummary, Submitter } from '../../lib/submit.svelte';
   import { route } from '../../lib/route.svelte';
   import type { RetrySubmission } from '../../lib/retry-keys';
   import { theme } from '../../lib/theme.svelte';
@@ -37,7 +37,7 @@
     type TensorInfo,
     type Tile,
   } from '../../lib/weightmap';
-  import type { JobSummary, Model } from '../../lib/types';
+  import type { JobSummary, Model, NewJob } from '../../lib/types';
 
   let {
     source,
@@ -49,6 +49,8 @@
     tuneReason,
     tuneRetry,
     retryLoading,
+    readRetry,
+    openRepeat,
     mode = $bindable('manual'),
     onproposal,
     pending,
@@ -62,6 +64,8 @@
     tuneReason: string | null;
     tuneRetry: RetrySubmission;
     retryLoading: boolean;
+    readRetry: (mode: 'inventory' | 'tile') => RetrySubmission;
+    openRepeat: (request?: NewJob) => boolean;
     mode?: 'manual' | 'auto';
     onproposal: (jobId: string) => void;
     pending: SvelteMap<string, DraftEdit>;
@@ -86,8 +90,14 @@
   async function read(job: ReturnType<typeof inventoryJob>) {
     if (retryLoading || reads.busy) return;
     readKey = JSON.stringify(job.options);
-    const created = await reads.submit(job);
-    if (created && 'state' in created) submitted = [created, ...submitted];
+    const created = await reads.submit(job, readRetry(job.options?.mode === 'tile' ? 'tile' : 'inventory'));
+    if (!created) return;
+    function record(summary: JobSummary) {
+      if (summary.id !== created?.id || !findRead([summary], source.id, job.options!, source.host)) return;
+      submitted = [summary, ...submitted.filter(item => item.id !== summary.id)];
+    }
+    record(acceptedJobSummary(created, job));
+    if (!('state' in created)) void brewery.loadJob(created.id).then(record).catch(() => {});
   }
   function ignoreReads(match: (job: JobSummary) => boolean) {
     const next = new Set(ignored);
@@ -105,6 +115,7 @@
   const lastInventoryRead = $derived(submitted.find(j => j.options?.mode === 'inventory' && !ignored.has(j.id)));
   const inventoryJobFound = $derived(inv.job ?? jobs.find(j => j.id === lastInventoryRead?.id));
   $effect(() => {
+    void brewery.lastUpdated;
     if (canVisual) want(inv.job ?? null);
   });
   function readInventoryPage() {
@@ -166,6 +177,7 @@
   const tileError = $derived(typeof tile === 'string' ? tile : tileOptions && readKey === JSON.stringify(tileOptions) ? reads.error : null);
   const otherTileActive = $derived(jobs.some((j) => j.kind === 'weight_inspect' && j.input_ids[0] === source.id && (j.options as Record<string, unknown> | undefined)?.mode === 'tile' && isActive(j.state)));
   $effect(() => {
+    void brewery.lastUpdated;
     if (canVisual) want(tileJobFound);
   });
   function readCurrentTile() {
@@ -375,6 +387,9 @@
         <p class="note warn small">The Library hash ({shortHash(source.sha256)}) differs from the file the worker read ({shortHash(sha)}). Edits use the file the worker read.</p>
       {/if}
       {#if inventoryError}<p class="note bad" role="alert">{inventoryError}</p>{/if}
+      {#if reads.replayed && reads.acceptedBody?.options?.mode === 'inventory'}
+        <SubmitStatus s={reads} prepare={() => openRepeat(reads.acceptedBody)} />
+      {/if}
       {#if tensors.length}
         <TensorMap {tensors} selected={tensorName} onopen={openTensor} />
       {:else if inv.job && !inv.error}
@@ -445,6 +460,9 @@
           </div>
         {/if}
         {#if tileError}<p class="note bad" role="alert">{tileError}</p>{/if}
+        {#if reads.replayed && reads.acceptedBody?.options?.mode === 'tile'}
+          <SubmitStatus s={reads} prepare={() => openRepeat(reads.acceptedBody)} />
+        {/if}
         {#if !tileJobFound || tileError}
           <div class="row">
             <button type="button" class="btn small" onclick={readCurrentTile} disabled={retryLoading || reads.busy || otherTileActive} aria-describedby={retryLoading ? 'w-retry-loading' : undefined}>{tileError ? 'Read tile again' : 'Read tile'}</button>
@@ -568,7 +586,7 @@
 
     {#if canChange && mode === 'auto' && tensor}
       <section class="step">
-        <SubmitStatus s={tuneSub} />
+        <SubmitStatus s={tuneSub} prepare={() => openRepeat(tuneSub.acceptedBody)} />
         <Submit blockers={tuneBlockers} busy={tuneSub.busy} disabled={tuneRetry.blocked} onclick={tune}>Tune {selected.size || ''} selected {selected.size === 1 ? 'weight' : 'weights'}</Submit>
       </section>
     {/if}

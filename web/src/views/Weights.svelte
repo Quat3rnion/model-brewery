@@ -19,6 +19,8 @@
   import { hashParam, route } from '../lib/route.svelte';
   import { loadRetryJob, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
   import RetryOffer from '../components/RetryOffer.svelte';
+  import RetryRecovery from '../components/RetryRecovery.svelte';
+  import type { RetrySubmission } from '../lib/retry-keys';
   import { fieldError, visibleBlockers, type Blocker } from '../lib/blockers';
   import { WEIGHT_SOURCES, isSafeSource, formatTime, hostName, isActive, isTerminal, kindTitle, modelLabel, newestFirst, shortHash } from '../lib/format';
   import { canInspectVisually, weightAccess, weightCapability, weightFormat } from '../lib/weight-access';
@@ -52,7 +54,7 @@
     type EditRow,
     type Op,
   } from '../lib/weights';
-  import type { JobDetail, Model } from '../lib/types';
+  import type { JobDetail, JobSummary, Model, NewJob } from '../lib/types';
 
   const models = $derived(brewery.state?.models ?? []);
   const hosts = $derived(brewery.state?.hosts ?? []);
@@ -62,7 +64,11 @@
   const sourceId = $derived(hashParam(route.hash, 'source') ?? '');
   function selectSource(id: string) {
     if (id === sourceId || !draftGuard.confirm()) return;
-    route.replaceQuery(id ? `#/weights?source=${encodeURIComponent(id)}` : '#/weights');
+    const params = new URLSearchParams();
+    if (id) params.set('source', id);
+    const prior = hashParam(route.hash, 'retry');
+    if (prior) params.set('retry', prior);
+    route.replaceQuery(params.size ? `#/weights?${params}` : '#/weights');
   }
 
   const source = $derived(models.find((m) => m.id === sourceId && WEIGHT_SOURCES.includes(m.kind)));
@@ -198,7 +204,7 @@
   ]);
   async function inspect() {
     if (!source || inspectBlockers.length || !inspectParsed.t.ok || !inspectParsed.i.ok) return;
-    await inspectSub.submit(inspectJob(source.id, source.host, inspectParsed.t.value, inspectParsed.i.value), retry.action('weight_inspect'));
+    await inspectSub.submit(inspectJob(source.id, source.host, inspectParsed.t.value, inspectParsed.i.value), retry.action('weight_inspect:value'));
   }
   const lastInspect = $derived(newestFirst(jobsFor(jobs, sourceId, new Set(['weight_inspect'])))[0]);
   let inspectDetail = $state<JobDetail | null>(null);
@@ -257,8 +263,9 @@
   }
 
   // ---- Review and apply. ----
+  let repeatApply = $state.raw<JobSummary>();
   const proposals = $derived.by(() => {
-    const retryProposal = retry.context?.proposal;
+    const retryProposal = retry.context?.proposal ?? (repeatApply?.input_ids[0] === sourceId ? repeatApply : undefined);
     const list = newestFirst(jobsFor(jobs, sourceId, PROPOSAL_KINDS)).slice(0, 20);
     return retryProposal && !list.some((job) => job.id === retryProposal?.id) ? [...list, retryProposal] : list;
   });
@@ -293,20 +300,30 @@
     confirmed = false;
   });
   const applySub = new Submitter('weights.apply');
+  const repeatingApply = $derived(!!repeatApply && repeatApply.id === reviewId && !hashParam(route.hash, 'retry'));
   const applyBlockers = $derived.by(() => {
     const out = [...gate('weight_apply')];
     if (!reviewed) return [...out, 'Select a proposal.'];
     if (reviewed.state !== 'succeeded') out.push('The proposal job has not succeeded.');
     else if (!proposal) out.push('The proposal cannot be read.');
     if (activeApply) out.push('An apply job for this proposal is already running.');
-    if (doneApply) out.push('This proposal is already applied.');
+    if (doneApply && !repeatingApply) out.push('This proposal is already applied.');
     if (!confirmed) out.push('Confirm that you reviewed the values.');
     return out;
   });
   async function applyNow() {
     if (!reviewed || !source || applyBlockers.length) return;
     // The controller requires the exact source of the proposal job.
-    await applySub.submit(applyJob(reviewed.input_ids[0], source.host, reviewed.id), retry.action('weight_apply'));
+    if (await applySub.submit(applyJob(reviewed.input_ids[0], source.host, reviewed.id), retry.action('weight_apply'))) {
+      repeatApply = undefined;
+    }
+  }
+  function prepareApply() {
+    const proposal = proposals.find(item => item.id === applySub.acceptedBody?.options?.proposal_job_id);
+    if (!proposal || !applySub.newRun?.()) return false;
+    repeatApply = proposal;
+    confirmed = false;
+    return true;
   }
   let appliedDetail = $state<JobDetail | null>(null);
   $effect(() => {
@@ -322,6 +339,8 @@
   const appliedModel = $derived(applied?.library_model_id ? models.find((m) => m.id === applied.library_model_id) : undefined);
 
   const retrySub = new Submitter(job => `weights.previous.${job.kind}`);
+  const repeatSub = new Submitter(job => `weights.previous.${job.kind}`);
+  let repeat = $state.raw<NewJob>();
   const loadWeightsRetry = loadRetryJob(WEIGHT_KINDS);
   type WeightRetry = { job: JobDetail; proposal?: JobDetail };
   const defaults = { reviewId: null as string | null, confirmed: false };
@@ -340,13 +359,24 @@
     },
     restore: ({ job, proposal }) => {
       if (sourceId !== job.input_ids[0]) throw new Error('Source mismatch.');
-      return { actions: proposal ? ['weight_apply'] : [job.kind, `previous:${job.kind}`, ...(job.kind === 'weight_tune' ? ['visual:weight_tune'] : [])],
+      const alternative = job.kind === 'weight_inspect' ? `weight_inspect:${job.options?.mode ?? 'value'}` : job.kind;
+      return { actions: proposal ? ['weight_apply'] : [alternative, `previous:${job.kind}`, ...(job.kind === 'weight_tune' ? ['visual:weight_tune'] : [])],
+        retryLauncher: proposal ? undefined : `weights.previous.${job.kind}`,
         patch: proposal ? { reviewId: proposal.id, confirmed: false } : {}, context: { job, proposal }, focus: 'w-source' };
     },
     clear: () => { confirmed = false; },
   });
   watchPrefill(retry, () => !!brewery.state);
-  const previous = $derived(retry.context && !retry.context.proposal ? retry.context.job : undefined);
+  const previous = $derived(repeat ?? (retry.context && !retry.context.proposal ? retry.context.job : undefined));
+  function openRepeat(request?: NewJob) {
+    if (!request?.input_ids[0]) return false;
+    route.replaceQuery(`#/weights?${new URLSearchParams({ source: request.input_ids[0] })}`);
+    repeat = request;
+    return true;
+  }
+  function visualReadRetry(mode: 'inventory' | 'tile'): RetrySubmission {
+    return retry.action(`weight_inspect:${mode}`);
+  }
   const previousBlockers = $derived.by(() => {
     if (!previous || !source) return ['Select an available source entry.'];
     const kind = WEIGHT_KINDS.find((kind) => kind === previous?.kind);
@@ -368,9 +398,13 @@
     return out;
   });
   async function queuePrevious() {
-    if (!previous || !source || previousBlockers.length || retrySub.busy) return;
+    if (!previous || !source || previousBlockers.length || retrySub.busy || repeatSub.busy) return;
     const visit = route.capture();
     const { kind, input_ids, options } = previous;
+    if (repeat) {
+      if (!hashParam(route.hash, 'retry') && await repeatSub.submit(repeat)) repeat = undefined;
+      return;
+    }
     const queued = await retrySub.submit({ kind, host: source.host, input_ids, options }, retry.action(`previous:${kind}`));
     if (queued && !retrySub.replayed && visit.canPresent()) location.hash = `#/jobs/${encodeURIComponent(queued.id)}`;
   }
@@ -392,6 +426,9 @@
     tuneMax = '';
     tuneTouched = {};
     reviewId = null;
+  });
+  $effect(() => {
+    if (repeat && (hashParam(route.hash, 'retry') || repeat.input_ids[0] !== sourceId)) repeat = undefined;
   });
 </script>
 
@@ -438,22 +475,23 @@
     </div>
   </section>
 
-  {#if retry.failed}<p class="note warn">Cannot open the previous request. Enter the inputs again.</p>{/if}
+  {#if retry.failed}<RetryRecovery id="w-retry-loading" reason={retry.failure} reload={retry.reload} startNew={retry.startNew} />{/if}
   {#if retry.loadingReason}<p id="w-retry-loading" class="hint" role="status">{retry.loadingReason}</p>{/if}
   {#if retry.offered}<RetryOffer apply={retry.usePrevious} />{/if}
   {#if previous}
     <section class="panel" aria-labelledby="w-previous-h">
-      <header><h2 id="w-previous-h">Previous weight request</h2></header>
+      <header><h2 id="w-previous-h">{repeat ? 'New weight request' : 'Previous weight request'}</h2></header>
       <div class="body stack">
         <p>{kindTitle(previous.kind)} on {hostName(hosts, previous.host)}</p>
         <p class="small">Inputs: {previous.input_ids.map((id) => models.find((m) => m.id === id)?.name ?? id).join(', ')}</p>
         <KeyValues data={previous.options} />
-        <p class="hint">Review the prior inputs and options before you queue the job. To change them, use the editor below.</p>
-        <Submit blockers={previousBlockers} busy={retrySub.busy} onclick={queuePrevious}>Queue previous request</Submit>
-        <SubmitStatus s={retrySub} />
+        <p class="hint">Review the inputs and options before you queue the job. To change them, use the editor below.</p>
+        <Submit blockers={previousBlockers} busy={repeat ? repeatSub.busy : retrySub.busy} disabled={retry.unavailable} onclick={queuePrevious}>{repeat ? 'Queue new weight request' : 'Queue previous request'}</Submit>
+        {#if !repeat}<SubmitStatus s={retrySub} prepare={() => openRepeat(retrySub.acceptedBody)} />{/if}
       </div>
     </section>
   {/if}
+  <SubmitStatus s={repeatSub} prepare={() => openRepeat(repeatSub.acceptedBody)} />
 
   <section class="panel" aria-labelledby="w-make-h">
     <header>
@@ -509,7 +547,9 @@
           {pending}
           onproposal={openReview}
           tuneRetry={retry.action('visual:weight_tune')}
-          retryLoading={retry.loading}
+          retryLoading={retry.unavailable}
+          readRetry={visualReadRetry}
+          {openRepeat}
         />
         {/key}
         {/if}
@@ -602,7 +642,7 @@
           <span class="hint" id="w-tune-c-hint">One <span class="mono">row, column</span> pair per line. Start at 0. <span class="num">{coordCount}</span> of {MAX_COORDINATES}.</span>
           <FieldError id="w-tune-c-e" error={fieldError(visibleTune, 'coordinates')} />
         </div>
-        <SubmitStatus s={tuneSub} />
+        <SubmitStatus s={tuneSub} prepare={() => openRepeat(tuneSub.acceptedBody)} />
         <Submit blockers={tuneBlockers} busy={tuneSub.busy} disabled={retry.action('weight_tune').blocked} onclick={tune}>Tune selected weights</Submit>
       </div>
     {/if}
@@ -642,7 +682,7 @@
             {:else}
               <p class="xs muted">No edits yet.{#if source.kind === 'gguf'} Add edits from the visual editor or text entry above.{/if}</p>
             {/if}
-            <SubmitStatus s={proposeSub} />
+            <SubmitStatus s={proposeSub} prepare={() => openRepeat(proposeSub.acceptedBody)} />
             <Submit blockers={proposeBlockers} busy={proposeSub.busy} disabled={retry.action('weight_propose').blocked} onclick={propose}>Create proposal</Submit>
           </section>
         {/if}
@@ -714,7 +754,8 @@
                       New Library entry: <a href="#/weights?source={encodeURIComponent(applied.library_model_id)}">{appliedModel ? modelLabel(appliedModel) : applied.library_model_id}</a>{#if applied.output_sha256}, SHA-256 <span class="mono" title={applied.output_sha256}>{shortHash(applied.output_sha256)}</span>{/if}.
                     {/if}
                   </p>
-                {:else}
+                {/if}
+                {#if !doneApply || repeatingApply}
                   {#each applies.filter((a) => a.state !== 'succeeded').slice(0, 3) as a (a.id)}
                     <div class="row">
                       <JobState job={a} /><a class="xs mono" href="#/jobs/{encodeURIComponent(a.id)}">{a.id}</a>
@@ -728,10 +769,10 @@
                       <span>I reviewed all {proposal.edits.length} proposed {proposal.edits.length === 1 ? 'value' : 'values'} for source <span class="mono">{shortHash(proposal.source_sha256)}</span>.{#if tuneRegress}{' '}I accept that the held-out error increased.{/if}</span>
                     </label>
                   {/if}
-                  <SubmitStatus s={applySub} />
                   <Submit blockers={applyBlockers} busy={applySub.busy} disabled={retry.action('weight_apply').blocked} onclick={applyNow}>Apply as new {sourceFormat}</Submit>
                   <p class="xs muted">Apply registers a verified revision as a separate Library entry and keeps the original.</p>
                 {/if}
+                <SubmitStatus s={applySub} prepare={applySub.newRun ? prepareApply : undefined} />
               </div>
             {/if}
           {/if}
@@ -753,9 +794,9 @@
         <label for="w-ins-i">Coordinate</label>
         <input id="w-ins-i" class="input mono coord" bind:value={inspectIndex} autocomplete="off" spellcheck="false" placeholder="0, 0" />
       </div>
-      <Submit variant="secondary" blockers={inspectBlockers} busy={inspectSub.busy} disabled={retry.action('weight_inspect').blocked} onclick={inspect}>Inspect</Submit>
+      <Submit variant="secondary" blockers={inspectBlockers} busy={inspectSub.busy} disabled={retry.action('weight_inspect:value').blocked} onclick={inspect}>Inspect</Submit>
     </div>
-    <SubmitStatus s={inspectSub} />
+    <SubmitStatus s={inspectSub} prepare={() => openRepeat(inspectSub.acceptedBody)} />
     <div aria-live="polite">
       {#if lastInspect}
         <div class="ins">

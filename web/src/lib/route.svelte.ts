@@ -18,6 +18,16 @@ export function hashParam(hash: string, name: string): string | null {
   return q < 0 ? null : new URLSearchParams(hash.slice(q + 1)).get(name);
 }
 
+export function plainRunHref(hash: string): string {
+  const [path, query] = hash.split('?');
+  const params = new URLSearchParams(query);
+  // The diagnostic choice comes from the draft, not the old job link.
+  if (path === '#/convert' && params.has('retry')) params.delete('step');
+  params.delete('retry');
+  params.delete('retry_run');
+  return `${path}${params.size ? `?${params}` : ''}`;
+}
+
 export function parse(hash: string): { view: View; jobId: string | null } {
   const path = hash.replace(/^#\/?/, '').split('?')[0];
   const job = /^(?:jobs|job)\/([^/]+)$/.exec(path);

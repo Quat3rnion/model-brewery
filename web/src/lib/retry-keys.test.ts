@@ -1,5 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import { bodyKey, PlainAttempt, retryKey } from './retry-keys';
+import { bodyKey, PlainAttempt, retryKey, resultOfPreviousSubmission } from './retry-keys';
+import { stripEmpty } from './submit.svelte';
+import { orderedSuites } from './benchmark';
+
+it('canonicalizes only set-valued wire fields before hashing', async () => {
+  const first = stripEmpty({ kind: 'transfer', input_ids: ['b', 'a'] });
+  const second = stripEmpty({ kind: 'transfer', input_ids: ['a', 'b'] });
+  expect(first).toEqual(second);
+  expect(first.input_ids).toEqual(['a', 'b']);
+  expect(await retryKey('job', 'transfers.transfer', first)).toBe(await retryKey('job', 'transfers.transfer', second));
+  expect(stripEmpty({ kind: 'compare', input_ids: ['b', 'a'] }).input_ids).toEqual(['b', 'a']);
+  expect(stripEmpty({ kind: 'weight_tune', input_ids: ['source', 'train', 'check'], options: { indices: [[3, 1], [1, 2], [1, 0]] } }))
+    .toEqual({ kind: 'weight_tune', input_ids: ['source', 'train', 'check'], options: { indices: [[1, 0], [1, 2], [3, 1]] } });
+  expect(orderedSuites(['a', 'c', 'b'], ['b', 'a'])).toEqual(['b', 'a', 'c']);
+  expect(orderedSuites(['a', 'b'], ['b', 'a'])).toEqual(['b', 'a']);
+});
+
+it('labels a result as previous only when the current body differs from its accepted request', () => {
+  const accepted = bodyKey({ host: 'a', input_ids: ['old'] });
+  expect(resultOfPreviousSubmission(accepted, { input_ids: ['old'], host: 'a' })).toBe(false);
+  expect(resultOfPreviousSubmission(accepted, { host: 'a', input_ids: ['edited'] })).toBe(true);
+  expect(resultOfPreviousSubmission(accepted, null)).toBe(true);
+});
 
 describe('retryKey', () => {
   it('uses SHA-256 of JSON with recursively sorted keys and leaves array order intact', async () => {

@@ -13,7 +13,6 @@
 
 <script lang="ts">
   import { SvelteMap } from 'svelte/reactivity';
-  import { errorText } from '../lib/api';
   import { conversionRunHref, STAGES, type ConversionBody } from '../lib/conversion';
   import type { Blocker } from '../lib/blockers';
   import { conversions, type ConversionStarter } from '../lib/conversions.svelte';
@@ -22,15 +21,18 @@
   import { inventoryBlocker, validSha } from '../lib/ggufSource';
   import { obj } from '../lib/reports';
   import { brewery } from '../lib/store.svelte';
-  import type { JobDetail, JobSummary, Model } from '../lib/types';
+  import type { JobDetail, JobSummary, Model, NewJob } from '../lib/types';
   import { inventoryJob, readInventory, walkInventory } from '../lib/weightmap';
   import JobState from './JobState.svelte';
   import Blockers from './Blockers.svelte';
   import Submit from './Submit.svelte';
   import SubmitStatus from './SubmitStatus.svelte';
-  import { Submitter } from '../lib/submit.svelte';
+  import { acceptedJobSummary, Submitter } from '../lib/submit.svelte';
   import { trellisProblem } from '../lib/trellis-layer';
   import type { RetrySubmission } from '../lib/retry-prefill.svelte';
+  import { bodyKey, resultOfPreviousSubmission } from '../lib/retry-keys';
+  import NewRun from './NewRun.svelte';
+  import KeyValues from './KeyValues.svelte';
 
   let { source, format, starter, draft = $bindable(), retry, originalSha, loading }: {
     source: Model; format: 'gguf' | 'hgn'; starter: ConversionStarter; draft: RecipeDraft;
@@ -39,7 +41,15 @@
 
   const submitted = new SvelteMap<number, JobSummary | null>();
   const loaded = new SvelteMap<string, JobDetail | 'rejected' | null>();
+  const attempted = new Map<string, Date | null>();
   const reads = new Submitter('convert.recipe.inventory');
+  let plainRead = $state.raw<NewJob>();
+  let repeatedRead = $state(false);
+  function prepareRead() {
+    if (!reads.acceptedBody || reads.acceptedBody.input_ids[0] !== source.id || !reads.newRun?.()) return false;
+    plainRead = reads.acceptedBody;
+    return true;
+  }
   let error = $state('');
   const host = $derived(brewery.state?.hosts.find(h => h.id === source.host));
   const blocked = $derived(inventoryBlocker(source, host));
@@ -73,22 +83,28 @@
     const { offset, sha } = next;
     const request = inventoryJob(source.id, source.host, offset, sha);
     submitted.set(offset, null);
-    const accepted = await reads.submit(request);
+    const accepted = await reads.submit(request, { blocked: loading, preparePlain: retry?.preparePlain });
     if (!accepted) {
       submitted.delete(offset);
       return;
     }
-    try {
-      const job = 'state' in accepted ? accepted : await brewery.loadJob(accepted.id);
-      if (job.kind !== request.kind || job.host !== request.host || job.input_ids?.length !== 1 || job.input_ids[0] !== request.input_ids[0]) {
+    const id = accepted.id;
+    function record(job: JobSummary) {
+      if (job.id !== id || job.kind !== request.kind || job.host !== request.host || job.input_ids?.length !== 1 || job.input_ids[0] !== request.input_ids[0]) {
         error = 'The inventory job does not match the selected source.';
         return;
       }
       submitted.set(offset, job);
-    } catch (e) { error = errorText(e); }
+    }
+    record(acceptedJobSummary(accepted, request));
+    // A match can return only the ID. If the detail GET fails, wait for the
+    // state poll to replace the placeholder instead of latching an error.
+    if (!('state' in accepted)) void brewery.loadJob(id).then(record).catch(() => {});
   }
 
   $effect(() => {
+    // Try a transient detail error again after the next successful state poll.
+    const snapshot = brewery.lastUpdated;
     const job = inventory.job;
     if (flash || error || job?.state !== 'succeeded') return;
     const jobId = job.id;
@@ -101,7 +117,8 @@
       reject(inventory.error);
       return;
     }
-    if (loaded.has(jobId)) return;
+    if (loaded.has(jobId) || attempted.get(jobId) === snapshot) return;
+    attempted.set(jobId, snapshot);
     const { id, host, kind } = source;
     loaded.set(jobId, null);
     void brewery.loadJob(jobId).then(detail => {
@@ -115,7 +132,7 @@
         return;
       }
       loaded.set(jobId, detail);
-    }).catch(e => reject(errorText(e)));
+    }).catch(() => loaded.delete(jobId));
   });
 
   const formatTypes = $derived(recipeTypes(format));
@@ -188,12 +205,12 @@
     input_ids: selectedAsset && standalone ? [source.id, selectedAsset.id] : [source.id],
     options: { layer_recipe: recipe },
   } : null);
-  let lastBody = $state('');
-  const currentSubmission = $derived(body !== null && lastBody === JSON.stringify(body));
+  let attemptedBody = $state<string>();
+  const currentAttempt = $derived(body !== null && attemptedBody === bodyKey(body));
 
   async function run() {
     if (loading || !body || starter.busy) return;
-    lastBody = JSON.stringify(body);
+    attemptedBody = bodyKey(body);
     await starter.start(body, retry);
   }
 
@@ -229,7 +246,19 @@
     <JobState job={readJob} />
   </div>
 {/if}
-{#if reads.error || reads.replayed}<SubmitStatus s={reads} />{/if}
+{#if reads.error || reads.replayed || repeatedRead}<SubmitStatus s={reads} prepare={reads.newRun ? prepareRead : undefined} />{/if}
+{#if plainRead}
+  <div class="note info stack">
+    <p>New layer read for {modelLabel(source)}</p>
+    <KeyValues data={plainRead.options} />
+    <Submit blockers={blocked ? [blocked] : []} busy={reads.busy} disabled={loading || flash} onclick={async () => {
+      if (plainRead && await reads.submit(plainRead, { blocked: loading, preparePlain: retry?.preparePlain })) {
+        plainRead = undefined;
+        repeatedRead = true;
+      }
+    }}>Queue new layer read</Submit>
+  </div>
+{/if}
 {#if problem}
   <p class="note bad" role="alert">{problem}</p>
 {:else if inventory.need}
@@ -291,9 +320,11 @@
 {/if}
 <Submit blockers={runBlockers} busy={starter.busy} disabled={loading || retry?.blocked} onclick={run}>Run layer recipe</Submit>
 <div aria-live="polite" class="xs">
-  {#if currentSubmission && starter.error}
+  {#if currentAttempt && starter.error}
     <p class="note bad" role="alert">{starter.error} Run the same recipe again to retry the same request.</p>
   {:else if !starter.busy && starter.last}
+    {#if resultOfPreviousSubmission(starter.acceptedBodyKey, body)}<p class="muted">Result of the previous submission</p>{/if}
     <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a href={conversionRunHref(starter.last.id, 'recipe')}>{starter.last.id}</a>. {#if starter.replayed}No second conversion was started.{/if}</p>
   {/if}
 </div>
+{#if starter.replayed && starter.newRun && !starter.error}<NewRun prepare={starter.newRun} disabled={starter.busy} />{/if}
