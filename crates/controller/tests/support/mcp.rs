@@ -3,7 +3,7 @@ use super::*;
 const ACCEPT: &str = "Accept: application/json, text/event-stream\r\n";
 const VERSION: &str = "MCP-Protocol-Version: 2025-06-18\r\n";
 
-fn call(t: &Fixture, name: &str, arguments: Value) -> Value {
+pub(super) fn call(t: &Fixture, name: &str, arguments: Value) -> Value {
     let (status, body) = t.request(
         "POST",
         "/mcp",

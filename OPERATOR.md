@@ -465,6 +465,54 @@ is 64 rules, with one rule per copied row, and 262144 vector values.
 For HTTP 413 on a patch source read, split the selected positions into
 smaller ranges. If retention removed a row, run the source trace again.
 
+### Sparse autoencoders (SAEs)
+
+Save an SAE with `POST /api/saes`. Send `multipart/form-data` with one
+`metadata` JSON part and one `weights` SafeTensors part. A CLI client must
+send `Origin` equal to the controller URL. Use an `Idempotency-Key` for
+retries. The controller accepts at most 32 KiB of metadata and 128 MiB of
+weights per version. It stores both in the controller database.
+
+Bind the metadata to the Library GGUF or scratch `model_id`, the GGUF
+SHA-256, a zero-based `layer`, and one vector `role`. The trace worker
+checks the GGUF hash. Use `GET /api/saes` to list the latest versions.
+Use `POST /api/saes/{id}/versions` to save a new version at the same binding.
+Read metadata at `GET /api/saes/{id}/versions/{version}`. Append
+`/safetensors` to download the weights. On HTTP 503, wait and retry.
+
+Schema version 1 uses F32 tensors `W_enc[d_in,d_sae]`,
+`W_dec[d_sae,d_in]`, `b_enc[d_sae]`, and `b_dec[d_in]`. For `jump_relu`,
+also include a nonnegative `threshold[d_sae]`. The encoder scales the
+input by `normalization.scale`, optionally subtracts `b_dec`, then applies
+the encoder weights and bias. `relu` keeps positive values. `top_k`
+keeps up to `k` positive values. `jump_relu` keeps values strictly above
+each feature threshold. Record the source or training method in
+`provenance`. Do not use pickle files.
+
+To read features, set `options.sae` to `{"id":"<sae-id>","version":1,"top_k":5}`
+in a trace request. Capture the SAE layer and role. After the job
+succeeds, use `GET /api/jobs/{id}/trace/features?prompt=0&start=0&end=16`
+or MCP `read_feature_trace`. Select 1 to 16 token positions per read.
+In the Trace view, select a token position under **Top SAE features**.
+Feature reads depend on the same retention settings as tensor reads.
+
+To steer a feature, use MCP `steer_feature` or add
+`options.feature_steering` to a trace request:
+
+```json
+{"id":"<sae-id>","version":1,"feature":0,"alpha":8.0,"positions":[3]}
+```
+
+The trace adds `alpha` times the stored decoder row at each selected
+position. If the SAE uses a scale other than 1, choose `alpha` in units of
+the stored decoder direction. This rule must not overlap another
+intervention. This operation does not change model weights. Compare it
+with a trace of the same prompts and positions without steering. Results
+are **not release-qualified**.
+
+Use [the CPU SAE procedure](qualification/weight_space_sae.md) to train a
+small TopK SAE from trace rows or to load the pinned public ReLU example.
+
 ### Library intervention artifacts
 
 Use `POST /api/interventions` to save an artifact. Give it a name, the

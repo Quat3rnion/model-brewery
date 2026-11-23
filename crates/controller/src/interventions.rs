@@ -20,7 +20,7 @@ type Payload<T> = std::result::Result<Json<T>, JsonRejection>;
 type Mutation = Result<(StatusCode, Json<Artifact>)>;
 
 mod control_vector;
-mod trace_plan;
+pub(crate) mod trace_plan;
 pub use trace_plan::TracePlan;
 
 #[derive(Serialize, Deserialize)]

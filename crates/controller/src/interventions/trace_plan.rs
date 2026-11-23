@@ -57,6 +57,8 @@ impl TracePlan {
         let options = &mut envelope.options;
         let saved: Option<ArtifactRef> = take(options, "intervention_artifact")?;
         let patches: Vec<Patch> = take(options, "activation_patches")?.unwrap_or_default();
+        let sae: Option<crate::sae::Selection> = take(options, "sae")?;
+        let steering: Option<crate::sae::Steering> = take(options, "feature_steering")?;
         let request = trace::Request::controller(
             &Value::Object(options.clone()),
             envelope.prompt.as_deref(),
@@ -91,6 +93,12 @@ impl TracePlan {
             }
             digest = Some(saved.binding.model_sha256);
             rules.extend(saved.interventions);
+        }
+        if let Some(sae) = sae {
+            sae.prepare(store, &model.id, &mut digest, options)?;
+        }
+        if let Some(steering) = steering {
+            rules.push(steering.rule(store, &model.id, &mut digest)?);
         }
         let fixed = rules.len();
         let fixed_values = value_count(&rules);
@@ -184,6 +192,7 @@ impl TracePlan {
                     role,
                     dtype,
                     rows,
+                    ..
                 } = serde_json::from_value(data).map_err(|_| invalid_payload())?;
                 if (prompt, layer, role, dtype.as_str())
                     != (patch.source_prompt, patch.layer, patch.role, "f32_le")
@@ -255,24 +264,26 @@ impl Patch {
 }
 
 #[derive(Deserialize)]
-struct Rows {
-    prompt: usize,
-    layer: usize,
-    role: Role,
-    dtype: String,
-    rows: Vec<Row>,
+pub(crate) struct Rows {
+    pub prompt: usize,
+    pub layer: usize,
+    pub role: Role,
+    pub dtype: String,
+    pub rows: Vec<Row>,
+    #[serde(default)]
+    pub missing_positions: Vec<usize>,
 }
 
 #[derive(Deserialize)]
-struct Row {
-    position: usize,
+pub(crate) struct Row {
+    pub position: usize,
     shape: Vec<usize>,
     sha256: String,
     data_base64: String,
 }
 
 impl Row {
-    fn vector(&self) -> Result<Vec<f32>> {
+    pub fn vector(&self) -> Result<Vec<f32>> {
         let [width] = self.shape.as_slice() else {
             return Err(invalid_payload());
         };

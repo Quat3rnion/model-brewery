@@ -99,6 +99,7 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
         )
         .merge(crate::admin::router())
         .merge(crate::interventions::router())
+        .merge(crate::sae::router())
         .merge(crate::scratch::router())
         .merge(crate::diff::router())
         .merge(crate::infra_hosts::router())

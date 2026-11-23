@@ -397,7 +397,7 @@
           <div><CancelButton job={selected} small={false} /></div>
         {:else if selected.state === 'succeeded'}
           {#if detailError}<p class="note bad" role="alert">{detailError}</p>
-          {:else if detail}<TraceResults jobId={selected.id} result={detail.result} />
+          {:else if detail}<TraceResults jobId={selected.id} result={detail.result} hasSae={!!detail.options?.sae} />
           {:else}<p class="muted small">Loading…</p>{/if}
         {:else}
           <p class="note bad" role="alert">The trace did not finish ({selected.state}). {selected.error ?? ''}</p>
