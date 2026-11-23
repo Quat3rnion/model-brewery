@@ -23,7 +23,8 @@ def digest(path):
 def exercise(args):
     os.umask(0o077)
     root = args.out.resolve()
-    root.mkdir()
+    root.mkdir(mode=0o700)
+    (root / "worker").mkdir(mode=0o700)
     bins = args.bins.resolve()
     model = args.model.resolve()
     python = args.python.absolute()
