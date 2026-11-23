@@ -33,7 +33,7 @@ const MAX_CONTEXT: usize = 128;
 const TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 const JOB_TIMEOUT: Duration = Duration::from_secs(1800);
 
-fn digest(bytes: &[u8]) -> String {
+pub(crate) fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
@@ -254,7 +254,7 @@ fn selection(model: &Path, req: &Request) -> Result<Vec<Tensor>> {
     Ok(out)
 }
 
-fn matches_device(backend: Backend, device: &str) -> bool {
+pub(crate) fn matches_device(backend: Backend, device: &str) -> bool {
     let prefix = match backend {
         Backend::Cpu => return device == "CPU",
         Backend::Cuda => "CUDA",

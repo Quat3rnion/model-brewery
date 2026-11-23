@@ -27,6 +27,12 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("steer_feature", "post", "/api/jobs"),
     ("tensor_sensitivity", "post", "/api/jobs"),
     ("find_circuit", "post", "/api/jobs"),
+    ("quantization_damage_map", "post", "/api/jobs"),
+    (
+        "read_quantization_damage",
+        "get",
+        "/api/jobs/{id}/quantization-damage",
+    ),
     ("read_feature_trace", "get", "/api/jobs/{id}/trace/features"),
     ("get_job", "get", "/api/jobs/{id}"),
     ("list_interventions", "get", "/api/interventions"),
@@ -112,6 +118,7 @@ impl Server {
                             "start_trace" | "steer_feature" => Some("trace"),
                             "tensor_sensitivity" => Some("sensitivity"),
                             "find_circuit" => Some("circuit"),
+                            "quantization_damage_map" => Some("quantization_damage"),
                             _ => None,
                         },
                     ),
@@ -138,6 +145,9 @@ impl Server {
                 }
                 "find_circuit" => {
                     "Queue a CPU sweep of activation sites for one pinned Library GGUF and two equal-length prompts. Measure the top sites with independent activation patches. Poll with get_job. Cite the saved artifact at /api/jobs/{id}/circuit."
+                }
+                "quantization_damage_map" => {
+                    "Compare pinned Library BF16 and quantized GGUFs on the same worker. Read the damage map after the job finishes. The job does not apply its recipe proposal."
                 }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({
@@ -308,7 +318,10 @@ impl Server {
 
 impl Route {
     fn new(
-        contract: &Value, method: &str, path: &'static str, fixed_kind: Option<&'static str>,
+        contract: &Value,
+        method: &str,
+        path: &'static str,
+        fixed_kind: Option<&'static str>,
     ) -> Self {
         let operation = &contract["paths"][path][method];
         let description = operation["summary"]
@@ -493,6 +506,7 @@ fn fixed_job_schema(contract: &Value, kind: &str) -> Value {
         "trace" => "TraceJob",
         "sensitivity" => "SensitivityJob",
         "circuit" => "CircuitJob",
+        "quantization_damage" => "QuantizationDamageJob",
         _ => unreachable!("unmapped fixed job kind"),
     }];
     let mut schema = base["JobRequestFields"].clone();
@@ -503,7 +517,7 @@ fn fixed_job_schema(contract: &Value, kind: &str) -> Value {
     }
     let props = schema["properties"].as_object_mut().unwrap();
     props.remove("kind");
-    if matches!(kind, "sensitivity" | "circuit") {
+    if kind != "trace" {
         props.remove("prompt");
         props.remove("prompt_id");
     }

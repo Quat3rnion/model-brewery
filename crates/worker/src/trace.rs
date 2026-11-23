@@ -1,5 +1,5 @@
 //! Bounded Lanternfish CLI exports and the read-only trace wire format.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -509,6 +509,20 @@ pub fn circuit_trace(
         Some(logit(targets.0)? - targets.1.map(logit).transpose()?.unwrap_or(0.))
     };
     Ok(CircuitTrace { activations, metric })
+}
+
+/// Read a new local export for W5 before it is published as a trace job.
+pub fn verified_diff_input(dir: &Path, spec: &Capture) -> Result<Value> {
+    let export = verify(dir, spec)?;
+    let (m, seen) = manifest(dir, export.bytes)?;
+    ensure!(seen.manifest_sha256 == export.manifest_sha256, "trace manifest changed");
+    let slice = Slice {
+        view: View::DiffInput, prompt: 0, layer: None, role: None, start: None, end: None,
+    };
+    match diff::input(dir, m, &slice)? {
+        ReadReply::Ok(value) => Ok(value),
+        _ => bail!("verified trace exceeds the W5 diff input cap"),
+    }
 }
 
 fn seen_row_top(top: &[TopLogit], k: usize) -> bool {

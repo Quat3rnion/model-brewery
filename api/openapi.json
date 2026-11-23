@@ -982,6 +982,17 @@
         }
       }
     },
+    "/api/jobs/{id}/quantization-damage": {
+      "get": {
+        "operationId": "getQuantizationDamage",
+        "summary": "Read the quantization damage map and unapplied recipe proposal",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "responses": {
+          "200": {"description": "A versioned damage map and a recipe proposal for operator review.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/QuantizationDamageArtifact"}}}},
+          "403": {"$ref": "#/components/responses/Forbidden"}, "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      }
+    },
     "/api/jobs/{id}/trace/tensor": {
       "get": {
         "operationId": "getTraceTensor",
@@ -2436,7 +2447,7 @@
           "truncated": {"type": "boolean"}
         }
       },
-      "JobKind": {"type": "string", "enum": ["compare", "trace", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer", "sensitivity", "circuit"]},
+      "JobKind": {"type": "string", "enum": ["compare", "trace", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer", "sensitivity", "circuit", "quantization_damage"]},
       "JobState": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled"]},
       "CapabilityMap": {
         "type": "object", "description": "Map from each known job kind to its availability.",
@@ -2609,7 +2620,8 @@
           {"$ref": "#/components/schemas/WeightInspectJob"}, {"$ref": "#/components/schemas/WeightProposeJob"},
           {"$ref": "#/components/schemas/WeightTuneJob"}, {"$ref": "#/components/schemas/WeightApplyJob"},
           {"$ref": "#/components/schemas/Exl3LayerJob"}, {"$ref": "#/components/schemas/TraceJob"},
-          {"$ref": "#/components/schemas/SensitivityJob"}, {"$ref": "#/components/schemas/CircuitJob"}
+          {"$ref": "#/components/schemas/SensitivityJob"}, {"$ref": "#/components/schemas/CircuitJob"},
+          {"$ref": "#/components/schemas/QuantizationDamageJob"}
         ],
         "discriminator": {
           "propertyName": "kind",
@@ -2622,7 +2634,8 @@
             "weight_inspect": "#/components/schemas/WeightInspectJob", "weight_propose": "#/components/schemas/WeightProposeJob",
             "weight_tune": "#/components/schemas/WeightTuneJob", "weight_apply": "#/components/schemas/WeightApplyJob",
             "exl3_layer": "#/components/schemas/Exl3LayerJob", "trace": "#/components/schemas/TraceJob",
-            "sensitivity": "#/components/schemas/SensitivityJob", "circuit": "#/components/schemas/CircuitJob"
+            "sensitivity": "#/components/schemas/SensitivityJob", "circuit": "#/components/schemas/CircuitJob",
+            "quantization_damage": "#/components/schemas/QuantizationDamageJob"
           }
         }
       },
@@ -2678,6 +2691,44 @@
           {"allOf":[{"$ref":"#/components/schemas/OnePrompt"}],"properties":{"options":{"not":{"required":["prompts"]}}}},
           {"allOf":[{"$ref":"#/components/schemas/NoPrompt"}],"properties":{"options":{"required":["prompts"]}}}
         ]
+      },
+      "QuantizationDamageJob": {
+        "description":"Measure raw logit drift and attribute it to quantized tensors on the first lines of the pinned W4 held-out corpus. Use two single-file Library GGUFs on the same opted-in worker. The operator must ensure that both GGUFs come from the same revision.",
+        "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"},{"$ref":"#/components/schemas/NoPrompt"}],
+        "required":["input_ids","options"],
+        "properties":{
+          "kind":{"const":"quantization_damage"},
+          "input_ids":{"description":"Reference first, quantized second.","minItems":2,"maxItems":2,"uniqueItems":true,"x-brewery-input-kinds":[["gguf","gguf"]]},
+          "options":{"$ref":"#/components/schemas/QuantizationDamageOptions"}
+        }
+      },
+      "QuantizationDamageOptions": {
+        "type":"object","additionalProperties":false,"required":["reference_sha256","quantized_sha256","gguf_type"],
+        "properties":{
+          "reference_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "quantized_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "gguf_type":{"const":"Q4_K_M","description":"Base for the GGUF tensor-type override proposal."},
+          "backend":{"type":"string","enum":["cpu","cuda","rocm"],"default":"cpu"},
+          "observations":{"type":"integer","minimum":1,"maximum":4,"default":1},
+          "swaps":{"type":"integer","minimum":1,"maximum":5,"default":3},
+          "tensors":{"type":"array","maxItems":512,"uniqueItems":true,"items":{"type":"string","maxLength":63,"pattern":"^[A-Za-z0-9_.-]+$"},"description":"Optional exact tensor names. An empty selection measures all quantized tensors."}
+        }
+      },
+      "QuantizationDamageArtifact": {
+        "type":"object",
+        "required":["kind","schema_version","reference_id","quantized_id","tensors","layers","observations","recipe_proposal"],
+        "properties":{
+          "kind":{"const":"quantization_damage"},"schema_version":{"const":1},"qualification":{"const":"not release-qualified"},
+          "reference_id":{"$ref":"#/components/schemas/Id"},"quantized_id":{"$ref":"#/components/schemas/Id"},
+          "reference_sha256":{"$ref":"#/components/schemas/Sha256"},"quantized_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "observations":{"type":"array","items":{"type":"object","description":"Signed reference minus quantized logit and the W5 comparison for each prompt."}},
+          "tensors":{"type":"array","items":{"type":"object","description":"Tensor ranking with signed first-order and optional measured single-tensor recoveries."}},
+          "layers":{"type":"array","items":{"type":"object","description":"Layer ranking by mean absolute sum of signed tensor contributions."}},
+          "recipe_proposal":{"type":"object","required":["applied","options","profile","uniform_profile"],"properties":{
+            "applied":{"const":false},"options":{"type":"object","description":"Resolved GGUF engine options for the proposal."},
+            "profile":{"$ref":"#/components/schemas/NewGgufProfile"},"uniform_profile":{"$ref":"#/components/schemas/NewGgufProfile"}
+          }}
+        }
       },
       "SensitivityJob": {
         "description":"Measure empirical Fisher sensitivity on a single-file dense Qwen2 or Llama F32/BF16 Library GGUF or private scratch GGUF. Use its source worker. No prompt, GPU fallback, or model edits.",
@@ -4026,12 +4077,13 @@
           {"$ref": "#/components/schemas/Exl3LayerResult"},
           {"$ref": "#/components/schemas/TraceResult"},
           {"$ref": "#/components/schemas/WeightSpectraResult"},
+          {"$ref": "#/components/schemas/QuantizationDamageArtifact"},
           {"type": "object", "not": {"anyOf": [
             {"$ref": "#/components/schemas/CompareResult"}, {"$ref": "#/components/schemas/ConversionResult"},
             {"$ref": "#/components/schemas/GenerateResult"}, {"$ref": "#/components/schemas/Gsm8kResult"},
             {"$ref": "#/components/schemas/BenchmarkResult"}, {"$ref": "#/components/schemas/TransferResult"},
              {"$ref": "#/components/schemas/CacheCleanupResult"}, {"$ref": "#/components/schemas/WeightApplyResult"},
-             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace", "weight_spectra"]}}}
+             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace", "weight_spectra", "quantization_damage"]}}}
           ]}}
         ]
       },

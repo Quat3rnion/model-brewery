@@ -11,6 +11,7 @@ pub const KINDS: &[&str] = &[
     brewery_worker::trace::JOB,
     brewery_worker::sensitivity::JOB,
     brewery_worker::circuit::JOB,
+    brewery_worker::damage::JOB,
     "inspect",
     "plan",
     "convert",
@@ -670,6 +671,7 @@ impl Host {
                     | brewery_worker::trace::JOB
                     | brewery_worker::sensitivity::JOB
                     | brewery_worker::circuit::JOB
+                    | brewery_worker::damage::JOB
                     | brewery_worker::exl3_layer::JOB
             ) || crate::weights::is_kind(kind);
             let enabled = options.remove(kind).unwrap_or(!opt_in)
@@ -683,7 +685,7 @@ impl Host {
                         "Configure Hugging Face downloads and opt in on this worker"
                     } else if kind == brewery_worker::trace::JOB {
                         "Configure pinned CPU Lanternfish and opt in on this worker"
-                    } else if kind == brewery_worker::sensitivity::JOB {
+                    } else if matches!(kind, brewery_worker::sensitivity::JOB | brewery_worker::damage::JOB) {
                         "Configure pinned Lanternfish sensitivity and opt in on this worker"
                     } else if kind == brewery_worker::circuit::JOB {
                         "Configure the pinned CPU Lanternfish gradient runtime and opt in on this worker"
@@ -1084,8 +1086,10 @@ pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<
                     && !host.scheduling_paused
                     && host.capabilities["weight_apply"]
                     && host.capabilities["weight_safetensors"]
-                    && (!matches!(job.kind.as_str(), brewery_worker::trace::JOB | brewery_worker::sensitivity::JOB)
-                        || host.capabilities[&job.kind])
+                    && (!matches!(
+                        job.kind.as_str(),
+                        brewery_worker::trace::JOB | brewery_worker::sensitivity::JOB
+                    ) || host.capabilities[&job.kind])
             })
             .collect();
     }
@@ -1248,6 +1252,14 @@ impl NewJob {
         } else {
             match self.kind.as_str() {
                 "compare" => n == 2 && main == "gguf" && second == "gguf" && prompt.is_some(),
+                brewery_worker::damage::JOB => {
+                    n == 2
+                        && main == "gguf"
+                        && second == "gguf"
+                        && inputs.iter().all(|m| m.host == host)
+                        && inputs[0].id != inputs[1].id
+                        && prompt.is_none()
+                }
                 brewery_worker::trace::JOB
                 | brewery_worker::sensitivity::JOB
                 | brewery_worker::circuit::JOB => {
@@ -1398,6 +1410,18 @@ fn check_options(job: &str, options: &Map<String, Value>, inputs: &[Model]) -> R
                     .map_or(Ok(()), |sha| req.check_model(sha))
             })
             .map_err(|err| format!("{err:#}"));
+    }
+    if job == brewery_worker::damage::JOB {
+        let request = brewery_worker::damage::Request::parse(&Value::Object(options.clone()))
+            .map_err(|err| format!("{err:#}"))?;
+        if inputs
+            .iter()
+            .zip(request.hashes())
+            .any(|(m, sha)| m.sha256.as_deref().is_some_and(|s| s != sha))
+        {
+            return Err("damage map input SHA-256 mismatch".into());
+        }
+        return Ok(());
     }
     if job == "hf_download" {
         return brewery_worker::hf_download::Spec::parse(&Value::Object(options.clone()))

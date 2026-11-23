@@ -2,6 +2,7 @@ mod benchmark;
 mod circuit;
 mod compare;
 mod converter;
+mod damage;
 mod exl3_layer;
 mod gguf;
 mod gguf_conversion;
@@ -402,6 +403,7 @@ fn run() -> Result<i32> {
         brewery_worker::trace::JOB => trace::run(&job, &cwd, &progress)?,
         brewery_worker::sensitivity::JOB => sensitivity::run(&job, &cwd, &progress)?,
         brewery_worker::circuit::JOB => circuit::run(&job, &cwd, &progress)?,
+        brewery_worker::damage::JOB => damage::run(&job, &cwd, &progress)?,
         brewery_worker::scratch_eval::CHECKS => scratch_checks::run(&job, &cwd, &progress)?,
         brewery_worker::locate_edit::JOB => scratch_locate::run(&job, &cwd, &progress)?,
         brewery_worker::scratch_eval::GGUF => {

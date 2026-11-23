@@ -134,6 +134,11 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/jobs/{id}/trace", "getTraceManifest"),
         ("get", "/api/jobs/{id}/sensitivity", "getTensorSensitivity"),
         ("get", "/api/jobs/{id}/circuit", "getCircuit"),
+        (
+            "get",
+            "/api/jobs/{id}/quantization-damage",
+            "getQuantizationDamage",
+        ),
         ("get", "/api/jobs/{id}/trace/tensor", "getTraceTensor"),
         ("get", "/api/jobs/{id}/trace/features", "readFeatureTrace"),
         (
@@ -151,7 +156,11 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("post", "/api/saes", "createSae"),
         ("post", "/api/crosscoders", "importCrosscoder"),
         ("get", "/api/crosscoders/{id}", "getCrosscoderDiff"),
-        ("get", "/api/crosscoders/{id}/safetensors", "exportCrosscoderWeights"),
+        (
+            "get",
+            "/api/crosscoders/{id}/safetensors",
+            "exportCrosscoderWeights",
+        ),
         ("post", "/api/saes/{id}/versions", "createSaeVersion"),
         ("get", "/api/saes/{id}/versions/{version}", "getSaeVersion"),
         (

@@ -26,6 +26,10 @@ and correlation for the patched sites. Do not call unpatched sites confirmed.
 Use the read-only `interp_benchmark` tool to read compiled-program X5, W11,
 and X6 scores against compiler ground truth. These scores do not validate
 results on a language model.
+For quantization damage, use `quantization_damage_map` with the pinned
+reference and quantized GGUFs from the same revision. Use
+`read_quantization_damage` after success. Report the measured swaps and any
+disagreement with the estimates. Do not apply the recipe proposal.
 
 For a weight change, convert the child to private GGUF with the same assets.
 Trace it with the same prompts and capture settings as the parent. Always

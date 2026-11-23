@@ -15,16 +15,19 @@ mod interventions;
 #[path = "support/mcp.rs"]
 mod mcp;
 
-#[path = "support/sae.rs"]
-mod sae;
 #[path = "support/crosscoder.rs"]
 mod crosscoder;
+#[path = "support/sae.rs"]
+mod sae;
 
 #[path = "support/sensitivity.rs"]
 mod sensitivity;
 
 #[path = "support/circuit.rs"]
 mod circuit;
+
+#[path = "support/damage.rs"]
+mod damage;
 
 #[path = "support/weights.rs"]
 mod weights;

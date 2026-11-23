@@ -121,7 +121,10 @@ fn lineage_returns_same_evidence_via_mcp_without_writing_records() {
     let (status, _) = t.request(&format!("{route}?candidate_1=bad"), "", None);
     assert_eq!(status, 400);
     let (status, _) = t.request(
-        &format!("{route}?candidate_1={0}&candidate_2={0}", base["id"].as_str().unwrap()),
+        &format!(
+            "{route}?candidate_1={0}&candidate_2={0}",
+            base["id"].as_str().unwrap()
+        ),
         "",
         None,
     );
@@ -135,18 +138,29 @@ fn weight_spectra_queues_parent_comparison_and_replays_through_mcp() {
     let hash = sha(&fs::read(&source).unwrap());
     t.launch();
     let (status, model) = t.request(
-        "/api/models", "", Some(json!({"host":"existing","kind":"safetensors","path":source})),
+        "/api/models",
+        "",
+        Some(json!({"host":"existing","kind":"safetensors","path":source})),
     );
     assert_eq!(status, 201, "{model}");
-    assert_eq!(t.admin(Some(json!({
-        "action":"set_weight_editor","worker":"existing","revision":0,"enabled":true
-    }))).0, 200);
-    let (status, scratch) = t.request("/api/scratch", "", Some(json!({
-        "parent_id":model["id"], "parent_sha256":hash
-    })));
+    assert_eq!(
+        t.admin(Some(json!({
+            "action":"set_weight_editor","worker":"existing","revision":0,"enabled":true
+        })))
+        .0,
+        200
+    );
+    let (status, scratch) = t.request(
+        "/api/scratch",
+        "",
+        Some(json!({
+            "parent_id":model["id"], "parent_sha256":hash
+        })),
+    );
     assert_eq!(status, 201, "{scratch}");
     let (status, job) = t.request(
-        "/api/weight-spectra", "Idempotency-Key: spectra-test\r\n",
+        "/api/weight-spectra",
+        "Idempotency-Key: spectra-test\r\n",
         Some(json!({"id":scratch["id"],"tensor":"w"})),
     );
     assert_eq!(status, 202, "{job}");
@@ -155,7 +169,10 @@ fn weight_spectra_queues_parent_comparison_and_replays_through_mcp() {
             "name":"weight_spectra", "arguments":{"id":scratch["id"],"tensor":"w","idempotency_key":"spectra-test"}
         }
     })));
-    assert_eq!(replay["result"]["structuredContent"]["id"], job["id"], "{replay}");
+    assert_eq!(
+        replay["result"]["structuredContent"]["id"], job["id"],
+        "{replay}"
+    );
     let route = format!("/api/jobs/{}", job["id"].as_str().unwrap());
     for _ in 0..100 {
         let (_, detail) = t.request(&route, "", None);
@@ -748,7 +765,10 @@ fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
     fisher["options"]["model_sha256"] = revision["gguf"]["sha256"].clone();
     let (status, sensitivity) = t.request("/api/jobs", "", Some(fisher));
     assert_eq!(status, 201, "{sensitivity}");
-    let artifact_url = format!("/api/jobs/{}/sensitivity", sensitivity["id"].as_str().unwrap());
+    let artifact_url = format!(
+        "/api/jobs/{}/sensitivity",
+        sensitivity["id"].as_str().unwrap()
+    );
     loop {
         let (status, artifact) = t.request(&artifact_url, "", None);
         if status == 200 {
@@ -1100,7 +1120,9 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "plan_experts",
             "prune_experts",
             "prune_model",
+            "quantization_damage_map",
             "read_feature_trace",
+            "read_quantization_damage",
             "read_token_loss_diff",
             "read_trace",
             "register_model",
@@ -1135,7 +1157,16 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
                     .contains(&json!("backend"))
             );
         }
-        if matches!(tool["name"].as_str(), Some("start_trace" | "steer_feature" | "tensor_sensitivity" | "find_circuit")) {
+        if matches!(
+            tool["name"].as_str(),
+            Some(
+                "start_trace"
+                    | "steer_feature"
+                    | "tensor_sensitivity"
+                    | "find_circuit"
+                    | "quantization_damage_map"
+            )
+        ) {
             let flag = &schema["properties"]["allow_duplicate"];
             assert_eq!(flag["type"], "boolean");
             assert_eq!(flag["default"], false);
@@ -1705,7 +1736,10 @@ fn scratch_edits_keep_parents_and_require_separate_publish_approval() {
             .any(|m| m["id"] == approved["library_model_id"] && m["kind"] == "safetensors")
     );
     let (status, lineage) = t.request(
-        &format!("/api/models/{}/lineage", approved["library_model_id"].as_str().unwrap()),
+        &format!(
+            "/api/models/{}/lineage",
+            approved["library_model_id"].as_str().unwrap()
+        ),
         "",
         None,
     );

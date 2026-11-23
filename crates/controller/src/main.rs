@@ -25,6 +25,7 @@ mod profiles;
 mod remote_edit;
 mod sae;
 mod sensitivity;
+mod damage;
 mod scratch;
 mod scratch_token_loss;
 mod settings;

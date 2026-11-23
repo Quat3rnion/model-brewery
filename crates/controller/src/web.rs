@@ -20,7 +20,10 @@ use axum::{
     response::{IntoResponse, Response, Sse, sse::KeepAlive},
     routing::{delete, get, post},
 };
-use brewery_worker::{sensitivity, trace::{self, ReadReply, Slice, View}};
+use brewery_worker::{
+    sensitivity,
+    trace::{self, ReadReply, Slice, View},
+};
 use serde_json::{Value, json, value::RawValue};
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc};
 use tower_http::services::ServeDir;
@@ -80,6 +83,7 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
         .route("/jobs/{id}/trace", get(trace_manifest))
         .route("/jobs/{id}/sensitivity", get(crate::sensitivity::get))
         .route("/jobs/{id}/circuit", get(crate::circuit::get))
+        .route("/jobs/{id}/quantization-damage", get(crate::damage::get))
         .route("/jobs/{id}/trace/tensor", get(trace_tensor))
         .route("/jobs/{id}/trace/logit-lens", get(trace_logit_lens))
         .route("/jobs/{id}/trace/model-logits", get(trace_model_logits))
@@ -739,7 +743,10 @@ fn prepare_job(app: &App, store: &Store, request: NewJob) -> Result<(Job, Envelo
                 let (model, sha) = crate::scratch::jobs::trace_input(store, id)?;
                 scratch_pins.insert(model.path.clone(), sha);
                 if request.kind == sensitivity::JOB {
-                    sensitivity_revision = store.scratch(id).map_err(ApiError::storage)?.map(|r| r.sha256);
+                    sensitivity_revision = store
+                        .scratch(id)
+                        .map_err(ApiError::storage)?
+                        .map(|r| r.sha256);
                 }
                 model
             } else {

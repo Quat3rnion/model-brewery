@@ -1014,6 +1014,23 @@ impl Store {
         if job.scratch_job && matches!(job.state, State::Failed | State::Cancelled) {
             crate::scratch::jobs::clean_failed_conversion(self, job);
         }
+        if job.state == State::Succeeded && job.kind == brewery_worker::damage::JOB {
+            use brewery_worker::damage;
+            let envelope = self.envelope(&job.id)?;
+            let check = (|| -> Result<()> {
+                let request = damage::Request::parse(&Value::Object(envelope.options))?;
+                let [a, b] = envelope.inputs.as_slice() else { return Err("missing damage map inputs".into()); };
+                Ok(damage::check_result(&request, result.as_ref().unwrap_or(&Value::Null), [&a.id, &b.id])?)
+            })();
+            if let Err(error) = check {
+                eprintln!("Rejected quantization damage artifact for {}: {error}", job.id);
+                job.state = State::Failed;
+                job.progress = "Quantization damage artifact was not accepted".into();
+                job.error = Some("Invalid quantization damage artifact".into());
+                job.has_result = false;
+                result = None;
+            }
+        }
         if job.state == State::Succeeded && job.kind == brewery_worker::sensitivity::JOB {
             let envelope = self.envelope(&job.id)?;
             match crate::sensitivity::check(job, &envelope, result.take().unwrap_or(Value::Null)) {

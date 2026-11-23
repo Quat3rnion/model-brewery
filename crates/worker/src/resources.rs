@@ -145,6 +145,7 @@ pub fn engine_job(kind: &str) -> bool {
             | crate::trace::JOB
             | crate::sensitivity::JOB
             | crate::circuit::JOB
+            | crate::damage::JOB
             | crate::scratch_eval::GGUF
             | crate::scratch_eval::CHECKS
             | crate::locate_edit::JOB

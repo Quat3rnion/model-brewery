@@ -162,7 +162,10 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
         }
         Ok(value)
     });
-    if (matches!(job.kind.as_str(), trace::JOB | sensitivity::JOB | circuit::JOB) || scratch_eval::private_output(&job.kind))
+    if (matches!(
+        job.kind.as_str(),
+        trace::JOB | sensitivity::JOB | circuit::JOB | damage::JOB
+    ) || scratch_eval::private_output(&job.kind))
         && created_work
         && (r.cancel || result.is_err())
         && let Err(error) =
@@ -357,7 +360,9 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             "pinned Lanternfish gradient backend is unavailable"
         );
         // The native runtime may expand BF16 weights to a private F32 GGUF.
-        let model_bytes = weight_source::open_regular(&job.inputs[0].path)?.metadata()?.len();
+        let model_bytes = weight_source::open_regular(&job.inputs[0].path)?
+            .metadata()?
+            .len();
         resources::disk_check(
             &w.cfg.root,
             w.disk_floor(job.resources.disk_reserve_bytes)
@@ -365,6 +370,36 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .saturating_add(model_bytes.saturating_mul(2)),
         )?;
         Some(backend)
+    } else if job.kind == damage::JOB {
+        let req = damage::Request::parse(&job.options)?;
+        ensure!(
+            damage::configured(&w.cfg.engine_env, &req, w.cfg.admission.as_deref()),
+            "pinned damage map backend is unavailable"
+        );
+        let [a, b] = job.inputs.as_slice() else {
+            bail!("missing damage map sources")
+        };
+        let size = |input: &Input| -> Result<u64> {
+            Ok(weight_source::open_regular(&input.path)?.metadata()?.len())
+        };
+        let (a, b) = (size(a)?, size(b)?);
+        ensure!(
+            [a, b]
+                .into_iter()
+                .all(|size| size <= damage::MAX_MODEL_BYTES),
+            "damage map input exceeds disk budget"
+        );
+        // At most one expanded head and one gradient (or one swap file).
+        let scratch = (a * 2 + damage::MAX_GRADIENT_BYTES * 2)
+            .max(b + damage::MAX_GRADIENT_BYTES / 2)
+            + (128 << 20)
+            + req.backend.runtime_stage_reserve();
+        resources::disk_check(
+            &w.cfg.root,
+            w.disk_floor(job.resources.disk_reserve_bytes)
+                .saturating_add(scratch),
+        )?;
+        Some(req.backend)
     } else {
         None
     };
@@ -448,14 +483,11 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .env("OMP_NUM_THREADS", "1");
         }
         c
-    } else if let Some(wrapper) = w
-        .cfg
-        .admission
-        .as_ref()
-        .filter(|_| {
-            gradient_backend.map_or(gpu_edit || (job.kind != trace::JOB && !scratch_job), |b| b.is_gpu())
+    } else if let Some(wrapper) = w.cfg.admission.as_ref().filter(|_| {
+        gradient_backend.map_or(gpu_edit || (job.kind != trace::JOB && !scratch_job), |b| {
+            b.is_gpu()
         })
-    {
+    }) {
         let mut c = Command::new(wrapper);
         c.args(["--wait", "--"]).arg(&w.cfg.engine);
         c
@@ -480,7 +512,11 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 scratch_eval::CACHE,
             ],
             locate_edit::JOB => &[],
-            sensitivity::JOB => &[sensitivity::PIN, sensitivity::MANIFEST_SHA, locate_edit::GPU_GATE],
+            sensitivity::JOB | damage::JOB => &[
+                sensitivity::PIN,
+                sensitivity::MANIFEST_SHA,
+                locate_edit::GPU_GATE,
+            ],
             circuit::JOB => &[sensitivity::PIN, sensitivity::MANIFEST_SHA],
             _ => &[trace::EXECUTABLE, trace::LIB_DIR],
         };
@@ -494,7 +530,11 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                         .flatten(),
                 )
                 .chain(["BREWERY_CPU_THREADS"])
-                .chain(gradient_backend.into_iter().flat_map(|b| b.visibility_vars().iter().copied()))
+                .chain(
+                    gradient_backend
+                        .into_iter()
+                        .flat_map(|b| b.visibility_vars().iter().copied()),
+                )
                 .filter_map(|key| w.cfg.engine_env.get(key).map(|value| (key, value))),
         );
         if gpu_edit || gradient_backend.is_some_and(locate_edit::Backend::is_gpu) {
@@ -814,7 +854,9 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         let (request, revision) = sensitivity::Request::resolved(&job.options)?;
         let input = &job.inputs[0];
         request.check_model(input.extra["sha256"].as_str().unwrap_or_default())?;
-        let model_id = input.extra["id"].as_str().context("missing sensitivity source ID")?;
+        let model_id = input.extra["id"]
+            .as_str()
+            .context("missing sensitivity source ID")?;
         let artifact: sensitivity::Artifact = serde_json::from_value(value)?;
         artifact.check(&request, model_id, &revision)?;
         ensure!(
@@ -827,7 +869,9 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         let request = circuit::Request::parse(&job.options)?;
         let input = &job.inputs[0];
         request.check_model(input.extra["sha256"].as_str().unwrap_or_default())?;
-        let model_id = input.extra["id"].as_str().context("missing circuit source ID")?;
+        let model_id = input.extra["id"]
+            .as_str()
+            .context("missing circuit source ID")?;
         let artifact: circuit::Artifact = serde_json::from_value(value)?;
         artifact.check(&request, model_id)?;
         ensure!(
@@ -835,6 +879,26 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             "circuit artifact runtime SHA-256 does not match worker pin"
         );
         return Ok(serde_json::to_value(artifact)?);
+    }
+    if job.kind == damage::JOB {
+        let request = damage::Request::parse(&job.options)?;
+        let [a, b] = job.inputs.as_slice() else {
+            bail!("missing damage map sources")
+        };
+        let ids = [
+            a.extra["id"].as_str().context("missing reference ID")?,
+            b.extra["id"].as_str().context("missing quantized ID")?,
+        ];
+        damage::check_result(&request, &value, ids)?;
+        ensure!(
+            w.cfg
+                .engine_env
+                .get(sensitivity::MANIFEST_SHA)
+                .map(String::as_str)
+                == value["manifest_sha256"].as_str(),
+            "damage artifact runtime SHA-256 does not match worker pin"
+        );
+        return Ok(value);
     }
     if w.cfg.hy4_plan.as_ref().is_some_and(|p| p.encode.is_some()) {
         let artifact = &value["artifact"];

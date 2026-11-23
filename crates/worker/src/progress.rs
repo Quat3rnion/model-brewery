@@ -53,6 +53,8 @@ pub fn engine(base: &Path, since: u64) -> Option<ProgressDetail> {
             | "publish_output"
             | "compare_left"
             | "trace_prompts"
+            | "damage_gradients"
+            | "damage_swaps"
             | "sensitivity_gradients"
             | "circuit_attribution"
             | "circuit_patches"
@@ -192,6 +194,8 @@ pub fn apply(reply: &mut Reply, detail: ProgressDetail) {
         "verify_staged" => "Verifying staged bundle checksums",
         "verify_output" => "Verifying engine output",
         "trace_prompts" => "Capturing and checking prompts",
+        "damage_gradients" => "Measuring quantization damage",
+        "damage_swaps" => "Checking single-tensor swaps",
         "sensitivity_gradients" => "Measuring and checking gradients",
         "circuit_attribution" => "Measuring activation attribution",
         "circuit_patches" => "Checking the top activation patches",
