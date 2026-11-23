@@ -1,7 +1,7 @@
 import AxeBuilder from '@axe-core/playwright';
 import { test, expect } from './fixtures.mjs';
 import { libraryWeights, verifiedHash } from './mock/library-weights.mjs';
-import { scenario } from './mock/scenarios.mjs';
+import { detail, job, scenario } from './mock/scenarios.mjs';
 
 test('Library shows controller identity and does not link unusable weights to the editor', async ({ page, controller }) => {
   libraryWeights(controller);
@@ -203,4 +203,100 @@ test('Running jobs have AA contrast and can collapse on mobile', async ({ page, 
   await expect(strip).toContainText('2 running');
   await toggle.press('Enter');
   await expect(running).toBeVisible();
+});
+
+for (const direction of ['back', 'forward']) {
+  test(`HF download retains an unsent draft when ${direction} is declined`, async ({ page, controller }) => {
+    libraryWeights(controller);
+    const sections = page.getByRole('navigation', { name: 'Sections' });
+    if (direction === 'back') {
+      await controller.open(page, 'queue');
+      await sections.getByRole('link', { name: 'Library' }).click();
+    } else {
+      await controller.open(page, 'library');
+      await sections.getByRole('link', { name: 'Jobs' }).click();
+      await page.goBack();
+    }
+    await page.getByText('Download from Hugging Face', { exact: true }).click();
+    await page.getByLabel('Repository ID').fill('fixture/model');
+    await page.getByLabel('Revision (optional)').fill('selected-tag');
+    await page.getByLabel('Model filename').fill('nested/test.gguf');
+    const confirmation = page.waitForEvent('dialog', { timeout: 5000 }).then((dialog) => dialog.dismiss());
+    await page.evaluate((direction) => { history[direction](); }, direction);
+    await confirmation;
+    await expect(page).toHaveURL(/#\/library$/);
+    await expect(page.getByLabel('Repository ID')).toHaveValue('fixture/model');
+    await expect(page.getByLabel('Revision (optional)')).toHaveValue('selected-tag');
+    await expect(page.getByLabel('Model filename')).toHaveValue('nested/test.gguf');
+    expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
+  });
+}
+
+test('HF download verifies files before adding a Library entry', async ({ page, controller }) => {
+  libraryWeights(controller);
+  await controller.open(page, 'library');
+  await page.getByText('Download from Hugging Face', { exact: true }).click();
+  await expect(page.getByText('The download service verifies the files before it adds the entry to Library.', { exact: false })).toBeVisible();
+});
+
+const sha = 'a'.repeat(64);
+const tensor = 'blk.0.ffn_down.weight';
+const edit = { tensor, index: [0, 1], op: 'set', value: 0.125 };
+test('Weights can inspect an exact GGUF value with inspect and tune only', async ({ page, controller }) => {
+  const state = scenario('live-shaped');
+  const host = state.hosts[0];
+  Object.assign(host.capabilities, { weight_inspect: true, weight_tune: true, weight_visual: false, weight_propose: false });
+  controller.respond('GET', '/api/state', { json: state });
+  await controller.open(page, 'weights?source=gguf-a');
+  const lookup = page.getByRole('group', { name: /Look up a stored value/ });
+  await expect(lookup).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Tensor, edit 1' })).toHaveCount(0);
+  await lookup.getByLabel('Tensor', { exact: true }).fill(tensor);
+  await lookup.getByLabel('Coordinate').fill('0, 1');
+  expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
+  await lookup.getByRole('button', { name: 'Inspect', exact: true }).click();
+  await expect.poll(() => controller.requests('POST', '/api/jobs').map(({ body }) => body)).toEqual([
+    { kind: 'weight_inspect', host: 'worker-a', input_ids: ['gguf-a'], options: { tensor, index: [0, 1] } },
+  ]);
+});
+
+const proposal = detail(job('old-proposal', 'weight_propose', { state: 'succeeded', input_ids: ['gguf-a'] }), {
+  report: { proposal: { schema: 'brewery.weight-edit-proposal.v1', source_sha256: sha,
+    edits: [{ ...edit, dtype: 'F32', before: 0.5, after: 0.125 }] } },
+});
+
+test('Weights keeps a draft when Forward is declined after Back between identical URLs', async ({ page, controller }) => {
+  const state = scenario('weight-reads');
+  state.hosts[1].capabilities = state.hosts[0].capabilities;
+  const applied = detail(job('applied-proposal', 'weight_apply', {
+    state: 'succeeded', input_ids: ['gguf-a'], options: { proposal_job_id: proposal.id, reviewed: true },
+  }), { library_model_id: 'gguf-b', report: { schema: 'brewery.weight-edit-result.v1', source_sha256: sha,
+    output_sha256: 'b'.repeat(64), edit_count: 1, verified: true } });
+  state.jobs.push(proposal, applied);
+  controller.respond('GET', '/api/state', { json: state });
+  for (const detail of [proposal, applied]) controller.respond('GET', `/api/jobs/${detail.id}`, { json: detail });
+  await controller.open(page, 'weights?source=gguf-a');
+  await page.getByRole('radio', { name: /old-proposal/ }).check();
+  await page.getByRole('link', { name: 'Fixture GGUF copy', exact: true }).click();
+  const picker = page.locator('#w-source');
+  await expect(picker).toHaveValue('Fixture GGUF copy');
+  await picker.click();
+  await page.getByRole('option', { name: /^Fixture GGUF\b(?! copy)/ }).click();
+  await expect(page).toHaveURL(/source=gguf-a$/);
+  // The URL stays the same, but the browser has moved to a different entry.
+  const back = page.evaluate(() => new Promise((resolve) => {
+    window.addEventListener('popstate', () => resolve(), { once: true });
+    history.back();
+  }));
+  await back;
+  await picker.click();
+  await page.getByRole('option', { name: /^Fixture GGUF copy/ }).click();
+  await page.getByText('Text entry: type tensor names and coordinates').click();
+  const draft = page.getByRole('textbox', { name: 'Tensor, edit 1' });
+  await draft.fill(tensor);
+  const confirm = page.waitForEvent('dialog', { predicate: (d) => d.type() === 'confirm' }).then((d) => d.dismiss());
+  await page.evaluate(() => { history.forward(); });
+  await confirm;
+  await expect(page).toHaveURL(/source=gguf-b$/);
+  await expect(draft).toHaveValue(tensor);
 });

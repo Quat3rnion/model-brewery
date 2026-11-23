@@ -6,9 +6,6 @@
   import { fieldError, visibleBlockers, type Blocker } from '../lib/blockers';
   import { hostWorkflowEligibility } from '../lib/eligibility';
   import { unsavedChanges } from '../lib/unsaved-changes.svelte';
-  import { availableId, historicalPrompt, loadRetryJob, RetryPrefill, watchPrefill } from '../lib/retry-prefill.svelte';
-  import RetryOffer from '../components/RetryOffer.svelte';
-  import RetryWarnings from '../components/RetryWarnings.svelte';
   import HostSelect from '../components/HostSelect.svelte';
   import Combobox from '../components/Combobox.svelte';
   import { idOptions, promptOptions } from '../lib/pickers';
@@ -17,10 +14,9 @@
   import Blockers from '../components/Blockers.svelte';
   import FieldError from '../components/FieldError.svelte';
   import SubmitStatus from '../components/SubmitStatus.svelte';
-  import RetryRecovery from '../components/RetryRecovery.svelte';
   import RecentJobs from '../components/RecentJobs.svelte';
   import Badge from '../components/Badge.svelte';
-  import type { Host, JobDetail, JobSummary, NewJob, Workflow } from '../lib/types';
+  import type { Host, JobSummary, NewJob, Workflow } from '../lib/types';
 
   const hosts = $derived(brewery.state?.hosts ?? []);
   const models = $derived(brewery.state?.models ?? []);
@@ -96,7 +92,7 @@
     options: gMaxTokens === undefined ? undefined : { max_tokens: gMaxTokens } });
   async function generate() {
     const request = generationJob;
-    const job = await gen.submit(request, retry.action('generate'));
+    const job = await gen.submit(request);
     if (job && request.prompt !== undefined) submittedText = request.prompt;
   }
 
@@ -132,7 +128,7 @@
   const base = new Submitter('evaluate.baseline');
   const bHostBlockers = $derived(hostBlockers('baseline', bWorker));
   const bFields = $derived<Blocker[]>([
-    ...(bMode === 'file' && !availableId(bFile, models.filter(m => refResults.includes(m.kind))) ?
+    ...(bMode === 'file' && !models.some(m => m.id === bFile && refResults.includes(m.kind) && m.available !== false) ?
       [{ field: 'b-file', text: 'Select available reference results or predictions.' }] : []),
     ...(bMode === 'source' && !bHost ? [{ field: 'b-host', text: 'Select a host.' }] : []),
     ...(bMode === 'source' && !bSources.some((s) => s.id === bSource) ? [{ field: 'b-src', text: 'Select a reference endpoint.' }] : []),
@@ -142,88 +138,15 @@
     : { kind: 'baseline', host: bHost, input_ids: [], options: { baseline_source: bSource } });
   const visible = $derived(visibleBlockers([...gFields, ...eFields, ...bFields], touched));
   const error = (field: string) => fieldError(visible, field);
-  const defaults = {
-    gBundle: '', gHost: '', gMode: 'saved' as typeof gMode, gPromptId: '', gText: '', gMaxTokens: undefined as number | undefined,
-    eBundle: '', eHost: '', eBaseFile: '', eSource: '', eBaseMode: 'none' as typeof eBaseMode,
-    bHost: '', bFile: '', bSource: '', bMode: 'file' as typeof bMode,
-  };
-  const retry = new RetryPrefill<typeof defaults, JobDetail>({
-    slot: 'evaluate', defaults,
-    read: () => ({ gBundle, gHost, gMode, gPromptId, gText, gMaxTokens, eBundle, eHost, eBaseFile, eSource, eBaseMode, bHost, bFile, bSource, bMode }),
-    write: value => { ({ gBundle, gHost, gMode, gPromptId, gText, gMaxTokens, eBundle, eHost, eBaseFile, eSource, eBaseMode, bHost, bFile, bSource, bMode } = value); },
-    load: loadRetryJob(['evaluate', 'baseline', 'generate']),
-    restore: job => {
-      const [first = '', second = ''] = job.input_ids;
-      const priorHost = job.requested_host ?? job.host ?? '';
-      const host = availableId(priorHost, hosts);
-      const endpoint = typeof job.options?.baseline_source === 'string' ? job.options.baseline_source : '';
-      const required = (id: string, resolved: string, what: string) => id && !resolved
-        ? [{ id: `${what}:${id}`, text: `Previous ${what} ${id} is not available. Select another ${what}.`, required: true }] : [];
-      if (job.kind === 'generate') {
-        const prompt = historicalPrompt(job, prompts);
-        return { actions: ['generate'], patch: { gBundle: availableId(first, bundles), gHost: host,
-          gText: prompt.text, gPromptId: job.prompt_text == null ? prompt.id : '',
-          gMode: job.prompt_text != null ? 'text' : prompt.mode,
-          gMaxTokens: typeof job.options?.max_tokens === 'number' ? job.options.max_tokens : undefined }, focus: 'g-bundle',
-          omissions: draft => [
-            ...required(first, availableId(draft.gBundle, bundles), 'bundle'),
-            ...required(priorHost, availableId(draft.gHost, hosts) || host, 'host'),
-            ...(!job.prompt_text && draft.gMode === 'text' && !draft.gText.trim() ?
-              required(job.prompt_id ?? '', '', 'prompt') : []),
-          ],
-          retains: draft => !!(first && draft.gBundle === first),
-        };
-      }
-      if (job.kind === 'evaluate') {
-        const eBundle = availableId(first, bundles);
-        const references = () => models.filter(m => refResults.includes(m.kind));
-        return {
-          actions: ['evaluate'], focus: 'e-bundle',
-          patch: { eBundle, eHost: host, eBaseFile: availableId(second, references()),
-            eSource: availableId(endpoint, sources(hostOf(eBundle, host))), eBaseMode: endpoint ? 'source' : second ? 'file' : 'none' },
-          omissions: draft => [
-            ...required(first, availableId(draft.eBundle, bundles), 'bundle'),
-            ...required(priorHost, availableId(draft.eHost, hosts) || (host ? host : ''), 'host'),
-            ...(draft.eBaseMode === 'file' ? required(second, availableId(draft.eBaseFile, references()), 'reference file') : []),
-            ...(draft.eBaseMode === 'source' ? required(endpoint, availableId(draft.eSource, sources(hostOf(draft.eBundle, draft.eHost))), 'reference endpoint') : []),
-            ...(draft.eBaseMode === 'none' && (endpoint || second) ?
-              [{ id: endpoint || second, text: `Previous reference input ${endpoint || second} will not be used.` }] : []),
-          ],
-          retains: draft => !!draft.eBundle && draft.eBundle === first,
-        };
-      }
-      const references = () => models.filter(m => refResults.includes(m.kind));
-      return {
-        actions: ['baseline'], focus: endpoint ? 'b-host' : 'b-file',
-        patch: { bHost: host, bFile: availableId(first, references()), bSource: availableId(endpoint, sources(hostOf('', host))), bMode: endpoint ? 'source' : 'file' },
-        omissions: draft => [
-          ...(draft.bMode === 'file' ? required(first, availableId(draft.bFile, references()), 'reference file')
-            : required(endpoint, availableId(draft.bSource, sources(hostOf('', draft.bHost))), 'reference endpoint')),
-          ...required(priorHost, availableId(draft.bHost, hosts) || (host ? host : ''), 'host'),
-        ],
-      };
-    },
-    applied: patch => { if (patch.gText !== undefined) submittedText = patch.gText; },
-    clear: patch => {
-      if (patch.gText === undefined) return;
-      // A retained text edit must still have its editor on the plain route.
-      if (gText !== '' && gText !== submittedText && gMode === 'saved') gMode = 'text';
-      submittedText = '';
-    },
-  });
-  watchPrefill(retry, () => !!brewery.state);
 </script>
 
-<div class="stack" oninputcapture={retry.touchField} onchangecapture={retry.touchField} onclickcapture={retry.touchField} onkeydowncapture={retry.touchField}>
+<div class="stack">
   <div class="head">
     <h1 tabindex="-1">Evaluate</h1>
     <p class="muted small">
       Score a bundle on the pinned GSM8K split. To measure a difference, compare it with another model’s results from the same protocol. File verification and generated text are separate checks.
     </p>
   </div>
-  {#if retry.failed}<RetryRecovery reason={retry.failure} reload={retry.reload} startNew={retry.startNew} />{/if}
-  {#if retry.loadingReason}<p class="hint" role="status">{retry.loadingReason}</p>{/if}
-  {#if retry.offered && retry.pending?.kind !== 'generate'}<RetryOffer apply={retry.usePrevious} />{/if}
 
   <section class="panel" aria-labelledby="st-h">
     <header><h2 id="st-h">Bundle status</h2></header>
@@ -269,10 +192,6 @@
     <WorkflowGate workflow="evaluate">
       <div class="body stack">
         <Blockers blockers={eHostBlockers} />
-        <RetryWarnings items={retry.omissions('evaluate')} acknowledged={retry.acknowledged('evaluate')} acknowledge={() => {
-          retry.acknowledge('evaluate');
-          document.getElementById('e-bundle')?.focus();
-        }} />
         <ModelSelect id="e-bundle" bind:value={() => usableBundle ? eBundle : '', (value) => { eBundle = value; }} kinds={BUNDLE_KINDS} label="Bundle" error={error('e-bundle')} onblur={touch('e-bundle')} />
         <HostSelect bind:value={eHost} workflow="evaluate" kind="evaluate" label="Run on" optional optionalLabel="Host of the bundle" />
         <fieldset class="plain">
@@ -303,8 +222,8 @@
             </div>
           {/if}
         </fieldset>
-        {@render queue('Queue full GSM8K evaluation', 'evaluate', eFields, eHostBlockers, ev, evaluationJob, () =>
-          ev.submit(evaluationJob, retry.action('evaluate')))}
+        {@render queue('Queue full GSM8K evaluation', eFields, eHostBlockers, ev, () =>
+          ev.submit(evaluationJob))}
       </div>
     </WorkflowGate>
   </section>
@@ -314,7 +233,6 @@
     <WorkflowGate workflow="baseline">
       <div class="body stack">
         <Blockers blockers={bHostBlockers} />
-        <RetryWarnings items={retry.omissions('baseline')} />
         <p class="small muted">Import predictions from a reference model, or score a configured endpoint on the same questions.</p>
         <fieldset class="plain">
           <legend class="small muted">Reference input</legend>
@@ -341,8 +259,8 @@
             </div>
           {/if}
         </div>
-        {@render queue('Queue reference results', 'baseline', bFields, bHostBlockers, base, baselineJob, () =>
-          base.submit(baselineJob, retry.action('baseline')))}
+        {@render queue('Queue reference results', bFields, bHostBlockers, base, () =>
+          base.submit(baselineJob))}
       </div>
     </WorkflowGate>
   </section>
@@ -353,8 +271,6 @@
     <WorkflowGate workflow="generate">
       <div class="body stack">
         <Blockers blockers={gHostBlockers} />
-        <RetryWarnings items={retry.omissions('generate')} />
-        {#if retry.pending?.kind === 'generate'}<RetryOffer apply={retry.usePrevious} />{/if}
         <ModelSelect id="g-bundle" bind:value={gBundle} kinds={BUNDLE_KINDS} label="Bundle" error={error('g-bundle')} onblur={touch('g-bundle')} />
         <HostSelect bind:value={gHost} workflow="generate" kind="generate" label="Run on" optional optionalLabel="Host of the bundle" hint="Needs a worker with an approved Halogen runtime. The run records which files it opens." />
         <fieldset class="plain">
@@ -383,7 +299,7 @@
             aria-invalid={invalidMax || undefined} aria-describedby="g-max-tokens-hint" />
           <span id="g-max-tokens-hint" class="hint">{invalidMax ? 'Enter a whole number from 1 to 512.' : 'Leave blank to use the default.'}</span>
         </div>
-        {@render queue('Queue generation', 'generate', gFields, gHostBlockers, gen, generationJob, generate)}
+        {@render queue('Queue generation', gFields, gHostBlockers, gen, generate)}
       </div>
     </WorkflowGate>
   </section>
@@ -391,11 +307,11 @@
   <RecentJobs kinds={['generate', 'evaluate', 'baseline']} title="Recent generation, evaluation and reference jobs" limit={8} />
 </div>
 
-{#snippet queue(label: string, action: string, fields: Blocker[], hosts: Blocker[], s: Submitter, current: NewJob, submit: () => Promise<unknown>)}
+{#snippet queue(label: string, fields: Blocker[], hosts: Blocker[], s: Submitter, submit: () => Promise<unknown>)}
   <div>
-    <button type="button" class="btn primary" disabled={retry.action(action).blocked || s.busy || fields.length > 0 || hosts.length > 0} aria-busy={s.busy} onclick={submit}>{s.busy ? 'Submitting…' : label}</button>
+    <button type="button" class="btn primary" disabled={s.busy || fields.length > 0 || hosts.length > 0} aria-busy={s.busy} onclick={submit}>{s.busy ? 'Submitting…' : label}</button>
   </div>
-  <SubmitStatus {s} {current} />
+  <SubmitStatus {s} />
 {/snippet}
 
 <style>

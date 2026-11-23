@@ -1,7 +1,7 @@
 import { api, rejectedSubmission, submissionError } from './api';
 import { brewery } from './store.svelte';
 import type { JobSummary, NewJob } from './types';
-import { openOnce, PlainAttempt, retryKey, type OpenPlain, type RetrySubmission } from './retry-keys';
+import { PlainAttempt } from './submission-key';
 import { captureSubmissionVisit } from './route.svelte';
 
 type AcceptedJob = JobSummary | Pick<JobSummary, 'id'>;
@@ -12,40 +12,30 @@ export class Submitter {
   error = $state<string | null>(null);
   job = $state<AcceptedJob | null>(null);
   replayed = $state(false);
-  acceptedBody = $state.raw<NewJob>();
-  newRun = $state.raw<OpenPlain>();
   #plain = new PlainAttempt();
 
   constructor(private launcher: string | ((job: NewJob) => string)) {}
 
-  /** An explicit new run must not reuse the key of an unconfirmed plain attempt. */
-  forgetPlainAttempt() { this.#plain = new PlainAttempt(); }
-
-  async submit(job: NewJob, retry?: RetrySubmission): Promise<AcceptedJob | null> {
-    if (this.busy || retry?.blocked) return null;
+  async submit(job: NewJob): Promise<AcceptedJob | null> {
+    if (this.busy) return null;
     this.busy = true;
     this.error = null;
-    const failedId = retry?.failedId;
     let plain: ReturnType<PlainAttempt['take']> | undefined;
     try {
-      // Freeze the actual wire body before yielding to Web Crypto.
+      // Use the same wire body for the key comparison and the POST.
       const body: NewJob = JSON.parse(JSON.stringify(stripEmpty(job)));
-      const prepare = retry?.preparePlain?.(body);
-      const launcher = retry?.launcher ?? (typeof this.launcher === 'string' ? this.launcher : this.launcher(body));
-      if (!failedId) plain = this.#plain.take(launcher, body, captureSubmissionVisit());
-      const key = plain?.key ?? await retryKey(failedId!, launcher, body);
-      const created = await api.queueJob(body, key);
+      const launcher = typeof this.launcher === 'string' ? this.launcher : this.launcher(body);
+      plain = this.#plain.take(launcher, body, captureSubmissionVisit());
+      const created = await api.queueJob(body, plain.key);
       if (typeof created?.id !== 'string' || !created.id) throw new Error('The controller did not return a job ID.');
-      plain?.complete();
+      plain.complete();
       this.job = created;
       this.replayed = !('state' in created);
-      this.acceptedBody = body;
-      this.newRun = this.replayed && prepare ? openOnce(prepare, () => { this.newRun = undefined; }) : undefined;
       void brewery.refresh();
       return created;
     } catch (e) {
       if (rejectedSubmission(e)) plain?.complete();
-      this.error = submissionError(e, !!failedId);
+      this.error = submissionError(e);
       return null;
     } finally {
       this.busy = false;

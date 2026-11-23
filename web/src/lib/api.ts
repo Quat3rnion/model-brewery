@@ -74,7 +74,6 @@ export const api = {
   conversionEligibility: (body: unknown, signal?: AbortSignal) => request<EligibilityEntry>('POST', '/api/conversions/eligibility', body, signal),
   startConversion: (body: unknown, key: string) => requestWithStatus<unknown>('POST', '/api/conversions', body, undefined, { 'Idempotency-Key': key }),
   conversions: (signal?: AbortSignal) => request<unknown>('GET', '/api/conversions', undefined, signal),
-  conversion: (id: string, signal?: AbortSignal) => request<unknown>('GET', `/api/conversions/${encodeURIComponent(id)}`, undefined, signal),
   cancelConversion: (id: string) => request<unknown>('POST', `/api/conversions/${encodeURIComponent(id)}/cancel`, {}),
   settings: (signal?: AbortSignal) => request<{ hosts: HostReadiness[] }>('GET', '/api/settings', undefined, signal),
   saveSettings: (host: string, body: unknown) => request<HostReadiness>('PUT', `/api/settings/${encodeURIComponent(host)}`, body),
@@ -99,10 +98,8 @@ export function rejectedSubmission(error: unknown): boolean {
   return error instanceof ApiError && error.status >= 400 && error.status < 500;
 }
 
-export function submissionError(error: unknown, retry = false): string {
+export function submissionError(error: unknown): string {
   const text = errorText(error);
   if (rejectedSubmission(error)) return text;
-  return retry
-    ? `${text} Check Jobs, or open the same retry and submit with the same inputs.`
-    : `${text} Check Jobs, or retry with the same inputs without reloading. Reloading loses duplicate protection.`;
+  return `${text} Check Jobs, or retry with the same inputs without reloading. Reloading loses duplicate protection.`;
 }

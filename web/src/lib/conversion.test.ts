@@ -1,19 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildConversion, parseConversion, parseConversions, stageRows, isActiveConversion, newerConversion, ConversionSubmitter, STAGES } from './conversion';
 
-it('uses a new key for an identical plain conversion after retry query removal', async () => {
-  const sent: string[] = [];
-  const s = new ConversionSubmitter('convert.managed', async (_body, key) => {
-    sent.push(key);
-    return { data: { id: 'started', state: 'running' }, status: 201 };
-  });
-  await s.submit({ input_ids: ['source'] }, { blocked: false, failedId: 'retry-run' });
-  expect((await s.submit({ input_ids: ['source'] }))?.id).toBe('started');
-  expect(s.replayed).toBe(false);
-  expect(sent).toHaveLength(2);
-  expect(sent[0]).toMatch(/^r-retry-run-convert\.managed-/);
-  expect(sent[1]).not.toBe(sent[0]);
-});
 import type { ConvertForm } from './convert';
 import type { Model } from './types';
 

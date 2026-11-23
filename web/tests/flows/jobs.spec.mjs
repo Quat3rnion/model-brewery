@@ -68,23 +68,14 @@ test('Job detail shows progress when cancellation is pending', async ({ page, co
   await expect(main.getByRole('button', { name: /Cancel job/ })).toHaveCount(0);
 });
 
-test('Failed comparison explains the fix and opens a prefilled form without queuing work', async ({ page, controller }) => {
+test('Failed comparison explains the fix and links to infrastructure settings', async ({ page, controller }) => {
   setJob(controller, failedCompare);
   await controller.open(page, `jobs/${failedCompare.id}`);
   const log = page.getByRole('region', { name: 'Event log' });
   await expect(log.getByText('Failed', { exact: true })).toBeVisible();
   await expect(log.getByText(/Failed · failed/i)).toHaveCount(0);
-  await expect(page.getByText('Free space on the host before you try again.', { exact: true })).toBeVisible();
-  await page.getByRole('link', { name: 'Open in Compare' }).click();
-  await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(failedCompare.prompt_text);
-  await expect(page.getByRole('combobox', { name: 'Model A' })).toHaveValue('Fixture GGUF');
-  await expect(page.getByRole('combobox', { name: 'Model B' })).toHaveValue('Fixture GGUF copy');
-  const tokens = page.getByRole('spinbutton', { name: 'Decode tokens' });
-  await expect(tokens).toHaveValue('32');
-  await tokens.fill('129');
-  await tokens.press('Tab');
-  await expect(tokens).toHaveAttribute('aria-invalid', 'true');
-  await expect(tokens).toHaveAccessibleDescription('Enter a whole number from 0 to 128.');
+  await expect(page.getByText('Free space on the host before you try again.', { exact: false })).toBeVisible();
+  await expect(page.getByRole('main').getByRole('link', { name: 'Infrastructure settings' })).toHaveAttribute('href', '#/settings/infrastructure');
   expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
 });
 
@@ -110,12 +101,21 @@ test('Job detail distinguishes the submitted prompt from the current Library tex
 });
 
 test('Compare queues only on explicit activation, not Enter in a numeric field', async ({ page, controller }) => {
-  setJob(controller, failedCompare);
-  await controller.open(page, `jobs/${failedCompare.id}`);
-  await page.getByRole('link', { name: 'Open in Compare' }).click();
+  await controller.open(page, 'compare');
+  for (const [label, name] of [['Model A', /^Fixture GGUF GGUF model/], ['Model B', /^Fixture GGUF copy/]]) {
+    await page.getByRole('combobox', { name: label }).click();
+    await page.getByRole('option', { name }).click();
+  }
+  await page.getByRole('radio', { name: 'Type a prompt' }).check();
+  await page.getByRole('textbox', { name: 'Prompt text' }).fill('Compare the fixture answers.');
   const tokens = page.getByRole('spinbutton', { name: 'Decode tokens' });
-  await expect(tokens).toHaveValue('32');
+  await tokens.fill('129');
+  await tokens.press('Tab');
+  await expect(tokens).toHaveAttribute('aria-invalid', 'true');
+  await expect(tokens).toHaveAccessibleDescription('Enter a whole number from 0 to 128.');
+  await tokens.fill('32');
   await tokens.press('Enter');
+  await page.getByText('Advanced options', { exact: true }).click();
   await page.getByRole('spinbutton', { name: /CPU threads/i }).press('Enter');
   await expect(page.getByText(/Queued as job/)).toHaveCount(0);
   expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
@@ -151,12 +151,10 @@ test('A verified conversion requires an explicit Library registration action', a
   await expect(page.getByText('Not release-qualified', { exact: true })).toBeVisible();
 });
 
-test('An interrupted transfer opens the prior destination and entries without starting a copy', async ({ page, controller }) => {
+test('An interrupted transfer explains that partial outputs are excluded', async ({ page, controller }) => {
   setJob(controller, interruptedTransfer);
   await controller.open(page, `jobs/${interruptedTransfer.id}`);
-  await page.getByRole('link', { name: 'Open in Transfers' }).click();
-  await expect(page.getByRole('combobox', { name: 'Destination host' })).toHaveValue('Worker B');
-  await expect(page.getByRole('checkbox', { name: /^Fixture GGUF/ })).toBeChecked();
+  await expect(page.getByText(/The controller lost this job.*Partial outputs are excluded/)).toBeVisible();
   expect(controller.requests('POST', '/api/jobs')).toHaveLength(0);
 });
 

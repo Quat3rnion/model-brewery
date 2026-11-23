@@ -69,13 +69,6 @@ export function choiceLabel(list: Choice[], id: string): string {
   return list.find((c) => c.id === id)?.label ?? id;
 }
 
-/** The worker executes suites in wire order. Keep the historical order for
- * selected historical suites, then append new selections in stable ID order. */
-export function orderedSuites(selected: readonly string[], historical: readonly string[]): string[] {
-  const rest = new Set(selected);
-  return [...historical.filter(id => rest.delete(id)), ...[...rest].sort()];
-}
-
 /** One 'benchmark' job: no inputs, options { benchmark_target, benchmarks }. */
 export function buildBenchmarkJob(host: Host | undefined, target: string, suites: string[], decision?: EligibilityEntry): { job: NewJob | null; blockers: Blocker[] } {
   const blockers: Blocker[] = [];

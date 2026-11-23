@@ -21,7 +21,7 @@
   import { inventoryBlocker, validSha } from '../lib/ggufSource';
   import { obj } from '../lib/reports';
   import { brewery } from '../lib/store.svelte';
-  import type { JobDetail, JobSummary, Model, NewJob } from '../lib/types';
+  import type { JobDetail, JobSummary, Model } from '../lib/types';
   import { inventoryJob, readInventory, walkInventory } from '../lib/weightmap';
   import JobState from './JobState.svelte';
   import Blockers from './Blockers.svelte';
@@ -29,28 +29,16 @@
   import SubmitStatus from './SubmitStatus.svelte';
   import { acceptedJobSummary, Submitter } from '../lib/submit.svelte';
   import { trellisProblem } from '../lib/trellis-layer';
-  import type { RetrySubmission } from '../lib/retry-prefill.svelte';
-  import { bodyKey, resultOfPreviousSubmission } from '../lib/retry-keys';
-  import NewRun from './NewRun.svelte';
-  import ResultAttribution from './ResultAttribution.svelte';
-  import KeyValues from './KeyValues.svelte';
+  import { bodyKey } from '../lib/submission-key';
 
-  let { source, format, starter, draft = $bindable(), retry, originalSha, loading }: {
+  let { source, format, starter, draft = $bindable() }: {
     source: Model; format: 'gguf' | 'hgn'; starter: ConversionStarter; draft: RecipeDraft;
-    retry?: RetrySubmission; originalSha?: string; loading: boolean;
   } = $props();
 
   const submitted = new SvelteMap<number, JobSummary | null>();
   const loaded = new SvelteMap<string, JobDetail | 'rejected' | null>();
   const attempted = new Map<string, Date | null>();
   const reads = new Submitter('convert.recipe.inventory');
-  let plainRead = $state.raw<NewJob>();
-  let repeatedRead = $state(false);
-  function prepareRead() {
-    if (!reads.acceptedBody || reads.acceptedBody.input_ids[0] !== source.id || !reads.newRun?.('current')) return false;
-    plainRead = reads.acceptedBody;
-    return true;
-  }
   let error = $state('');
   const host = $derived(brewery.state?.hosts.find(h => h.id === source.host));
   const blocked = $derived(inventoryBlocker(source, host));
@@ -80,11 +68,11 @@
 
   async function readLayers() {
     const next = inventory.need;
-    if (loading || flash || blocked || error || !next || submitted.has(next.offset)) return;
+    if (flash || blocked || error || !next || submitted.has(next.offset)) return;
     const { offset, sha } = next;
     const request = inventoryJob(source.id, source.host, offset, sha);
     submitted.set(offset, null);
-    const accepted = await reads.submit(request, { blocked: loading, preparePlain: retry?.preparePlain });
+    const accepted = await reads.submit(request);
     if (!accepted) {
       submitted.delete(offset);
       return;
@@ -192,8 +180,6 @@
     if (!recipe && !problem) out.push(!complete ? 'Read the source layers first.' : !layers.length
       ? 'Choose a source with recognized layer matrices.' : tooMany ? 'Use at most 256 layer overrides.' : 'Change the incompatible types.');
     if (problem) out.push('Resolve the source inventory problem above.');
-    if (recipe && originalSha && sourceSha !== originalSha) out.push('The source file changed. Select the original source or start a new recipe.');
-    if (complete && originalSha && Object.keys(draft.overrides).some((index) => !layers.includes(Number(index)))) out.push('The source does not contain all layers in the previous recipe.');
     if (format === 'hgn' && recipe && !Object.values(recipe.layers).some(type => type === 'HT3' || type === 'HT4')) {
       out.push('Select HT3 or HT4 for at least one layer to run a managed HGN recipe.');
     }
@@ -210,9 +196,9 @@
   const currentAttempt = $derived(body !== null && attemptedBody === bodyKey(body));
 
   async function run() {
-    if (loading || !body || starter.busy) return;
+    if (!body || starter.busy) return;
     attemptedBody = bodyKey(body);
-    await starter.start(body, retry);
+    await starter.start(body);
   }
 
   function download() {
@@ -237,9 +223,6 @@
 {/snippet}
 
 <Blockers blockers={setup} />
-{#if originalSha && !complete}
-  <p class="hint">Previous recipe: {draft.defaultType} default{#each Object.entries(draft.overrides) as [layer, type]} · Layer {layer}: {type}{/each}. Read the source layers to check the recipe.</p>
-{/if}
 <p class="hint">Supported architectures: {format === 'gguf' ? 'GPT-2 and Qwen2' : 'dense Llama and Qwen2'}. The exporter checks the architecture and assets before it writes output.</p>
 {#if readJob && !flash}
   <div class="row" role="status">
@@ -247,26 +230,12 @@
     <JobState job={readJob} />
   </div>
 {/if}
-{#if reads.error || reads.replayed || repeatedRead}
-  <SubmitStatus s={reads} current={plainRead ?? reads.acceptedBody} prepare={reads.newRun ? prepareRead : undefined} />
-{/if}
-{#if plainRead}
-  <div class="note info stack">
-    <p>New layer read for {modelLabel(source)}</p>
-    <KeyValues data={plainRead.options} />
-    <Submit blockers={blocked ? [blocked] : []} busy={reads.busy} disabled={loading || flash} onclick={async () => {
-      if (plainRead && await reads.submit(plainRead, { blocked: loading, preparePlain: retry?.preparePlain })) {
-        plainRead = undefined;
-        repeatedRead = true;
-      }
-    }}>Queue new layer read</Submit>
-  </div>
-{/if}
+{#if reads.error || reads.replayed}<SubmitStatus s={reads} />{/if}
 {#if problem}
   <p class="note bad" role="alert">{problem}</p>
 {:else if inventory.need}
   <div class="row">
-    <button type="button" class="btn" onclick={readLayers} disabled={loading || readPending} aria-describedby={loading ? 'cv-retry-loading' : undefined}>
+    <button type="button" class="btn" onclick={readLayers} disabled={readPending}>
       {inventory.pages.length ? 'Read next layers' : 'Read layers'}
     </button>
     <span class="hint">This queues a <code>weight_inspect</code> job on {hostName(brewery.state?.hosts ?? [], source.host)}.</span>
@@ -321,16 +290,11 @@
   </label>
   {#if !assets.length}<p class="hint"><a href="#/library">Register the matching assets in Library</a> on {host?.name ?? source.host}.</p>{/if}
 {/if}
-<Submit blockers={runBlockers} busy={starter.busy} disabled={loading || retry?.blocked} onclick={run}>Run layer recipe</Submit>
+<Submit blockers={runBlockers} busy={starter.busy} onclick={run}>Run layer recipe</Submit>
 <div aria-live="polite" class="xs">
   {#if currentAttempt && starter.error}
-    <p class="note bad" role="alert">{starter.error} Run the same recipe again to retry the same request.</p>
+    <p class="note bad" role="alert">{starter.error}</p>
   {:else if !starter.busy && starter.last}
-    <ResultAttribution accepted={starter.acceptedBodyKey} current={body} />
     <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a href={conversionRunHref(starter.last.id, 'recipe')}>{starter.last.id}</a>. {#if starter.replayed}No second conversion was started.{/if}</p>
   {/if}
 </div>
-{#if starter.replayed && starter.newRun && !starter.error}
-  <NewRun prepare={starter.newRun} current={() => starter.newRun?.('current') ?? false}
-    changed={resultOfPreviousSubmission(starter.acceptedBodyKey, body)} disabled={starter.busy} />
-{/if}

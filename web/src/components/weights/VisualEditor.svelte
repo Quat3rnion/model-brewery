@@ -13,7 +13,6 @@
   import { brewery } from '../../lib/store.svelte';
   import { acceptedJobSummary, Submitter } from '../../lib/submit.svelte';
   import { route } from '../../lib/route.svelte';
-  import type { RetrySubmission } from '../../lib/retry-keys';
   import { theme } from '../../lib/theme.svelte';
   import { isSafeSource, hostName, isActive, shortHash } from '../../lib/format';
   import { MAX_COORDINATES, MAX_EDITS, coord, exact, percent, relChange, signed, tuneJob, parseValue, parseMaxUpdate } from '../../lib/weights';
@@ -33,11 +32,10 @@
     step,
     tileJob,
     tileRequest,
-
     type TensorInfo,
     type Tile,
   } from '../../lib/weightmap';
-  import type { JobSummary, Model, NewJob } from '../../lib/types';
+  import type { JobSummary, Model } from '../../lib/types';
 
   let {
     source,
@@ -47,10 +45,6 @@
     calibrationId,
     heldOutId,
     tuneReason,
-    tuneRetry,
-    retryLoading,
-    readRetry,
-    openRepeat,
     mode = $bindable('manual'),
     onproposal,
     pending,
@@ -62,10 +56,6 @@
     calibrationId: string;
     heldOutId: string;
     tuneReason: string | null;
-    tuneRetry: RetrySubmission;
-    retryLoading: boolean;
-    readRetry: (mode: 'inventory' | 'tile') => RetrySubmission;
-    openRepeat: (request?: NewJob) => boolean;
     mode?: 'manual' | 'auto';
     onproposal: (jobId: string) => void;
     pending: SvelteMap<string, DraftEdit>;
@@ -83,15 +73,17 @@
   const sourceHost = $derived(hostName(brewery.state?.hosts ?? [], source.host));
   const reads = new Submitter(job => job.options?.mode === 'tile' ? 'weights.visual.tile' : 'weights.visual.inventory');
   let readKey = $state('');
+  let acceptedReadMode = $state<'inventory' | 'tile'>();
 
   function want(job: JobSummary | null): void {
     if (job?.state === 'succeeded' && !brewery.details[job.id]) void brewery.loadJob(job.id).catch(() => {});
   }
   async function read(job: ReturnType<typeof inventoryJob>) {
-    if (retryLoading || reads.busy) return;
+    if (reads.busy) return;
     readKey = JSON.stringify(job.options);
-    const created = await reads.submit(job, readRetry(job.options?.mode === 'tile' ? 'tile' : 'inventory'));
+    const created = await reads.submit(job);
     if (!created) return;
+    acceptedReadMode = job.options?.mode === 'tile' ? 'tile' : 'inventory';
     function record(summary: JobSummary) {
       if (summary.id !== created?.id || !findRead([summary], source.id, job.options!, source.host)) return;
       submitted = [summary, ...submitted.filter(item => item.id !== summary.id)];
@@ -119,7 +111,7 @@
     if (canVisual) want(inv.job ?? null);
   });
   function readInventoryPage() {
-    if (retryLoading || !canVisual || reads.busy || (inv.job && !inv.error)) return;
+    if (!canVisual || reads.busy || (inv.job && !inv.error)) return;
     if (!inventoryRequest) {
       ignoreReads(j => j.options?.mode === 'inventory');
       void read(inventoryJob(source.id, source.host, 0, undefined, packedHost));
@@ -183,7 +175,7 @@
   function readCurrentTile() {
     const request = tileRead;
     const options = request?.options;
-    if (retryLoading || !canVisual || !request || !options || reads.busy || otherTileActive || (tileJobFound && !tileError)) return;
+    if (!canVisual || !request || !options || reads.busy || otherTileActive || (tileJobFound && !tileError)) return;
     if (tileJobFound) ignoreReads(j => !!findRead([j], source.id, options));
     void read(request);
   }
@@ -353,7 +345,7 @@
   async function tune() {
     if (!tuneRequest || tuneBlockers.length) return;
     const visit = route.capture();
-    const created = await tuneSub.submit(tuneRequest, tuneRetry);
+    const created = await tuneSub.submit(tuneRequest);
     if (created && !tuneSub.replayed && visit.canPresent()) onproposal(created.id);
   }
 
@@ -381,7 +373,7 @@
       {/if}
       {#if !inv.job || inv.error}
         <div class="row">
-          <button type="button" class="btn small" onclick={readInventoryPage} disabled={retryLoading || reads.busy} aria-describedby={retryLoading ? 'w-retry-loading' : undefined}>
+          <button type="button" class="btn small" onclick={readInventoryPage} disabled={reads.busy}>
             {!inventoryRequest ? 'Read tensor list again' : inv.pages.length ? 'Read next tensors' : 'Read tensor list'}
           </button>
           <span class="hint">This queues a <code>weight_inspect</code> job on {sourceHost}.</span>
@@ -391,8 +383,8 @@
         <p class="note warn small">The Library hash ({shortHash(source.sha256)}) differs from the file the worker read ({shortHash(sha)}). Edits use the file the worker read.</p>
       {/if}
       {#if inventoryError}<p class="note bad" role="alert">{inventoryError}</p>{/if}
-      {#if reads.replayed && reads.acceptedBody?.options?.mode === 'inventory'}
-        <SubmitStatus s={reads} current={inventoryRequest ?? reads.acceptedBody} prepare={() => openRepeat(reads.acceptedBody)} />
+      {#if reads.replayed && acceptedReadMode === 'inventory'}
+        <SubmitStatus s={reads} />
       {/if}
       {#if tensors.length}
         <TensorMap {tensors} selected={tensorName} onopen={openTensor} />
@@ -464,12 +456,12 @@
           </div>
         {/if}
         {#if tileError}<p class="note bad" role="alert">{tileError}</p>{/if}
-        {#if reads.replayed && reads.acceptedBody?.options?.mode === 'tile'}
-          <SubmitStatus s={reads} current={tileRead} prepare={() => openRepeat(reads.acceptedBody)} />
+        {#if reads.replayed && acceptedReadMode === 'tile'}
+          <SubmitStatus s={reads} />
         {/if}
         {#if !tileJobFound || tileError}
           <div class="row">
-            <button type="button" class="btn small" onclick={readCurrentTile} disabled={retryLoading || reads.busy || otherTileActive} aria-describedby={retryLoading ? 'w-retry-loading' : undefined}>{tileError ? 'Read tile again' : 'Read tile'}</button>
+            <button type="button" class="btn small" onclick={readCurrentTile} disabled={reads.busy || otherTileActive}>{tileError ? 'Read tile again' : 'Read tile'}</button>
             <span class="hint">This queues a <code>weight_inspect</code> job on {sourceHost}.</span>
           </div>
           {#if otherTileActive}<p class="hint" role="status">Wait for the previous tile read to finish.</p>{/if}
@@ -590,8 +582,8 @@
 
     {#if canChange && mode === 'auto' && tensor}
       <section class="step">
-        <SubmitStatus s={tuneSub} current={tuneRequest} prepare={() => openRepeat(tuneSub.acceptedBody)} />
-        <Submit blockers={tuneBlockers} busy={tuneSub.busy} disabled={tuneRetry.blocked} onclick={tune}>Tune {selected.size || ''} selected {selected.size === 1 ? 'weight' : 'weights'}</Submit>
+        <SubmitStatus s={tuneSub} />
+        <Submit blockers={tuneBlockers} busy={tuneSub.busy} onclick={tune}>Tune {selected.size || ''} selected {selected.size === 1 ? 'weight' : 'weights'}</Submit>
       </section>
     {/if}
   </div>
