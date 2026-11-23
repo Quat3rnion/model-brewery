@@ -117,9 +117,10 @@ if __name__ == "__main__":
     for key in ("evidence", "bins", "cache", "pin", "libs"):
         parser.add_argument("--" + key, type=Path, required=True)
     args = parser.parse_args()
+    scratch = (ARB / "xa-scratch").resolve()
     for key, value in vars(args).items():
         path = value.resolve()
-        if ARB not in path.parents:
+        if ARB not in path.parents and scratch not in path.parents:
             parser.error(f"--{key} must be inside /arboretum")
         setattr(args, key, path)
     args.evidence.mkdir(mode=0o700, parents=True, exist_ok=False)
