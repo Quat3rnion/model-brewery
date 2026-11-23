@@ -866,6 +866,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
     assert_eq!(
         names,
         [
+            "ablate_direction",
             "alphaedit_edit",
             "apply_edit",
             "compile_program",
@@ -905,6 +906,16 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
     );
     for tool in listed {
         let schema = &tool["inputSchema"];
+        if tool["name"] == "ablate_direction" {
+            assert_eq!(
+                schema["properties"]["direction"]["properties"]["version"]["const"],
+                2
+            );
+            assert_eq!(
+                schema["properties"]["variant"]["enum"],
+                json!(["plain", "projected", "norm_preserving"])
+            );
+        }
         assert_eq!(schema["type"], "object", "{tool}");
         if tool["name"] == "run_checks" {
             let behavior = &schema["properties"]["behavior_direction"];
@@ -1010,6 +1021,25 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
     );
     let scratch = ok("create_scratch", create.clone());
     assert_eq!(ok("create_scratch", create.clone()), scratch);
+    let mut ablation = json!({
+        "id": scratch["id"], "sha256": scratch["sha256"], "idempotency_key": "ablate-rejected",
+        "direction": {"id": parent["id"], "version": 2, "layer": 0},
+        "first_layer": 0, "last_layer": 0, "variant": "plain",
+        "kernel": {"shape": "flat", "peak": 0, "width": 1, "min_weight": 0},
+        "include_embeddings": true,
+    });
+    let rejected = call("ablate_direction", ablation.clone());
+    assert_eq!(
+        rejected["result"]["structuredContent"]["status"], 400,
+        "{rejected}"
+    );
+    ablation["include_embeddings"] = json!(false);
+    let missing = call("ablate_direction", ablation);
+    assert_eq!(
+        missing["result"]["structuredContent"]["status"], 404,
+        "{missing}"
+    );
+    assert_eq!(ok("list_scratch", json!({}))["revisions"], json!([scratch]));
     create["parent_sha256"] = json!("0".repeat(64));
     assert_eq!(
         call("create_scratch", create)["result"]["structuredContent"]["status"],

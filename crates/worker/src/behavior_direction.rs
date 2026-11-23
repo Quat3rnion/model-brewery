@@ -206,6 +206,8 @@ pub struct Layer {
     pub held_out_margin: Option<f64>,
     pub held_out_cohens_d: Option<f64>,
     pub mean_residual_norm: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negative_mean: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -240,6 +242,16 @@ impl Fit {
                         .is_some_and(|n| n.is_finite() && n >= 0.0)
                         && row.held_out_cohens_d.is_none_or(f64::is_finite),
                     "invalid direction separation or residual norm"
+                );
+            }
+            if let Some(mean) = &row.negative_mean {
+                ensure!(
+                    version == VERSION
+                        && (1..=16384).contains(&mean.len())
+                        && mean.len() * self.layers.len() <= FLOAT_CAP
+                        && mean.len() == *width.get_or_insert(mean.len())
+                        && mean.iter().all(|x| x.is_finite()),
+                    "invalid mean negative activation"
                 );
             }
             match (&row.unit_vector, row.held_out_margin) {
@@ -350,6 +362,7 @@ pub fn compute(
     };
 
     let mut train = vec![Vec::<f64>::new(); layers.len()];
+    let mut negative_sums = train.clone();
     for (row, _) in splits
         .iter()
         .enumerate()
@@ -357,10 +370,22 @@ pub fn compute(
     {
         let positive = checked_trace(row, true)?;
         let negative = checked_trace(row, false)?;
-        for ((sum, p), n) in train.iter_mut().zip(positive).zip(negative) {
+        for (((sum, negative_sum), p), n) in train
+            .iter_mut()
+            .zip(&mut negative_sums)
+            .zip(positive)
+            .zip(negative)
+        {
             sum.resize(p.activation.len(), 0.0);
-            for ((sum, p), n) in sum.iter_mut().zip(p.activation).zip(n.activation) {
+            negative_sum.resize(n.activation.len(), 0.0);
+            for (((sum, negative_sum), p), n) in sum
+                .iter_mut()
+                .zip(negative_sum)
+                .zip(p.activation)
+                .zip(n.activation)
+            {
                 *sum += f64::from(p) - f64::from(n);
+                *negative_sum += f64::from(n);
             }
         }
     }
@@ -403,7 +428,9 @@ pub fn compute(
     let layers = layers
         .iter()
         .zip(fitted)
-        .map(|(&layer, (norm, unit, projections, residual_sum))| {
+        .zip(negative_sums)
+        .map(|((&layer, stats), negative_sum)| {
+            let (norm, unit, projections, residual_sum) = stats;
             let n = held_out_pairs as f64;
             let held_out_margin = unit.as_ref().map(|_| {
                 projections[0]
@@ -439,6 +466,12 @@ pub fn compute(
                 held_out_margin,
                 held_out_cohens_d,
                 mean_residual_norm: Some(residual_sum / (2.0 * n)),
+                negative_mean: Some(
+                    negative_sum
+                        .into_iter()
+                        .map(|x| (x / train_pairs as f64) as f32)
+                        .collect(),
+                ),
             }
         })
         .collect();

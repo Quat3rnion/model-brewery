@@ -193,6 +193,7 @@ pub(crate) fn finish(
         merge: None,
         pruning: None,
         pruning_trace: None,
+        ablation: None,
         tensors: output.tensors,
         tool: "Lanternfish locate-edit and Brewery SafeTensors scratch editor".into(),
         tool_version: pin.commit.into(),

@@ -48,13 +48,13 @@ pub(super) async fn model(
                 let store = app.store.lock().map_err(ApiError::storage)?;
                 visible(&store, &id)?;
             }
-            build_with_pruning(
+            build_special(
                 app,
                 id,
                 Some(request.sha256),
                 Vec::new(),
                 None,
-                Some(request.pruning),
+                Some(NativeEdit::Prune(request.pruning)),
                 key,
             )
         },

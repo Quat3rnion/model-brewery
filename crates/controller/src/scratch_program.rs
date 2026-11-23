@@ -187,6 +187,7 @@ fn build(app: &App, request: Compile, key: Option<&Submission<'_>>) -> Mutation 
         merge: None,
         pruning: None,
         pruning_trace: None,
+        ablation: None,
         tensors,
         tool: config.architecture,
         tool_version: config.compiler_commit,

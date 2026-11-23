@@ -22,6 +22,7 @@ Agents and operators can read, change and test model weights. All changes go to 
 
 - **Trace.** Capture activations, attention, model logits and a logit lens per layer for one GGUF model or scratch revision. Each trace job has a byte limit and a retention limit. The worker runs a pinned, headless [Lanternfish](https://github.com/Quat3rnion/lanternfish) CLI on the CPU. See [CPU trace jobs](OPERATOR.md#cpu-trace-jobs).
 - **Measure behavior directions.** Fit per-layer directions for slop, sycophancy, and response length on a Qwen2 GGUF. Read held-out separation scores and versioned vectors without changing weights. See [Behavior directions](OPERATOR.md#behavior-directions).
+- **Ablate a direction.** Edit residual-writing weights in a private scratch child with a reversible delta and a layer kernel. See [Native directional ablation](OPERATOR.md#native-directional-ablation).
 - **Steer and patch.** Add, replace, scale or remove activations during a trace, or copy activations from an earlier trace. Save interventions as versioned Library artifacts, and export steering vectors as llama.cpp control vectors. See [Trace interventions](OPERATOR.md#trace-interventions).
 - **Edit weights.** Set or add values in a tensor slice, apply a rank-one update, or orthogonalize a weight against a direction. See [Scratch weight revisions](OPERATOR.md#scratch-weight-revisions).
 - **Edit facts.** Use ROME, MEMIT or AlphaEdit on dense Llama and Qwen2 models, on the CPU or with a pinned CUDA or ROCm runtime. See [Locate and edit a fact](OPERATOR.md#locate-and-edit-a-fact).

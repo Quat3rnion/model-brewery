@@ -1,5 +1,5 @@
 //! An immutable direction artifact is stored atomically as its job result.
-use crate::{App, domain::State as JobState, web::ApiError};
+use crate::{App, domain::State as JobState, store::Store, web::ApiError};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -25,31 +25,8 @@ async fn get_version(
     Path((id, version)): Path<(String, u32)>,
     Query(selection): Query<Selection>,
 ) -> Result<Json<Value>, ApiError> {
-    if !matches!(version, 1 | direction::VERSION) {
-        return Err(ApiError::not_found("direction version"));
-    }
     let store = app.store.lock().map_err(ApiError::storage)?;
-    let job = store
-        .job(&id)
-        .map_err(ApiError::storage)?
-        .filter(|job| job.kind == direction::JOB && job.state == JobState::Succeeded)
-        .ok_or_else(|| ApiError::not_found("direction"))?;
-    let mut result = store
-        .job_result(&id)
-        .map_err(ApiError::storage)?
-        .ok_or_else(|| ApiError::not_found("direction result"))?;
-    if result["schema_version"] != version {
-        return Err(ApiError::not_found("direction version"));
-    }
-    let request = direction::Request::parse(&json!(job.options)).map_err(ApiError::storage)?;
-    let envelope = store.envelope(&id).map_err(ApiError::storage)?;
-    let input = envelope
-        .inputs
-        .first()
-        .ok_or_else(|| ApiError::storage("Direction input is missing"))?;
-    request
-        .verify_version(&result, &input.id, &request.model_sha256, version)
-        .map_err(ApiError::storage)?;
+    let mut result = load(&store, &id, version)?;
     if let Some(layer) = selection.layer {
         let row = result["fit"]["layers"]
             .as_array()
@@ -60,4 +37,32 @@ async fn get_version(
     Ok(Json(
         json!({"id":id, "version":version, "direction":result}),
     ))
+}
+
+pub(crate) fn load(store: &Store, id: &str, version: u32) -> Result<Value, ApiError> {
+    if !matches!(version, 1 | direction::VERSION) {
+        return Err(ApiError::not_found("direction version"));
+    }
+    let job = store
+        .job(id)
+        .map_err(ApiError::storage)?
+        .filter(|job| job.kind == direction::JOB && job.state == JobState::Succeeded)
+        .ok_or_else(|| ApiError::not_found("direction"))?;
+    let result = store
+        .job_result(id)
+        .map_err(ApiError::storage)?
+        .ok_or_else(|| ApiError::not_found("direction result"))?;
+    if result["schema_version"] != version {
+        return Err(ApiError::not_found("direction version"));
+    }
+    let request = direction::Request::parse(&json!(job.options)).map_err(ApiError::storage)?;
+    let envelope = store.envelope(id).map_err(ApiError::storage)?;
+    let input = envelope
+        .inputs
+        .first()
+        .ok_or_else(|| ApiError::storage("Direction input is missing"))?;
+    request
+        .verify_version(&result, &input.id, &request.model_sha256, version)
+        .map_err(ApiError::storage)?;
+    Ok(result)
 }

@@ -1453,6 +1453,53 @@ Dense masks do not reduce the model dimensions, file size, or compute cost
 in a dense runtime. Use the same private conversion, checks, and diffs as
 for a direct edit.
 
+### Native directional ablation
+
+Use `ablate_direction` or `POST /api/scratch/{id}/ablate_direction`. Use
+the scratch parent's exact `sha256`. In `direction`, give the `id`,
+`version` (2), and `layer` from `get_direction`. Set inclusive
+`first_layer` and `last_layer` (at most 64 layers). Select a `variant` and
+a `kernel` with `shape`, `peak`, `width`, and `min_weight`:
+
+- `flat` uses weight 1 at all selected layers. `gaussian` uses
+  `exp(-0.5 * t^2)` and `triangle` uses `max(0, 1 - t)`, where `t` is
+  the distance from `peak` divided by `width` in layers. `min_weight`
+  is the floor (0 to 1). A zero weight skips the layer.
+- `plain` subtracts the component along the fitted direction.
+- `projected` first removes the direction's component along the source
+  layer's training negative mean. The edit leaves the component along
+  that mean unchanged.
+- `norm_preserving` also projects the direction away from the target
+  layer's training negative mean. It restores each writing vector's
+  original L2 norm after subtraction. This uses rows of the transposed
+  SafeTensors matrix (columns of the stored `[out, in]` matrix), so
+  restoring the norms does not reintroduce the removed direction.
+
+Projected variants need `negative_mean` in the artifact. Fit the
+direction again if an older artifact does not have this field. For
+`norm_preserving`, include all target layers in the fit. A weight of 1
+removes the component along the effective direction up to storage
+rounding; a lower weight gives only partial removal.
+
+The editor changes `self_attn.o_proj.weight` and `mlp.down_proj.weight`
+for each active layer of a dense HF checkpoint. It rejects biased
+writers, incompatible widths, tensors over 32 MiB, and more than
+256 MiB of input tensors in one edit. Embeddings are not edited
+(`include_embeddings: true` is rejected); Qwen2.5-0.5B embeddings exceed
+the per-tensor limit.
+
+Use a direction measured on the same model in the same residual basis.
+The editor checks tensor compatibility, not equivalence between the
+Library GGUF and scratch SafeTensors. Provenance records both pins, the
+source layer, and the edit settings. The child has a reversible delta.
+Convert it to private GGUF, run checks, and review the diffs before a
+publish request. This workflow does not qualify a release.
+
+References: [Arditi et al. (2024), section 4.1](https://arxiv.org/abs/2406.11717);
+[Labonne's Gaussian layer kernel](https://huggingface.co/mlabonne/gemma-3-4b-it-abliterated-v2);
+[Lai (2025), Projected Abliteration](https://huggingface.co/blog/grimjim/projected-abliteration)
+and [Norm-Preserving Biprojected Abliteration](https://huggingface.co/blog/grimjim/norm-preserving-biprojected-abliteration).
+
 Use `plan_experts` with a registered local GGUF and two independent
 `brewery.expert-activations.v1` JSON observations to generate a REAP map.
 The planner needs Python 3 at `/usr/bin/python3` on the controller. It

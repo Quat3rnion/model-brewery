@@ -464,6 +464,37 @@
         }
       }
     },
+    "/api/scratch/{id}/ablate_direction": {
+      "post": {
+        "operationId": "ablateScratchDirection",
+        "summary": "Ablate a fitted direction in a new scratch child",
+        "description": "Edit dense attention output and MLP down projections on the CPU. Use a pinned scratch parent and a version 2 behavior direction. The child is private and has a reversible delta. Embedding edits are not supported.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false,
+          "required": ["sha256", "direction", "first_layer", "last_layer", "kernel", "variant"],
+          "properties": {
+            "sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "direction": {"$ref": "#/components/schemas/AblationDirection"},
+            "first_layer": {"$ref": "#/components/schemas/TraceLayer"},
+            "last_layer": {"$ref": "#/components/schemas/TraceLayer"},
+            "kernel": {"$ref": "#/components/schemas/AblationKernel"},
+            "variant": {"$ref": "#/components/schemas/AblationVariant"},
+            "include_embeddings": {"const": false, "default": false}
+          }
+        }}}},
+        "responses": {
+          "200": {"$ref": "#/components/responses/ScratchRow"},
+          "201": {"$ref": "#/components/responses/ScratchRow"},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "503": {"$ref": "#/components/responses/ScratchBusy"}
+        }
+      }
+    },
     "/api/scratch/{id}/prune": {
       "post": {
         "operationId": "pruneScratch",
@@ -1939,7 +1970,7 @@
           "schema": {"const": "brewery.scratch-provenance.v1"}, "parent_id": {"$ref": "#/components/schemas/Id"},
           "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "revision_id": {"$ref": "#/components/schemas/Id"},
           "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "worker": {"type": "string"},
-          "method": {"enum": ["copy", "direct", "compile_program", "linear", "task_arithmetic", "ties", "dare_linear", "dare_ties", "rome", "memit", "alphaedit", "prune"]},
+          "method": {"enum": ["copy", "direct", "compile_program", "linear", "task_arithmetic", "ties", "dare_linear", "dare_ties", "rome", "memit", "alphaedit", "prune", "ablate_direction"]},
           "locate_edit": {"type": "object", "description": "Edit request, covariance digest, runtime library digests and optimization losses. CUDA receipts include backend and device in the nested provenance object."},
           "operations": {"type": "array", "items": {"$ref": "#/components/schemas/ScratchOperation"}},
           "merge": {"type": "object", "required": ["algorithm", "inputs"], "properties": {
@@ -1947,6 +1978,14 @@
             "inputs": {"$ref": "#/components/schemas/ScratchMergeInputs"}
           }},
           "pruning": {"$ref": "#/components/schemas/DensePruning"},
+          "ablation": {"type": "object", "required": ["direction", "source_gguf_sha256", "first_layer", "last_layer", "kernel", "variant"], "properties": {
+            "direction": {"$ref": "#/components/schemas/AblationDirection"},
+            "source_gguf_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "first_layer": {"$ref": "#/components/schemas/TraceLayer"},
+            "last_layer": {"$ref": "#/components/schemas/TraceLayer"},
+            "kernel": {"$ref": "#/components/schemas/AblationKernel"},
+            "variant": {"$ref": "#/components/schemas/AblationVariant"}
+          }},
           "pruning_trace": {"type": "object", "required": ["gguf_sha256", "manifest_sha256", "lanternfish_sha256"], "properties": {
             "gguf_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "manifest_sha256": {"$ref": "#/components/schemas/ScratchHash"},
             "lanternfish_sha256": {"$ref": "#/components/schemas/ScratchHash"}
@@ -1965,6 +2004,24 @@
           "tool": {"type": "string"}, "tool_version": {"type": "string"}, "runtime_version": {"type": "string"}, "created_at_ms": {"type": "integer"}
         }
       },
+      "AblationDirection": {
+        "type": "object", "additionalProperties": false, "required": ["id", "version", "layer"],
+        "properties": {
+          "id": {"$ref": "#/components/schemas/Id"},
+          "version": {"type": "integer", "const": 2},
+          "layer": {"$ref": "#/components/schemas/TraceLayer"}
+        }
+      },
+      "AblationKernel": {
+        "type": "object", "additionalProperties": false, "required": ["shape", "peak", "width", "min_weight"],
+        "properties": {
+          "shape": {"enum": ["flat", "gaussian", "triangle"]},
+          "peak": {"$ref": "#/components/schemas/TraceLayer"},
+          "width": {"type": "number", "exclusiveMinimum": 0, "maximum": 4096},
+          "min_weight": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      },
+      "AblationVariant": {"enum": ["plain", "projected", "norm_preserving"]},
       "ScratchRevision": {
         "type": "object", "required": ["id", "kind", "state", "sha256", "qualification", "library_model_id", "provenance", "delta"],
         "properties": {
@@ -3667,7 +3724,8 @@
                 "layer":{"$ref":"#/components/schemas/TraceLayer"},"norm":{"type":"number","minimum":0},
                 "unit_vector":{"type":["array","null"],"items":{"type":"number"}},"held_out_margin":{"type":["number","null"]},
                 "held_out_cohens_d":{"type":["number","null"],"description":"Raw margin divided by the pooled within-class sample standard deviation of held-out projections. Null if undefined."},
-                "mean_residual_norm":{"type":"number","minimum":0,"description":"Mean L2 norm of l_out over both classes of held-out prompts, at the captured token."}
+                "mean_residual_norm":{"type":"number","minimum":0,"description":"Mean L2 norm of l_out over both classes of held-out prompts, at the captured token."},
+                "negative_mean":{"type":"array","minItems":1,"maxItems":16384,"items":{"type":"number"},"description":"Mean negative-class activation over training prompts. Required for projected ablation; older artifacts omit it."}
               }}}
           }}
         }

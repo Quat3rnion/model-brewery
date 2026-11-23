@@ -21,6 +21,7 @@ const MAX_DELTA_RECORDS: usize = 4096;
 pub const MERGE_DELTA_OVERHEAD: u64 = DELTA_HEADER + MAX_DELTA_RECORDS as u64 * 16;
 const MAGIC: &[u8; 8] = b"BWDELTA1";
 
+pub mod ablation;
 pub mod diff;
 pub mod merge;
 pub mod prune;
@@ -232,7 +233,7 @@ pub fn build(
     dir: &Path,
     operations: &[Operation],
 ) -> Result<Output> {
-    build_inner(source, expected, dir, operations, None)
+    build_inner(source, expected, dir, operations, None, None)
 }
 
 pub fn build_pruned(
@@ -242,7 +243,16 @@ pub fn build_pruned(
     plan: &prune::Plan,
     activations: Option<&[Vec<f32>]>,
 ) -> Result<Output> {
-    build_inner(source, expected, dir, &[], Some((plan, activations)))
+    build_inner(source, expected, dir, &[], Some((plan, activations)), None)
+}
+
+pub fn build_ablated(
+    source: &Path,
+    expected: &str,
+    dir: &Path,
+    plan: &ablation::Plan,
+) -> Result<Output> {
+    build_inner(source, expected, dir, &[], None, Some(plan))
 }
 
 fn build_inner(
@@ -251,6 +261,7 @@ fn build_inner(
     dir: &Path,
     operations: &[Operation],
     pruning: Option<(&prune::Plan, Option<&[Vec<f32>]>)>,
+    ablation: Option<&ablation::Plan>,
 ) -> Result<Output> {
     ensure!(crate::is_digest(expected), "expected a lowercase SHA-256");
     ensure!(
@@ -290,6 +301,13 @@ fn build_inner(
     for name in masks.keys() {
         groups.entry(name.as_str()).or_default();
     }
+    let writers = ablation
+        .map(|plan| plan.writers(&header))
+        .transpose()?
+        .unwrap_or_default();
+    for &name in writers.keys() {
+        groups.entry(name).or_default();
+    }
     let mut tensors = Vec::new();
     let mut records = Vec::new();
     let mut edited = 0;
@@ -299,7 +317,7 @@ fn build_inner(
         let [start, end] = t.data_offsets;
         edited += end - start;
         ensure!(
-            end > start && edited <= MAX_EDIT_BYTES,
+            end > start && (ablation.is_some() || edited <= MAX_EDIT_BYTES),
             "edited tensors exceed scratch limit or are empty"
         );
         let offset = header.payload_start + start;
@@ -312,6 +330,9 @@ fn build_inner(
         }
         if let Some(mask) = masks.get(name) {
             mask.apply(&mut after, editable_width(&t.dtype)?);
+        }
+        if let Some(layer) = writers.get(name) {
+            layer.apply(t, &mut after)?;
         }
         for (a, b) in before.iter_mut().zip(&after) {
             *a ^= *b;
@@ -333,7 +354,7 @@ fn build_inner(
         });
     }
     ensure!(
-        (operations.is_empty() && pruning.is_none()) || !records.is_empty(),
+        (operations.is_empty() && pruning.is_none() && ablation.is_none()) || !records.is_empty(),
         "no stored weight changes"
     );
     child.sync_all()?;

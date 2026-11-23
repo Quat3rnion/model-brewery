@@ -21,6 +21,9 @@ Use `compute_direction` to measure slop, sycophancy, or response-length
 directions on a pinned Qwen2 GGUF. Use `get_direction` to read version 2 by
 job ID. Specify a layer for a smaller response. Report Cohen's d
 as a probe result, not as evidence of a change in generated behavior.
+Use `ablate_direction` to test a fitted version 2 direction in a private
+scratch child. Use a direction from the same model in the same residual
+basis. Check the target behavior and side effects before a publish request.
 
 For a weight change, convert the child to private GGUF with the same assets.
 Trace it with the same prompts and capture settings as the parent. Always

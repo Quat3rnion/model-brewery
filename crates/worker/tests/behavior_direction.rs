@@ -11,7 +11,7 @@ fn holds_out_pairs_when_fitting_and_selects_by_signed_projection() {
     let artifact = direction::compute(&[0, 1], Role::LOut, &pairs, |row, positive| {
         let sign = if positive { 1.0 } else { 0.0 };
         let rows = match row {
-            0 => vec![vec![3.0 * sign, 4.0 * sign], vec![sign, 0.0]],
+            0 => vec![vec![1.0 + 3.0 * sign, 2.0 + 4.0 * sign], vec![sign, 0.0]],
             1 => vec![vec![5.0 * sign, -5.0 * sign], vec![2.0 * sign, 10.0]],
             _ => vec![vec![0.0, 0.0], vec![4.0 * sign, -11.0]],
         };
@@ -22,6 +22,7 @@ fn holds_out_pairs_when_fitting_and_selects_by_signed_projection() {
     assert_eq!(artifact.layers[0].unit_vector, Some(vec![0.6, 0.8]));
     assert_eq!(artifact.layers[0].norm, 5.0);
     assert_eq!(artifact.layers[0].held_out_margin, Some(-0.5));
+    assert_eq!(artifact.layers[0].negative_mean, Some(vec![1., 2.]));
     assert_eq!(artifact.layers[1].held_out_margin, Some(3.0));
     assert_eq!(artifact.selected_layer, Some(1));
 }
