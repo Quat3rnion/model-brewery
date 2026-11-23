@@ -55,20 +55,31 @@ def numpy_fixture(agent, directory, evidence):
     w8.save(evidence, "numpy-oracle", {"version": np.__version__, "expected": expected, "actual": actual})
 
 
-def exercise(base, evidence, bins, run, skip_prune):
+def quantized_case(agent, model, spectra):
+    q4 = agent.write("register_model", "q4-library", host="local", kind="gguf",
+                     path=str(Q4), name="Qwen2.5-0.5B-Instruct Q4_K_M")
+    rows = spectra("q4-k-m", q4, layer=LAYER, compare_id=model["id"])
+    # The file label is a preset, not a per-tensor type. This pinned file
+    # stores the layer 8 down and value projections as Q6_K and Q8_0.
+    types = {r["source"]["dtype"] for r in rows if r["status"] == "compared"
+             and r["delta"]["sigma_max"] != 0}
+    w8.require({"Q6_K", "Q8_0"} <= types, f"Expected changed dequantized spectra ({types})")
+
+
+def exercise(base, evidence, bins, run, skip_prune, gguf_only):
     a = Agent(base, evidence)
     a.post("/api/admin/actions", {"action": "set_weight_editor", "worker": "local",
                                  "revision": 0, "enabled": True})
     model = a.write("register_model", "library", host="local", kind="safetensors",
                     path=str(w8.SAFE), name="Qwen2.5-0.5B-Instruct BF16 SafeTensors")
-    root = a.write("create_scratch", "base", parent_id=model["id"], parent_sha256=w8.PINS[w8.SAFE])
+    pin = w8.PINS[w8.SAFE]
     report = {"qualification": w8.QUALIFICATION, "bin_sha256": bins, "cases": {}}
 
     def spectra(label, source, **spec):
         job = a.write("weight_spectra", label + "-queued", id=source["id"], **spec)
         result = a.wait(job, label + "-job")
         w8.require(result["source"]["sha256"] == EXPECTED[label], f"{label}: source hash mismatch")
-        w8.require(result["reference"]["sha256"] == root["sha256"], f"{label}: reference hash mismatch")
+        w8.require(result["reference"]["sha256"] == pin, f"{label}: reference hash mismatch")
         w8.require(result["qualification"] == w8.QUALIFICATION, f"{label}: qualification mismatch")
         report["cases"][label] = {
             "job": job["id"], "source": result["source"], "reference": result["reference"],
@@ -77,6 +88,13 @@ def exercise(base, evidence, bins, run, skip_prune):
         w8.save(evidence, "report", report)
         return result["tensors"]
 
+    if gguf_only:
+        quantized_case(a, model, spectra)
+        report["status"] = "passed"
+        w8.save(evidence, "report", report)
+        return
+
+    root = a.write("create_scratch", "base", parent_id=model["id"], parent_sha256=pin)
     if not skip_prune:
         plan = PERCENTAGES["magnitude-30"]
         child = a.write("prune_model", "w12-prune", id=root["id"], sha256=root["sha256"], pruning=plan)
@@ -111,11 +129,7 @@ def exercise(base, evidence, bins, run, skip_prune):
     a.write("discard_scratch", "discard-w10", id=child["id"])
     a.write("discard_scratch", "discard-base", id=root["id"])
 
-    q4 = a.write("register_model", "q4-library", host="local", kind="gguf",
-                 path=str(Q4), name="Qwen2.5-0.5B-Instruct Q4_K_M")
-    rows = spectra("q4-k-m", q4, layer=LAYER, compare_id=model["id"])
-    types = {r["source"]["dtype"] for r in rows if r["status"] == "compared"}
-    w8.require("Q4_K" in types, f"Q4_K_M: did not compare dequantized tensors ({types})")
+    quantized_case(a, model, spectra)
     numpy_fixture(a, run / "assets", evidence)
     report["status"] = "passed"
     w8.save(evidence, "report", report)
@@ -125,8 +139,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True, help="New evidence directory under /arboretum")
     parser.add_argument("--bins", type=Path, required=True, help="Directory with copied Brewery binaries")
-    parser.add_argument("--numpy-only", action="store_true", help="Run only the small NumPy oracle fixture")
-    parser.add_argument("--skip-prune", action="store_true", help="Use retained W12 evidence; run W10, GGUF and NumPy")
+    cases = parser.add_mutually_exclusive_group()
+    cases.add_argument("--numpy-only", action="store_true", help="Run only the small NumPy oracle fixture")
+    cases.add_argument("--skip-prune", action="store_true", help="Use retained W12 evidence; run W10, GGUF and NumPy")
+    cases.add_argument("--gguf-only", action="store_true", help="Run only the GGUF comparison without scratch copies")
     args = parser.parse_args()
     args.root, args.bins = args.root.resolve(), args.bins.resolve()
     w8.require(w8.ARB in args.root.parents, "Evidence root must be under /arboretum")
@@ -159,7 +175,7 @@ def main():
                                                               "revision": 0, "enabled": True})
                             numpy_fixture(agent, run / "assets", evidence)
                         else:
-                            exercise(match[1], evidence, pins, run, args.skip_prune)
+                            exercise(match[1], evidence, pins, run, args.skip_prune, args.gguf_only)
                         break
                     time.sleep(0.1)
                 else:
