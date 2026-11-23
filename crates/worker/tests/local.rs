@@ -22,7 +22,7 @@ impl Rig {
     fn new() -> Self {
         let tmp = tempfile::Builder::new()
             .prefix("brewery-worker-")
-            .tempdir_in("/arboretum")
+            .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
             .unwrap();
         let root = tmp.path().to_path_buf();
         let engine = root.join("engine");

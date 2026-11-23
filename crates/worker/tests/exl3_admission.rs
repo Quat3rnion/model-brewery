@@ -7,7 +7,7 @@ use std::{
 
 #[test]
 fn gpu_exl3_requires_admission_but_cpu_does_not() {
-    let tmp = tempfile::tempdir_in("/arboretum").unwrap();
+    let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let root = tmp.path();
     let config = root.join("worker.json");
     let sources = root.join("sources");

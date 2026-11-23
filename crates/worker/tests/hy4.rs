@@ -16,7 +16,7 @@ fn dispatch(config: &Path, action: &str, id: &str, body: Option<&Value>) -> Valu
 
 #[test]
 fn hy4_worker_dispatches_only_a_direct_metadata_plan() {
-    let tmp = tempfile::tempdir_in("/arboretum").unwrap();
+    let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let root = tmp.path();
     let source = root.join("source");
     fs::create_dir(&source).unwrap();

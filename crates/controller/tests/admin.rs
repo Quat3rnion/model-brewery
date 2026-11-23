@@ -269,7 +269,9 @@ fn enabled_local_editor_uses_private_route_and_drains_on_disable() {
     const NEW_WORK: &str = "Brewery-Allow-Duplicate: 1\r\n";
     let mut t = Test::new();
     let root = t.root.path();
-    let sources = root.join("sources");
+    // The default temp directory can be /tmp, which cannot be granted.
+    let model_fixture = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let sources = model_fixture.path().join("sources");
     fs::create_dir(&sources).unwrap();
     let config = root.join("local-worker.json");
     let original = json!({"root":root.join("ordinary"),"source_roots":[sources],"engine":"/usr/bin/false",
