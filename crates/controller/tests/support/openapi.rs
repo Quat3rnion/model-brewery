@@ -72,6 +72,8 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/diff/traces", "diffTraces"),
         ("get", "/api/diff/behavior", "diffBehavior"),
         ("post", "/api/scratch", "createScratch"),
+        ("post", "/api/scratch/compile_program", "compileProgram"),
+        ("post", "/api/scratch/{id}/run_program", "runProgram"),
         ("get", "/api/scratch/{id}", "getScratch"),
         ("post", "/api/scratch/{id}/edits", "editScratch"),
         ("get", "/api/scratch/{id}/delta", "getScratchDelta"),
