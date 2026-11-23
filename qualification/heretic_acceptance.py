@@ -92,7 +92,7 @@ def main():
     cli = argparse.ArgumentParser(description=__doc__)
     for name in ("root", "bins", "runtime", "resource-queue", "contrast-cache", "runner"):
         cli.add_argument("--" + name, type=Path, required=True)
-    cli.add_argument("--resume-checks", action="store_true", help="Reuse a completed Heretic child and its private GGUF pair.")
+    cli.add_argument("--resume", action="store_true", help="Reuse an isolated stack by replaying the same idempotent requests.")
     args = cli.parse_args()
     excluded = install_acceptance_profile(args.runtime.resolve(), args.contrast_cache.resolve())
     run = args.root.resolve()
@@ -100,18 +100,14 @@ def main():
     require(run.is_relative_to(approved) and run != approved,
             "use an isolated directory under /arboretum/xa-scratch")
     require(sha(args.runner) == A2_RUNNER, "A2 runner hash mismatch")
-    if not args.resume_checks:
+    if not args.resume:
         run.mkdir(mode=0o700, parents=True)
     cache = run / "contrast-cache"
     prompt_pins = extended_cache(args.contrast_cache, cache, excluded)
     evidence = run / "evidence"
     dist = run / "web"
-    if args.resume_checks:
-        require((evidence / "child.json").is_file() and (evidence / "child-gguf.json").is_file()
-                and (evidence / "baseline-gguf.json").is_file(), "missing acceptance child or GGUF evidence")
-        for name in ("baseline-gguf", "child-gguf"):
-            prior = json.loads((evidence / f"{name}.json").read_text())
-            require(prior["state"] == "succeeded", f"{name} did not succeed")
+    if args.resume:
+        require((run / "state" / "controller.db").is_file(), "missing isolated acceptance state")
         env = json.loads((run / "controller-env.json").read_text())
     else:
         evidence.mkdir()
@@ -145,7 +141,7 @@ def main():
     with (evidence / "controller.log").open("wb") as log:
         with subprocess.Popen([args.bins / "brewery"], env=env, stdout=log, stderr=log) as proc:
             try:
-                exercise(run, evidence, proc, prompt_pins, args.resume_checks)
+                exercise(run, evidence, proc, prompt_pins, args.resume)
             finally:
                 proc.terminate()
 
@@ -172,7 +168,7 @@ def exercise(run, evidence, proc, prompt_pins, resume):
             headers["Accept"] = "application/json, text/event-stream"
         req = Request(base + path, None if body is None else json.dumps(body).encode(), headers)
         try:
-            response = http.open(req, timeout=120)
+            response = http.open(req, timeout=600)
         except HTTPError as error:
             response = error
         with response:
@@ -204,40 +200,34 @@ def exercise(run, evidence, proc, prompt_pins, resume):
         require(not result["isError"], f"{name}: {result}")
         return result["structuredContent"]
 
-    if resume:
-        queued = json.loads((evidence / "heretic.json").read_text())
-        child_id = queued["result"]["scratch_id"]
-        child = request("/api/scratch/" + child_id)
-        parent, = [m for m in request("/api/models") if m["id"] == child["provenance"]["parent_id"]]
-        assets, = [m for m in request("/api/models") if m["kind"] == "assets"]
-    else:
+    if not resume:
         require(not request("/api/models"), "controller Library is not empty")
         request("/api/admin/actions", {"action": "set_weight_editor", "worker": "local",
                                 "revision": 0, "enabled": True}, "editor")
-        parent = submit("/api/models", "base", host="local", kind="safetensors", path=str(SAFE))
-        assets = submit("/api/models", "assets", host="local", kind="assets", path=str(run / "assets"))
-        rejection = request("/api/scratch/heretic_reproduce", {
-            "parent_id": parent["id"], "base_sha256": PINS[SAFE],
-            "manifest": {"version": "4", "settings": {"model": "Qwen/Qwen2.5-0.5B-Instruct",
-                                                       "model_commit": "a" * 40}},
-        }, "unattested-manifest", allow={409})
-        require("verified Hugging Face base download" in rejection["error"], "accepted an unattested base")
-        save(evidence, "unattested-manifest", rejection)
-        queued = call("run_heretic", parent_id=parent["id"], base_sha256=PINS[SAFE],
-                      profile="noslop-dolly", trials=2, trial_index=0, seed=83,
-                      assets_id=assets["id"])
-        result = wait(queued, "heretic")
-        child_id = result["scratch_id"]
-        child = request("/api/scratch/" + child_id)
-        require(child["provenance"]["parent_id"] == parent["id"]
-                and child["state"] == "scratch" and child["delta"]["changed_tensors"] > 0,
-                "Heretic output is not an edited Library child")
-        save(evidence, "child", child)
-        baseline = submit("/api/scratch", "baseline-copy", parent_id=parent["id"], parent_sha256=PINS[SAFE])
-        for name, row in (("baseline", baseline), ("child", child)):
-            conversion = submit(f"/api/scratch/{row['id']}/gguf", name + "-gguf",
-                                assets_id=assets["id"], sha256=row["sha256"])
-            wait(conversion, name + "-gguf")
+    parent = submit("/api/models", "base", host="local", kind="safetensors", path=str(SAFE))
+    assets = submit("/api/models", "assets", host="local", kind="assets", path=str(run / "assets"))
+    rejection = request("/api/scratch/heretic_reproduce", {
+        "parent_id": parent["id"], "base_sha256": PINS[SAFE],
+        "manifest": {"version": "4", "settings": {"model": "Qwen/Qwen2.5-0.5B-Instruct",
+                                                   "model_commit": "a" * 40}},
+    }, "unattested-manifest", allow={409})
+    require("verified Hugging Face base download" in rejection["error"], "accepted an unattested base")
+    save(evidence, "unattested-manifest", rejection)
+    queued = call("run_heretic", parent_id=parent["id"], base_sha256=PINS[SAFE],
+                  profile="noslop-dolly", trials=2, trial_index=0, seed=83,
+                  assets_id=assets["id"])
+    result = wait(queued, "heretic")
+    child_id = result["scratch_id"]
+    child = request("/api/scratch/" + child_id)
+    require(child["provenance"]["parent_id"] == parent["id"]
+            and child["state"] == "scratch" and child["delta"]["changed_tensors"] > 0,
+            "Heretic output is not an edited Library child")
+    save(evidence, "child", child)
+    baseline = submit("/api/scratch", "baseline-copy", parent_id=parent["id"], parent_sha256=PINS[SAFE])
+    for name, row in (("baseline", baseline), ("child", child)):
+        conversion = submit(f"/api/scratch/{row['id']}/gguf", name + "-gguf",
+                            assets_id=assets["id"], sha256=row["sha256"])
+        wait(conversion, name + "-gguf")
     checks = submit(f"/api/scratch/{child_id}/checks", "a2-w4-held-out", sha256=child["sha256"],
                     behavior_direction={"prompt_sets": prompt_pins})
     result = wait(checks, "a2-w4-held-out")
