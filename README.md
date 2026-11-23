@@ -20,7 +20,7 @@ Model Brewery is a work in progress. [Issues](https://github.com/Quat3rnion/mode
 
 Agents and operators can read, change and test model weights. All changes go to scratch revisions. A scratch revision is a private child copy of a SafeTensors model with a reversible delta and a provenance record. The source model does not change. Only an operator can approve a scratch revision for the Library, in the workbench. Results are not release-qualified.
 
-- **Trace.** Capture activations, model logits and a logit lens per layer for GGUF or Qwen3.8 Flash Next v2 HGN. GGUF also supports attention capture and private scratch revisions. The worker uses a pinned CPU runtime. See [CPU trace jobs](OPERATOR.md#cpu-trace-jobs).
+- **Trace.** Capture activations, model logits and a logit lens per layer for GGUF or Qwen3.8 Flash Next v2 HGN. GGUF also supports attention capture and private scratch revisions. The worker uses a pinned CPU runtime. For GGUF, the worker runs Lanternfish as a headless command-line program that is pinned by SHA-256. It does not start a Lanternfish server or use the Lanternfish UI. See [CPU trace jobs](OPERATOR.md#cpu-trace-jobs).
 - **MoE routing atlas.** Read expert load, entropy, co-activation and token clusters for Qwen2MoE and Qwen3MoE. Compare paired expert ablations without changing weights. See [MoE routing atlas](OPERATOR.md#moe-routing-atlas).
 - **Measure behavior directions.** Fit per-layer directions for slop, sycophancy, and response length on a Qwen2 GGUF. Read held-out separation scores and versioned vectors without changing weights. See [Behavior directions](OPERATOR.md#behavior-directions).
 - **Ablate a direction.** Edit residual-writing weights in a private scratch child with a reversible delta and a layer kernel. See [Native directional ablation](OPERATOR.md#native-directional-ablation).
@@ -47,7 +47,7 @@ Agents and operators can read, change and test model weights. All changes go to 
 
 **Built-in agent.** The **Agent** page runs an agent in the workbench with the same tools as MCP. Set an Anthropic or OpenAI-compatible provider and its API key in Settings. The key is write-only. See [Hosted workbench agent](OPERATOR.md#hosted-workbench-agent).
 
-**Workbench views.** **Trace** shows layer-by-token heatmaps, the logit lens and attention. **Edits** shows the scratch revisions of each source model, their checks and diffs, and the approval action for the operator.
+**Workbench views.** **Trace** shows layer-by-token heatmaps, the logit lens and attention. **Edits** shows the scratch revisions of each source model, their checks and diffs, and the approval action for the operator. **Abliteration** shows direction fits, native ablation searches and Heretic runs. **Findings** shows hypotheses with their evidence. **Agent** runs the built-in agent. See [Inside the workbench](#inside-the-workbench) for screenshots.
 
 - **Token loss diff.** See which heldout sentences and tokens account for a perplexity change. Read the ranked results in Edits or with `read_token_loss_diff`. See [Token loss diff](OPERATOR.md#token-loss-diff).
 - **Findings.** Record a hypothesis, link measured evidence, and replay the same experiments on another pinned revision. See [Findings](OPERATOR.md#findings).
@@ -73,6 +73,102 @@ For ROCmFPX formats and worker requirements, see [ROCmFPX GGUF qualification](qu
 **Choose checkpoint components.** Keep the embedded components or select replacements from the model library.
 
 ![The Convert page showing the tokenizer, vision tower, n-gram lookup and MTP head supplied by a Flash-Next checkpoint](docs/images/checkpoint-components.png)
+
+The screenshots below show weight-space work. They use synthetic data from the test controller in `web/tests/flows`, not measured results. Interpretability and abliteration results in the workbench are not release-qualified.
+
+### Trace a prompt
+
+**Activations and logit lens.** The heatmap shows the activation norm for each layer and token. The logit lens shows the top token ID for each layer and position. Select a cell to read its exact value or its top tokens.
+
+![Trace results with a layer-by-token norm heatmap, a logit lens table and the model logits for each position](docs/images/trace-activations.png)
+
+**Attention.** Select a layer and a head to see the attention probabilities of each query position.
+
+![Attention pattern for layer 12, head 0, with most of the weight on the first token](docs/images/trace-attention.png)
+
+**SAE features.** If the trace used a sparse autoencoder, select a token position to read its top features.
+
+![Top SAE features at token position 4 with their activations](docs/images/sae-features.png)
+
+**MoE routing atlas.** For a mixture-of-experts model, read the expert load, router entropy, token clusters and co-activation for one layer. An optional paired ablation trace shows the effect of one expert.
+
+![MoE routing atlas for layer 12 with expert 17 selected and the results of its ablation](docs/images/routing-atlas.png)
+
+**Steer and patch.** Add a saved intervention and activation patches from an earlier trace before you queue a trace.
+
+![New trace form with a saved steering intervention and an activation patch for layer 12](docs/images/interventions.png)
+
+### Review scratch revisions
+
+**Edit sessions.** The lineage tree shows each scratch revision, its method and its checks. The detail shows provenance, the delta, the checks, the publish request and the diffs against the parent.
+
+![Edits page with a ROME revision that waits for publish approval and its behavior diff against the parent](docs/images/edits.png)
+
+**Token loss diff.** See which held-out sentences and tokens cause a perplexity change.
+
+![Token loss diff with the sentence that gives the largest gain and the top token contributors](docs/images/token-loss-diff.png)
+
+**Weight health.** Compare the effective rank, stable rank and alpha of each layer with the parent. The chart marks layers that changed by 1% or more.
+
+![Weight health charts and table with a change at layer 6, and the singular values of the edited tensor](docs/images/weight-health.png)
+
+**Crosscoder diff.** Read the reconstruction metrics and the features that are shared, changed, or unique to the parent or the child.
+
+![Crosscoder report with reconstruction metrics, feature counts per class and a scatter of child share against decoder cosine](docs/images/crosscoder-diff.png)
+
+**Merges and compiled programs.** A merge revision shows its method, for example TIES. A compiled program is a root revision without a parent. Its checks include the exact program outputs.
+
+![Edits page with a TIES merge revision selected in the lineage tree](docs/images/merge-revision.png)
+
+![Edits page with a compiled sort program, its configuration hash and its program checks](docs/images/compiled-program.png)
+
+**Model lineage.** In the Library, compare a model with candidate bases to find a likely base and the type of change.
+
+![Model lineage panel that finds a rank-one edit of Qwen2.5-0.5B-Instruct and shows the evidence for each candidate](docs/images/model-lineage.png)
+
+### Measure model internals
+
+**Tensor sensitivity.** The job result shows the empirical Fisher score for each layer and tensor.
+
+![Empirical Fisher scores in a table with one row for each layer and one column for each tensor type](docs/images/sensitivity.png)
+
+**Activation circuits.** The job result shows the attribution for each layer and position, and the measured activation patches for the top sites.
+
+![Attribution heatmap by layer and position for the attention output, and a table of measured patches with their correlation](docs/images/circuit.png)
+
+**Quantization damage map.** Agents read the ranked tensors and the recipe proposal with MCP. The workbench has no separate view for this result.
+
+![Agent transcript that queues a quantization damage map and reads the two tensors with the largest effect](docs/images/quantization-damage.png)
+
+### Abliteration
+
+**Behavior direction.** The fit shows the held-out separation, the margin and the norms for each layer, and the selected layer.
+
+![Sycophancy direction with charts of held-out Cohen's d, margin and norms for each layer](docs/images/abliteration-direction.png)
+
+**Native ablation search.** The screen compares each setting with a matched random control and marks the Pareto front. Paired checks on the scratch child confirm or reject the effect.
+
+![Native search with a plot of marker reduction against KL, the screen trials and the paired child checks](docs/images/abliteration-search.png)
+
+**Heretic.** A Heretic run shows the pinned invocation, the selected trial, the trial journal and a link to the imported scratch child.
+
+![Heretic run with its profile, seed, hashes and trial scores](docs/images/heretic.png)
+
+**Behavior-direction checks.** In Edits, the check bundle of the child shows held-out behavior, first-token KL and benign over-refusal against the parent.
+
+![Behavior-direction check table with the agreement rate, first-token KL and benign refusal rate for the parent and the child](docs/images/behavior-checks.png)
+
+### Agents and findings
+
+**Built-in agent.** The transcript shows each tool call and result. The agent can request publication, but only an operator can approve it.
+
+![Agent session that finds a circuit, applies a ROME edit, runs the checks and requests publication](docs/images/agent.png)
+
+**Findings.** A finding records a hypothesis, its experiments, a verdict and the provenance. A replay on another revision compares each value with the original.
+
+![Finding that replays an earlier finding on an approved revision and shows three changed values](docs/images/findings.png)
+
+To make all README screenshots again, run `node scripts/readme-shots.mjs` in `web/`. First install the web dependencies with `npm ci` and the Playwright Chromium browser with `npx playwright install chromium`. The script starts the test controller on a loopback port and writes the images to `docs/images`. It does not connect to a real controller.
 
 ## Reference
 

@@ -27,7 +27,8 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
    `start_trace` and read it with `read_trace`.
    For a SafeTensors input, use `create_scratch` and `convert_scratch_gguf`
    first. Save the trace ID, prompts, and capture settings.
-3. Use `list_scratch` to find the pinned scratch parent. Select a method below
+3. Use `list_scratch` to find the pinned scratch parent and `get_scratch` to
+   read its provenance. Select a method below
    and record the child ID and hash. For queued work, use `get_job` to read
    the terminal result before starting the next step.
 4. Use `convert_scratch_gguf` on the child with the same assets as the parent.
@@ -48,14 +49,16 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
    See [Behavior direction checks](../../../OPERATOR.md#behavior-direction-checks).
 6. Use `add_evidence` to select numeric paths in the finished artifacts and
    record a verdict with your reasoning. Use `get_finding` to verify the
-   saved version. See [Findings](../../../OPERATOR.md#findings) to replay an
-   experiment on another pinned revision. Compare the same paths and check
+   saved version. Use `list_findings` to find earlier findings. Use
+   `replay_finding` to replay an
+   experiment on another pinned revision; see [Findings](../../../OPERATOR.md#findings). Compare the same paths and check
    the runtime pins before giving the replay a verdict.
 7. If the user asks, use `request_publish` for the exact child hash. If smoke
    or behavior did not pass, disclose that and acknowledge the current bundle
    only after review. Integrity failure blocks the request. A request leaves
    the Library unchanged. Report the IDs, measured results, and blockers as
-   **not release-qualified**.
+   **not release-qualified**. Use `discard_scratch` to remove a child that
+   you do not need.
 
 ## Choose a method
 
@@ -71,7 +74,7 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
 | Compare weight spectra | Queue `weight_spectra` with a scratch or approved local Library `id`. A scratch input uses its parent unless you give `compare_id`. Start with one `layer` or exact `tensor`. Read the result with `get_job`. Record the hashes, method, and energy fraction. See [Spectral weight health](../../../OPERATOR.md#spectral-weight-health). |
 | Check model lineage | Call read-only `lineage` with a Library `id`. Use `candidate_1` through `candidate_3` to select local entries. To check a merge, include the base and two possible parents. Report the fingerprint evidence and do not claim provenance. See [Model lineage](../../../OPERATOR.md#model-lineage). |
 | Read MoE routing | Capture `ffn_moe_logits`, `ffn_moe_topk`, and `ffn_moe_route_weights` on Qwen2MoE or Qwen3MoE. Use `routing_atlas` for one layer. For an expert ablation, capture `l_out` in both traces and supply the `zero_expert` job as `ablation_job_id`. Pass optional `routing_evidence` to `plan_experts`; keep the independent REAP inputs. |
-| Change activations only | Use `start_trace` with [trace interventions](../../../OPERATOR.md#trace-interventions). Reuse [versioned rules](../../../OPERATOR.md#library-intervention-artifacts). Use `read_feature_trace` to inspect [SAE features](../../../OPERATOR.md#sparse-autoencoders-saes) or `steer_feature` to apply an SAE direction. Compare to an unmodified trace; there is no weight revision to publish. |
+| Change activations only | Use `start_trace` with [trace interventions](../../../OPERATOR.md#trace-interventions). Reuse [versioned rules](../../../OPERATOR.md#library-intervention-artifacts) with `list_interventions` and `get_intervention`, or save them with `create_intervention` and `new_intervention_version`. Use `read_feature_trace` to inspect [SAE features](../../../OPERATOR.md#sparse-autoencoders-saes) or `steer_feature` to apply an SAE direction. Compare to an unmodified trace; there is no weight revision to publish. |
 | Compare learned features across revisions | Use `crosscoder_diff` with a saved ID. To build an artifact, use the offline [crosscoder procedure](../../../OPERATOR.md#crosscoder-model-diff) with unmodified paired traces and separate train and holdout prompts. Check reconstruction for both revisions before interpreting unique or changed features. |
 | Remove a behavior direction during inference | Use `get_direction`, then `create_direction_intervention` with `project_out` and the target rows. Pass the saved version to `start_trace` and compare the result with `diff_traces`. Use `subtract` to export a fixed scaled direction. `export_control_vector` cannot export projection. |
 | Measure a behavior direction | Use `compute_direction` with a pinned Library Qwen2 GGUF, behavior, and increasing layer numbers. Read version 2 with `get_direction`. Report held-out Cohen's d, not a change in generated behavior. See [Behavior directions](../../../OPERATOR.md#behavior-directions). |
