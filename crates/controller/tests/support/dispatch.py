@@ -78,6 +78,21 @@ if action == "trace-read":
         out({"status": "missing"})
     elif query["view"] == "manifest":
         out({"status": "ok", "data": {"schema_version": 1}})
+    elif query["view"] == "diff_input":
+        options = prior["result"]["envelope"]["options"]
+        spec = {k: options[k] for k in ("positions", "roles", "layers", "top_k", "byte_cap")}
+        edited = bool(options.get("interventions"))
+        mismatch = root / "trace-token-mismatch"
+        token = 12 if mismatch.exists() and mismatch.read_text() == job_id else 11
+        top = [{"token_id": i, "logit": logit} for i, logit in
+               ([(1, 3.), (2, 1.), (8, 0.)] if edited else [(1, 2.), (2, 1.), (7, 0.)])]
+        out({"status": "ok", "data": {
+            "spec": spec, "tokens": [{"position": 0, "token_id": token}], "missing": [],
+            "tensors": [{"layer": 0, "role": "l_out", "position": 0, "shape": [1],
+                         "data_base64": "AAAAAA==" if edited else "AACAPw=="}],
+            "logit_lens": [{"position": 0, "layer": 0, "top": top[:spec["top_k"]]}],
+            "model_logits": [{"position": 0, "top": top[:spec["top_k"]]}],
+        }})
     elif query["end"] is None:
         out({"status": "too_large"})
     else:

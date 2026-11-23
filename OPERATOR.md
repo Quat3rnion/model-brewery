@@ -382,6 +382,56 @@ the half-open token position range `start` and `end`. Tensor reads also
 require `layer` and `role`; logit lens reads can filter by `layer`. Narrow
 the range if a response exceeds 4 MiB (HTTP 413).
 
+## Compare revisions and traces
+
+Use these `GET` routes with `a=<baseline ID>&b=<comparison ID>`.
+The routes do not change the inputs. A diff does not qualify a release.
+
+- `/api/diff/tensors`: Use two scratch IDs from the same source, or one
+  scratch ID and its original SafeTensors Library ID. Each file must be at
+  most 4 GiB. The report lists changed tensors and counts elements with
+  different stored bits. The bounds start at zero. The start is inclusive
+  and the end is exclusive. The relative Frobenius norm uses the full
+  baseline tensor as the denominator. A zero baseline gives `null`.
+  For a matrix, the report shows up to eight singular values from a sample
+  of at most 32 rows and 32 columns in the bounds. A sample can miss changes.
+  Its rank counts sample values above one millionth of the largest value.
+  It is not the rank of the full tensor.
+- `/api/diff/traces`: Use two successful trace job IDs with the same prompt
+  text, capture spec, and token IDs. Select one `prompt` index per request
+  (default `0`). Use `layer`, `start`, or `end` to narrow the slice. The
+  `layer` filter does not change the model logit rows. The report gives
+  activation shifts and cosine similarity. It lists the ranked top-k for
+  each side, plus token IDs that enter or leave. It calculates logit
+  shifts and KL(A || B) only for shared top-k token IDs. This is not
+  full-vocabulary KL. Without shared IDs, these values are `null`. Use
+  worker and dispatch binaries that support trace diff reads.
+- `/api/diff/behavior`: Use a scratch ID for `b` and its immediate parent
+  for `a`. The controller reads `scratch/<b>/behavior.v1.json` under
+  `BREWERY_DATA`. The file is at most 256 KiB and has at most 256 metrics.
+  A producer must compare results from the same test inputs and settings.
+  The producer writes the `BehaviorDiffInputV1` artifact from OpenAPI.
+  Until it writes that file, the route returns 404.
+
+Example behavior input (`parent_id` and `child_id` must be actual IDs):
+
+```json
+{"schema_version":1,"parent_id":"34868afe-7dbc-4f80-ba42-600481fd50e6","child_id":"0dcb24c4-bc87-4a7a-95d4-79c28b941446","metrics":[{"name":"locality.accuracy","parent":0.95,"child":0.93,"better":"higher","threshold":0.01}]}
+```
+
+Metric results can be numbers, Boolean values, strings, or `null`. A
+numeric delta is the child value minus the parent value. A nonzero delta
+with an absolute value at or below `threshold` gives `within_threshold`.
+Other numeric changes give `improved` or `regressed` if `better` is
+`higher` or `lower`.
+The defaults are `threshold: 0` and `better: "neither"`. A missing value
+gives `missing`. Other changes give `changed`.
+
+The controller holds at most eight ordered reports in memory. It checks
+trace retention before it returns a cached report. Report size is limited
+to 4 MiB. Try a smaller trace slice on 413. Only one diff can run at a
+time. On 429, wait and retry.
+
 ## Operator paths and environment
 
 The operator sets these variables. The controller uses the first group. The

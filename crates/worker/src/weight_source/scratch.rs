@@ -18,6 +18,8 @@ pub const MAX_EDIT_BYTES: u64 = 32 << 20;
 pub const DELTA_OVERHEAD: u64 = 8 + 64 + 64 + 8 + 4 + 32 * 16;
 const MAGIC: &[u8; 8] = b"BWDELTA1";
 
+pub mod diff;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {

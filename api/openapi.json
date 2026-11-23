@@ -203,6 +203,66 @@
         }
       }
     },
+    "/api/diff/tensors": {
+      "get": {
+        "operationId": "diffTensors",
+        "summary": "Compare weights in two scratch revisions of the same source",
+        "description": "Use scratch IDs or the original SafeTensors Library ID and a scratch ID. A is the baseline for relative norms. The API returns only changed tensors. File limit: 4 GiB per revision.",
+        "parameters": [{"$ref": "#/components/parameters/DiffA"}, {"$ref": "#/components/parameters/DiffB"}],
+        "responses": {
+          "200": {"description": "Tensor diff.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TensorDiffReport"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/DiffNotFound"},
+          "413": {"$ref": "#/components/responses/DiffTooLarge"},
+          "422": {"$ref": "#/components/responses/DiffInvalid"},
+          "429": {"$ref": "#/components/responses/DiffBusy"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/diff/traces": {
+      "get": {
+        "operationId": "diffTraces",
+        "summary": "Compare two retained trace jobs",
+        "description": "Prompts, capture specs and token IDs must match. Compare one prompt index per request. Use a layer or a smaller token range if the worker slice or report exceeds 4 MiB.",
+        "parameters": [
+          {"$ref": "#/components/parameters/DiffA"}, {"$ref": "#/components/parameters/DiffB"},
+          {"$ref": "#/components/parameters/TracePrompt"},
+          {"name": "layer", "in": "query", "description": "Filter activations and logit lens rows by layer. Does not filter model logits.", "schema": {"type": "integer", "minimum": 0, "maximum": 4095}},
+          {"$ref": "#/components/parameters/TraceStart"}, {"$ref": "#/components/parameters/TraceEnd"}
+        ],
+        "responses": {
+          "200": {"description": "Trace diff.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TraceDiffReport"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/TraceNotFound"},
+          "413": {"$ref": "#/components/responses/DiffTooLarge"},
+          "422": {"$ref": "#/components/responses/DiffInvalid"},
+          "429": {"$ref": "#/components/responses/DiffBusy"},
+          "500": {"$ref": "#/components/responses/StorageError"},
+          "502": {"$ref": "#/components/responses/TraceReadFailed"}
+        }
+      }
+    },
+    "/api/diff/behavior": {
+      "get": {
+        "operationId": "diffBehavior",
+        "summary": "Compare behavior metrics from a scratch revision and its parent",
+        "description": "Reads the BehaviorDiffInputV1 artifact for scratch revision B. A must be its immediate parent. This operation does not run checks or qualify a release.",
+        "parameters": [{"$ref": "#/components/parameters/DiffA"}, {"$ref": "#/components/parameters/DiffB"}],
+        "responses": {
+          "200": {"description": "Behavior diff.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BehaviorDiffReport"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/DiffNotFound"},
+          "413": {"$ref": "#/components/responses/DiffTooLarge"},
+          "422": {"$ref": "#/components/responses/DiffInvalid"},
+          "429": {"$ref": "#/components/responses/DiffBusy"},
+          "500": {"$ref": "#/components/responses/StorageError"}
+        }
+      }
+    },
     "/api/scratch": {
       "get": {
         "operationId": "listScratch",
@@ -941,6 +1001,8 @@
       "TracePrompt": {"name":"prompt","in":"query","description":"Zero-based index in the trace request.","schema":{"type":"integer","minimum":0,"maximum":3,"default":0}},
       "TraceStart": {"name":"start","in":"query","description":"Inclusive token position.","schema":{"type":"integer","minimum":0,"maximum":4095,"default":0}},
       "TraceEnd": {"name":"end","in":"query","description":"Exclusive token position. Must be greater than start.","schema":{"type":"integer","minimum":1,"maximum":4096,"default":4096}},
+      "DiffA": {"name": "a", "in": "query", "required": true, "description": "Baseline ID.", "schema": {"$ref": "#/components/schemas/DiffId"}},
+      "DiffB": {"name": "b", "in": "query", "required": true, "description": "Comparison ID.", "schema": {"$ref": "#/components/schemas/DiffId"}},
       "IdempotencyKey": {
         "name": "Idempotency-Key",
         "in": "header",
@@ -963,6 +1025,10 @@
       "TraceNotFound": {"description":"No successful trace, retained prompt, or requested tensor slice.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},
       "TraceTooLarge": {"description":"The slice exceeds the 4 MiB response limit. Select a smaller range.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},
       "TraceReadFailed": {"description":"The worker could not read or verify the result.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},
+      "DiffNotFound": {"description": "A revision or required artifact is not available.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "DiffInvalid": {"description": "The inputs differ in required metadata, do not match their pins, or contain invalid data.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "DiffTooLarge": {"description": "An input or report exceeds its size limit.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "DiffBusy": {"description": "Another diff is in progress. Retry later.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "UnsupportedMediaType": {"description": "Send Content-Type: application/json for JSON requests or a CLI cancel request.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "InvalidJsonData": {"description": "JSON could not be decoded as the request type (for example, wrong field type, unknown top-level field, or missing required field). Kind-specific validation after decoding instead returns 400.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "StorageError": {"description": "A controller storage operation failed.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}, "example": {"error": "controller storage error"}}}},
@@ -972,6 +1038,108 @@
       "HfTokenStorageUnavailable": {"description": "The private token file cannot be safely changed.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
     },
     "schemas": {
+      "DiffId": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
+      "DiffPairReport": {
+        "type": "object", "required": ["schema_version", "qualification", "a", "b"],
+        "properties": {
+          "schema_version": {"const": 1}, "qualification": {"const": "not release-qualified"},
+          "a": {"$ref": "#/components/schemas/DiffId"}, "b": {"$ref": "#/components/schemas/DiffId"}
+        }
+      },
+      "DiffCoordinates": {"type": "array", "maxItems": 8, "items": {"type": "integer", "minimum": 0}},
+      "TensorDiffReport": {
+        "allOf": [{"$ref": "#/components/schemas/DiffPairReport"}, {
+          "type": "object", "required": ["a_sha256", "b_sha256", "tensors"],
+          "properties": {
+            "a_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "b_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "tensors": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/components/schemas/TensorDiffRow"}}
+          }
+        }]
+      },
+      "TensorDiffRow": {
+        "type": "object", "required": ["name", "shape", "dtype", "changed_elements", "bounds", "l2", "linf", "relative_frobenius", "low_rank"],
+        "properties": {
+          "name": {"type": "string"}, "shape": {"$ref": "#/components/schemas/DiffCoordinates"}, "dtype": {"enum": ["F32", "F16", "BF16"]},
+          "changed_elements": {"type": "integer", "minimum": 1, "description": "Number of elements with a change in stored bits."},
+          "bounds": {"type": "object", "required": ["start", "end"], "description": "Zero-based bounding box with inclusive start and exclusive end per axis.", "properties": {
+            "start": {"$ref": "#/components/schemas/DiffCoordinates"}, "end": {"$ref": "#/components/schemas/DiffCoordinates"}
+          }},
+          "l2": {"type": "number", "minimum": 0}, "linf": {"type": "number", "minimum": 0},
+          "relative_frobenius": {"type": ["number", "null"], "minimum": 0, "description": "L2 shift divided by the Frobenius norm of A over the full tensor, or null for a zero baseline."},
+          "low_rank": {"type": ["object", "null"], "description": "A sample from the changed bounding box of a 2D tensor. Not a full tensor rank.", "required": ["sample_shape", "singular_values", "sample_rank"], "properties": {
+            "sample_shape": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer", "minimum": 1, "maximum": 32}},
+            "singular_values": {"type": "array", "maxItems": 8, "items": {"type": "number", "minimum": 0}},
+            "sample_rank": {"type": "integer", "minimum": 0, "maximum": 32}
+          }}
+        }
+      },
+      "TraceDiffReport": {
+        "allOf": [{"$ref": "#/components/schemas/DiffPairReport"}, {
+          "type": "object", "required": ["prompt", "activations", "logit_lens", "model_logits"], "properties": {
+            "prompt": {"type": "integer", "minimum": 0, "maximum": 3},
+            "activations": {"type": "array", "items": {"$ref": "#/components/schemas/TraceDiffActivation"}},
+            "logit_lens": {"type": "array", "items": {"$ref": "#/components/schemas/TraceDiffLogits"}},
+            "model_logits": {"type": "array", "items": {"$ref": "#/components/schemas/TraceDiffLogits"}}
+          }
+        }]
+      },
+      "TraceDiffActivation": {
+        "type": "object", "required": ["layer", "role", "position", "shape", "missing_a", "missing_b", "l2", "linf", "cosine"],
+        "properties": {
+          "layer": {"type": "integer", "minimum": 0}, "position": {"type": "integer", "minimum": 0},
+          "role": {"enum": ["l_out", "attn_out", "ffn_inp", "ffn_out", "kq_soft_max"]},
+          "shape": {"anyOf": [{"$ref": "#/components/schemas/DiffCoordinates"}, {"type": "null"}]},
+          "missing_a": {"type": "boolean"}, "missing_b": {"type": "boolean"},
+          "l2": {"type": ["number", "null"], "minimum": 0}, "linf": {"type": ["number", "null"], "minimum": 0},
+          "cosine": {"type": ["number", "null"], "minimum": -1, "maximum": 1, "description": "Null when either row is missing or has zero norm."}
+        }
+      },
+      "TraceDiffTop": {"type": ["array", "null"], "maxItems": 100, "items": {
+        "type": "object", "required": ["token_id", "logit"], "properties": {"token_id": {"type": "integer", "minimum": 0}, "logit": {"type": "number"}}
+      }},
+      "TraceDiffLogits": {
+        "type": "object", "required": ["layer", "position", "a", "b", "entered", "exited", "shared_count", "l2", "linf", "kl_a_to_b_shared"],
+        "properties": {
+          "layer": {"type": ["integer", "null"], "minimum": 0, "description": "Null for model logits."}, "position": {"type": "integer", "minimum": 0},
+          "a": {"$ref": "#/components/schemas/TraceDiffTop"}, "b": {"$ref": "#/components/schemas/TraceDiffTop"},
+          "entered": {"type": "array", "items": {"type": "integer", "minimum": 0}}, "exited": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+          "shared_count": {"type": "integer", "minimum": 0},
+          "l2": {"type": ["number", "null"], "minimum": 0}, "linf": {"type": ["number", "null"], "minimum": 0},
+          "kl_a_to_b_shared": {"type": ["number", "null"], "minimum": 0, "description": "KL(A || B) after softmax on the shared top-k token IDs. This is not full-vocabulary KL. Null when there are no shared IDs."}
+        }
+      },
+      "BehaviorDiffInputV1": {
+        "type": "object", "additionalProperties": false, "required": ["schema_version", "parent_id", "child_id", "metrics"], "properties": {
+          "schema_version": {"const": 1},
+          "parent_id": {"$ref": "#/components/schemas/DiffId"}, "child_id": {"$ref": "#/components/schemas/DiffId"},
+          "metrics": {"type": "array", "maxItems": 256, "items": {"$ref": "#/components/schemas/BehaviorDiffMetricInput"}}
+        }
+      },
+      "BehaviorDiffMetricFields": {
+        "type": "object", "required": ["name", "parent", "child"], "properties": {
+          "name": {"type": "string", "minLength": 1, "maxLength": 128},
+          "parent": {"type": ["number", "string", "boolean", "null"]}, "child": {"type": ["number", "string", "boolean", "null"]},
+          "better": {"enum": ["higher", "lower", "neither"], "default": "neither"},
+          "threshold": {"type": "number", "minimum": 0, "default": 0}
+        }
+      },
+      "BehaviorDiffMetricInput": {
+        "$ref": "#/components/schemas/BehaviorDiffMetricFields", "unevaluatedProperties": false
+      },
+      "BehaviorDiffReport": {
+        "allOf": [{"$ref": "#/components/schemas/DiffPairReport"}, {
+          "type": "object", "required": ["metrics"], "properties": {
+            "metrics": {"type": "array", "maxItems": 256, "items": {"allOf": [
+              {"$ref": "#/components/schemas/BehaviorDiffMetricFields"}, {
+                "type": "object", "required": ["better", "threshold", "delta", "flag"], "properties": {
+                  "delta": {"type": ["number", "null"], "description": "Child minus parent for numeric results."},
+                  "flag": {"enum": ["unchanged", "missing", "within_threshold", "improved", "regressed", "changed"]}
+                }
+              }
+            ]}}
+          }
+        }]
+      },
       "ScratchHash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
       "ScratchOperation": {
         "oneOf": [

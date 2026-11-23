@@ -57,18 +57,18 @@ pub struct Revision {
     pub id: String,
     kind: String,
     pub state: RevisionState,
-    sha256: String,
+    pub(crate) sha256: String,
     qualification: String,
     library_model_id: Option<String>,
     pub provenance: Provenance,
-    delta: Summary,
+    pub(crate) delta: Summary,
 }
 
 #[derive(Deserialize, Serialize)]
 pub struct Provenance {
     schema: String,
     pub parent_id: String,
-    parent_sha256: String,
+    pub(crate) parent_sha256: String,
     revision_id: String,
     revision_sha256: String,
     worker: String,
