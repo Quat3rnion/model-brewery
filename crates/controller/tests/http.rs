@@ -15,6 +15,9 @@ mod interventions;
 #[path = "support/mcp.rs"]
 mod mcp;
 
+#[path = "support/sae.rs"]
+mod sae;
+
 #[path = "support/weights.rs"]
 mod weights;
 

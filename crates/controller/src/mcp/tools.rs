@@ -22,6 +22,8 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("compile_program", "post", "/api/scratch/compile_program"),
     ("run_program", "post", "/api/scratch/{id}/run_program"),
     ("start_trace", "post", "/api/jobs"),
+    ("steer_feature", "post", "/api/jobs"),
+    ("read_feature_trace", "get", "/api/jobs/{id}/trace/features"),
     ("get_job", "get", "/api/jobs/{id}"),
     ("list_interventions", "get", "/api/interventions"),
     ("create_intervention", "post", "/api/interventions"),
@@ -87,7 +89,12 @@ impl Server {
             .map(|&(name, method, path)| {
                 (
                     name,
-                    Route::new(&contract, method, path, name == "start_trace"),
+                    Route::new(
+                        &contract,
+                        method,
+                        path,
+                        matches!(name, "start_trace" | "steer_feature"),
+                    ),
                 )
             })
             .collect();
@@ -100,6 +107,10 @@ impl Server {
             let mut schema = route.schema.clone();
             let description = match name {
                 "start_trace" => "Queue a CPU trace. Enter one Library GGUF ID or one scratch revision ID with private GGUF in input_ids. Poll its ID with get_job.",
+                "steer_feature" => {
+                    schema["properties"]["options"]["required"] = json!(["feature_steering"]);
+                    "Queue a CPU trace with one SAE decoder direction. Set options.feature_steering. Poll its ID with get_job."
+                }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({
                         "type":"integer", "minimum":0, "maximum":WAIT_MS_MAX, "default":0,
@@ -170,7 +181,16 @@ impl Server {
         } else {
             0
         };
-        let (path, key, body) = route.request(args, name == "start_trace")?;
+        if name == "steer_feature"
+            && !args
+                .get("options")
+                .and_then(|o| o.get("feature_steering"))
+                .is_some_and(Value::is_object)
+        {
+            return Err("steer_feature requires options.feature_steering");
+        }
+        let (path, key, body) =
+            route.request(args, matches!(name, "start_trace" | "steer_feature"))?;
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
         let result = loop {
             let result = match self.send(route, &path, key.as_deref(), body.clone()).await {

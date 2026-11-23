@@ -18,7 +18,7 @@
   } from '../../lib/weightspace';
   import MatrixHeat from './MatrixHeat.svelte';
 
-  let { jobId, result }: { jobId: string; result: unknown } = $props();
+  let { jobId, result, hasSae = false }: { jobId: string; result: unknown; hasSae?: boolean } = $props();
 
   const promptCount = $derived(Math.max(1, (obj(result)?.prompts as unknown[] | undefined)?.length ?? 1));
   let prompt = $state(0);
@@ -44,6 +44,36 @@
   const posLabel = (p: number) => (tokenAt.has(p) ? `${p} (#${tokenAt.get(p)})` : String(p));
   const plainRoles = $derived((summary?.spec.roles ?? []).filter((r) => r !== 'kq_soft_max') as TraceRole[]);
   const hasAttention = $derived(summary?.spec.roles.includes('kq_soft_max') ?? false);
+
+  type FeatureRow = { position: number; top: { feature: number; activation: number }[] };
+  let featurePosition = $state<number | undefined>(undefined);
+  let featureRow = $state<FeatureRow | undefined>(undefined);
+  let featureError = $state<string | null>(null);
+  let featureBusy = $state(false);
+  const capturedPositions = $derived((summary?.tokens ?? []).map((t) => t.position)
+    .filter((p) => summary?.spec.positions.includes(p)));
+  $effect(() => {
+    const s = summary;
+    const id = jobId;
+    const position = featurePosition;
+    featureRow = undefined;
+    featureError = null;
+    featureBusy = false;
+    if (!hasSae || !s || position === undefined || !capturedPositions.includes(position)) return;
+    const ac = new AbortController();
+    featureBusy = true;
+    api.trace(id, { prompt: s.prompt, start: position, end: position + 1 }, 'features', ac.signal)
+      .then((data) => {
+        if (!ac.signal.aborted) featureRow = (data as { rows: FeatureRow[] }).rows[0];
+      })
+      .catch((e) => {
+        if (!ac.signal.aborted) featureError = errorText(e);
+      })
+      .finally(() => {
+        if (!ac.signal.aborted) featureBusy = false;
+      });
+    return () => ac.abort();
+  });
 
   // ---- Activation norms ----
   let role = $state<TraceRole | ''>('');
@@ -169,6 +199,30 @@
     </dl>
     {#if summary.intervention_count}
       <p class="note info small">This trace ran with {summary.intervention_count} activation interventions. Values after an edited node show the edited run.</p>
+    {/if}
+
+    {#if hasSae}
+      <section class="sub" aria-labelledby="{uid}-sae-h">
+        <h3 id="{uid}-sae-h">Top SAE features</h3>
+        <div class="field inline">
+          <label for="{uid}-sae-pos">Token position</label>
+          <select id="{uid}-sae-pos" class="input" bind:value={featurePosition}>
+            <option value={undefined}>Select a position</option>
+            {#each capturedPositions as p (p)}<option value={p}>{posLabel(p)}</option>{/each}
+          </select>
+        </div>
+        {#if featureError}
+          <p class="note bad" role="alert">{featureError}</p>
+        {:else if featureBusy}
+          <p class="muted small" aria-live="polite">Reading features…</p>
+        {:else if featureRow?.top.length}
+          <ul class="toplist num" aria-label="Feature IDs and activations">
+            {#each featureRow.top as f (f.feature)}<li>#{f.feature} {fmt(f.activation)}</li>{/each}
+          </ul>
+        {:else if featurePosition !== undefined}
+          <p class="empty">No active features at this position.</p>
+        {/if}
+      </section>
     {/if}
 
     <section class="sub" aria-labelledby="{uid}-norm-h">

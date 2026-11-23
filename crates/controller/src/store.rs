@@ -14,6 +14,7 @@ use std::{
 };
 
 mod interventions;
+mod sae;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -67,6 +68,7 @@ impl Store {
         crate::feed::install(&conn)?;
         idempotency::install(&conn)?;
         interventions::install(&conn)?;
+        sae::install(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS profile_revisions(revision TEXT PRIMARY KEY, body TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS host_evaluation_profiles(

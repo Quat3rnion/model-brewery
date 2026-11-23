@@ -11,6 +11,7 @@ mod hf_download;
 mod hf_tokens;
 mod idempotency;
 mod interventions;
+mod sae;
 mod infra_hosts;
 mod local_edit;
 mod mcp;
