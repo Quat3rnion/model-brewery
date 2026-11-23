@@ -32,6 +32,9 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
    Trace the child with the same prompts, positions, and capture settings.
 5. Use `run_checks`, wait for any check job, then read `get_checks`. Compare
    with `diff_tensors`, `diff_traces`, and `diff_behavior` as applicable.
+   To score a behavior direction, pass `behavior_direction.prompt_sets` with
+   the verified held-out set digests. Use the same digests for each run.
+   See [Behavior direction checks](../../../OPERATOR.md#behavior-direction-checks).
 6. If the user asks, use `request_publish` for the exact child hash. If smoke
    or behavior did not pass, disclose that and acknowledge the current bundle
    only after review. Integrity failure blocks the request. A request leaves

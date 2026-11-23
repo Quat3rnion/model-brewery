@@ -71,7 +71,7 @@ impl ScratchAccess {
             }
             scratch_eval::CHECKS
                 if job.prompt.is_none()
-                    && job.options.as_object().is_some_and(|v| v.is_empty())
+                    && scratch_eval::check_options(&job.options).is_ok()
                     && kinds().eq(scratch_eval::CHECK_INPUTS) =>
             {
                 &job.inputs[..]
@@ -882,6 +882,23 @@ impl Worker {
                     action,
                     job,
                     Reply::error("BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR must be an absolute path"),
+                );
+            }
+            if job.kind == scratch_eval::CHECKS
+                && scratch_eval::check_options(&job.options)?.is_some()
+                && !self
+                    .cfg
+                    .engine_env
+                    .get(scratch_eval::CONTRAST_CACHE)
+                    .is_some_and(|p| Path::new(p).is_absolute())
+            {
+                return self.record_prepare(
+                    id,
+                    action,
+                    job,
+                    Reply::error(
+                        "BREWERY_CONTRAST_CACHE must be an absolute path for behavior checks",
+                    ),
                 );
             }
             if job.kind == locate_edit::JOB {

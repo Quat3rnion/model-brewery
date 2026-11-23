@@ -1794,6 +1794,45 @@ pinned dataset files in a local cache. Set these keys in the worker's
 The worker does not download data during a check. Restart the controller
 after a change to the local worker's runtime configuration.
 
+### Behavior direction checks
+
+Set `BREWERY_CONTRAST_CACHE` to an absolute path in the worker's `engine_env`.
+Use a runner built with `--behavior-v1` support. Put each normalized
+`brewery.contrast-prompts.v1` set in `<sha256>.json` in this cache.
+Use the same digest as the direction job. Set `behavior_direction` in
+`POST /api/scratch/{id}/checks` or `run_checks`, with `prompt_sets` that
+contains the `slop`, `sycophancy`, and `response_length` digests. For a
+synthetic refusal test, add the `refusal` digest. There is no approved
+refusal dataset. Keep each set to 1 to 32 held-out rows. The worker checks
+each file's hash before it reads rows. It does not use the training rows.
+
+The CPU runner uses the model's GGUF chat template and greedy decoding with
+a limit of 64 new tokens. The check counts refusal prefixes, stock phrasing,
+and replies that start with the expected agreement label. It reports mean
+response length in tokens, not characters. It scores the positive side of
+the contrast sets. Agreement on prompts that ask for agreement does not
+measure unsolicited agreement. `refusal_prefixes` can replace
+the default prefixes. A trusted local Python check script can supply a
+classifier to `main(refusal_classifier=...)`. Return a Boolean to override
+the prefix detector, or `None` to use the detector. The request cannot select
+or install a classifier. An operator wrapper can load that entry point with
+`runpy.run_path` and the trusted absolute path to `tools/scratch_checks.py`.
+
+On the held-out short-answer side of the length set, the worker computes
+full-vocabulary `D_KL(parent || child)` in nats. It reports a mean for the
+first token and a separate mean over up to four more positions on the same
+greedy parent continuation. `kl_continuation_positions` records how many
+positions contribute to the second mean. A value of zero means there were
+no continuation positions.
+
+Read `behavior_direction` in the check bundle. The worker saves aggregate
+scores and one sample pair per non-refusal scorer, limited to 160 UTF-8 bytes
+per reply. It does not save refusal-set replies or full generations. W5
+behavior diffs include the numeric scores. An opt-in check does not change
+the release qualification or publication rules.
+
+### Review and approve
+
 Review `check_bundle` for the exact `sha256`. If smoke or behavior did not
 pass, put the current bundle `id` in `acknowledge_bundle` to confirm that you
 reviewed the incomplete results. A new check replaces the bundle and clears

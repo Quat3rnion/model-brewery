@@ -904,6 +904,20 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
     for tool in listed {
         let schema = &tool["inputSchema"];
         assert_eq!(schema["type"], "object", "{tool}");
+        if tool["name"] == "run_checks" {
+            let behavior = &schema["properties"]["behavior_direction"];
+            assert_eq!(behavior["required"], json!(["prompt_sets"]));
+            assert_eq!(
+                behavior["properties"]["prompt_sets"]["required"],
+                json!(["slop", "sycophancy", "response_length"])
+            );
+            assert!(
+                !schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("behavior_direction"))
+            );
+        }
         if matches!(
             tool["name"].as_str(),
             Some("rome_edit" | "memit_edit" | "alphaedit_edit")
@@ -1029,6 +1043,16 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
         "apply_edit",
         json!({"id":scratch["id"],"idempotency_key":"mcp-edit",
         "operations":[{"op":"add","tensor":"w","origin":[0,1],"shape":[1,1],"values":[6.]}]}),
+    );
+    let opted_in = call(
+        "run_checks",
+        json!({"id":edit["id"],"idempotency_key":"mcp-behavior-check","sha256":edit["sha256"],
+               "behavior_direction":{"prompt_sets":{"slop":"a".repeat(64),
+                   "response_length":"b".repeat(64), "sycophancy":"c".repeat(64)}}}),
+    );
+    assert_eq!(
+        opted_in["result"]["structuredContent"]["status"], 409,
+        "{opted_in}"
     );
     let check = ok(
         "run_checks",

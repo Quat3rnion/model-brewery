@@ -1,4 +1,5 @@
 use super::{Fixture, Read, Value};
+use serde_json::json;
 use std::collections::BTreeSet;
 
 const CONTRACT: &str = include_str!("../../../../api/openapi.json");
@@ -215,6 +216,13 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("post", "/api/profiles", "saveProfile"),
     ]);
     assert_eq!(operations, expected);
+    let check = &contract["paths"]["/api/scratch/{id}/checks"]["post"]["requestBody"]["content"]["application/json"]
+        ["schema"];
+    assert_eq!(check["required"], json!(["sha256"]));
+    assert_eq!(
+        check["properties"]["behavior_direction"]["$ref"],
+        "#/components/schemas/BehaviorDirectionConfig"
+    );
     let ids: BTreeSet<_> = operations.iter().map(|entry| entry.2).collect();
     assert_eq!(ids.len(), operations.len());
     walk_refs(&contract, &contract);

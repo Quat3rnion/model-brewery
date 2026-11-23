@@ -454,6 +454,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 scratch_eval::RUNNER_SHA,
                 scratch_eval::RUNNER_LIB_DIR,
                 scratch_eval::CACHE,
+                scratch_eval::CONTRAST_CACHE,
             ],
             locate_edit::JOB => &[],
             _ => &[trace::EXECUTABLE, trace::LIB_DIR],
@@ -714,7 +715,8 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             .engine_env
             .get(scratch_eval::RUNNER_SHA)
             .context("scratch checks runner pin is missing")?;
-        scratch_eval::check_report(&value, hashes, runner)?;
+        let behavior = scratch_eval::check_options(&job.options)?;
+        scratch_eval::check_report(&value, hashes, runner, behavior.as_ref())?;
         return Ok(value);
     }
     if job.kind == locate_edit::JOB {

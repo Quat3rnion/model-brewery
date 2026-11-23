@@ -4,7 +4,10 @@ use crate::{
     web::{read_submission, replay},
 };
 use axum::response::{IntoResponse, Response};
-use brewery_worker::weight_source::{Header, LIMIT as HEADER_LIMIT};
+use brewery_worker::{
+    scratch_eval::{self, BehaviorConfig, BehaviorMetric as Metric, BehaviorReport},
+    weight_source::{Header, LIMIT as HEADER_LIMIT},
+};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -45,6 +48,8 @@ pub(super) struct Bundle {
     smoke: Check,
     behavior: Check,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    behavior_direction: Option<BehaviorReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     program_correctness: Option<Check>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     program_cases: Option<usize>,
@@ -72,6 +77,8 @@ pub(super) enum Check {
 #[serde(deny_unknown_fields)]
 pub(super) struct Run {
     sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    behavior_direction: Option<BehaviorConfig>,
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
@@ -111,15 +118,8 @@ struct OfflineReport {
     metrics: Vec<Metric>,
     parent_generation: String,
     child_generation: String,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Metric {
-    name: String,
-    parent: f64,
-    child: f64,
-    better: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    behavior_direction: Option<BehaviorReport>,
 }
 
 impl OfflineReport {
@@ -190,6 +190,11 @@ pub(super) async fn run(
     payload: Payload<Run>,
 ) -> Result<Response> {
     let request = read(payload)?;
+    if let Some(config) = &request.behavior_direction {
+        config
+            .validate()
+            .map_err(|e| ApiError::bad(e.to_string()))?;
+    }
     // Keep the existing scratch writer serialization for checks and edits.
     let slot = app.scratch_slots.clone().try_acquire_owned().map_err(|_| {
         ApiError(
@@ -228,6 +233,9 @@ fn check(app: &App, id: String, request: Run, key: Option<&Submission<'_>>) -> R
         admit(app, &row.provenance.worker)?;
         let root = store.scratch_root();
         if row.is_compiled_program() {
+            if request.behavior_direction.is_some() {
+                return Err(ApiError::bad("behavior checks require a language model"));
+            }
             let directory = root.join(&id);
             drop(store);
             return program::check(app, row, &directory, key);
@@ -266,9 +274,13 @@ fn check(app: &App, id: String, request: Run, key: Option<&Submission<'_>>) -> R
         return Err(conflict("checks are already running for this revision"));
     }
     if let (Ok(()), Some(parent)) = (&integrity, parent)
-        && let Some((job, envelope)) = plan(&store, &row, parent)?
+        && let Some((job, envelope)) =
+            plan(&store, &row, parent, request.behavior_direction.as_ref())?
     {
         return jobs::enqueue(app, &mut store, job, envelope, key, StatusCode::ACCEPTED);
+    }
+    if request.behavior_direction.is_some() {
+        return Err(conflict(integrity.err().as_deref().unwrap_or(NO_GGUF)));
     }
     let failure = integrity.err();
     row.check_bundle = Some(bundle(&row, failure, None));
@@ -279,7 +291,12 @@ fn check(app: &App, id: String, request: Run, key: Option<&Submission<'_>>) -> R
     Ok((StatusCode::OK, Json(row)).into_response())
 }
 
-fn plan(store: &Store, row: &Revision, parent: Model) -> Result<Option<(Job, Envelope)>> {
+fn plan(
+    store: &Store,
+    row: &Revision,
+    parent: Model,
+    behavior: Option<&BehaviorConfig>,
+) -> Result<Option<(Job, Envelope)>> {
     if row.gguf.is_none() {
         return Ok(None);
     }
@@ -307,7 +324,7 @@ fn plan(store: &Store, row: &Revision, parent: Model) -> Result<Option<(Job, Env
     let (job, mut envelope) = jobs::private_job(
         jobs::CHECK,
         vec![parent_gguf, child_gguf, parent, child],
-        json!({}),
+        behavior.map_or_else(|| json!({}), |config| json!({"behavior_direction":config})),
     );
     envelope.scratch_pins = pins;
     Ok(Some((job, envelope)))
@@ -320,7 +337,7 @@ pub(super) fn finish(
     result: &Value,
     directory: &FsPath,
 ) -> std::result::Result<(Revision, Value), crate::Error> {
-    let measured: OfflineReport = serde_json::from_value(result.clone())?;
+    let mut measured: OfflineReport = serde_json::from_value(result.clone())?;
     measured
         .validate(&row)
         .map_err(|_| "invalid scratch behavior protocol or measurements")?;
@@ -334,7 +351,12 @@ pub(super) fn finish(
             return Err("worker behavior result does not match the pinned inputs".into());
         }
     }
-    row.check_bundle = Some(bundle(&row, None, Some((job.id.clone(), measured))));
+    let config = scratch_eval::check_options(&json!(envelope.options))?;
+    let behavior = measured.behavior_direction.take();
+    scratch_eval::validate_behavior(behavior.as_ref(), config.as_ref())?;
+    let mut completed = bundle(&row, None, Some((job.id.clone(), measured)));
+    completed.behavior_direction = behavior;
+    row.check_bundle = Some(completed);
     write_behavior(&row, directory)?;
     let safe_result = json!({"scratch_id":row.id, "check_bundle":row.check_bundle});
     Ok((row, safe_result))
@@ -370,6 +392,7 @@ fn bundle(
         integrity: failure.map_or(Check::Passed, |reason| Check::Failed { reason }),
         smoke: measured_status(),
         behavior: measured_status(),
+        behavior_direction: None,
         program_correctness: None,
         program_cases: None,
         offline_report: None,
@@ -408,7 +431,7 @@ fn write_behavior(row: &Revision, directory: &FsPath) -> std::result::Result<(),
         schema_version: u8,
         parent_id: &'a str,
         child_id: &'a str,
-        metrics: &'a [Metric],
+        metrics: Vec<&'a Metric>,
     }
     let behavior = Behavior {
         schema_version: 1,
@@ -416,9 +439,20 @@ fn write_behavior(row: &Revision, directory: &FsPath) -> std::result::Result<(),
         child_id: &row.id,
         metrics: row
             .check_bundle
-            .as_ref()
-            .and_then(|b| b.measured_report.as_ref())
-            .map_or(&[], |report| &report.metrics),
+            .iter()
+            .flat_map(|bundle| {
+                bundle
+                    .measured_report
+                    .iter()
+                    .flat_map(|report| &report.metrics)
+                    .chain(
+                        bundle
+                            .behavior_direction
+                            .iter()
+                            .flat_map(|report| &report.metrics),
+                    )
+            })
+            .collect(),
     };
     // Metrics have fixed keys and bounded numbers. Keep the projection below the W5 read limit.
     if serde_json::to_vec(&behavior)?.len() >= 256 * 1024 {

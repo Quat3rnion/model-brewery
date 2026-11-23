@@ -277,6 +277,7 @@ impl Lanes {
                 scratch_eval::RUNNER_SHA,
                 scratch_eval::RUNNER_LIB_DIR,
                 scratch_eval::CACHE,
+                scratch_eval::CONTRAST_CACHE,
                 trace::EXECUTABLE,
                 trace::LIB_DIR,
                 locate_edit::EXECUTABLE,

@@ -159,3 +159,14 @@ scratch SafeTensors child and its pinned configuration, or the plan must
 approve a format-aware private GGUF child. The new child must pass
 integrity, generation, quality checks, and diffs without Library
 registration. These results are not release-qualified.
+
+## Optional behavior scores
+
+Use `qualification/behavior_scoring_acceptance.py` to check the pinned Qwen
+parent twice. Pass the isolated `--root`, the `--bins` directory with copies
+of the controller and worker binaries, and the `--runner` built from
+`tools/scratch_check_logits.cpp`. Pass the approved normalized prompt cache
+as `--contrast-cache` and its tab-separated behavior and digest index as
+`--contrast-index`. The script adds two synthetic refusal prompts. It writes
+`evidence/report.json` only when two distinct CPU worker jobs return the same
+scores and W5 diff. The result is not release-qualified.
