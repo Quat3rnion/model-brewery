@@ -27,9 +27,11 @@ Use the read-only `interp_benchmark` tool to read compiled-program X5, W11,
 and X6 scores against compiler ground truth. These scores do not validate
 results on a language model.
 For quantization damage, use `quantization_damage_map` with the pinned
-reference and quantized GGUFs from the same revision. Use
-`read_quantization_damage` after success. Report the measured swaps and any
-disagreement with the estimates. Do not apply the recipe proposal.
+reference and quantized GGUFs from the same revision. Use the default
+objective for logit drift and measured swaps. Select the corpus loss
+objective to rank mean next-token loss over all W4 held-out lines. Use
+`read_quantization_damage` after success. Report the signed estimates and
+any disagreement with measured swaps. Do not apply the recipe proposal.
 Use `routing_atlas` after you capture router logits, expert IDs, and weights
 on Qwen2MoE or Qwen3MoE. To compare an expert ablation, set the expert-zero
 operation on the FFN output and capture the block output in both traces.

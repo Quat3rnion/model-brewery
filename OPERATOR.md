@@ -557,7 +557,8 @@ come from the same revision.
 
 Submit `POST /api/jobs` with `kind: "quantization_damage"`, the two `input_ids`,
 and `options` with `reference_sha256`, `quantized_sha256`, and
-`gguf_type: "Q4_K_M"`. Do not supply a prompt. The job uses the first
+`gguf_type: "Q4_K_M"`. Do not supply a prompt. The default objective is
+`target_logit`. It uses the first
 `observations` lines of the pinned W4 held-out corpus (1 to 4, default 1).
 By default it measures all quantized tensors. To reduce run time, set
 `tensors` to exact GGUF names. Set `swaps` to 1 to 5 (default 3). CPU runs
@@ -576,6 +577,16 @@ two copies of the reference weights for independent gradients. The job also
 measures the change after it replaces each top-ranked tensor, one at a time,
 in a temporary copy of the quantized GGUF. Predictions can differ from these
 measurements. The job does not edit either input.
+
+Set `objective: "corpus_nll"` to use mean teacher-forced next-token loss
+over all 16 W4 held-out lines. Omit `observations`. The worker must use a
+pinned Lanternfish build that supports `grad-corpus`. This objective does not
+run traces or single-tensor swaps. `swaps` limits only the recipe exchanges.
+The artifact gives the reference mean loss and observation count in `corpus`.
+`predicted_nll_increase` is the dot product of the mean loss gradient and
+the dequantized weight minus the reference weight. A positive value predicts
+higher loss. The ranking uses absolute values. Verify the recipe with
+measured losses; the gradient gives an estimate, not a measurement.
 
 Review `recipe_proposal.layer_pairs`. Each pair exchanges tensor types between
 equal-shaped matrices to preserve payload size. The proposal has no effect

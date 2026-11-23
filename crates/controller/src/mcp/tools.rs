@@ -153,7 +153,7 @@ impl Server {
                     "Queue a CPU sweep of activation sites for one pinned GGUF (Library or private scratch) and two equal-length prompts. Measure the top sites with independent activation patches. Poll with get_job. Cite the saved artifact at /api/jobs/{id}/circuit."
                 }
                 "quantization_damage_map" => {
-                    "Compare pinned Library BF16 and quantized GGUFs on the same worker. Read the damage map after the job finishes. The job does not apply its recipe proposal."
+                    "Compare pinned Library BF16 and quantized GGUFs on the same worker. Choose target_logit for logit drift or corpus_nll for mean next-token loss on all W4 held-out lines. Read the damage map after the job finishes. The job does not apply its recipe proposal."
                 }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({

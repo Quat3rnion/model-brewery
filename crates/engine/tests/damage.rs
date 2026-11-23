@@ -34,19 +34,18 @@ fn gguf(ty: u32, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-#[test]
-fn attributes_dequantized_error_and_checks_a_real_file_swap() {
+fn damage(options: Value, fixture_mode: &str) -> std::process::Output {
     let root = tempfile::tempdir().unwrap();
     let dir = root.path();
-    let script = include_str!("damage_fixture.py");
+    let script = include_str!("damage_fixture.py").replace("__FIXTURE_MODE__", fixture_mode);
     let bin = dir.join("lanternfish");
-    fs::write(&bin, script).unwrap();
+    fs::write(&bin, &script).unwrap();
     fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
     fs::create_dir_all(dir.join("lib/cpu")).unwrap();
     fs::write(dir.join("lib/cpu/libfixture.so"), "fixture").unwrap();
     let manifest = format!(
         "{}  lanternfish\n{}  lib/cpu/libfixture.so\n",
-        sha(script),
+        sha(&script),
         sha("fixture")
     );
     fs::write(dir.join("SHA256SUMS"), &manifest).unwrap();
@@ -75,26 +74,70 @@ fn attributes_dequantized_error_and_checks_a_real_file_swap() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let mut job_options = json!({"reference_sha256":reference["sha256"],"quantized_sha256":quant["sha256"],
+                                "swaps":1,"gguf_type":"Q4_K_M"});
+    job_options
+        .as_object_mut()
+        .unwrap()
+        .extend(options.as_object().unwrap().clone());
     writeln!(
         child.stdin.take().unwrap(),
         "{}",
         json!({
             "kind":"quantization_damage","inputs":[reference,quant],
-            "options":{"reference_sha256":reference["sha256"],"quantized_sha256":quant["sha256"],
-                       "observations":1,"swaps":1,"gguf_type":"Q4_K_M"}
+            "options":job_options
         })
     )
     .unwrap();
-    let out = child.wait_with_output().unwrap();
+    child.wait_with_output().unwrap()
+}
+
+fn success(out: std::process::Output) -> Value {
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let receipt: Value = serde_json::from_slice(&out.stdout).unwrap();
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn attributes_dequantized_error_and_checks_a_real_file_swap() {
+    let receipt = success(damage(json!({}), ""));
     assert_eq!(receipt["tensors"][0]["predicted_recovery"], json!([8.0]));
     assert_eq!(receipt["tensors"][0]["measured_recovery"], json!([8.0]));
     assert_eq!(receipt["layers"][0]["layer"], 0);
     assert_eq!(receipt["observations"][0]["measured_drift"], 8.0);
     assert_eq!(receipt["recipe_proposal"]["applied"], false);
+}
+
+#[test]
+fn corpus_loss_attributes_quantized_minus_reference_without_logit_swaps() {
+    let receipt = success(damage(json!({"objective":"corpus_nll"}), ""));
+    assert_eq!(receipt["objective"], "corpus_nll");
+    assert_eq!(receipt["corpus"]["reference_mean_nll"], 1.25);
+    assert_eq!(receipt["corpus"]["observation_count"], 222);
+    assert_eq!(receipt["corpus"]["predicted_nll_increase"], -8.0);
+    assert_eq!(receipt["tensors"][0]["predicted_nll_increase"], -8.0);
+    assert_eq!(receipt["tensors"][0]["mean_absolute_damage"], 8.0);
+    assert_eq!(receipt["layers"][0]["predicted_nll_increase"], -8.0);
+    assert!(receipt["tensors"][0]["measured_recovery"].is_null());
+    assert_eq!(receipt["observations"], json!([]));
+}
+
+#[test]
+fn corpus_loss_rejects_corrupt_or_unexpected_gradient_entries() {
+    for (mode, error) in [
+        ("bad-hash", "gradient payload size or SHA-256 mismatch"),
+        ("bad-path", "invalid corpus gradient file"),
+        ("bad-shape", "invalid shape for corpus gradient"),
+    ] {
+        let out = damage(json!({"objective":"corpus_nll"}), mode);
+        assert!(!out.status.success(), "accepted {mode}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(error),
+            "{mode}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }

@@ -2828,7 +2828,7 @@
         ]
       },
       "QuantizationDamageJob": {
-        "description":"Measure raw logit drift and attribute it to quantized tensors on the first lines of the pinned W4 held-out corpus. Use two single-file Library GGUFs on the same opted-in worker. The operator must ensure that both GGUFs come from the same revision.",
+        "description":"Attribute quantization damage to tensors on the pinned W4 held-out corpus. Use two single-file Library GGUFs from the same revision on one opted-in worker.",
         "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"},{"$ref":"#/components/schemas/NoPrompt"}],
         "required":["input_ids","options"],
         "properties":{
@@ -2844,21 +2844,29 @@
           "quantized_sha256":{"$ref":"#/components/schemas/Sha256"},
           "gguf_type":{"const":"Q4_K_M","description":"Base for the GGUF tensor-type override proposal."},
           "backend":{"type":"string","enum":["cpu","cuda","rocm"],"default":"cpu"},
-          "observations":{"type":"integer","minimum":1,"maximum":4,"default":1},
-          "swaps":{"type":"integer","minimum":1,"maximum":5,"default":3},
+          "objective":{"type":"string","enum":["target_logit","corpus_nll"],"default":"target_logit","description":"Compare one target logit per selected line, or attribute the mean teacher-forced next-token loss over the full corpus."},
+          "observations":{"type":"integer","minimum":1,"maximum":4,"default":1,"description":"Number of prompt lines for target_logit. Omit for corpus_nll."},
+          "swaps":{"type":"integer","minimum":1,"maximum":5,"default":3,"description":"Maximum recipe type exchanges. Only target_logit also measures this many single-tensor swaps."},
           "tensors":{"type":"array","maxItems":512,"uniqueItems":true,"items":{"type":"string","maxLength":63,"pattern":"^[A-Za-z0-9_.-]+$"},"description":"Optional exact tensor names. An empty selection measures all quantized tensors."}
-        }
+        },
+        "if":{"required":["objective"],"properties":{"objective":{"const":"corpus_nll"}}},
+        "then":{"not":{"required":["observations"]}}
       },
       "QuantizationDamageArtifact": {
         "type":"object",
         "required":["kind","schema_version","reference_id","quantized_id","tensors","layers","observations","recipe_proposal"],
         "properties":{
           "kind":{"const":"quantization_damage"},"schema_version":{"const":1},"qualification":{"const":"not release-qualified"},
+          "objective":{"enum":["target_logit","corpus_nll"],"default":"target_logit"},
           "reference_id":{"$ref":"#/components/schemas/Id"},"quantized_id":{"$ref":"#/components/schemas/Id"},
           "reference_sha256":{"$ref":"#/components/schemas/Sha256"},"quantized_sha256":{"$ref":"#/components/schemas/Sha256"},
-          "observations":{"type":"array","items":{"type":"object","description":"Signed reference minus quantized logit and the W5 comparison for each prompt."}},
-          "tensors":{"type":"array","items":{"type":"object","description":"Tensor ranking with signed first-order and optional measured single-tensor recoveries."}},
-          "layers":{"type":"array","items":{"type":"object","description":"Layer ranking by mean absolute sum of signed tensor contributions."}},
+          "observations":{"type":"array","items":{"type":"object","description":"Signed reference minus quantized logit and the W5 comparison for each prompt. Empty for corpus_nll."}},
+          "corpus":{"type":"object","description":"Only for corpus_nll.","required":["line_count","observation_count","reference_mean_nll","predicted_nll_increase"],"properties":{
+            "line_count":{"const":16},"observation_count":{"type":"integer","minimum":1},
+            "reference_mean_nll":{"type":"number","minimum":0},"predicted_nll_increase":{"type":"number","description":"Sum of the selected first-order tensor contributions to the loss increase."}
+          }},
+          "tensors":{"type":"array","items":{"type":"object","description":"Tensor ranking by absolute damage. For corpus_nll, predicted_nll_increase is the signed dot product of the mean NLL gradient and (dequantized minus reference) weights. Only target_logit measures single-tensor recoveries."}},
+          "layers":{"type":"array","items":{"type":"object","description":"Layer ranking by the magnitude of its signed tensor contributions."}},
           "recipe_proposal":{"type":"object","required":["applied","options","profile","uniform_profile"],"properties":{
             "applied":{"const":false},"options":{"type":"object","description":"Resolved GGUF engine options for the proposal."},
             "profile":{"$ref":"#/components/schemas/NewGgufProfile"},"uniform_profile":{"$ref":"#/components/schemas/NewGgufProfile"}
