@@ -7,8 +7,9 @@ import { route } from './route.svelte';
 import { captureResultFocus } from './focus';
 import { isTerminal } from './format';
 
-type Click = Pick<MouseEvent, 'detail'> & Partial<Pick<PointerEvent, 'pointerType' | 'button'>>;
+type Click = Pick<MouseEvent, 'detail'> & Partial<Pick<PointerEvent, 'pointerType' | 'button' | 'clientX' | 'clientY'>>;
 type ClickStep = { detail: number; previousLauncher?: string; launcher?: string };
+type Tap = { x: number; y: number };
 const pointerClicks = new Map<string, ClickStep>();
 const clickSteps = new WeakMap<Click, ClickStep>();
 const disabledPresses = new Map<string, { ended: boolean }>();
@@ -56,13 +57,28 @@ if (typeof window !== 'undefined') {
 /** Do not follow a read result link that appears under a repeat submit click. */
 export function guardReadLink(event: MouseEvent, launcher: string): void {
   const step = clickStep(event);
-  if (step?.previousLauncher === launcher) {
-    step.launcher = launcher;
+  if (step?.previousLauncher === launcher || isRepeatTap(launcher, tapPoint(event), performance.now())) {
+    if (step) step.launcher = launcher;
     event.preventDefault();
   }
 }
 
 const DOUBLE_CLICK_MS = 800;
+const TAP_SLOP_PX = 24;
+let lastTap: (Tap & { launcher: string; time: number; current: () => boolean }) | undefined;
+
+function tapPoint(event?: Click): Tap | undefined {
+  if (event?.pointerType === 'touch' && event.detail > 0 && event.clientX !== undefined && event.clientY !== undefined) {
+    return { x: event.clientX, y: event.clientY };
+  }
+}
+
+function isRepeatTap(launcher: string, tap: Tap | undefined, now: number): boolean {
+  return !!(tap && lastTap?.launcher === launcher && lastTap.current()
+    && now - lastTap.time < DOUBLE_CLICK_MS
+    && Math.hypot(tap.x - lastTap.x, tap.y - lastTap.y) <= TAP_SLOP_PX);
+}
+
 // DefaultBodyLimit for both queue endpoints in crates/controller/src/web.rs.
 const MAX_BODY_BYTES = 256 * 1024;
 const encoder = new TextEncoder();
@@ -75,7 +91,9 @@ let recentVisit: (() => boolean) | undefined;
  *    an enabled submit of the same launcher, even if the body changed. Touch
  *    contacts in one sequence can have different pointer IDs. A disabled press
  *    only clears the sequence if it ends without dispatching a click.
- * 2. Also suppress the same launcher and wire body within 800 ms of send or
+ * 2. Touch browsers can reset the click count before a replacement control is
+ *    ready. Also guard a nearby tap on the same launcher within 800 ms of send.
+ * 3. Also suppress the same launcher and wire body within 800 ms of send or
  *    acceptance, a conservative bound for the platform double-click window.
  *    A keyboard activation (detail = 0) only uses the acceptance window.
  * K (keys). Each explicit submission gets a random key. Resending the same
@@ -123,6 +141,11 @@ export class Submission {
       return null;
     }
     const now = performance.now();
+    const tap = tapPoint(event);
+    if (isRepeatTap(launcher, tap, now)) {
+      if (step) step.launcher = launcher;
+      return null;
+    }
     for (const [key, value] of recent) {
       if (now - Math.max(value.sent, value.accepted ?? -Infinity) >= DOUBLE_CLICK_MS) recent.delete(key);
     }
@@ -134,6 +157,7 @@ export class Submission {
 
     const plain = this.attempts.takeRequest(request, current);
     recent.set(request, { sent: now, accepted: last?.accepted });
+    if (tap) lastTap = { ...tap, launcher, time: now, current };
     this.busy = true;
     this.error = null;
     this.ambiguous = false;

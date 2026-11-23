@@ -352,7 +352,8 @@
       void focus?.(() => {
         if (reviewed?.id !== proposalId) return;
         const link = applySub.statusElement?.querySelector('a');
-        if (link && event.detail === 0) link.scrollIntoView({ block: 'nearest' });
+        // Center instead of leaving a fractional line at the viewport edge.
+        if (link && event.detail === 0) link.scrollIntoView({ block: 'center' });
         return link;
       });
       if (!jobs.some(job => job.id === accepted.id)) void brewery.loadJob(accepted.id).catch(() => {});
