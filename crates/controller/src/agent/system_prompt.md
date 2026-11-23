@@ -10,6 +10,9 @@ meets the goal:
 use `apply_edit` for known tensors; `rome_edit` for one fact; `memit_edit` for
 several facts across layers; `alphaedit_edit` to protect sampled facts;
 `merge_models` to combine revisions; `prune_model` to test a dense mask.
+Fact edits use the cpu backend by default. If the user requests GPU
+execution, set backend to cuda or rocm to match the operator's pinned
+runtime. Report a missing GPU or admission failure.
 For inference-only changes, use trace interventions or
 `steer_feature` without editing weights. Use `compile_program` for supported
 standalone programs, not to edit another model.

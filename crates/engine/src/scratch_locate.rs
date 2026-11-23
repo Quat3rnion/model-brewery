@@ -1,22 +1,21 @@
-use crate::{Job, child_threads, gguf_conversion::Tool, integrity, progress::Progress, write_json};
-use anyhow::{Context, Result, ensure};
-use brewery_worker::{is_digest, locate_edit, weight_source::open_regular};
-use serde_json::{Value, json};
-use std::{
-    env, fs,
-    io::BufReader,
-    path::{Path, PathBuf},
+use crate::{
+    child_threads, gguf_conversion::Tool, integrity, progress::Progress, w0_libraries, write_json,
+    Job,
 };
+use anyhow::{ensure, Context, Result};
+use brewery_worker::{is_digest, locate_edit, weight_source::open_regular};
+use serde_json::{json, Value};
+use std::{env, fs, io::BufReader, os::unix::fs::PermissionsExt, path::Path};
 
 pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let request = locate_edit::Request::parse(&job.options)?;
     let backend = request.edit.backend;
-    let cuda = backend == locate_edit::Backend::Cuda;
     let pin = backend.pin();
-    if cuda {
+    if backend.is_gpu() {
         ensure!(
             env::var(locate_edit::GPU_GATE).as_deref() == Ok("1"),
-            "CUDA edit requires GPU load permission"
+            "{} edit requires GPU load permission",
+            backend.label()
         );
     }
     ensure!(
@@ -40,6 +39,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let model = &job.inputs[0].path;
     let work = tempfile::Builder::new()
         .prefix(".locate-edit-")
+        .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in(cwd)?;
     let tool = Tool::pinned_digest(
         work.path(),
@@ -48,28 +48,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         "lanternfish",
         "Lanternfish",
     )?;
-    let configured = PathBuf::from(
-        env::var_os(pin.lib_dir).with_context(|| format!("{} is required", pin.lib_dir))?,
-    );
-    ensure!(
-        integrity::canonical(&configured)?.is_dir(),
-        "invalid edit runtime library directory"
-    );
-    let libs = work.path().join("libs");
-    fs::create_dir(&libs)?;
-    for &(name, sha) in pin.libraries {
-        let library = configured.join(name).canonicalize()?;
-        ensure!(
-            library.parent() == Some(configured.as_path()),
-            "edit runtime library escapes its directory"
-        );
-        let staged = libs.join(name);
-        fs::copy(library, &staged)?;
-        ensure!(
-            integrity::file_digest(&staged, name.into())?.0.sha256 == sha,
-            "edit runtime library {name} SHA-256 mismatch"
-        );
-    }
+    let libs = w0_libraries::stage(work.path(), pin.lib_dir, "Lanternfish edit", pin.libraries)?;
     let cache = cwd
         .ancestors()
         .nth(3)
@@ -101,15 +80,22 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         .arg(cache)
         .arg("--threads")
         .arg(threads.to_string());
-    if cuda {
-        match env::var_os(locate_edit::CUDA_DEVICES) {
-            Some(devices) => command.env(locate_edit::CUDA_DEVICES, devices),
-            None => command.env_remove(locate_edit::CUDA_DEVICES),
-        };
+    if backend.is_gpu() {
+        command.args(["--backend", backend.key()]);
+        for &key in backend.visibility_vars() {
+            match env::var_os(key) {
+                Some(devices) => command.env(key, devices),
+                None => command.env_remove(key),
+            };
+        }
+    }
+    if backend == locate_edit::Backend::Cuda {
         command
-            .args(["--backend", "cuda"])
             .env("NVIDIA_TF32_OVERRIDE", "0")
             .env("GGML_CUDA_CUBLAS_COMPUTE_TYPE", "f32");
+    } else if backend == locate_edit::Backend::Rocm {
+        // HIP also recognizes this CUDA alias. An empty value can hide all GPUs.
+        command.env_remove(locate_edit::CUDA_DEVICES);
     }
     ids.iter().try_for_each(integrity::Identity::check)?;
     let mut phase = progress.start("locate_edit", "items", Some(1));

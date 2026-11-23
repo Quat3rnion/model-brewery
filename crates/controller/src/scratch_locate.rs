@@ -5,7 +5,7 @@ use crate::{
     web::{read_submission, replay},
 };
 use axum::response::Response;
-use brewery_worker::locate_edit::{self, Backend, Edit, Factors, Method, Request};
+use brewery_worker::locate_edit::{self, Edit, Factors, Method, Request};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -69,15 +69,16 @@ fn run(
     let lane = admit(app, &row.provenance.worker)?;
     let backend = request.edit.backend;
     if !lane.locate_edit_configured(backend) {
-        return Err(conflict(match backend {
-            Backend::Cpu => "configure the pinned Lanternfish CPU editor on this local worker",
-            Backend::Cuda => "configure the pinned Lanternfish CUDA editor on this local worker",
-        }));
+        return Err(conflict(&format!(
+            "configure the pinned Lanternfish {} editor on this local worker",
+            backend.label()
+        )));
     }
-    if backend == Backend::Cuda && !lane.scratch_gpu_allowed() {
-        return Err(conflict(
-            "CUDA edit requires GPU load permission and a GPU admission wrapper on this worker",
-        ));
+    if backend.is_gpu() && !lane.scratch_gpu_allowed() {
+        return Err(conflict(&format!(
+            "{} edit requires GPU load permission and a GPU admission wrapper on this worker",
+            backend.label()
+        )));
     }
     if store.scratch_count().map_err(ApiError::storage)? >= LIMIT {
         return Err(conflict("scratch revision limit reached"));
@@ -90,6 +91,7 @@ fn run(
     let budget = parent_len
         .saturating_mul(3)
         .saturating_add(512 << 20)
+        .saturating_add(backend.runtime_stage_reserve())
         .saturating_add(lane.scratch_disk_reserve());
     if brewery_worker::available(store.scratch_root()).map_err(ApiError::storage)? < budget {
         return Err(conflict("not enough disk space for locate-then-edit"));

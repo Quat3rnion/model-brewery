@@ -584,6 +584,8 @@ worker environment applies to jobs that run on that worker.
 | `BREWERY_LANTERNFISH_EDIT_LIB_DIR` | engine | Absolute path to the directory with the four pinned llama.cpp and ggml libraries. |
 | `BREWERY_LANTERNFISH_EDIT_CUDA` | engine | Absolute path to the pinned W14b Lanternfish binary for CUDA locate-then-edit jobs. |
 | `BREWERY_LANTERNFISH_EDIT_CUDA_LIB_DIR` | engine | Absolute path to the directory with the five pinned W14b libraries. |
+| `BREWERY_LANTERNFISH_EDIT_ROCM` | engine | Absolute path to the pinned Lanternfish binary for ROCm locate-then-edit jobs. |
+| `BREWERY_LANTERNFISH_EDIT_ROCM_LIB_DIR` | engine | Absolute path to the directory with the pinned ROCm edit runtime libraries. |
 | `BREWERY_CONVERTER` | engine | Pinned bf16-to-hgn converter for `inspect`, `plan`, `convert`, and `verify`. |
 | `BREWERY_COMPONENT_CONVERTER` | engine | Separate role-overlay converter build for HF jobs that replace a component. See [Conversion components](#conversion-components). |
 | `BREWERY_COMPONENT_CPU_ONLY` | engine | Set to `1` to refuse non-CPU backends for those jobs. |
@@ -1616,7 +1618,7 @@ Do not delete the Library entry if you need to select that parent later.
 | --- | --- | --- |
 | `POST /api/scratch` | `{"parent_id":"<id>","parent_sha256":"<hash>"}` | New scratch record with an empty delta (`201`). |
 | `POST /api/scratch/{id}/edits` | `{"operations":[...]}` | New scratch child of `{id}` (`201`). |
-| `POST /api/scratch/{id}/rome`, `/memit`, `/alphaedit` | Parent `sha256`, `layers`, `facts`, optional `steps` and `backend` (`cpu` or `cuda`). | Queued edit (`202`). Read `result.scratch_id` when it succeeds. |
+| `POST /api/scratch/{id}/rome`, `/memit`, `/alphaedit` | Parent `sha256`, `layers`, `facts`, optional `steps` and `backend` (`cpu`, `cuda`, or `rocm`). | Queued edit (`202`). Read `result.scratch_id` when it succeeds. |
 | `GET /api/scratch` | None | List of scratch records with provenance (`200`). |
 | `GET /api/scratch/{id}/delta` | None | Parent and child hashes, delta hash and size, and counts of changed tensors and bytes (`200`). |
 | `POST /api/scratch/{id}/gguf` | `{"sha256":"<hash>","assets_id":"<Library assets ID>"}` | Private BF16 conversion job (`202`). |
@@ -1707,23 +1709,32 @@ AlphaEdit takes up to eight facts and one to three layers. The optional
 applies to these jobs. Success makes a child without changing the parent
 or the Library. Use the normal private conversion and check tools on it.
 
-To use CUDA, set `backend` to `cuda` in the API or MCP request. Configure
-the original local worker as follows:
+To use a GPU, set `backend` to `cuda` or `rocm` in the API or MCP request.
+Configure the original local worker as follows:
 
 - Set `admission` to the absolute path of the GPU admission wrapper. Use
   the same lock as other GPU jobs on this host.
-- In `engine_env`, set `BREWERY_ALLOW_GPU_LOAD` to `"1"`. Optionally set
-  `CUDA_VISIBLE_DEVICES` to restrict the available devices.
-- In `engine_env`, set `BREWERY_LANTERNFISH_EDIT_CUDA` to the absolute path
+- In `engine_env`, set `BREWERY_ALLOW_GPU_LOAD` to `"1"`.
+- For CUDA, set `BREWERY_LANTERNFISH_EDIT_CUDA` to the absolute path
   of the W14b executable and `BREWERY_LANTERNFISH_EDIT_CUDA_LIB_DIR` to the
   absolute directory of its five pinned libraries. See the
-  [W14b pin](qualification/lanternfish-w14b-cuda.md).
+  [W14b pin](qualification/lanternfish-w14b-cuda.md). You can set
+  `CUDA_VISIBLE_DEVICES` to restrict the available devices.
+- For ROCm, set `BREWERY_LANTERNFISH_EDIT_ROCM` to the absolute path of
+  the pinned executable and `BREWERY_LANTERNFISH_EDIT_ROCM_LIB_DIR` to the
+  absolute path of `lib` in that package. Keep the `rocblas/library`
+  subdirectory with its Tensile files. See the
+  [ROCm pin manifest](qualification/lanternfish-rocm.sha256).
+  To restrict devices, set `HIP_VISIBLE_DEVICES` or `ROCR_VISIBLE_DEVICES`.
+  Omit the other mask. Allow 768 MiB of disk space for staging.
 
-Only the CUDA edit uses this GPU configuration. The engine verifies the
-executable and all five library hashes before launch. The runtime requires
-GPU placement for forward and backward compute and disables TF32. It does
-not fall back to CPU if CUDA is unavailable. The scratch provenance gives
-the backend and device.
+Set the runtime paths and device masks in `engine_env`. Each GPU edit uses
+only its own runtime settings. The engine verifies the executable and
+library hashes and stages private copies before launch. Forward and
+backward compute require GPU placement. CUDA also disables TF32. If no GPU
+is visible for the requested backend, the job fails. It does not fall back
+to CPU. The scratch provenance gives the backend and device, for example
+`rocm` and `ROCm0`.
 
 The worker expands BF16 GGUF to F32 for ggml backward. The W3 editor writes
 the update in the original SafeTensors dtype. The private forward pass

@@ -4,6 +4,7 @@ use crate::{
     web::{read_submission, replay},
 };
 use axum::response::{IntoResponse, Response};
+use brewery_worker::locate_edit;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -156,9 +157,15 @@ pub(crate) fn prepare_enqueue(app: &App, mut job: Job, envelope: &Envelope) -> R
     if crate::domain::candidates(&job, envelope, &hosts).is_empty() {
         return Err(conflict("no eligible local worker for this scratch job"));
     }
-    let cuda = job.kind == brewery_worker::locate_edit::JOB
-        && envelope.options.get("backend").is_some_and(|v| v == "cuda");
-    lane.snapshot_scratch(&job.host, &job.id, &envelope.scratch_pins, cuda)
+    let backend = if job.kind == locate_edit::JOB {
+        locate_edit::Request::parse(&Value::Object(envelope.options.clone()))
+            .map_err(ApiError::storage)?
+            .edit
+            .backend
+    } else {
+        locate_edit::Backend::Cpu
+    };
+    lane.snapshot_scratch(&job.host, &job.id, &envelope.scratch_pins, backend)
         .map_err(ApiError::storage)?;
     Ok(job)
 }

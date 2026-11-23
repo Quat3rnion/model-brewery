@@ -604,6 +604,12 @@ fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
         error.to_string().contains("pinned Lanternfish CUDA"),
         "{error}"
     );
+    let (status, error) = locate("rocm");
+    assert_eq!(status, 409, "{error}");
+    assert!(
+        error.to_string().contains("pinned Lanternfish ROCm"),
+        "{error}"
+    );
     assert_eq!(locate("auto").0, 422);
     assert_eq!(
         revision["gguf"]["converter_version"],
@@ -903,7 +909,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             Some("rome_edit" | "memit_edit" | "alphaedit_edit")
         ) {
             let backend = &schema["properties"]["backend"];
-            assert_eq!(backend["enum"], json!(["cpu", "cuda"]));
+            assert_eq!(backend["enum"], json!(["cpu", "cuda", "rocm"]));
             assert_eq!(backend["default"], "cpu");
             assert!(
                 !schema["required"]
@@ -1003,6 +1009,13 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
         let rejected = call(method, invalid);
         assert_eq!(
             rejected["result"]["structuredContent"]["status"], 400,
+            "{rejected}"
+        );
+        let mut rocm = located.clone();
+        rocm["backend"] = json!("rocm");
+        let rejected = call(method, rocm);
+        assert_eq!(
+            rejected["result"]["structuredContent"]["status"], 409,
             "{rejected}"
         );
         let rejected = call(method, located);

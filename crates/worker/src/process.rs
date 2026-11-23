@@ -347,6 +347,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         )?;
     }
     let edit_backend = if job.kind == locate_edit::JOB {
+        let backend = locate_edit::Request::parse(&job.options)?.edit.backend;
         let bytes = weight_source::open_regular(&job.inputs[0].path)?
             .metadata()?
             .len();
@@ -354,14 +355,15 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             &w.cfg.root,
             w.disk_floor(job.resources.disk_reserve_bytes)
                 .saturating_add(bytes.saturating_mul(2))
-                .saturating_add(512 << 20),
+                .saturating_add(512 << 20)
+                .saturating_add(backend.runtime_stage_reserve()),
         )?;
-        Some(locate_edit::Request::parse(&job.options)?.edit.backend)
+        backend
     } else {
-        None
+        locate_edit::Backend::Cpu
     };
-    let cuda_edit = edit_backend == Some(locate_edit::Backend::Cuda);
-    if cuda_edit {
+    let gpu_edit = edit_backend.is_gpu();
+    if gpu_edit {
         ensure!(
             scratch_job
                 && w.cfg.admission.is_some()
@@ -369,7 +371,8 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                     .engine_env
                     .get(locate_edit::GPU_GATE)
                     .is_some_and(|v| v == "1"),
-            "CUDA edit requires GPU load permission and a GPU admission wrapper"
+            "{} edit requires GPU load permission and a GPU admission wrapper",
+            edit_backend.label()
         );
     }
     fs::create_dir(&work)?;
@@ -427,7 +430,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         .cfg
         .admission
         .as_ref()
-        .filter(|_| cuda_edit || (job.kind != trace::JOB && !scratch_job))
+        .filter(|_| gpu_edit || (job.kind != trace::JOB && !scratch_job))
     {
         let mut c = Command::new(wrapper);
         c.args(["--wait", "--"]).arg(&w.cfg.engine);
@@ -452,22 +455,22 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 scratch_eval::RUNNER_LIB_DIR,
                 scratch_eval::CACHE,
             ],
-            locate_edit::JOB if cuda_edit => &[
-                locate_edit::CUDA_EXECUTABLE,
-                locate_edit::CUDA_LIB_DIR,
-                locate_edit::GPU_GATE,
-                locate_edit::CUDA_DEVICES,
-            ],
-            locate_edit::JOB => &[locate_edit::EXECUTABLE, locate_edit::LIB_DIR],
+            locate_edit::JOB => &[],
             _ => &[trace::EXECUTABLE, trace::LIB_DIR],
         };
         command.env_clear().envs(
             keys.iter()
                 .copied()
+                .chain(
+                    (job.kind == locate_edit::JOB)
+                        .then(|| edit_backend.env_keys())
+                        .into_iter()
+                        .flatten(),
+                )
                 .chain(["BREWERY_CPU_THREADS"])
                 .filter_map(|key| w.cfg.engine_env.get(key).map(|value| (key, value))),
         );
-        if cuda_edit {
+        if gpu_edit {
             command.env("PATH", "/usr/bin:/bin");
         }
     } else {
