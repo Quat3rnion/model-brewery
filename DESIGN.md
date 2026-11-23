@@ -79,6 +79,8 @@ At 760 px, the header stops being sticky and the section links wrap. Shared two-
 
 Keep wide data views inside local scroll areas. `web/src/components/weights/HeatGrid.svelte` and `web/src/components/trace/MatrixHeat.svelte` use a scroll wrapper and keyboard grid semantics. `MatrixHeat.svelte` also gives the values as a table. Use `.break` for long paths, hashes, and IDs so they do not widen the page.
 
+In Jobs, the tensor sensitivity result uses a layer-by-tensor table as its heatmap. Keep the Fisher values as text in the cells, identify missing measurements with text, and show the element-weighted layer mean in a separate column. Shade measured cells relative to the largest value in that job. Keep the table in its own scroll area.
+
 ## Workbench flow tests
 
 From `web/`, run `npm ci`, `npx playwright install chromium`, and `npm run test:flows`. On Linux, use `npx playwright install --with-deps chromium` if the browser needs system packages. Use `npm run test:flows -- --project=390-dark` to run one project. The suite checks both themes at 1280 and 390 px.

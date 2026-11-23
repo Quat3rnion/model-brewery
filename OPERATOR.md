@@ -391,6 +391,66 @@ the half-open token position range `start` and `end`. Tensor reads also
 require `layer` and `role`; logit lens reads can filter by `layer`. Narrow
 the range if a response exceeds 4 MiB (HTTP 413).
 
+## Tensor sensitivity
+
+Use `sensitivity` to measure empirical Fisher for a dense Qwen2 or Llama F32
+or BF16 GGUF. The job reads one Library GGUF or a scratch revision with a
+private GGUF. It runs on the source worker. It does not change the model.
+
+Set `"sensitivity": true` in the worker's controller capabilities. In the
+worker's `engine_env`, set `BREWERY_LANTERNFISH_SENSITIVITY_PIN` to the
+absolute path of the pinned runtime directory. Set
+`BREWERY_LANTERNFISH_SENSITIVITY_MANIFEST_SHA256` to the trusted SHA-256 of
+its `SHA256SUMS` file. The engine verifies the manifest and stages verified
+copies of the CLI and the selected libraries from `lib/cpu`, `lib/cuda` or
+`lib/rocm`. It uses the CPU libraries for tokenization. For example, the
+Lanternfish X3 pin `lanternfish-x3-fa0e8c5` has manifest SHA-256
+`a6b0816755e6030d22fdce0a140911a3e0d64b407bac6043289a5f090ae85eb6`.
+Keep this runtime separate from the trace and fact-edit runtimes.
+
+For `cuda` or `rocm`, also set `BREWERY_ALLOW_GPU_LOAD` to `"1"` and
+configure an `admission` wrapper that gets the GPU queue before it starts
+the engine. For a private scratch GPU job, use the same local scratch GPU
+configuration as for fact edits. GPU placement is strict. If the requested
+backend cannot run the job, the job fails. BF16 can require a temporary F32
+copy of the full model.
+
+Submit `POST /api/jobs` with:
+
+```json
+{
+  "kind": "sensitivity",
+  "input_ids": ["<Library GGUF ID or scratch revision ID>"],
+  "options": {
+    "model_sha256": "<SHA-256 of the GGUF file>",
+    "corpus_sha256": "9678f9afdc31b2a9be7fec2045997e2360693ee72b893287c0d539983bff4923",
+    "backend": "cpu",
+    "layers": [0],
+    "observations": 4
+  }
+}
+```
+
+Select up to 16 `layers` (all two-dimensional weights in those layers), or
+use `tensors` instead for up to 32 exact GGUF tensor names. The resolved
+selection must fit 32 tensors, 256 gradient calls, 128 MiB for one gradient
+and 2 GiB of total gradient data. Select 1 to 64 next-token observations in
+the fixed W4 held-out corpus order (default 16). Start with one tensor and
+a small observation count.
+
+With MCP, use `tensor_sensitivity` with the same inputs and options but no
+`kind`. Supply an `idempotency_key`, then read the result with `get_job`.
+With REST, read `GET /api/jobs/{id}/sensitivity` after success. In Jobs,
+open the job to see the heatmap and the exact numeric values.
+
+The artifact records the GGUF and revision hashes, the corpus and token
+observation hashes, and the runtime pin. Each tensor value is the mean of
+squared next-token loss gradients over observations and tensor elements.
+Each layer value is the mean over the selected elements of that layer.
+The worker verifies each gradient, then removes the raw gradient data.
+These values describe the selected observations only. They are
+**not release-qualified**.
+
 ## Compare revisions and traces
 
 Use these `GET` routes with `a=<baseline ID>&b=<comparison ID>`.
@@ -1301,7 +1361,7 @@ The viewer keeps both reports separate; their order is not proof of a match.
 
 Agents can operate the workbench without a browser. Use
 [`brewery-weight-space`](.opencode/skills/brewery-weight-space/SKILL.md) for
-traces, scratch edits, checks, and publish requests. See the
+traces, Fisher sensitivity, scratch edits, checks, and publish requests. See the
 [project skills](.opencode/skills/) for other workflows. The running
 controller serves its [OpenAPI contract](api/openapi.json) at
 `GET /api/openapi.json`. Use the same loopback address and worker permissions

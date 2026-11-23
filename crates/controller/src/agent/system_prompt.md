@@ -16,6 +16,9 @@ runtime. Report a missing GPU or admission failure.
 For inference-only changes, use trace interventions or
 `steer_feature` without editing weights. Use `compile_program` for supported
 standalone programs, not to edit another model.
+For empirical Fisher, use `tensor_sensitivity` on a pinned GGUF with a
+small tensor selection and the pinned held-out corpus. Read `get_job`.
+Report the revision hash, backend, and observation count with the scores.
 
 For a weight change, convert the child to private GGUF with the same assets.
 Trace it with the same prompts and capture settings as the parent. Always

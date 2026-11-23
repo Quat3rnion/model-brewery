@@ -162,7 +162,7 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
         }
         Ok(value)
     });
-    if (job.kind == trace::JOB || scratch_eval::private_output(&job.kind))
+    if (matches!(job.kind.as_str(), trace::JOB | sensitivity::JOB) || scratch_eval::private_output(&job.kind))
         && created_work
         && (r.cancel || result.is_err())
         && let Err(error) =
@@ -346,6 +346,24 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .context("trace disk reserve overflow")?,
         )?;
     }
+    let sensitivity_backend = if job.kind == sensitivity::JOB {
+        let (req, _) = sensitivity::Request::resolved(&job.options)?;
+        ensure!(
+            sensitivity::configured(&w.cfg.engine_env, req.backend, w.cfg.admission.as_deref()),
+            "pinned sensitivity backend is unavailable"
+        );
+        // The native runtime may expand BF16 weights to a private F32 GGUF.
+        let model_bytes = weight_source::open_regular(&job.inputs[0].path)?.metadata()?.len();
+        resources::disk_check(
+            &w.cfg.root,
+            w.disk_floor(job.resources.disk_reserve_bytes)
+                .saturating_add(sensitivity::RUNTIME_RESERVE + sensitivity::MAX_GRADIENT_BYTES)
+                .saturating_add(model_bytes.saturating_mul(2)),
+        )?;
+        Some(req.backend)
+    } else {
+        None
+    };
     let edit_backend = if job.kind == locate_edit::JOB {
         let backend = locate_edit::Request::parse(&job.options)?.edit.backend;
         let bytes = weight_source::open_regular(&job.inputs[0].path)?
@@ -430,7 +448,9 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         .cfg
         .admission
         .as_ref()
-        .filter(|_| gpu_edit || (job.kind != trace::JOB && !scratch_job))
+        .filter(|_| {
+            sensitivity_backend.map_or(gpu_edit || (job.kind != trace::JOB && !scratch_job), |b| b.is_gpu())
+        })
     {
         let mut c = Command::new(wrapper);
         c.args(["--wait", "--"]).arg(&w.cfg.engine);
@@ -438,7 +458,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     } else {
         Command::new(&w.cfg.engine)
     };
-    if scratch_job {
+    if scratch_job || sensitivity_backend.is_some() {
         let keys: &[&str] = match job.kind.as_str() {
             scratch_eval::GGUF => &[
                 "BREWERY_GGUF_SAFETENSORS",
@@ -456,6 +476,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 scratch_eval::CACHE,
             ],
             locate_edit::JOB => &[],
+            sensitivity::JOB => &[sensitivity::PIN, sensitivity::MANIFEST_SHA, locate_edit::GPU_GATE],
             _ => &[trace::EXECUTABLE, trace::LIB_DIR],
         };
         command.env_clear().envs(
@@ -468,9 +489,10 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                         .flatten(),
                 )
                 .chain(["BREWERY_CPU_THREADS"])
+                .chain(sensitivity_backend.into_iter().flat_map(|b| b.visibility_vars().iter().copied()))
                 .filter_map(|key| w.cfg.engine_env.get(key).map(|value| (key, value))),
         );
-        if gpu_edit {
+        if gpu_edit || sensitivity_backend.is_some_and(locate_edit::Backend::is_gpu) {
             command.env("PATH", "/usr/bin:/bin");
         }
     } else {
@@ -782,6 +804,19 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             "invalid trace receipt byte count"
         );
         return Ok(value);
+    }
+    if job.kind == sensitivity::JOB {
+        let (request, revision) = sensitivity::Request::resolved(&job.options)?;
+        let input = &job.inputs[0];
+        request.check_model(input.extra["sha256"].as_str().unwrap_or_default())?;
+        let model_id = input.extra["id"].as_str().context("missing sensitivity source ID")?;
+        let artifact: sensitivity::Artifact = serde_json::from_value(value)?;
+        artifact.check(&request, model_id, &revision)?;
+        ensure!(
+            w.cfg.engine_env.get(sensitivity::MANIFEST_SHA) == Some(&artifact.manifest_sha256),
+            "sensitivity artifact runtime SHA-256 does not match worker pin"
+        );
+        return Ok(serde_json::to_value(artifact)?);
     }
     if w.cfg.hy4_plan.as_ref().is_some_and(|p| p.encode.is_some()) {
         let artifact = &value["artifact"];

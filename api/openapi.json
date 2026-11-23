@@ -946,6 +946,17 @@
         }
       }
     },
+    "/api/jobs/{id}/sensitivity": {
+      "get": {
+        "operationId": "getTensorSensitivity",
+        "summary": "Read the empirical Fisher sensitivity artifact for a finished job",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+        "responses": {
+          "200": {"description": "Verified Fisher scores for one model revision and corpus.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SensitivityArtifact"}}}},
+          "403": {"$ref": "#/components/responses/Forbidden"}, "404": {"$ref": "#/components/responses/NotFound"}
+        }
+      }
+    },
     "/api/jobs/{id}/trace/tensor": {
       "get": {
         "operationId": "getTraceTensor",
@@ -2233,7 +2244,7 @@
           "truncated": {"type": "boolean"}
         }
       },
-      "JobKind": {"type": "string", "enum": ["compare", "trace", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer"]},
+      "JobKind": {"type": "string", "enum": ["compare", "trace", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer", "sensitivity"]},
       "JobState": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled"]},
       "CapabilityMap": {
         "type": "object", "description": "Map from each known job kind to its availability.",
@@ -2405,7 +2416,8 @@
           {"$ref": "#/components/schemas/HfDownloadJob"},
           {"$ref": "#/components/schemas/WeightInspectJob"}, {"$ref": "#/components/schemas/WeightProposeJob"},
           {"$ref": "#/components/schemas/WeightTuneJob"}, {"$ref": "#/components/schemas/WeightApplyJob"},
-          {"$ref": "#/components/schemas/Exl3LayerJob"}, {"$ref": "#/components/schemas/TraceJob"}
+          {"$ref": "#/components/schemas/Exl3LayerJob"}, {"$ref": "#/components/schemas/TraceJob"},
+          {"$ref": "#/components/schemas/SensitivityJob"}
         ],
         "discriminator": {
           "propertyName": "kind",
@@ -2417,7 +2429,8 @@
             "hf_download": "#/components/schemas/HfDownloadJob",
             "weight_inspect": "#/components/schemas/WeightInspectJob", "weight_propose": "#/components/schemas/WeightProposeJob",
             "weight_tune": "#/components/schemas/WeightTuneJob", "weight_apply": "#/components/schemas/WeightApplyJob",
-            "exl3_layer": "#/components/schemas/Exl3LayerJob", "trace": "#/components/schemas/TraceJob"
+            "exl3_layer": "#/components/schemas/Exl3LayerJob", "trace": "#/components/schemas/TraceJob",
+            "sensitivity": "#/components/schemas/SensitivityJob"
           }
         }
       },
@@ -2473,6 +2486,43 @@
           {"allOf":[{"$ref":"#/components/schemas/OnePrompt"}],"properties":{"options":{"not":{"required":["prompts"]}}}},
           {"allOf":[{"$ref":"#/components/schemas/NoPrompt"}],"properties":{"options":{"required":["prompts"]}}}
         ]
+      },
+      "SensitivityJob": {
+        "description":"Measure empirical Fisher sensitivity on a single-file dense Qwen2 or Llama F32/BF16 Library GGUF or private scratch GGUF. Use its source worker. No prompt, GPU fallback, or model edits.",
+        "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"},{"$ref":"#/components/schemas/NoPrompt"}],
+        "required":["input_ids","options"],
+        "properties":{
+          "kind":{"const":"sensitivity"},
+          "input_ids":{"description":"One Library GGUF ID or scratch revision ID.","minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
+          "options":{"$ref":"#/components/schemas/SensitivityOptions"}
+        }
+      },
+      "SensitivityOptions": {
+        "type":"object","additionalProperties":false,"required":["model_sha256","corpus_sha256"],
+        "oneOf":[{"required":["layers"]},{"required":["tensors"]}],
+        "properties":{
+          "model_sha256":{"$ref":"#/components/schemas/Sha256","description":"SHA-256 of the exact GGUF file, including for a private scratch revision."},
+          "corpus_sha256":{"const":"9678f9afdc31b2a9be7fec2045997e2360693ee72b893287c0d539983bff4923","description":"W4 held-out text corpus SHA-256."},
+          "backend":{"type":"string","enum":["cpu","cuda","rocm"],"default":"cpu"},
+          "observations":{"type":"integer","minimum":1,"maximum":64,"default":16,"description":"Number of next-token observations in corpus order. The resolved selection must fit 256 gradient calls and 2 GiB of total gradient data."},
+          "layers":{"type":"array","minItems":1,"maxItems":16,"uniqueItems":true,"items":{"$ref":"#/components/schemas/TraceLayer"},"description":"Measure all two-dimensional weights in these layers."},
+          "tensors":{"type":"array","minItems":1,"maxItems":32,"uniqueItems":true,"items":{"type":"string","maxLength":63,"pattern":"^[A-Za-z0-9_.-]+$"}}
+        }
+      },
+      "SensitivityArtifact": {
+        "type":"object", "additionalProperties":false,
+        "required":["schema_version","kind","qualification","model_id","model_sha256","revision_sha256","corpus_sha256","backend","observation_count","observations_sha256","manifest_sha256","executable_sha256","tensors","layers"],
+        "properties":{
+          "schema_version":{"const":1},"kind":{"const":"sensitivity"},"qualification":{"const":"not release-qualified"},
+          "model_id":{"$ref":"#/components/schemas/Id"},"model_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "revision_sha256":{"$ref":"#/components/schemas/Sha256","description":"SafeTensors revision SHA-256 for scratch; GGUF SHA-256 for Library."},
+          "corpus_sha256":{"$ref":"#/components/schemas/Sha256"},"observations_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "backend":{"enum":["cpu","cuda","rocm"]},"observation_count":{"type":"integer","minimum":1,"maximum":64},
+          "manifest_sha256":{"$ref":"#/components/schemas/Sha256"},"executable_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "tensors":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","required":["name","layer","shape","fisher"],
+            "properties":{"name":{"type":"string"},"layer":{"type":["integer","null"]},"shape":{"description":"GGML storage order, innermost dimension first.","type":"array","items":{"type":"integer","minimum":1}},"fisher":{"type":"number","minimum":0}}}},
+          "layers":{"type":"array","items":{"type":"object","required":["layer","elements","fisher"],"properties":{"layer":{"type":"integer"},"elements":{"type":"integer","minimum":1},"fisher":{"type":"number","minimum":0,"description":"Mean over the selected tensor elements in this layer."}}}}
+        }
       },
       "TraceOptions": {
         "type":"object",

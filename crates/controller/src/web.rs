@@ -20,7 +20,7 @@ use axum::{
     response::{IntoResponse, Response, Sse, sse::KeepAlive},
     routing::{delete, get, post},
 };
-use brewery_worker::trace::{self, ReadReply, Slice, View};
+use brewery_worker::{sensitivity, trace::{self, ReadReply, Slice, View}};
 use serde_json::{Value, json, value::RawValue};
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc};
 use tower_http::services::ServeDir;
@@ -69,6 +69,7 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
         .route("/jobs", post(add_job))
         .route("/jobs/{id}", get(job))
         .route("/jobs/{id}/trace", get(trace_manifest))
+        .route("/jobs/{id}/sensitivity", get(crate::sensitivity::get))
         .route("/jobs/{id}/trace/tensor", get(trace_tensor))
         .route("/jobs/{id}/trace/logit-lens", get(trace_logit_lens))
         .route("/jobs/{id}/trace/model-logits", get(trace_model_logits))
@@ -713,18 +714,22 @@ fn prepare_job(app: &App, store: &Store, request: NewJob) -> Result<(Job, Envelo
         return Err(ApiError::bad("unknown job kind or too many inputs"));
     }
     let mut scratch_pins = BTreeMap::new();
+    let mut sensitivity_revision = None;
     let inputs = request
         .input_ids
         .iter()
         .map(|id| {
             let model = if let Some(model) = store.model(id).map_err(ApiError::storage)? {
                 model
-            } else if request.kind == trace::JOB
+            } else if matches!(request.kind.as_str(), trace::JOB | sensitivity::JOB)
                 && request.input_ids.len() == 1
                 && store.scratch(id).map_err(ApiError::storage)?.is_some()
             {
                 let (model, sha) = crate::scratch::jobs::trace_input(store, id)?;
                 scratch_pins.insert(model.path.clone(), sha);
+                if request.kind == sensitivity::JOB {
+                    sensitivity_revision = store.scratch(id).map_err(ApiError::storage)?.map(|r| r.sha256);
+                }
                 model
             } else {
                 return Err(ApiError::bad("unknown model ID"));
@@ -856,6 +861,9 @@ fn prepare_job(app: &App, store: &Store, request: NewJob) -> Result<(Job, Envelo
     };
     let (job, mut envelope) = request.build(host, inputs, prompt).map_err(ApiError::bad)?;
     envelope.scratch_pins = scratch_pins;
+    if job.kind == sensitivity::JOB {
+        crate::sensitivity::prepare(&mut envelope, sensitivity_revision.as_deref())?;
+    }
     Ok((job, envelope))
 }
 
@@ -868,7 +876,9 @@ fn enqueue_job(
     mut envelope: Envelope,
     submission: Option<&Submission<'_>>,
 ) -> Result<Response> {
-    let job = if job.kind == trace::JOB && !envelope.scratch_pins.is_empty() {
+    let job = if matches!(job.kind.as_str(), trace::JOB | sensitivity::JOB)
+        && !envelope.scratch_pins.is_empty()
+    {
         crate::scratch::jobs::prepare_enqueue(app, job, &envelope)?
     } else {
         admit_job(app, store, job, &mut envelope)?

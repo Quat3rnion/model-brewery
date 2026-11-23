@@ -24,6 +24,7 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("run_program", "post", "/api/scratch/{id}/run_program"),
     ("start_trace", "post", "/api/jobs"),
     ("steer_feature", "post", "/api/jobs"),
+    ("tensor_sensitivity", "post", "/api/jobs"),
     ("read_feature_trace", "get", "/api/jobs/{id}/trace/features"),
     ("get_job", "get", "/api/jobs/{id}"),
     ("list_interventions", "get", "/api/interventions"),
@@ -76,6 +77,7 @@ const TRACE_VIEWS: &[(&str, &str)] = &[
 ];
 
 struct Route {
+    fixed_kind: Option<&'static str>,
     path: &'static str,
     write: bool,
     path_params: Vec<String>,
@@ -103,14 +105,18 @@ impl Server {
                         &contract,
                         method,
                         path,
-                        matches!(name, "start_trace" | "steer_feature"),
+                        match name {
+                            "start_trace" | "steer_feature" => Some("trace"),
+                            "tensor_sensitivity" => Some("sensitivity"),
+                            _ => None,
+                        },
                     ),
                 )
             })
             .collect();
         let trace_views: BTreeMap<_, _> = TRACE_VIEWS
             .iter()
-            .map(|&(view, path)| (view, Route::new(&contract, "get", path, false)))
+            .map(|&(view, path)| (view, Route::new(&contract, "get", path, None)))
             .collect();
         let mut tools = Vec::new();
         for (&name, route) in &routes {
@@ -122,6 +128,9 @@ impl Server {
                 "steer_feature" => {
                     schema["properties"]["options"]["required"] = json!(["feature_steering"]);
                     "Queue a CPU trace with one SAE decoder direction. Set options.feature_steering. Poll its ID with get_job."
+                }
+                "tensor_sensitivity" => {
+                    "Queue empirical Fisher sensitivity on the pinned W4 held-out corpus for one GGUF or private scratch GGUF. Select layers or exact tensor names. Poll with get_job. Results are not release-qualified."
                 }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({
@@ -206,8 +215,7 @@ impl Server {
         {
             return Err("steer_feature requires options.feature_steering");
         }
-        let (path, key, allow_duplicate, body) =
-            route.request(args, matches!(name, "start_trace" | "steer_feature"))?;
+        let (path, key, allow_duplicate, body) = route.request(args)?;
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
         let result = loop {
             let result = match self
@@ -292,15 +300,17 @@ impl Server {
 }
 
 impl Route {
-    fn new(contract: &Value, method: &str, path: &'static str, trace: bool) -> Self {
+    fn new(
+        contract: &Value, method: &str, path: &'static str, fixed_kind: Option<&'static str>,
+    ) -> Self {
         let operation = &contract["paths"][path][method];
         let description = operation["summary"]
             .as_str()
             .expect("tool source operation")
             .into();
         let write = method == "post";
-        let mut schema = if trace {
-            trace_schema(contract)
+        let mut schema = if let Some(kind) = fixed_kind {
+            fixed_job_schema(contract, kind)
         } else if write {
             let body = resolve(contract, &operation["requestBody"]);
             resolve(contract, &body["content"]["application/json"]["schema"])
@@ -365,6 +375,7 @@ impl Route {
         schema["required"] = json!(required);
         schema["additionalProperties"] = json!(false);
         Self {
+            fixed_kind,
             write,
             path: path.strip_prefix("/api").unwrap(),
             path_params,
@@ -377,7 +388,6 @@ impl Route {
     fn request(
         &self,
         mut args: Map<String, Value>,
-        trace: bool,
     ) -> Result<(String, Option<String>, bool, Vec<u8>), &'static str> {
         if !args
             .keys()
@@ -454,8 +464,8 @@ impl Route {
             }
         }
         let body = if self.write {
-            if trace {
-                args.insert("kind".into(), json!("trace"));
+            if let Some(kind) = self.fixed_kind {
+                args.insert("kind".into(), json!(kind));
             }
             serde_json::to_vec(&args).expect("serialize tool arguments")
         } else {
@@ -465,20 +475,26 @@ impl Route {
     }
 }
 
-fn trace_schema(contract: &Value) -> Value {
+fn fixed_job_schema(contract: &Value, kind: &str) -> Value {
     let base = &contract["components"]["schemas"];
-    let trace = &base["TraceJob"];
+    let job = &base[if kind == "trace" { "TraceJob" } else { "SensitivityJob" }];
     let mut schema = base["JobRequestFields"].clone();
-    schema["required"] = trace["required"].clone();
-    schema["description"] = trace["description"].clone();
-    schema["oneOf"] = trace["oneOf"].clone();
+    schema["required"] = job["required"].clone();
+    schema["description"] = job["description"].clone();
+    if let Some(variants) = job.get("oneOf") {
+        schema["oneOf"] = variants.clone();
+    }
     let props = schema["properties"].as_object_mut().unwrap();
     props.remove("kind");
+    if kind == "sensitivity" {
+        props.remove("prompt");
+        props.remove("prompt_id");
+    }
     props.insert(
         "host".into(),
         base["DefaultInputHost"]["properties"]["host"].clone(),
     );
-    for (name, rules) in object(&trace["properties"]) {
+    for (name, rules) in object(&job["properties"]) {
         if name != "kind" {
             match props.get_mut(name) {
                 Some(generic) => object_mut(generic).extend(object(rules).clone()),
@@ -489,7 +505,7 @@ fn trace_schema(contract: &Value) -> Value {
         }
     }
     // Replace the generic options schema, not a composite $ref with siblings.
-    props.insert("options".into(), trace["properties"]["options"].clone());
+    props.insert("options".into(), job["properties"]["options"].clone());
     resolve(contract, &schema)
 }
 

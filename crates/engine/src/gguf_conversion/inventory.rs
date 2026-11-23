@@ -55,7 +55,7 @@ const ROCMFPX_TYPES: &[(u64, &str, u64, u64)] = &[
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Namespace {
+pub(crate) enum Namespace {
     Stock,
     RocmFpx,
 }
@@ -99,9 +99,9 @@ pub(super) fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-pub(super) struct Tensor {
-    pub(super) shape: Vec<u64>,
-    pub(super) ty: u64,
+pub(crate) struct Tensor {
+    pub(crate) shape: Vec<u64>,
+    pub(crate) ty: u64,
 }
 
 impl Tensor {
@@ -120,9 +120,9 @@ impl Tensor {
     }
 }
 
-pub(super) struct Model {
-    pub(super) architecture: String,
-    pub(super) tensors: BTreeMap<String, Tensor>,
+pub(crate) struct Model {
+    pub(crate) architecture: String,
+    pub(crate) tensors: BTreeMap<String, Tensor>,
     ftype: Option<u64>,
     align: u64,
     data: u64,
@@ -137,7 +137,7 @@ fn align(value: u64, align: u64) -> Result<u64> {
 }
 
 impl Model {
-    pub(super) fn open(path: &Path, namespace: Namespace) -> Result<Self> {
+    pub(crate) fn open(path: &Path, namespace: Namespace) -> Result<Self> {
         let meta = crate::integrity::canonical(path)?;
         ensure!(meta.is_file(), "expected regular GGUF file");
         let mut r = BufReader::new(File::open(path)?);

@@ -18,6 +18,9 @@ mod mcp;
 #[path = "support/sae.rs"]
 mod sae;
 
+#[path = "support/sensitivity.rs"]
+mod sensitivity;
+
 #[path = "support/weights.rs"]
 mod weights;
 
