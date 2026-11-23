@@ -24,6 +24,7 @@
   let saving = $state(false);
   let saveError = $state<string | null>(null);
   let saveNote = $state<string | null>(null);
+  let settingsHeading = $state<HTMLElement>();
   let evaluationHeading = $state<HTMLElement>();
   let readinessHeading = $state<HTMLElement>();
   let focusRequest = $state('');
@@ -108,12 +109,22 @@
     focusRequest = path === '#/settings/evaluation' ? 'evaluation' : hashParam(hash, 'section')
       ?? (path === '#/settings/infrastructure' ? (id ? 'weights' : 'infrastructure') : '');
   });
+  const allowsEvaluationFocus = (el: Element | null) => el === document.body || el === settingsHeading ||
+    (el instanceof HTMLAnchorElement && el.hash === route.hash);
+  $effect(() => {
+    if (focusRequest !== 'evaluation') return;
+    const cancel = (event: FocusEvent) => {
+      if (event.target instanceof Element && !allowsEvaluationFocus(event.target)) focusRequest = '';
+    };
+    document.addEventListener('focusin', cancel);
+    return () => document.removeEventListener('focusin', cancel);
+  });
   $effect(() => {
     if (focusRequest !== 'evaluation' || !loaded) return;
-    const heading = evaluationHeading ?? readinessHeading;
+    const heading = evaluationHeading ?? readinessHeading ?? settingsHeading;
     if (heading) {
-      heading.focus();
       focusRequest = '';
+      if (allowsEvaluationFocus(document.activeElement)) heading.focus();
     }
   });
   function reset() {
@@ -250,7 +261,7 @@
 
 <div class="stack">
   <div class="head">
-    <h1 tabindex="-1">Settings</h1>
+    <h1 tabindex="-1" bind:this={settingsHeading}>Settings</h1>
     <p class="muted small">
       Select a host to manage weight editing, admission policy and resource limits. Evaluation settings are separate.
       <a href="#/settings/infrastructure">Infrastructure controls and audit log</a>

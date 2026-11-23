@@ -16,6 +16,7 @@
   import { brewery } from '../lib/store.svelte';
   import { errorText } from '../lib/api';
   import { Submitter } from '../lib/submit.svelte';
+  import { PlainAttempt } from '../lib/submission-key';
   import { hashParam, route } from '../lib/route.svelte';
   import { fieldError, visibleBlockers, type Blocker } from '../lib/blockers';
   import { WEIGHT_SOURCES, isSafeSource, formatTime, hostName, isActive, isTerminal, kindTitle, modelLabel, newestFirst, shortHash } from '../lib/format';
@@ -55,6 +56,7 @@
   const models = $derived(brewery.state?.models ?? []);
   const hosts = $derived(brewery.state?.hosts ?? []);
   const jobs = $derived(brewery.state?.jobs ?? []);
+  const visualReadAttempts = new PlainAttempt();
 
   // ---- Source (shared by both modes). ----
   const sourceId = $derived(hashParam(route.hash, 'source') ?? '');
@@ -277,14 +279,19 @@
     detailError = null;
     if (!j || !isTerminal(j.state)) return;
     const id = j.id;
+    let current = true;
     brewery.loadJob(id).then(
       (d) => {
-        if (reviewId === id) detail = d;
+        if (current && reviewId === id && d.id === id && d.state === j.state) {
+          detailError = null;
+          detail = d;
+        }
       },
       (e) => {
-        if (reviewId === id) detailError = errorText(e);
+        if (current && reviewId === id) detailError = errorText(e);
       },
     );
+    return () => { current = false; };
   });
   const proposal = $derived(detail ? readProposal(detail.result) : null);
   const tuneRegress = $derived(detail ? (readTuneReport(detail.result)?.held_out.regression ?? false) : false);
@@ -442,6 +449,7 @@
           tuneReason={caps.weight_tune.reason}
           bind:mode
           {pending}
+          readAttempts={visualReadAttempts}
           onproposal={openReview}
         />
         {/key}

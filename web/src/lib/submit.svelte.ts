@@ -1,44 +1,89 @@
-import { api, rejectedSubmission, submissionError } from './api';
+import { api, submissionError } from './api';
 import { brewery } from './store.svelte';
 import type { JobSummary, NewJob } from './types';
-import { bodyKey, PlainAttempt } from './submission-key';
-import { captureSubmissionVisit } from './route.svelte';
+import { PlainAttempt, requestKey } from './submission-key';
+import { route } from './route.svelte';
 import { captureResultFocus } from './focus';
 
 type AcceptedJob = JobSummary | Pick<JobSummary, 'id'>;
-const MULTI_CLICK_MS = 500;
+type Click = Pick<MouseEvent, 'detail'> & Partial<Pick<PointerEvent, 'pointerId' | 'pointerType' | 'button'>>;
+type ClickStep = { detail: number; pointer: number; repeat: boolean; consumed: boolean };
+const pointerClicks = new Map<string, ClickStep>();
+const clickSteps = new WeakMap<Click, ClickStep>();
+const clickStream = (event: Click) => `${event.pointerType ?? 'mouse'}:${event.button ?? 0}`;
 
-/** One launcher request scope. Use a separate scope for independent reads. */
+function clickStep(event: Click): ClickStep | undefined {
+  if (event.detail <= 0) return;
+  const seen = clickSteps.get(event);
+  if (seen) return seen;
+  const stream = clickStream(event);
+  const pointer = event.pointerId ?? 0;
+  const prior = pointerClicks.get(stream);
+  const repeat = event.detail > 1 && prior?.pointer === pointer && prior.detail === event.detail - 1 && prior.consumed;
+  const step = { detail: event.detail, pointer, repeat, consumed: false };
+  pointerClicks.set(stream, step);
+  clickSteps.set(event, step);
+  return step;
+}
+
+if (typeof window !== 'undefined') {
+  // Observe non-submit clicks and presses on disabled controls, which can
+  // suppress the click entirely. Neither has consumed a submit activation.
+  window.addEventListener('click', clickStep, { capture: true });
+  window.addEventListener('pointerdown', event => {
+    if (event.target instanceof Element && event.target.closest(':disabled')) {
+      pointerClicks.delete(clickStream(event));
+    }
+  }, { capture: true });
+}
+
+/** Do not follow a read result link that appears under a repeat submit click. */
+export function guardReadLink(event: MouseEvent): void {
+  const step = clickStep(event);
+  if (step?.repeat) {
+    step.consumed = true;
+    event.preventDefault();
+  }
+}
+
+/**
+ * Submission rules:
+ * 1. Use the native click count, not elapsed time. A repeat click (detail > 1)
+ *    cannot queue again after a submit in that pointer sequence, even if the
+ *    control or request changes. If the preceding click was disabled or blocked
+ *    and did not reach an enabled submit, the repeat may queue.
+ * 2. Identify a request by launcher ID and its wire body, not UI metadata.
+ *    Keep each key until acceptance is confirmed in this visit. A retry uses
+ *    its original key even after other sends. A different body gets its own key.
+ */
 export class Submission {
   busy = $state(false);
   error = $state<string | null>(null);
-  #plain = new PlainAttempt();
-  #sent?: { request: string; at: number; current: () => boolean };
+
+  constructor(private attempts = new PlainAttempt()) {}
 
   async send<Body extends object, Result>(
     launcher: string,
     body: Body,
     post: (body: Body, key: string) => Promise<Result>,
-    event?: Pick<MouseEvent, 'detail' | 'timeStamp'>,
+    event?: Click,
   ): Promise<Result | null> {
+    const step = event && clickStep(event);
+    if (step?.repeat) {
+      step.consumed = true;
+      return null;
+    }
     if (this.busy) return null;
-    const current = captureSubmissionVisit();
-    const request = bodyKey([launcher, body])!;
-    const prior = this.#sent;
-    if (event && event.detail > 1 && prior?.request === request && prior.current() &&
-        event.timeStamp >= prior.at && event.timeStamp - prior.at <= MULTI_CLICK_MS) return null;
 
-    const plain = this.#plain.take(launcher, body, current);
+    const plain = this.attempts.take(launcher, body, route.capture().current);
     this.busy = true;
     this.error = null;
+    if (step) step.consumed = true;
     try {
-      const pending = post(body, plain.key);
-      this.#sent = event && event.detail > 0 ? { request, at: event.timeStamp, current } : undefined;
-      const result = await pending;
+      const result = await post(body, plain.key);
       plain.complete();
       return result;
     } catch (e) {
-      if (rejectedSubmission(e)) plain.complete();
       this.error = submissionError(e);
       return null;
     } finally {
@@ -53,14 +98,18 @@ export class Submitter extends Submission {
   replayed = $state(false);
   statusElement?: HTMLElement;
 
-  constructor(private launcher: string | ((job: NewJob) => string)) { super(); }
+  constructor(private launcher: string | ((job: NewJob) => string), attempts?: PlainAttempt) { super(attempts); }
+
+  #launcherId(body: NewJob) {
+    return typeof this.launcher === 'string' ? this.launcher : this.launcher(body);
+  }
 
   async submit(job: NewJob, event: MouseEvent, focusStatus = true): Promise<AcceptedJob | null> {
     const focus = captureResultFocus(event);
     const trigger = event.currentTarget;
     // Use the same wire body for the key comparison and the POST.
     const body: NewJob = JSON.parse(JSON.stringify(stripEmpty(job)));
-    const launcher = typeof this.launcher === 'string' ? this.launcher : this.launcher(body);
+    const launcher = this.#launcherId(body);
     const sent = this.send(launcher, body, async (snapshot, key) => {
       const created = await api.queueJob(snapshot, key);
       if (typeof created?.id !== 'string' || !created.id) throw new Error('The controller did not return a job ID.');
@@ -78,6 +127,11 @@ export class Submitter extends Submission {
     }
     return created;
   }
+}
+
+/** Compare job reads using the same omitted fields as the POST. */
+export function jobRequestKey(launcher: string, job: NewJob): string {
+  return requestKey(launcher, stripEmpty(job));
 }
 
 /** Remove empty optional values so the controller applies its own defaults. */

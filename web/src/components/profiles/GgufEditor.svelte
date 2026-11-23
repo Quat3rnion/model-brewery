@@ -5,7 +5,7 @@
   import { SvelteMap } from 'svelte/reactivity';
   import { api, errorText } from '../../lib/api';
   import { captureResultFocus } from '../../lib/focus';
-  import { acceptedJobSummary, Submitter } from '../../lib/submit.svelte';
+  import { acceptedJobSummary, jobRequestKey, Submitter } from '../../lib/submit.svelte';
   import { brewery } from '../../lib/store.svelte';
   import { profileStore } from '../../lib/profiles.svelte';
   import { WEIGHT_SOURCES, hostName, isSafeSource, formatBytes, formatTime } from '../../lib/format';
@@ -62,6 +62,7 @@
   const blocked = $derived(source ? inventoryBlocker(source, host) : null);
   const packed = $derived(!!source && !isSafeSource(source.kind) && host?.capabilities?.weight_packed === true);
   const submitted = new SvelteMap<string, JobSummary>();
+  const launcher = 'profiles.gguf.inventory';
   const reads = new SvelteMap<string, Submitter>();
   const detailErrors = new SvelteMap<string, string>();
   const inventoryJobs = $derived([...jobs, ...[...submitted.values()].filter(j => !jobs.some(row => row.id === j.id))]);
@@ -70,7 +71,7 @@
     sha: source.kind === 'hf' ? validSha(source.bundle_sha256) ?? validSha(source.sha256) : validSha(source.sha256),
   }) : null);
   const need = $derived(source && inv?.need ? inventoryJob(source.id, source.host, inv.need.offset, inv.need.sha, packed) : null);
-  const needKey = $derived(need ? JSON.stringify([sourceKey, need.options]) : '');
+  const needKey = $derived(need ? jobRequestKey(launcher, need) : '');
   const readPending = $derived(reads.get(needKey)?.busy ?? false);
   const lastReads = new SvelteMap<string, { job: JobSummary; matched: boolean }>();
   const lastRead = $derived(lastReads.get(sourceKey));
@@ -91,7 +92,7 @@
     const focus = captureResultFocus(event);
     let read = reads.get(key);
     if (!read) {
-      read = new Submitter('profiles.gguf.inventory');
+      read = new Submitter(launcher);
       reads.set(key, read);
     }
     const accepted = await read.submit(request, event, false);

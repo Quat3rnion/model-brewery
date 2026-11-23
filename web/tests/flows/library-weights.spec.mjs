@@ -290,6 +290,34 @@ const proposal = detail(job('old-proposal', 'weight_propose', { state: 'succeede
     edits: [{ ...edit, dtype: 'F32', before: 0.5, after: 0.125 }] } },
 });
 
+test('Weights ignores a superseded proposal detail failure after a successful state refresh', async ({ page, controller }) => {
+  const state = scenario('weight-reads');
+  state.jobs.push(proposal);
+  controller.respond('GET', '/api/state', () => ({ json: state }));
+  controller.respond('GET', `/api/jobs/${proposal.id}`, { json: proposal });
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  await page.route(`**/api/jobs/${proposal.id}`, async route => {
+    await held;
+    await route.fulfill({ status: 502, json: { error: 'Superseded detail failure.' } });
+  }, { times: 1 });
+  await controller.open(page, 'weights?source=gguf-a');
+  try {
+    const loading = page.waitForRequest(request => request.url().endsWith(`/api/jobs/${proposal.id}`));
+    await page.getByRole('radio', { name: /old-proposal/ }).check();
+    await loading;
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    const apply = page.getByRole('button', { name: 'Apply as new GGUF' });
+    await expect(apply).toBeVisible();
+    const failure = page.waitForResponse(r => r.url().endsWith(`/api/jobs/${proposal.id}`) && r.status() === 502);
+    release();
+    await failure;
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await expect(apply).toBeVisible({ timeout: 1000 });
+    await expect(page.getByText('Superseded detail failure.')).toHaveCount(0);
+  } finally { release(); }
+});
+
 test('Weights keeps a draft when Forward is declined after Back between identical URLs', async ({ page, controller }) => {
   const state = scenario('weight-reads');
   state.hosts[1].capabilities = state.hosts[0].capabilities;

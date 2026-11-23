@@ -30,16 +30,46 @@ it('reuses an unconfirmed key only for the same launcher and body in the same vi
   expect(plain.take('convert.inspect', body, () => true).key).not.toBe(afterSuccess.key);
 });
 
-it('suppresses a multi-click only after a recent send with the same launcher and body', async () => {
+it('suppresses native repeat clicks across requests and launchers without a time cutoff', async () => {
   const submission = new Submission();
+  const other = new Submission();
   const body = { input_ids: ['model-a'] };
   const changed = { input_ids: ['model-b'] };
   const post = async () => true;
   const click = (detail: number, timeStamp: number) => ({ detail, timeStamp });
-  expect(await submission.send('preview', body, post, click(2, 10))).toBe(true);
-  expect(await submission.send('preview', body, post, click(3, 20))).toBeNull();
-  expect(await submission.send('preview', changed, post, click(4, 30))).toBe(true);
-  expect(await submission.send('copy', changed, post, click(5, 40))).toBe(true);
-  expect(await submission.send('copy', changed, post, click(6, 600))).toBe(true);
-  expect(await submission.send('copy', changed, post, click(1, 610))).toBe(true);
+  expect(await submission.send('preview', body, post, click(1, 10))).toBe(true);
+  expect(await submission.send('preview', body, post, click(2, 610))).toBeNull();
+  expect(await other.send('copy', changed, post, click(3, 620))).toBeNull();
+  expect(await other.send('copy', changed, post, click(1, 630))).toBe(true);
+});
+
+it('allows a repeat click when the first was blocked, without mixing pointers', async () => {
+  const submission = new Submission();
+  let finish!: (value: boolean) => void;
+  const body = { input_ids: ['model-a'] };
+  const post = async () => true;
+  const click = (detail: number, pointerId: number) => ({ detail, pointerId, pointerType: 'mouse' });
+  const busy = submission.send('preview', body, () => new Promise<boolean>(resolve => { finish = resolve; }));
+  expect(await submission.send('preview', body, post, click(1, 1))).toBeNull();
+  finish(true);
+  await busy;
+  expect(await submission.send('preview', body, post, click(2, 1))).toBe(true);
+  expect(await submission.send('preview', body, post, click(3, 2))).toBe(true);
+  expect(await submission.send('preview', body, post, { detail: 0 })).toBe(true);
+});
+
+it('keeps each unconfirmed wire request key through other sends until acceptance', async () => {
+  const submission = new Submission();
+  const a = { options: { offset: 0, limit: 128 }, input_ids: ['source'] };
+  const b = { ...a, options: { ...a.options, offset: 128 } };
+  let original = '';
+  expect(await submission.send('inventory', a, async (_, key) => {
+    original = key;
+    throw new Error('Reply lost.');
+  })).toBeNull();
+  expect(await submission.send('inventory', b, async (_, key) => key)).not.toBe(original);
+  expect(await submission.send('recipe', a, async (_, key) => key)).not.toBe(original);
+  expect(await submission.send('inventory', { input_ids: a.input_ids, options: { limit: 128, offset: 0 } },
+    async (_, key) => key)).toBe(original);
+  expect(await submission.send('inventory', a, async (_, key) => key)).not.toBe(original);
 });

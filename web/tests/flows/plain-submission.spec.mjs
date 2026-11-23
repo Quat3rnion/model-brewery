@@ -11,6 +11,18 @@ const choose = async (page, field, name) => {
 const refresh = page => page.evaluate(() => window.dispatchEvent(new Event('online')));
 const response = (page, path = '/api/jobs') =>
   page.waitForResponse(r => r.url().endsWith(path) && r.request().method() === 'POST');
+const twoFrames = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+const freezeState = async (page, controller) => {
+  const snapshot = await (await page.request.get(controller.origin + '/api/state')).json();
+  await page.route('**/api/state', route => route.fulfill({ json: snapshot }));
+  return snapshot;
+};
+const maskAcceptedRead = async (page) => {
+  await page.route('**/api/jobs', async route => {
+    expect((await route.fetch()).status()).toBe(201);
+    await route.fulfill({ status: 502, json: { error: 'Read reply lost.' } });
+  }, { times: 1 });
+};
 
 async function benchmarks(page) {
   await choose(page, page.locator('#bm-host'), /^Worker A/);
@@ -143,6 +155,32 @@ test('the first enabled activation submits even with a native click count of two
   expect((await pending).status()).toBe(201);
 });
 
+test('a disabled first click resets an older native submit sequence', async ({ page, controller }) => {
+  await controller.open(page, 'benchmarks');
+  await benchmarks(page);
+  const suite = check(page, /^Endpoint smoke/);
+  const action = button(page, 'Queue benchmark run');
+  await action.scrollIntoViewIfNeeded();
+  const point = await center(action);
+  const cdp = await page.context().newCDPSession(page);
+  const first = response(page);
+  await clickPoint(cdp, point, 1);
+  expect((await first).status()).toBe(201);
+  await expect(action).toBeEnabled();
+  await suite.evaluate(el => el.click());
+  await expect(action).toBeDisabled();
+  await clickPoint(cdp, point, 1);
+  await suite.evaluate(el => el.click());
+  await expect(action).toBeEnabled();
+  expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest('button')?.textContent.trim(), point))
+    .toBe('Queue benchmark run');
+  const second = page.waitForResponse(r => r.url().endsWith('/api/jobs') && r.request().method() === 'POST',
+    { timeout: 2000 }).catch(() => null);
+  await clickPoint(cdp, point, 2);
+  expect((await second)?.status()).toBe(201);
+  expect(posts(controller)).toHaveLength(2);
+});
+
 test('a fast GGUF inventory reply does not put its job link under the second click', async ({ page, controller }) => {
   controller.load('weight-reads');
   await controller.open(page, 'profiles?format=gguf');
@@ -224,6 +262,181 @@ test('GGUF inventory can queue the next page while the first reply is held', asy
     expect(posts(controller).map(r => r.body.options.offset)).toEqual([0, 128]);
   } finally { release(); }
 });
+
+test('a repeat click on a newly ready GGUF inventory page does not queue the next read', async ({ page, controller }) => {
+  controller.load('weight-reads');
+  await controller.open(page, 'profiles?format=gguf');
+  await choose(page, page.getByRole('combobox', { name: 'Source model', exact: true }), /^Fixture GGUF GGUF/);
+  const read = button(page, 'Read tensor list');
+  await read.scrollIntoViewIfNeeded();
+  const point = await center(read);
+  const cdp = await page.context().newCDPSession(page);
+  await clickPoint(cdp, point, 1);
+  await expect(button(page, 'Read next tensors')).toBeEnabled();
+  expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest('button')?.textContent.trim(), point))
+    .toBe('Read next tensors');
+  const repeat = response(page).catch(() => null);
+  // Synchronize on input handling, not a fixed double-click time window.
+  await clickPoint(cdp, point, 2);
+  await twoFrames(page);
+  expect(posts(controller).map(r => r.body.options.offset)).toEqual([0]);
+  await clickPoint(cdp, point, 1);
+  expect((await repeat).status()).toBe(201);
+  expect(posts(controller).map(r => r.body.options.offset)).toEqual([0, 128]);
+});
+
+test('a Library digest update does not unlock a pending identical Profile wire request', async ({ page, controller }) => {
+  controller.load('weight-reads');
+  const state = scenario('weight-reads');
+  state.hosts[0].capabilities.weight_hgn = true;
+  const hgn = { id: 'managed-hgn', name: 'Managed HGN', kind: 'hgn', host: 'worker-a', path: '/fixtures/managed.hgn', available: true };
+  state.models.push(hgn);
+  controller.respond('GET', '/api/state', () => ({ json: state }));
+  await controller.open(page, 'profiles?format=gguf');
+  const chooseSource = page.getByRole('combobox', { name: 'Source model', exact: true });
+  await choose(page, chooseSource, /^Managed HGN/);
+  const read = button(page, 'Read tensor list');
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  await page.route('**/api/jobs', async route => {
+    const accepted = await route.fetch();
+    await held;
+    await route.fulfill({ status: 502, json: { error: 'Read reply lost.' } });
+    expect(accepted.status()).toBe(201);
+  }, { times: 1 });
+  try {
+    await read.press('Enter');
+    await expect.poll(() => posts(controller).length).toBe(1);
+    hgn.sha256 = 'a'.repeat(64);
+    // A changed display label confirms the refreshed model is present.
+    hgn.name = 'Verified HGN';
+    await refresh(page);
+    await expect(chooseSource).toHaveValue('Verified HGN');
+    await expect(read).toBeDisabled();
+    release();
+    await expect(page.getByText(/Read reply lost/)).toBeVisible();
+    const retry = response(page);
+    await read.press('Enter');
+    expect((await retry).status()).toBe(200);
+    const [a, b] = posts(controller);
+    expect(b.body).toEqual(a.body);
+    expect(b.headers['idempotency-key']).toBe(a.headers['idempotency-key']);
+  } finally { release(); }
+});
+
+for (const kind of ['recipe inventory', 'visual inventory', 'visual tile']) {
+  const recipe = kind === 'recipe inventory';
+  const tile = kind === 'visual tile';
+  const label = recipe ? 'Read layers' : tile ? 'Read tile' : 'Read tensor list';
+  const link = recipe ? 'Layer read job' : tile ? 'Tile read job' : 'Tensor list read job';
+  const view = recipe ? 'convert?format=recipe&output=gguf' : 'weights?source=gguf-a';
+  const setup = async (page, controller) => {
+    controller.load('weight-reads');
+    await controller.open(page, view);
+    const picker = page.locator(recipe ? '#recipe-source' : '#w-source');
+    if (recipe) await choose(page, picker, /^Fixture checkpoint/);
+    if (tile) {
+      await button(page, 'Read tensor list').press('Enter');
+      await page.getByRole('option', { name: /^blk\.0\.ffn_down\.weight,/ }).click();
+    }
+  };
+  test(`${kind} does not follow its result link on the second click`, async ({ page, controller }) => {
+    await setup(page, controller);
+    const action = button(page, label);
+    await action.scrollIntoViewIfNeeded();
+    const rect = await action.boundingBox();
+    const point = { x: rect.x + 36, y: rect.y + rect.height / 2 };
+    const cdp = await page.context().newCDPSession(page);
+    const route = page.url();
+    const before = posts(controller).length;
+    await clickPoint(cdp, point, 1);
+    const result = page.getByRole('link', { name: link, exact: true });
+    await expect(result).toBeVisible();
+    await clickPoint(cdp, point, 2);
+    await twoFrames(page);
+    expect(page.url()).toBe(route);
+    expect(posts(controller)).toHaveLength(before + 1);
+    await result.click();
+    await expect(page).toHaveURL(/#\/jobs\//);
+  });
+
+  test(`${kind} keeps the retry key after a different read`, async ({ page, controller }) => {
+    await setup(page, controller);
+    if (recipe) {
+      await page.request.post(`${controller.origin}/api/models`, { data: {
+        name: 'Second checkpoint', kind: 'hf', host: 'worker-a', path: '/fixtures/second-checkpoint',
+      } });
+      await refresh(page);
+    }
+    const picker = page.locator(recipe ? '#recipe-source' : '#w-source');
+    await freezeState(page, controller);
+    const count = posts(controller).length;
+    await maskAcceptedRead(page);
+    const first = response(page);
+    await button(page, label).press('Enter');
+    expect((await first).status()).toBe(502);
+    await expect(page.getByText(/Read reply lost/)).toBeVisible();
+    const select = async again => {
+      if (tile) await page.locator('#vw-tc').selectOption(again ? '0' : '1');
+      else await choose(page, picker, again ? (recipe ? /^Fixture checkpoint/ : /^Fixture GGUF GGUF/) :
+        (recipe ? /^Second checkpoint/ : /^Fixture checkpoint/));
+    };
+    await select(false);
+    const other = response(page);
+    await button(page, label).press('Enter');
+    expect((await other).status()).toBe(201);
+    if (tile) await expect(page.getByRole('gridcell').first()).toBeVisible();
+    await select(true);
+    const retry = response(page);
+    await button(page, label).press('Enter');
+    expect((await retry).status()).toBe(200);
+    const [a, b, again] = posts(controller).slice(count);
+    expect(b.body).not.toEqual(a.body);
+    expect(b.headers['idempotency-key']).not.toBe(a.headers['idempotency-key']);
+    expect(again.body).toEqual(a.body);
+    expect(again.headers['idempotency-key']).toBe(a.headers['idempotency-key']);
+  });
+}
+
+for (const isTransfer of [true, false]) {
+  const view = isTransfer ? 'transfers' : 'benchmarks';
+  test(`${view} restores focus when changing omissions without accepting a held Space`, async ({ page, controller }) => {
+    const state = scenario('live-shaped');
+    const models = state.models;
+    const suites = [...state.hosts[0].benchmarks, { id: 'extra-a', label: 'Fixture suite A' }, { id: 'extra-b', label: 'Fixture suite B' }];
+    controller.respond('GET', '/api/state', () => ({ json: state }));
+    const update = async ids => {
+      state.models = models.filter(m => !ids.includes(m.id));
+      state.hosts[0].benchmarks = suites.filter(s => !ids.includes(s.id));
+      await refresh(page);
+    };
+    await update([]);
+    await controller.open(page, view);
+    await (isTransfer ? transfers : benchmarks)(page);
+    const labels = isTransfer ? ['Fixture checkpoint', 'Fixture GGUF'] : ['Fixture suite A', 'Fixture suite B'];
+    const ids = isTransfer ? ['source-a', 'gguf-a'] : ['extra-a', 'extra-b'];
+    for (const label of labels) await check(page, new RegExp(`^${label}`)).check();
+    await update(ids.slice(0, 1));
+    const review = button(page, 'Keep remaining selection');
+    const alert = page.getByRole('alert');
+    await expect(alert).toContainText(labels[0]);
+    await review.focus();
+    await page.keyboard.down('Space');
+    await update(ids);
+    await expect(alert).toContainText(labels[1]);
+    await page.keyboard.up('Space');
+    await expect(alert).toContainText(labels[1]);
+    await expect.soft(review).toBeFocused({ timeout: 1000 });
+    await review.focus();
+    await update([]);
+    const restored = check(page, new RegExp(`^${labels[0]}`));
+    await expect(restored).toBeChecked();
+    await expect(check(page, new RegExp(`^${labels[1]}`))).toBeChecked();
+    await expect.soft(page.locator('input[type=checkbox]:checked:focus')).toBeVisible({ timeout: 1000 });
+    await expect(button(page, isTransfer ? 'Transfer' : 'Queue benchmark run')).toBeEnabled();
+    expect(posts(controller)).toHaveLength(0);
+  });
+}
 
 test('GGUF Convert names a missing optional matrix and waits for review', async ({ page, controller }) => {
   const data = scenario('live-shaped');

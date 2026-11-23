@@ -3,6 +3,33 @@ import { test, expect } from './fixtures.mjs';
 import { adminState, fingerprint, gib, sshHost } from './mock/settings.mjs';
 import { scenario } from './mock/scenarios.mjs';
 
+for (const move of [true, false]) {
+  test(`a deferred Evaluation Settings link ${move ? 'does not steal moved focus' : 'focuses its destination'}`, async ({ page, controller }) => {
+    controller.load('capabilities-off');
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    await page.route('**/api/settings', async route => {
+      const response = await route.fetch();
+      await held;
+      await route.fulfill({ response });
+    });
+    await controller.open(page, 'evaluate');
+    try {
+      const setup = page.getByRole('main').locator('a[href^="#/settings/evaluation?"]').first();
+      await setup.press('Enter');
+      await expect(page).toHaveURL(/#\/settings\/evaluation\?host=/);
+      const destination = page.getByRole('heading', { name: 'Evaluation configuration', exact: true });
+      await expect(destination).toHaveCount(0);
+      const other = page.getByRole('navigation', { name: 'Sections' }).getByRole('link', { name: 'Library', exact: true });
+      if (move) await other.focus();
+      release();
+      await expect(destination).toBeVisible();
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await expect(move ? other : destination).toBeFocused({ timeout: 1000 });
+    } finally { release(); }
+  });
+}
+
 const workers = (page) => page.getByRole('navigation', { name: 'Workers' });
 const select = (page) => page.getByLabel('Defined host');
 const pause = (page) => page.getByRole('checkbox', { name: 'Pause new work' });
