@@ -1067,7 +1067,7 @@ pub fn manual_registration_blocker(host: &str, kind: &str) -> Option<Reason> {
 // Prefer the source host if eligible, avoiding a transfer. Selection of an
 // *idle* host occurs in the scheduler, not during POST.
 pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<&'a Host> {
-    if job.scratch_job {
+    if job.scratch_job || job.kind == brewery_worker::weight_spectra::JOB {
         return hosts
             .iter()
             .filter(|host| {

@@ -91,7 +91,7 @@ pub(super) async fn convert(
     )
 }
 
-pub(super) fn input(store: &Store, row: &Revision, name: &str, kind: &str) -> Model {
+pub(crate) fn input(store: &Store, row: &Revision, name: &str, kind: &str) -> Model {
     Model {
         id: row.id.clone(),
         name: format!("Scratch revision ({})", row.id),

@@ -22,6 +22,7 @@
   import JobLink from '../components/JobLink.svelte';
   import ApproveScratch from '../components/trace/ApproveScratch.svelte';
   import TokenLossDiff from '../components/trace/TokenLossDiff.svelte';
+  import WeightHealth from '../components/spectra/WeightHealth.svelte';
 
   const POLL_MS = 3000;
   const models = $derived(brewery.state?.models ?? []);
@@ -391,6 +392,8 @@
       {/if}
     </section>
   </div>
+
+  {#if selected}<WeightHealth rev={selected} revisions={all.map((n) => n.rev)} />{/if}
 
   <section class="panel" aria-labelledby="ed-td-h">
     <header><h2 id="ed-td-h">Trace diff</h2></header>

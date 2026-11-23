@@ -1605,6 +1605,46 @@ Other routes: `GET /api/jobs/{id}`, `POST /api/jobs/{id}/cancel`,
 `POST /api/conversions/{id}/cancel`, and `DELETE /api/models/{id}`. Errors
 use `{"error": "..."}`.
 
+### Spectral weight health
+
+In Edits, select a scratch revision and open Weight health. Start with one
+layer or tensor. The revision uses its direct parent as the reference.
+Select a different reference to compare with another revision or Library
+quantization on the same host. The job needs an enabled local SafeTensors
+editor. Use `representation: "gguf"` for an existing private scratch GGUF.
+The default reference remains in SafeTensors format.
+
+With REST, send `POST /api/weight-spectra` with `id`, and optionally
+`compare_id`, `representation`, `compare_representation`, `layer`, and
+`tensor`. Use an exact tensor name. Use a Library ID in `id` to measure that
+model without creating a scratch revision. The MCP tool is `weight_spectra`.
+Use `GET /api/jobs/{id}` or `get_job` with the returned job ID. The result
+contains the source and reference SHA-256 values. For sharded SafeTensors
+it also lists the sorted shard names and hashes. Deltas are source minus
+reference. A missing tensor or a shape mismatch has no delta.
+
+The CPU job reads SafeTensors F32, F16 and BF16, and single-file little-endian
+GGUF V2/V3 F32, F16, BF16, Q4_0, Q8_0, Q4_K and Q6_K. Other types and
+tensor ranks above two do not have measurements. The job compares matching
+names, with aliases for common Llama and Qwen attention, MLP and norm weights.
+A report can include at most 512 tensors.
+
+Small tensors use exact SVD. Large matrices use a seeded randomized SVD
+with up to 32 singular values. Effective rank is the exponential of Shannon
+entropy of normalized singular values. Stable rank is the full squared
+Frobenius norm divided by the largest squared singular value. Use the
+captured energy fraction to see how much of the full spectrum the
+randomized result covers. Effective rank and alpha from the randomized
+result use only the retained values.
+
+The WeightWatcher-style alpha follows Martin and Mahoney, [Implicit
+Self-Regularization in Deep Neural Networks](https://jmlr.org/papers/v22/20-410.html)
+(JMLR, 2021, section 4). It fits a continuous power law to the squared
+singular values. It uses maximum likelihood and selects the lower cutoff
+with the smallest Kolmogorov-Smirnov distance. The fit needs at least eight
+nonzero tail samples. The fitted exponent alone does not show that a
+tensor has a power-law spectrum. Results are not release-qualified.
+
 ### Scratch weight revisions
 
 Enable the local CPU weight editor for the worker that owns the source.

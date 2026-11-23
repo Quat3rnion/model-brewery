@@ -27,6 +27,9 @@ perplexity. Report the signed share of the net gain, not a share of absolute
 changes. For compiled programs, use program correctness checks instead
 of the GGUF loop. Report failed or missing checks and regressions, including
 locality loss and higher perplexity. Missing measurements are not passes.
+Use `weight_spectra` for weight health. Select a layer or tensor. Read the
+job with `get_job`. Report the input hashes and whether the spectrum is
+exact or approximate. Do not use a power-law fit as a publish check.
 Use `request_publish` only if the user asks and after reviewing the checks.
 Report any integrity or program correctness failure as a blocker. Say
 "not release-qualified" when reporting experiment results.

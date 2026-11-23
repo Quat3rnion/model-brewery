@@ -24,6 +24,7 @@ mod sae;
 mod scratch;
 mod scratch_token_loss;
 mod settings;
+mod spectra;
 mod store;
 mod suggestions;
 mod web;

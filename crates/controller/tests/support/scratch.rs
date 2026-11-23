@@ -71,6 +71,54 @@ fn sha(bytes: &[u8]) -> String {
 }
 
 #[test]
+fn weight_spectra_queues_parent_comparison_and_replays_through_mcp() {
+    let mut t = Test::new();
+    let source = fixture(&t, &[3., 1., -2., 2., 1., 4.]);
+    let hash = sha(&fs::read(&source).unwrap());
+    t.launch();
+    let (status, model) = t.request(
+        "/api/models", "", Some(json!({"host":"existing","kind":"safetensors","path":source})),
+    );
+    assert_eq!(status, 201, "{model}");
+    assert_eq!(t.admin(Some(json!({
+        "action":"set_weight_editor","worker":"existing","revision":0,"enabled":true
+    }))).0, 200);
+    let (status, scratch) = t.request("/api/scratch", "", Some(json!({
+        "parent_id":model["id"], "parent_sha256":hash
+    })));
+    assert_eq!(status, 201, "{scratch}");
+    let (status, job) = t.request(
+        "/api/weight-spectra", "Idempotency-Key: spectra-test\r\n",
+        Some(json!({"id":scratch["id"],"tensor":"w"})),
+    );
+    assert_eq!(status, 202, "{job}");
+    let (_, replay) = t.request("/mcp", "Accept: application/json, text/event-stream\r\n", Some(json!({
+        "jsonrpc":"2.0", "id":1, "method":"tools/call", "params": {
+            "name":"weight_spectra", "arguments":{"id":scratch["id"],"tensor":"w","idempotency_key":"spectra-test"}
+        }
+    })));
+    assert_eq!(replay["result"]["structuredContent"]["id"], job["id"], "{replay}");
+    let route = format!("/api/jobs/{}", job["id"].as_str().unwrap());
+    for _ in 0..100 {
+        let (_, detail) = t.request(&route, "", None);
+        match detail["state"].as_str().unwrap() {
+            "running" | "queued" => std::thread::sleep(std::time::Duration::from_millis(50)),
+            "succeeded" => {
+                let result = &detail["result"];
+                assert_eq!(result["source"]["id"], scratch["id"]);
+                assert_eq!(result["reference"]["id"], model["id"]);
+                assert_eq!(result["source"]["sha256"], hash);
+                assert_eq!(result["reference"]["sha256"], hash);
+                assert_eq!(result["tensors"][0]["delta"]["stable_rank"], 0.0);
+                return;
+            }
+            _ => panic!("{detail}"),
+        }
+    }
+    panic!("spectral job did not finish");
+}
+
+#[test]
 fn mcp_compiled_root_checks_and_approval_boundary() {
     let mut t = Test::new();
     fixture(&t, &[1., 2., 3., 4., 5., 6.]);
@@ -942,6 +990,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "run_program",
             "start_trace",
             "steer_feature",
+            "weight_spectra",
         ]
     );
     for tool in listed {

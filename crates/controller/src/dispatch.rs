@@ -370,8 +370,43 @@ fn allocate(app: &App) -> Result<Vec<Job>, Error> {
     Ok(launch)
 }
 
-async fn drive(app: &App, dispatch: &Dispatcher, job: Job, recovered: bool) -> Result<(), Error> {
+async fn drive(
+    app: &Arc<App>,
+    dispatch: &Dispatcher,
+    job: Job,
+    recovered: bool,
+) -> Result<(), Error> {
     let envelope = app.store.lock().expect("store lock").envelope(&job.id)?;
+    if job.kind == brewery_worker::weight_spectra::JOB {
+        let result = if recovered {
+            Err("Controller interrupted the spectral job; submit a new job".into())
+        } else {
+            crate::spectra::run(app, &job, envelope).await
+        };
+        let mut store = app.store.lock().expect("store lock");
+        let mut current = store.job(&job.id)?.ok_or("active job disappeared")?;
+        let report = match result {
+            _ if current.cancel_requested => {
+                current.state = State::Cancelled;
+                current.progress = "Spectral job cancelled".into();
+                None
+            }
+            Ok(result) => {
+                current.state = State::Succeeded;
+                current.progress = "Spectral analysis complete".into();
+                Some(result)
+            }
+            Err(error) => {
+                current.state = State::Failed;
+                current.progress = "Spectral analysis failed".into();
+                current.error = Some(bounded(&error.to_string(), 4096));
+                None
+            }
+        };
+        current.has_result = report.is_some();
+        store.update(&mut current, report)?;
+        return Ok(());
+    }
     let action = match job.kind.as_str() {
         "transfer" => "transfer",
         "transfer_preview" => "preview_transfer",
