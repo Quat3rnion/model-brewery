@@ -10,6 +10,7 @@ mod integrity;
 mod native_progress;
 mod progress;
 mod recipe;
+mod scratch_checks;
 mod trace;
 mod weight;
 
@@ -156,7 +157,7 @@ fn native_json_admitted(
     // All converter arguments are absolute. Use a dedicated cwd for native
     // counters so they cannot replace the engine snapshot or enter an artifact.
     let cwd = env::current_dir()?.canonicalize()?;
-    let scratch = matches!(name, "convert" | "verify")
+    let scratch = matches!(name, "convert" | "verify" | brewery_worker::scratch_eval::CHECKS)
         .then(|| {
             tempfile::Builder::new()
                 .prefix(".native-progress-")
@@ -392,6 +393,16 @@ fn run() -> Result<i32> {
         "benchmark" => benchmark::run(&job, &cwd, &progress)?,
         "compare" => compare::run(&job, &cwd, &progress)?,
         brewery_worker::trace::JOB => trace::run(&job, &cwd, &progress)?,
+        brewery_worker::scratch_eval::CHECKS => scratch_checks::run(&job, &cwd, &progress)?,
+        brewery_worker::scratch_eval::GGUF => {
+            ensure!(
+                brewery_worker::scratch_eval::gguf_options(&job.options)
+                    && job.inputs.iter().map(|i| i.kind.as_str()).eq(["safetensors", "assets"])
+                    && job.inputs[0].sha256.as_deref().is_some_and(brewery_worker::is_digest),
+                "scratch GGUF needs pinned standalone SafeTensors, assets, and BF16 options"
+            );
+            gguf_conversion::run(&job, &cwd, &progress)?
+        }
         "hf_download" => hf_download::run(&job, &cwd, &progress)?,
         brewery_worker::exl3_layer::JOB => exl3_layer::run(&job, &cwd, &progress)?,
         "weight_inspect" | "weight_propose" | "weight_tune" | "weight_apply" => {

@@ -75,6 +75,7 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/scratch/{id}", "getScratch"),
         ("post", "/api/scratch/{id}/edits", "editScratch"),
         ("get", "/api/scratch/{id}/delta", "getScratchDelta"),
+        ("post", "/api/scratch/{id}/gguf", "convertScratchGguf"),
         ("get", "/api/scratch/{id}/checks", "getScratchChecks"),
         ("post", "/api/scratch/{id}/checks", "runScratchChecks"),
         ("post", "/api/scratch/{id}/discard", "discardScratch"),

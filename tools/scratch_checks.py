@@ -6,9 +6,11 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 from urllib.request import urlopen
 
 
@@ -158,6 +160,22 @@ def score(runner, path, threads, rows):
     return bytes.fromhex(generation).decode("utf-8", errors="replace"), groups
 
 
+def progress(completed):
+    dest = os.environ.get("BREWERY_NATIVE_PROGRESS")
+    if not dest:
+        return
+    path = Path(dest)
+    staged = path.with_suffix(".partial")
+    try:
+        staged.write_text(json.dumps(dict(
+            phase="scratch_checks", unit="items", completed=completed, total=4,
+            updated_at_ms=time.time_ns() // 1_000_000,
+        )), encoding="utf-8")
+        staged.replace(path)
+    except OSError:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("runner", "parent-gguf", "child-gguf", "parent-safetensors", "child-safetensors"):
@@ -175,8 +193,11 @@ def main():
     }
     hashes = {name: file_sha(path) for name, path in files.items()}
     pins, rows = load_fixtures(args.cache, args.fetch)
+    progress(1)
     parent_text, parent = score(args.runner, args.parent_gguf, args.threads, rows)
+    progress(2)
     child_text, child = score(args.runner, args.child_gguf, args.threads, rows)
+    progress(3)
     for group in parent:
         if any((p.tokens, p.prompt_tokens) != (c.tokens, c.prompt_tokens)
                for p, c in zip(parent[group], child[group], strict=True)):
@@ -193,6 +214,7 @@ def main():
         **hashes, fixture_sha256=pins, metrics=metrics,
         parent_generation=parent_text, child_generation=child_text,
     ), indent=2, allow_nan=False))
+    progress(4)
 
 
 if __name__ == "__main__":

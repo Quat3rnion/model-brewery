@@ -104,6 +104,45 @@ impl Store {
                 .is_ok_and(|path| path.starts_with(&self.scratch))
     }
 
+    pub fn is_private_editor_path(&self, path: &Path) -> Result<bool> {
+        let lanes = self.scratch.with_file_name("local-edit");
+        let candidate = |path: &Path| -> Result<bool> {
+            // Do not admit an enclosing directory as an HF or bundle source.
+            let Ok(relative) = path.strip_prefix(&lanes) else {
+                return Ok(lanes.starts_with(path));
+            };
+            if relative.components().count() <= 3 {
+                return Ok(true);
+            }
+            let mut parts = relative.iter();
+            parts.next(); // worker host
+            if parts.next().and_then(|p| p.to_str()) != Some("worker")
+                || parts.next().and_then(|p| p.to_str()) != Some("jobs")
+            {
+                return Ok(false);
+            }
+            let Some(id) = parts.next().and_then(|p| p.to_str()) else {
+                return Ok(true);
+            };
+            Ok(self.job(id)?.is_some_and(|job| job.scratch_job))
+        };
+        Ok(candidate(path)? || match path.canonicalize() {
+            Ok(path) => candidate(&path)?,
+            Err(_) => false,
+        })
+    }
+
+    pub fn scratch_has_jobs(&self, id: &str, kind: Option<&str>) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM jobs j WHERE j.state IN ('queued','running')
+             AND json_extract(j.body,'$.scratch_job') = 1
+             AND (?2 IS NULL OR json_extract(j.body,'$.kind') = ?2)
+             AND EXISTS(SELECT 1 FROM json_each(j.body,'$.input_ids') WHERE value = ?1))",
+            params![id, kind],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn scratch(&self, id: &str) -> Result<Option<Revision>> {
         read_one(
             &self.conn,
@@ -866,6 +905,35 @@ impl Store {
     }
     pub fn update(&mut self, job: &mut Job, mut result: Option<Value>) -> Result<()> {
         // One transaction: no reader can see a terminal success without its immutable result.
+        let mut scratch = None;
+        if job.scratch_job && job.state == State::Succeeded {
+            let verified = if job.cancel_requested {
+                job.state = State::Cancelled;
+                job.progress = "Scratch job cancelled".into();
+                Err("cancelled".into())
+            } else {
+                crate::scratch::jobs::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
+            };
+            match verified {
+                Ok(Some((revision, safe_result))) => {
+                    scratch = Some(revision);
+                    result = Some(safe_result);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    if job.state != State::Cancelled {
+                        job.state = State::Failed;
+                        job.progress = "Scratch job result was not accepted".into();
+                        job.error = Some(error.to_string());
+                    }
+                    job.has_result = false;
+                    result = None;
+                }
+            }
+        }
+        if job.scratch_job && matches!(job.state, State::Failed | State::Cancelled) {
+            crate::scratch::jobs::clean_failed_conversion(self, job);
+        }
         if job.state == State::Succeeded && job.kind == brewery_worker::exl3_layer::JOB {
             let receipt = result.as_ref().unwrap_or(&Value::Null);
             let envelope = self.envelope(&job.id)?;
@@ -978,6 +1046,12 @@ impl Store {
             None
         };
         let tx = self.conn.transaction()?;
+        if let Some(row) = scratch {
+            tx.execute(
+                "UPDATE scratch_revisions SET body=? WHERE id=? AND state='scratch'",
+                params![encode(&row)?, row.id],
+            )?;
+        }
         if let Some(model) = artifact {
             tx.execute(
                 "INSERT INTO models(id,body) VALUES (?,?)",

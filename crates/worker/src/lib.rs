@@ -5,6 +5,7 @@ pub mod hgn_recipe;
 pub mod hy4;
 pub mod operational;
 pub mod resources;
+pub mod scratch_eval;
 pub mod source_grants;
 pub mod trace;
 pub mod weight_source;
@@ -467,7 +468,8 @@ pub fn staging_error(detail: &str) -> &'static str {
         "Target disk space is insufficient; check free space and the configured reserve"
     } else if detail.contains("trace model SHA-256 mismatch") {
         "Trace model SHA-256 mismatch; use the model revision bound to the intervention"
-    } else if detail.contains("hash mismatch")
+    } else if detail.contains("scratch input SHA-256 mismatch")
+        || detail.contains("hash mismatch")
         || detail.contains("content mismatch")
         || detail.contains("changed while hashing")
     {

@@ -33,6 +33,8 @@ const LIMIT: u32 = 64;
 const PROVENANCE: &str = "provenance.json";
 #[path = "scratch_checks.rs"]
 mod checks;
+#[path = "scratch_jobs.rs"]
+pub(crate) mod jobs;
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,6 +68,8 @@ pub struct Revision {
     pub(crate) delta: Summary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     check_bundle: Option<checks::Bundle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) gguf: Option<jobs::PrivateGguf>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -122,6 +126,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/scratch/{id}", get(get_revision))
         .route("/scratch/{id}/edits", post(edit))
         .route("/scratch/{id}/delta", get(delta))
+        .route("/scratch/{id}/gguf", post(jobs::convert))
         .route("/scratch/{id}/checks", get(checks::get).post(checks::run))
         .route("/scratch/{id}/discard", post(discard))
         .route("/scratch/{id}/publish-request", post(request_publish))
@@ -491,6 +496,7 @@ fn build(
         provenance,
         delta: result.delta,
         check_bundle: None,
+        gguf: None,
     };
     let mut store = app.store.lock().map_err(ApiError::storage)?;
     admit(app, &row.provenance.worker)?;
@@ -519,7 +525,7 @@ fn change(
 ) -> Mutation {
     use RevisionState::*;
     let id = request_id(target)?;
-    let (mut row, root) = {
+    let (row, root) = {
         let store = app.store.lock().map_err(ApiError::storage)?;
         let row = visible(&store, &id)?;
         if pin.is_some_and(|pin| pin != row.sha256) {
@@ -536,7 +542,9 @@ fn change(
     }
     let path = root.join(&row.id).join(scratch::MODEL);
     if new != Discarded {
-        checks::require_publishable(&mut row, new, acknowledgement.as_deref())?;
+        // Reject incomplete bundles before hashing the full model. Recheck the
+        // current record after the hash in case a worker finished in between.
+        checks::require_publishable(&row, new, acknowledgement.as_deref())?;
         let mut source =
             open_regular(&path).map_err(|_| conflict("scratch artifact is not available"))?;
         if scratch::file_sha256(&mut source).map_err(ApiError::storage)? != row.sha256 {
@@ -544,6 +552,22 @@ fn change(
                 "scratch artifact no longer matches the reviewed hash",
             ));
         }
+    }
+    let mut store = app.store.lock().map_err(ApiError::storage)?;
+    let mut row = visible(&store, &id)?;
+    if row.state != old {
+        return Err(conflict("scratch state changed before commit"));
+    }
+    if store.scratch_has_jobs(&id, None).map_err(ApiError::storage)? {
+        return Err(conflict("wait for active scratch jobs to finish"));
+    }
+    if new != Discarded {
+        admit(app, &row.provenance.worker)?;
+        if checks::require_publishable(&row, new, acknowledgement.as_deref())? {
+            checks::acknowledge(&mut row);
+        }
+    } else if store.has_scratch_children(&id).map_err(ApiError::storage)? {
+        return Err(conflict("discard the child scratch revisions first"));
     }
     let model = if new == Approved {
         let model = NewModel {
@@ -562,12 +586,6 @@ fn change(
     } else {
         None
     };
-    let mut store = app.store.lock().map_err(ApiError::storage)?;
-    if new != Discarded {
-        admit(app, &row.provenance.worker)?;
-    } else if store.has_scratch_children(&id).map_err(ApiError::storage)? {
-        return Err(conflict("discard the child scratch revisions first"));
-    }
     row.state = new;
     store
         .update_scratch(&row, old, model.as_ref(), key)

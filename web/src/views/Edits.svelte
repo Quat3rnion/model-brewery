@@ -24,6 +24,7 @@
 
   const POLL_MS = 3000;
   const models = $derived(brewery.state?.models ?? []);
+  const jobs = $derived(brewery.state?.jobs ?? []);
   const traces = $derived(newestFirst((brewery.state?.jobs ?? []).filter((j) => j.kind === 'trace' && j.state === 'succeeded')));
 
   let list = $state<ScratchRevision[] | null>(null);
@@ -216,6 +217,8 @@
       {:else}
         {@const st = SCRATCH_STATE[selected.state] ?? { label: selected.state, tone: 'muted' as const }}
         {@const p = selected.provenance}
+        {@const conversion = newestFirst(jobs.filter((j) => j.kind === 'scratch_gguf' && j.input_ids[0] === selectedId))[0]}
+        {@const workerChecks = newestFirst(jobs.filter((j) => j.kind === 'scratch_checks' && j.input_ids[3] === selectedId))[0]}
         <header>
           <h2 id="ed-rev-h">Revision <span class="mono">{selected.id.slice(0, 8)}</span></h2>
           <div class="row"><Badge tone={st.tone} label={st.label} /><Badge tone="warn" label="Not release-qualified" /></div>
@@ -250,6 +253,16 @@
 
           <div>
             <h3>Checks</h3>
+            {#if selected.gguf}
+              <p class="small">Private GGUF: Ready <span class="mono xs muted" title={selected.gguf.sha256}>{shortHash(selected.gguf.sha256)}</span> · <JobLink id={selected.gguf.job_id} label="Conversion job" /></p>
+            {:else if conversion}
+              <p class="small">Private GGUF: <JobLink id={conversion.id} label={conversion.state} /></p>
+            {:else}
+              <p class="small muted">Private GGUF: Not converted</p>
+            {/if}
+            {#if workerChecks && workerChecks.id !== selected.check_bundle?.measured_job_id}
+              <p class="small">Worker check job: <JobLink id={workerChecks.id} label={workerChecks.state} /></p>
+            {/if}
             {#if !selected.check_bundle}
               <p class="small muted">No check bundle. An agent runs checks before a publish request.</p>
             {:else}
@@ -262,6 +275,9 @@
               <p class="xs muted">
                 Bundle <span class="mono">{b.id.slice(0, 8)}</span>, {formatTime(b.created_at_ms)}.{#if b.revision_sha256 !== selected.sha256}{' '}<strong class="err">The bundle is for another hash.</strong>{/if}{#if b.acknowledged_at_ms}{` Acknowledged ${formatTime(b.acknowledged_at_ms)}.`}{/if}
               </p>
+              {#if b.measured_job_id}
+                <p class="small"><JobLink id={b.measured_job_id} label="Worker measurements" /></p>
+              {/if}
               {#if b.job_refs.length}
                 <p class="xs">Referenced jobs (not verified against this revision): {#each b.job_refs as j, i (j.job_id)}{i ? ', ' : ''}<JobLink id={j.job_id} label="{j.kind} ({j.role})" />{/each}</p>
               {/if}

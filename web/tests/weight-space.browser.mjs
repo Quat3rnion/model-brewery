@@ -61,7 +61,10 @@ const scratchRev = (id, parent, state, method, at, extra = {}) => ({
 const ROOT = uuid(20), CHILD = uuid(21), LATER = uuid(22);
 const baseList = [
   scratchRev(ROOT, uuid(9), 'scratch', 'copy', T0),
-  scratchRev(CHILD, ROOT, 'publish_requested', 'direct', T0 + 10, { check_bundle: bundle(SHA) }),
+  scratchRev(CHILD, ROOT, 'publish_requested', 'direct', T0 + 10, {
+    check_bundle: { ...bundle(SHA), measured_job_id: uuid(42) },
+    gguf: { sha256: SHA_P, revision_sha256: SHA, converter_version: 'fixture', bytes: 128, job_id: uuid(41) },
+  }),
 ];
 const tensorDiff = { schema_version: 1, qualification: 'not release-qualified', a: ROOT, b: CHILD, a_sha256: SHA_P, b_sha256: SHA, tensors: [{ name: 'blk.3.ffn_down.weight', shape: [896, 4864], dtype: 'BF16', changed_elements: 2, bounds: { start: [0, 0], end: [1, 2] }, l2: 0.0223, linf: 0.02, relative_frobenius: 0.000013, low_rank: { sample_shape: [1, 2], singular_values: [0.0223], sample_rank: 1 } }] };
 const behaviorDiff = { schema_version: 1, qualification: 'not release-qualified', a: ROOT, b: CHILD, metrics: [{ name: 'counterfact_efficacy', parent: 0.1, child: 0.9, better: 'higher', threshold: 0, delta: 0.8, flag: 'improved' }, { name: 'perplexity', parent: 12.1, child: 12.6, better: 'lower', threshold: 0.2, delta: 0.5, flag: 'regressed' }] };
@@ -210,6 +213,8 @@ try {
       assert.equal(await tree.locator('a[aria-current="true"]').count(), 1);
       const detail = main.getByRole('region', { name: /Revision/ });
       await detail.getByText('Not release-qualified', { exact: true }).waitFor();
+      await detail.getByText('Private GGUF: Ready').waitFor();
+      await detail.getByRole('link', { name: 'Worker measurements' }).waitFor();
       await detail.getByText('Behavior: Failed').first().waitFor();
       await detail.getByText('brewery-weight-edit 0.4.1').waitFor();
       await detail.getByRole('button', { name: 'Tensor diff' }).click();

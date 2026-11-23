@@ -120,6 +120,106 @@ fi
 }
 
 #[test]
+fn scratch_grant_is_job_scoped_exact_and_verified_before_use() {
+    let t = Rig::new();
+    let private = t.root.join("private");
+    fs::create_dir(&private).unwrap();
+    let model = private.join("pinned.gguf");
+    let other = private.join("other.gguf");
+    fs::write(&model, b"abc").unwrap();
+    fs::write(&other, b"abc").unwrap();
+    let pin = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    let mut cfg: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
+    cfg["engine_env"] = json!({"BREWERY_LANTERNFISH_TRACE":"/unused-in-fixture"});
+    cfg["scratch_access"] = json!({"job_id":"private-trace","paths":{(model.to_str().unwrap()):pin}});
+    fs::write(&t.b, cfg.to_string()).unwrap();
+    fs::set_permissions(&t.b, fs::Permissions::from_mode(0o600)).unwrap();
+    let input = |path: &Path| json!({"host":"b","path":path,"kind":"gguf","id":"scratch"});
+    let prepare = |id, kind, path: &Path| {
+        let job = if kind == "trace" {
+            json!({"kind":kind,"inputs":[input(path)],"prompt":"test",
+                "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":1,
+                           "byte_cap":65536,"retain_jobs":1,"expected_model_sha256":pin}})
+        } else {
+            json!({"kind":kind,"inputs":[input(path)]})
+        };
+        t.rpc_raw(&json!({"op":"prepare","id":id,"action":"start","job":job}))
+    };
+    let resolve =
+        |id, path: &Path| t.rpc_raw(&json!({"op":"resolve","id":id,"index":0,"input":input(path)}));
+    assert!(t.rpc_raw(&json!({"op":"describe","input":input(&model)}))["error"].is_string());
+    prepare("normal", "unrelated", &model);
+    assert!(resolve("normal", &model)["error"].is_string());
+    prepare("another-trace", "trace", &model);
+    assert!(resolve("another-trace", &model)["error"].is_string());
+    assert_eq!(prepare("private-trace", "trace", &model)["ok"]["state"], "queued");
+    assert!(resolve("private-trace", &other)["error"].is_string());
+    fs::write(&model, b"bad").unwrap();
+    assert!(
+        resolve("private-trace", &model)["error"]
+            .as_str().is_some_and(|e| e.contains("scratch input SHA-256 mismatch"))
+    );
+    fs::write(&model, b"abc").unwrap();
+    let resolved = resolve("private-trace", &model);
+    assert_eq!(resolved["ok"]["sha256"], pin, "{resolved}");
+    assert_eq!(resolved["ok"]["files"].as_array().unwrap().len(), 1);
+    fs::write(&model, b"changed after resolve").unwrap();
+    assert_eq!(
+        t.rpc_raw(&json!({"op":"start","id":"private-trace"}))["ok"]["state"],
+        "queued"
+    );
+    let failed = t.wait("private-trace", "failed");
+    assert!(failed["error"].as_str().unwrap().contains("scratch input SHA-256 mismatch"));
+    assert!(!t.root.join("b/jobs/private-trace/work").exists());
+}
+
+#[test]
+fn scratch_conversion_outputs_never_become_worker_sources() {
+    let t = Rig::new();
+    fs::write(
+        t.root.join("engine"),
+        r#"#!/usr/bin/python3
+import hashlib, json, pathlib, sys
+j = json.load(sys.stdin)
+assert j["kind"] == "scratch_gguf"
+p = pathlib.Path.cwd() / "converted.gguf"
+data = b"GGUF"
+p.write_bytes(data)
+print(json.dumps(dict(kind="convert", output_format="gguf", gguf_type="BF16",
+    inputs=j["inputs"], file_verification={"status":"passed"},
+    artifact=dict(path=str(p), kind="gguf", bytes=len(data), sha256=hashlib.sha256(data).hexdigest()))))
+"#,
+    ).unwrap();
+    let private = t.root.join("private.safetensors");
+    fs::write(&private, b"abc").unwrap();
+    let mut cfg: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
+    cfg["engine_env"] = json!({"BREWERY_GGUF_SAFETENSORS":"1",
+        "BREWERY_GGUF_QUANTIZER":"/unused","BREWERY_GGUF_HF_EXPORTER":"/unused"});
+    cfg["scratch_access"] = json!({"job_id":"scratch-export",
+        "paths":{(private.to_str().unwrap()):"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}});
+    fs::write(&t.b, cfg.to_string()).unwrap();
+    fs::set_permissions(&t.b, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(t.src.join("config.json"), "{}").unwrap();
+    let reply = t.dispatch("start", "scratch-export", Some(&json!({
+        "kind":"scratch_gguf","inputs":[{"host":"b","path":private,"kind":"safetensors"},
+                                       {"host":"b","path":t.src,"kind":"assets"}],
+        "options":{"output_format":"gguf","gguf_type":"BF16"}
+    })));
+    assert_eq!(reply["state"], "queued", "{reply}");
+    let receipt = t.wait("scratch-export", "succeeded");
+    assert_eq!(receipt["result"]["kind"], "convert");
+    let out = &receipt["result"]["artifact"]["path"];
+    assert!(Path::new(out.as_str().unwrap()).is_file());
+    // Test ordinary RPCs under the same worker state, without the grant config.
+    cfg.as_object_mut().unwrap().remove("scratch_access");
+    fs::write(&t.b, cfg.to_string()).unwrap();
+    let input = json!({"host":"b","path":out,"kind":"gguf"});
+    assert!(t.rpc_raw(&json!({"op":"describe","input":input}))["error"].is_string());
+    let reply = t.dispatch("start", "ordinary", Some(&json!({"kind":"unrelated","inputs":[input]})));
+    assert_eq!(reply["state"], "failed", "{reply}");
+}
+
+#[test]
 fn trace_worker_publishes_slices_rejects_corruption_and_prunes_only_traces() {
     let t = Rig::new();
     let mut cfg: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();

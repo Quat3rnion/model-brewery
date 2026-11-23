@@ -53,6 +53,7 @@ pub fn engine(base: &Path, since: u64) -> Option<ProgressDetail> {
             | "publish_output"
             | "compare_left"
             | "trace_prompts"
+            | scratch_eval::CHECKS
             | "compare_right"
             | "benchmark"
             | "admission"
@@ -187,6 +188,7 @@ pub fn apply(reply: &mut Reply, detail: ProgressDetail) {
         "verify_staged" => "Verifying staged bundle checksums",
         "verify_output" => "Verifying engine output",
         "trace_prompts" => "Capturing and checking prompts",
+        scratch_eval::CHECKS => "Checking scratch model behavior",
         "hf_download_transfer" => "Downloading complete files",
         "hf_download_verify" => "Checking download checksums",
         "hy4_encode_gate" => "Encoding Hy4 gate",

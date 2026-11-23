@@ -500,8 +500,12 @@ async fn add_model(
         return Ok(response);
     }
     let model = request.validate().map_err(ApiError::bad)?;
-    if store.is_scratch_path(std::path::Path::new(&model.path)) {
+    let path = std::path::Path::new(&model.path);
+    if store.is_scratch_path(path) {
         return Err(ApiError::bad("scratch files require operator approval"));
+    }
+    if store.is_private_editor_path(path).map_err(ApiError::storage)? {
+        return Err(ApiError::bad("private scratch job output cannot enter the Library"));
     }
     if model.kind == brewery_worker::hgn_recipe::ARCHIVE {
         return Err(ApiError::bad(
@@ -588,11 +592,13 @@ async fn add_job(
         return Ok(response);
     }
     resolved?;
-    if store
-        .model(&envelope.inputs[0].id)
-        .map_err(ApiError::storage)?
-        .is_none()
-    {
+    let input = &envelope.inputs[0];
+    if let Some(digest) = envelope.scratch_pins.get(&input.path) {
+        let (_, current) = crate::scratch::jobs::trace_input(&store, &input.id)?;
+        if digest != &current {
+            return Err(ApiError::bad("scratch GGUF changed during admission"));
+        }
+    } else if store.model(&input.id).map_err(ApiError::storage)?.is_none() {
         return Err(ApiError::bad("unknown model ID"));
     }
     enqueue_job(&app, &mut store, job, envelope, submission.as_ref())
@@ -602,14 +608,22 @@ fn prepare_job(app: &App, store: &Store, request: NewJob) -> Result<(Job, Envelo
     if request.input_ids.len() > 32 || !KINDS.contains(&request.kind.as_str()) {
         return Err(ApiError::bad("unknown job kind or too many inputs"));
     }
+    let mut scratch_pins = BTreeMap::new();
     let inputs = request
         .input_ids
         .iter()
         .map(|id| {
-            let model = store
-                .model(id)
-                .map_err(ApiError::storage)?
-                .ok_or_else(|| ApiError::bad("unknown model ID"))?;
+            let model = if let Some(model) = store.model(id).map_err(ApiError::storage)? {
+                model
+            } else if request.kind == trace::JOB && request.input_ids.len() == 1
+                && store.scratch(id).map_err(ApiError::storage)?.is_some()
+            {
+                let (model, sha) = crate::scratch::jobs::trace_input(store, id)?;
+                scratch_pins.insert(model.path.clone(), sha);
+                model
+            } else {
+                return Err(ApiError::bad("unknown model ID"));
+            };
             if !app
                 .effective_hosts()
                 .map_err(ApiError::storage)?
@@ -733,7 +747,9 @@ fn prepare_job(app: &App, store: &Store, request: NewJob) -> Result<(Job, Envelo
         ),
         (None, prompt) => prompt.clone(),
     };
-    request.build(host, inputs, prompt).map_err(ApiError::bad)
+    let (job, mut envelope) = request.build(host, inputs, prompt).map_err(ApiError::bad)?;
+    envelope.scratch_pins = scratch_pins;
+    Ok((job, envelope))
 }
 
 fn enqueue_job(
@@ -743,6 +759,11 @@ fn enqueue_job(
     mut envelope: Envelope,
     submission: Option<&Submission<'_>>,
 ) -> Result<Response> {
+    if job.kind == trace::JOB && !envelope.scratch_pins.is_empty() {
+        return crate::scratch::jobs::enqueue(
+            app, store, job, envelope, submission, StatusCode::CREATED,
+        );
+    }
     let hosts = app.effective_hosts().map_err(ApiError::storage)?;
     if crate::weights::is_kind(&job.kind)
         && let Some(entry) = hosts.iter().find(|entry| entry.id == job.host)
@@ -814,7 +835,7 @@ pub(crate) fn read_submission<'a, T: serde::Serialize>(
     Ok((request, submission))
 }
 
-fn replay(store: &Store, submission: Option<&Submission<'_>>) -> Result<Option<Response>> {
+pub(crate) fn replay(store: &Store, submission: Option<&Submission<'_>>) -> Result<Option<Response>> {
     let Some(submission) = submission else {
         return Ok(None);
     };
