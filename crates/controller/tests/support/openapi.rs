@@ -54,6 +54,7 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         .collect::<BTreeSet<_>>();
     let expected = BTreeSet::from([
         ("get", "/api/openapi.json", "getOpenApi"),
+        ("get", "/api/interp/benchmark", "getInterpBenchmark"),
         ("get", "/api/state", "getState"),
         ("get", "/api/events", "streamEvents"),
         ("get", "/api/settings/agent-provider", "getAgentProvider"),

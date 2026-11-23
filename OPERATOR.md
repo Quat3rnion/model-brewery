@@ -2056,6 +2056,86 @@ The compile result includes the SHA-256 of the weights and config. The same
 program produces the same hashes on the verified platform with the pinned
 environment.
 
+#### Compiled-program benchmark
+
+Use `interp_benchmark` with no arguments or `GET /api/interp/benchmark`.
+The controller returns the saved [report](qualification/interp_benchmark.v1.json).
+It does not run a model or train features. The results are not release-qualified.
+
+Use the local reference runner to capture a compiled model:
+
+```sh
+"$PYTHON" tools/compiled_program.py trace "$artifact" '[2,0,2,1]' "$trace"
+```
+
+Choose a new output directory. `manifest.json` uses trace schema v1.
+The `l_out`, `attn_out`, and `ffn_out` tensors contain the residual after
+each layer, the total attention output, and the MLP output, respectively.
+The `compiled_heads` extension contains projected head outputs in
+`[head][position][residual coordinate]` order. Positions include the compiler
+BOS when the program has one. Use these captures in the local benchmark.
+Do not submit them to the Lanternfish job or pinned GGUF import routes.
+
+The compiler writes `ground-truth.v1.json` with the weights and config.
+It records the ordered residual basis and the layer, role, head index
+where applicable, and residual coordinates for each operation. Tracr
+selectors are implemented by the attention heads of their consumers.
+ALTA uses the same shared attention and transition rules at every layer.
+The sidecar binds the map to the weight and config hashes. The local
+compile command returns the sidecar hash. The controller saves the hash
+in provenance and checks the sidecar before running a program.
+
+**X5 attribution patching** (CPU reference runner):
+
+| Program | Precision at K | Recall at K | ROC AUC |
+| --- | ---: | ---: | ---: |
+| Sort | 0.700 | 0.700 | 0.700 |
+| Histogram | 1.000 | 1.000 | Not applicable |
+| ALTA relative parity | 1.000 | 1.000 | Not applicable |
+
+X5 uses exact JAX automatic differentiation through the W13 reference
+runner, not the Lanternfish GGUF gradient path. It computes gradients
+on the corrupt input for the clean-versus-corrupt logit margin at the
+last output position where the decoded outputs differ. It ranks each
+head and each MLP by the sum of the absolute attribution across tokens.
+It also runs a separate exact patch at each site and reports its
+measured margin change. K is the number of compiler sites. The score
+averages ties at the cutoff. Histogram and relative parity have no
+compiler-empty sites; their precision and recall are not evidence of
+ranking quality, and ROC AUC is undefined.
+
+**W11 TopK SAE** (mean best decoder cosine to the compiler subspace):
+
+| Program | Mean cosine |
+| --- | ---: |
+| Sort | 0.834 |
+| Histogram | 0.935 |
+| ALTA relative parity | 0.716 |
+
+**X6 paired crosscoder** (same cosine measure for each decoder):
+
+| Pair | Sort | Descending sort |
+| --- | ---: | ---: |
+| Sort vs. descending sort | 0.858 | 0.869 |
+
+SAEs and crosscoders use the same residual rows as the trace exporter.
+They split full-length inputs 75:25 before training and exclude BOS rows.
+For each operation, they compare decoder vectors active during training
+to the operation's compiler subspace after the layer that writes it.
+For ALTA, they measure final-layer transition state, not attention
+read ports cleared by the MLP. These cosines measure alignment, not
+whether a feature causes the program output.
+
+To reproduce the report, use a separate copy of the pinned W13
+environment with `torch==2.7.1+cpu` from `https://download.pytorch.org/whl/cpu`.
+Choose a new working directory outside controller data. The script
+writes the compiled models, truth maps, v1 traces, and feature weights
+there, and writes the report to standard output:
+
+```sh
+"$PYTHON" -B tools/interp_benchmark.py build "$work" > "$report"
+```
+
 #### Scratch files
 
 The controller stores these files in its private

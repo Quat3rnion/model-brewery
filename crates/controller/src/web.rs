@@ -39,6 +39,15 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
                 )
             }),
         )
+        .route(
+            "/interp/benchmark",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "application/json")],
+                    include_str!("../../../qualification/interp_benchmark.v1.json"),
+                )
+            }),
+        )
         .route("/state", get(state))
         .route("/conversions/eligibility", post(conversion_eligibility))
         .route("/settings", get(get_settings))

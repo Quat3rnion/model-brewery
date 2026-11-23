@@ -3,6 +3,33 @@ use super::*;
 const ACCEPT: &str = "Accept: application/json, text/event-stream\r\n";
 const VERSION: &str = "MCP-Protocol-Version: 2025-06-18\r\n";
 
+#[test]
+fn interp_benchmark_reads_the_versioned_report_without_driving_compute() {
+    let mut t = Fixture::new();
+    t.launch();
+    let report = t.json("GET", "/api/interp/benchmark", None, 200);
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["qualification"], "not release-qualified");
+    for method in ["x5", "w11"] {
+        for program in ["sort", "histogram"] {
+            assert!(
+                report["methods"][method]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["program"] == program)
+            );
+        }
+    }
+    let reply = call(&t, "interp_benchmark", json!({}));
+    assert_eq!(reply["result"]["structuredContent"], report);
+    assert_eq!(
+        call(&t, "interp_benchmark", json!({"program":"sort"}))["error"]["code"],
+        -32602
+    );
+    assert!(!t.path("launches").exists());
+}
+
 pub(super) fn call(t: &Fixture, name: &str, arguments: Value) -> Value {
     let (status, body) = t.request(
         "POST",

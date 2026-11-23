@@ -81,12 +81,15 @@ action = sys.argv[1]
 directory = pathlib.Path(sys.argv[3 if action == "compile" else 2])
 weights = directory / "model.safetensors"
 config = directory / "config.json"
+truth = directory / "ground-truth.v1.json"
 if action == "compile":
     header = b'{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}'
     weights.write_bytes(struct.pack("<Q", len(header)) + header + struct.pack("<f", 1))
     config.write_text('{"schema":"brewery.compiled-program.v1","program":"sort","compiler_commit":"9ce2b8c82b6ba10e62e86cf6f390e7536d4fd2cd","architecture":"tracr","runtime":"mock"}')
+    truth.write_text('{"schema_version":1}')
     print(json.dumps({"sha256": hashlib.sha256(weights.read_bytes()).hexdigest(),
-        "config_sha256": hashlib.sha256(config.read_bytes()).hexdigest()}))
+        "config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+        "ground_truth_sha256": hashlib.sha256(truth.read_bytes()).hexdigest()}))
 elif action == "run":
     print(json.dumps([0, 1, 2, 2]))
 elif action == "check":
@@ -135,6 +138,10 @@ elif action == "check":
     );
     assert_eq!(row["kind"], "compiled_program");
     assert_eq!(row["provenance"]["method"], "compile_program");
+    assert_eq!(
+        row["provenance"]["compiled_program"]["ground_truth_sha256"],
+        sha(br#"{"schema_version":1}"#),
+    );
     assert_eq!(ok("compile_program", compile)["id"], row["id"]);
     assert!(
         ok("list_models", json!({}))["models"]
@@ -173,6 +180,16 @@ elif action == "check":
         .path()
         .join("state/scratch")
         .join(id.as_str().unwrap());
+    fs::write(directory.join("ground-truth.v1.json"), "{}").unwrap();
+    assert_eq!(
+        call("run_program", run.clone())["structuredContent"]["status"],
+        409
+    );
+    fs::write(
+        directory.join("ground-truth.v1.json"),
+        r#"{"schema_version":1}"#,
+    )
+    .unwrap();
     fs::write(directory.join("config.json"), "{}").unwrap();
     assert_eq!(call("run_program", run)["structuredContent"]["status"], 409);
     let failed = checks("check-tampered-sort");
@@ -924,6 +941,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "get_intervention",
             "get_job",
             "get_scratch",
+            "interp_benchmark",
             "list_interventions",
             "list_models",
             "list_scratch",

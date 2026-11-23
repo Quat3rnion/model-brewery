@@ -34,6 +34,20 @@
         }
       }
     },
+    "/api/interp/benchmark": {
+      "get": {
+        "operationId": "getInterpBenchmark",
+        "summary": "Read the compiled-program interpretability benchmark",
+        "description": "Read the saved CPU scores against compiler ground truth. This operation does not run a model or train features.",
+        "responses": {
+          "200": {
+            "description": "Versioned CPU benchmark report, not release-qualified.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/InterpBenchmark"}}}
+          },
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
     "/api/state": {
       "get": {
         "operationId": "getState",
@@ -1766,6 +1780,23 @@
       "HfTokenStorageUnavailable": {"description": "The private token file cannot be safely changed.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
     },
     "schemas": {
+      "InterpBenchmark": {
+        "type":"object","required":["schema_version","qualification","backend","models","methods"],
+        "properties":{
+          "schema_version":{"const":1},
+          "qualification":{"const":"not release-qualified"},
+          "backend":{"const":"cpu"},
+          "models":{"type":"array","items":{"type":"object"}},
+          "methods":{
+            "type":"object","required":["x5","w11","x6"],
+            "properties":{
+              "x5":{"type":"array","items":{"type":"object"},"description":"Site ranking, precision, recall, ROC AUC and measured patch deltas."},
+              "w11":{"type":"array","items":{"type":"object"},"description":"SAE reconstruction and best feature cosine for each compiler operation."},
+              "x6":{"type":"array","items":{"type":"object"},"description":"Paired crosscoder reconstruction and best feature cosine for each compiler operation."}
+            }
+          }
+        }
+      },
       "CrosscoderBinding": {
         "type":"object","required":["id","sha256"],"additionalProperties":false,
         "properties":{"id":{"type":"string","format":"uuid"},"sha256":{"$ref":"#/components/schemas/Sha256"}}
@@ -2096,7 +2127,8 @@
             "properties": {
               "program": {"enum": ["sort", "histogram", "reverse", "frac_prevs", "alta_parity_relative", "alta_parity_absolute"]},
               "config_sha256": {"$ref": "#/components/schemas/ScratchHash"},
-              "runner_sha256": {"$ref": "#/components/schemas/ScratchHash"}
+              "runner_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+              "ground_truth_sha256": {"$ref": "#/components/schemas/ScratchHash"}
             }
           },
           "tool": {"type": "string"}, "tool_version": {"type": "string"}, "runtime_version": {"type": "string"}, "created_at_ms": {"type": "integer"}
