@@ -21,6 +21,9 @@ mod sae;
 #[path = "support/sensitivity.rs"]
 mod sensitivity;
 
+#[path = "support/circuit.rs"]
+mod circuit;
+
 #[path = "support/weights.rs"]
 mod weights;
 

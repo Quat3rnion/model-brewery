@@ -451,6 +451,61 @@ The worker verifies each gradient, then removes the raw gradient data.
 These values describe the selected observations only. They are
 **not release-qualified**.
 
+## Activation attribution
+
+Use `find_circuit` to locate activation sites that can change a next-token
+logit or logit margin. Use one dense Qwen2 or Llama F32 or BF16 Library
+GGUF on its source worker. Enable `"circuit": true` in the controller
+capabilities and configure the [Lanternfish runtime pin](#tensor-sensitivity).
+The job uses `lib/cpu` only. BF16 can need a temporary F32 copy of the
+model. The job does not change or publish model weights.
+
+Submit `POST /api/jobs` with:
+
+```json
+{
+  "kind": "circuit",
+  "input_ids": ["<Library GGUF ID>"],
+  "options": {
+    "model_sha256": "<SHA-256 of the GGUF file>",
+    "clean_prompt": "The capital of France is",
+    "corrupt_prompt": "The capital of Germany is",
+    "target_id": 12095,
+    "contrast_id": 19846,
+    "layers": [0, 8, 16, 23],
+    "positions": [3, 4],
+    "roles": ["l_out", "attn_out", "ffn_out"],
+    "top_k": 8,
+    "sample_lower": 4
+  }
+}
+```
+
+For MCP, omit `kind` and provide `idempotency_key`. Use `get_job` to read
+the result. Use two distinct prompts with equal token counts from 1 to 128.
+The CPU runtime tokenizes the raw text without a chat template. Layers and
+positions start at zero. Omit `contrast_id` for a raw target logit. Use
+at most 256 site gradients (two per site for a margin) and at most 32
+patches in total. Set `sample_lower` (default 0) to also patch a reproducible
+sample of sites below the top ranks. Start with a small selection.
+
+The job multiplies each clean-minus-corrupt activation by the corrupt
+gradient of the objective and sums the elements. It ranks sites by absolute
+attribution. For each selected site, it makes a separate W2 trace that
+replaces only that corrupt activation with the clean activation. A positive
+measured change increases the objective from the unpatched corrupt value.
+Pearson `r` and Spearman `rho` compare the signed attribution and measured
+change for the patched sites only. Spearman uses mean ranks for ties.
+A null value means that there were fewer than two measurements or that one
+variable was constant. These correlations do not measure effects at
+unpatched sites or interactions between sites.
+
+Open the job in Jobs for the layer-by-position heatmap. Select a node role
+and read the exact values and measured patches. Cite the saved
+`GET /api/jobs/{id}/circuit` artifact by job ID, model SHA-256, and runtime pin.
+The artifact includes both token sequences, baselines, and signed results.
+The measurement is specific to this pair and is **not release-qualified**.
+
 ## Compare revisions and traces
 
 Use these `GET` routes with `a=<baseline ID>&b=<comparison ID>`.

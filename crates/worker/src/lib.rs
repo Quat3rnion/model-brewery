@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, ensure};
+pub mod circuit;
 pub mod compiled_program;
 pub mod exl3_layer;
 pub mod hf_download;

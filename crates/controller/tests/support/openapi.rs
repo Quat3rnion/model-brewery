@@ -132,6 +132,7 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/jobs/{id}", "getJob"),
         ("get", "/api/jobs/{id}/trace", "getTraceManifest"),
         ("get", "/api/jobs/{id}/sensitivity", "getTensorSensitivity"),
+        ("get", "/api/jobs/{id}/circuit", "getCircuit"),
         ("get", "/api/jobs/{id}/trace/tensor", "getTraceTensor"),
         ("get", "/api/jobs/{id}/trace/features", "readFeatureTrace"),
         (

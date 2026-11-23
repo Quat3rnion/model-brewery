@@ -957,6 +957,17 @@
         }
       }
     },
+    "/api/jobs/{id}/circuit": {
+      "get": {
+        "operationId": "getCircuit",
+        "summary": "Read the circuit artifact for a successful job",
+        "parameters": [{"$ref":"#/components/parameters/ResourceId"}],
+        "responses": {
+          "200": {"description":"Signed attribution scores and measured patch deltas.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/CircuitArtifact"}}}},
+          "403": {"$ref":"#/components/responses/Forbidden"}, "404": {"$ref":"#/components/responses/NotFound"}
+        }
+      }
+    },
     "/api/jobs/{id}/trace/tensor": {
       "get": {
         "operationId": "getTraceTensor",
@@ -2244,7 +2255,7 @@
           "truncated": {"type": "boolean"}
         }
       },
-      "JobKind": {"type": "string", "enum": ["compare", "trace", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer", "sensitivity"]},
+      "JobKind": {"type": "string", "enum": ["compare", "trace", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer", "sensitivity", "circuit"]},
       "JobState": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled"]},
       "CapabilityMap": {
         "type": "object", "description": "Map from each known job kind to its availability.",
@@ -2417,7 +2428,7 @@
           {"$ref": "#/components/schemas/WeightInspectJob"}, {"$ref": "#/components/schemas/WeightProposeJob"},
           {"$ref": "#/components/schemas/WeightTuneJob"}, {"$ref": "#/components/schemas/WeightApplyJob"},
           {"$ref": "#/components/schemas/Exl3LayerJob"}, {"$ref": "#/components/schemas/TraceJob"},
-          {"$ref": "#/components/schemas/SensitivityJob"}
+          {"$ref": "#/components/schemas/SensitivityJob"}, {"$ref": "#/components/schemas/CircuitJob"}
         ],
         "discriminator": {
           "propertyName": "kind",
@@ -2430,7 +2441,7 @@
             "weight_inspect": "#/components/schemas/WeightInspectJob", "weight_propose": "#/components/schemas/WeightProposeJob",
             "weight_tune": "#/components/schemas/WeightTuneJob", "weight_apply": "#/components/schemas/WeightApplyJob",
             "exl3_layer": "#/components/schemas/Exl3LayerJob", "trace": "#/components/schemas/TraceJob",
-            "sensitivity": "#/components/schemas/SensitivityJob"
+            "sensitivity": "#/components/schemas/SensitivityJob", "circuit": "#/components/schemas/CircuitJob"
           }
         }
       },
@@ -2522,6 +2533,64 @@
           "tensors":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","required":["name","layer","shape","fisher"],
             "properties":{"name":{"type":"string"},"layer":{"type":["integer","null"]},"shape":{"description":"GGML storage order, innermost dimension first.","type":"array","items":{"type":"integer","minimum":1}},"fisher":{"type":"number","minimum":0}}}},
           "layers":{"type":"array","items":{"type":"object","required":["layer","elements","fisher"],"properties":{"layer":{"type":"integer"},"elements":{"type":"integer","minimum":1},"fisher":{"type":"number","minimum":0,"description":"Mean over the selected tensor elements in this layer."}}}}
+        }
+      },
+      "CircuitJob": {
+        "description":"Measure activation attribution and independent W2 patches for two equal-length raw prompts. Use a single-file dense Qwen2 or Llama F32/BF16 Library GGUF on its opted-in CPU worker.",
+        "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"},{"$ref":"#/components/schemas/NoPrompt"}],
+        "required":["input_ids","options"],
+        "properties":{
+          "kind":{"const":"circuit"},
+          "input_ids":{"description":"One Library GGUF ID.","minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
+          "options":{"$ref":"#/components/schemas/CircuitOptions"}
+        }
+      },
+      "CircuitRole": {"type":"string","enum":["l_out","attn_out","ffn_out"]},
+      "CircuitToken": {"type":"integer","minimum":0,"maximum":2147483647},
+      "CircuitPosition": {"type":"integer","minimum":0,"maximum":127},
+      "CircuitOptions": {
+        "type":"object","additionalProperties":false,
+        "description":"Use distinct prompts with 1 to 128 tokens each. The site count times the number of objective tokens must not exceed 256.",
+        "required":["model_sha256","clean_prompt","corrupt_prompt","target_id","layers","positions","roles","top_k"],
+        "properties":{
+          "model_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "clean_prompt":{"type":"string","minLength":1,"maxLength":4096,"x-brewery-max-utf8-bytes":4096},
+          "corrupt_prompt":{"type":"string","minLength":1,"maxLength":4096,"x-brewery-max-utf8-bytes":4096},
+          "target_id":{"$ref":"#/components/schemas/CircuitToken","description":"Token whose raw next-token logit defines the objective."},
+          "contrast_id":{"anyOf":[{"$ref":"#/components/schemas/CircuitToken"},{"type":"null"}],"description":"Optional distinct token whose logit is subtracted from the target logit."},
+          "layers":{"type":"array","minItems":1,"maxItems":128,"uniqueItems":true,"items":{"$ref":"#/components/schemas/TraceLayer"}},
+          "positions":{"type":"array","minItems":1,"maxItems":128,"uniqueItems":true,"items":{"$ref":"#/components/schemas/CircuitPosition"}},
+          "roles":{"type":"array","minItems":1,"maxItems":3,"uniqueItems":true,"items":{"$ref":"#/components/schemas/CircuitRole"}},
+          "top_k":{"type":"integer","minimum":1,"maximum":32,"description":"Number of top sites to patch, ranked by absolute attribution. Together with sample_lower this cannot exceed the site count or 32."},
+          "sample_lower":{"type":"integer","minimum":0,"maximum":31,"default":0,"description":"Number of additional lower-ranked sites to sample without replacement with a fixed seed."}
+        }
+      },
+      "CircuitArtifact": {
+        "type":"object","additionalProperties":false,
+        "required":["schema_version","kind","qualification","model_id","model_sha256","backend","clean_prompt","corrupt_prompt","clean_tokens","corrupt_tokens","target_id","contrast_id","clean_metric","corrupt_metric","sites","top_k","sample_lower","pearson_r","spearman_rho","manifest_sha256","executable_sha256"],
+        "properties":{
+          "schema_version":{"const":1},"kind":{"const":"circuit"},"qualification":{"const":"not release-qualified"},
+          "model_id":{"$ref":"#/components/schemas/Id"},"model_sha256":{"$ref":"#/components/schemas/Sha256"},"backend":{"const":"cpu"},
+          "clean_prompt":{"type":"string"},"corrupt_prompt":{"type":"string"},
+          "clean_tokens":{"type":"array","minItems":1,"maxItems":128,"items":{"$ref":"#/components/schemas/CircuitToken"}},
+          "corrupt_tokens":{"type":"array","minItems":1,"maxItems":128,"items":{"$ref":"#/components/schemas/CircuitToken"}},
+          "target_id":{"$ref":"#/components/schemas/CircuitToken"},
+          "contrast_id":{"anyOf":[{"$ref":"#/components/schemas/CircuitToken"},{"type":"null"}]},
+          "clean_metric":{"type":"number"},"corrupt_metric":{"type":"number"},
+          "pearson_r":{"type":["number","null"],"minimum":-1,"maximum":1,"description":"Signed Pearson r across measured sites only. Null if fewer than two measurements or either variable is constant."},
+          "spearman_rho":{"type":["number","null"],"minimum":-1,"maximum":1,"description":"Signed Spearman rank correlation across measured sites only. Ties use mean ranks. Null if fewer than two measurements or either variable is constant."},
+          "top_k":{"type":"integer","minimum":1,"maximum":32},
+          "sample_lower":{"type":"integer","minimum":0,"maximum":31},
+          "manifest_sha256":{"$ref":"#/components/schemas/Sha256"},"executable_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "sites":{"type":"array","minItems":1,"maxItems":256,"description":"Ranked by absolute attribution. Ties use ascending layer, role order (l_out, attn_out, ffn_out), then ascending position.","items":{
+            "type":"object","additionalProperties":false,"required":["layer","position","role","attribution","patched_delta"],
+            "properties":{
+              "layer":{"$ref":"#/components/schemas/TraceLayer"},"position":{"$ref":"#/components/schemas/CircuitPosition"},
+              "role":{"$ref":"#/components/schemas/CircuitRole"},
+              "attribution":{"type":"number","description":"Dot product of clean minus corrupt activation and the corrupt objective gradient."},
+              "patched_delta":{"type":["number","null"],"description":"Patched corrupt metric minus unpatched corrupt metric; null if not measured."}
+            }
+          }}
         }
       },
       "TraceOptions": {
