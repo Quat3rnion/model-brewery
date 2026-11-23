@@ -420,6 +420,58 @@ fn hy4_gate_encode_requires_the_exact_same_worker_opt_in() {
 }
 
 #[test]
+fn diff_traces_matches_prompts_and_tokens() {
+    let mut app = Fixture::new();
+    fs::write(app.path("dispatch.json"), json!({
+        "hosts":{"alpha":{"local":true,"capabilities":{"trace":true}}}
+    }).to_string()).unwrap();
+    app.launch();
+    let model = app.register("alpha", "gguf", "/models/trace.gguf");
+    let request = json!({"kind":"trace","host":"alpha","input_ids":[model],"prompt":"one two",
+        "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":3}});
+    let run = |body| {
+        let id = app.enqueue(body);
+        app.await_job(&id, |job| job["state"] == "succeeded");
+        id
+    };
+    let a = run(request.clone());
+    let mut edited = request.clone();
+    edited["options"]["interventions"] = json!([{"layer":0,"role":"l_out","positions":[0],"op":"zero"}]);
+    let b = run(edited);
+    let path = format!("/api/diff/traces?a={a}&b={b}");
+    let result = app.json("GET", &path, None, 200);
+    assert_eq!(app.json("GET", &path, None, 200), result);
+    app.json("GET", &format!("{path}&start=2&end=1"), None, 400);
+    let row = &result["activations"][0];
+    assert_eq!(row["layer"], 0);
+    assert_eq!(row["role"], "l_out");
+    assert_eq!(row["position"], 0);
+    assert_eq!(row["l2"], 1.);
+    assert_eq!(row["linf"], 1.);
+    assert!(row["cosine"].is_null());
+    for key in ["model_logits", "logit_lens"] {
+        let logits = &result[key][0];
+        assert_eq!(logits["entered"], json!([8]));
+        assert_eq!(logits["exited"], json!([7]));
+        assert_eq!(logits["shared_count"], 2);
+        assert_eq!(logits["linf"], 1.);
+        assert!((logits["kl_a_to_b_shared"].as_f64().unwrap() - 0.08260774489474476).abs() < 1e-12);
+    }
+    let mut other = request.clone();
+    other["prompt"] = json!("different text");
+    let different = run(other);
+    app.json("GET", &format!("/api/diff/traces?a={a}&b={different}"), None, 422);
+    let mut other = request;
+    other["options"]["top_k"] = json!(2);
+    let different = run(other);
+    app.json("GET", &format!("/api/diff/traces?a={a}&b={different}"), None, 422);
+    fs::write(app.path("trace-token-mismatch"), &b).unwrap();
+    app.json("GET", &format!("{path}&start=0&end=1"), None, 422);
+    fs::write(app.path("trace-pruned"), "").unwrap();
+    app.json("GET", &path, None, 404);
+}
+
+#[test]
 fn trace_admission_and_reads_are_bounded() {
     let mut app = Fixture::new();
     fs::write(app.path("dispatch.json"), json!({

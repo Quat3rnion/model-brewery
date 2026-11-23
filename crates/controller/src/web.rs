@@ -99,6 +99,7 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
         )
         .merge(crate::admin::router())
         .merge(crate::scratch::router())
+        .merge(crate::diff::router())
         .merge(crate::infra_hosts::router())
         .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "API endpoint not found".into()) })
         .method_not_allowed_fallback(|| async {

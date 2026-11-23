@@ -2,6 +2,7 @@ mod admin;
 mod backend_calibration;
 mod backend_hf;
 mod conversion;
+mod diff;
 mod dispatch;
 mod domain;
 mod feed;
@@ -52,6 +53,7 @@ struct App {
     suggestions: suggestions::PathSuggestions,
     feed_subscribers: Arc<tokio::sync::Semaphore>,
     scratch_slots: Arc<tokio::sync::Semaphore>,
+    diffs: diff::Service,
 }
 
 impl App {
@@ -157,6 +159,7 @@ async fn main() -> Result<(), Error> {
         suggestions: suggestions::PathSuggestions::new(dispatcher.command.clone()),
         feed_subscribers: Arc::new(tokio::sync::Semaphore::new(feed::SUBSCRIBERS)),
         scratch_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+        diffs: diff::Service::default(),
     });
     let listener = TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;

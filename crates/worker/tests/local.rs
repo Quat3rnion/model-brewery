@@ -178,6 +178,13 @@ print(json.dumps(dict(kind="trace",schema_version=1,model_id=src["id"],model_sha
         let value = t.dispatch("trace-read", "trace-old", Some(&json!({"view":view})));
         assert_eq!(value["data"]["rows"][0]["top"][0]["token_id"], token);
     }
+    let slice = json!({"view":"diff_input","start":0,"end":1});
+    let joined = t.dispatch("trace-read", "trace-old", Some(&slice));
+    let data = joined["data"].clone();
+    assert_eq!(data["tensors"][0]["data_base64"], "AACAPw==");
+    assert_eq!(data["model_logits"][0]["top"][0]["token_id"], 7);
+    let diff = brewery_worker::trace::diff::compare(data.clone(), data).unwrap();
+    assert_eq!(serde_json::to_value(diff).unwrap()["activations"][0]["l2"], 0.);
     submit("trace-corrupt", "corrupt");
     assert!(t.wait("trace-corrupt", "failed")["error"].as_str().unwrap().contains("SHA-256"));
     assert!(!t.root.join("b/jobs/trace-corrupt/work").exists());
@@ -187,6 +194,10 @@ print(json.dumps(dict(kind="trace",schema_version=1,model_id=src["id"],model_sha
     t.wait("trace-new", "succeeded");
     assert_eq!(t.dispatch("trace-read", "trace-old", Some(&json!({"view":"manifest"}))),
         json!({"status":"missing"}));
+    assert_eq!(
+        t.dispatch("trace-read", "trace-old", Some(&slice)),
+        json!({"status":"missing"})
+    );
     t.wait("trace-old", "succeeded");
     assert!(t.root.join("b/jobs/non-trace/work/unrelated-artifact").is_file());
 }

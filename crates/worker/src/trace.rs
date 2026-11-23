@@ -12,6 +12,8 @@ use std::{
     path::Path,
 };
 
+pub mod diff;
+
 pub const JOB: &str = "trace";
 pub const EXECUTABLE: &str = "BREWERY_LANTERNFISH_TRACE";
 pub const COMMIT: &str = "0ea30b37729a136a76b8412e7ad1ec91bd7de9b5";
@@ -218,7 +220,7 @@ impl Request {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 struct Key {
     layer: usize,
     role: Role,
@@ -251,7 +253,7 @@ struct Manifest {
     logit_lens: Vec<Logits>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, PartialEq)]
 struct Token {
     position: usize,
     token_id: i32,
@@ -415,6 +417,8 @@ pub enum View {
     Tensor,
     LogitLens,
     ModelLogits,
+    /// Internal: joined, bounded slice used by controller trace diffs.
+    DiffInput,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -448,7 +452,7 @@ impl Slice {
                     && self.end.is_none()
             }
             View::Tensor => self.layer.is_some() && self.role.is_some(),
-            View::LogitLens => self.role.is_none(),
+            View::LogitLens | View::DiffInput => self.role.is_none(),
             View::ModelLogits => self.layer.is_none() && self.role.is_none(),
         };
         ensure!(valid, "invalid query for trace view");
@@ -486,6 +490,7 @@ pub fn read(root: &Path, slice: &Slice, result: &Value) -> Result<ReadReply> {
     let in_range =
         |p: usize| (slice.start.unwrap_or(0)..slice.end.unwrap_or(MAX_POSITIONS)).contains(&p);
     let data = match slice.view {
+        View::DiffInput => return diff::input(&dir, m, slice),
         View::Manifest => {
             let mut model = m.model;
             model

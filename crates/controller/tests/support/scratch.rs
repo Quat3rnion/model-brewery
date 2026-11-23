@@ -46,6 +46,137 @@ fn sha(bytes: &[u8]) -> String {
 }
 
 #[test]
+fn diff_scratch_tensors_and_behavior() {
+    let mut t = Test::new();
+    let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
+    t.launch();
+    let (_, parent) = t.request(
+        "/api/models",
+        "",
+        Some(json!({"host":"existing","kind":"safetensors","path":source})),
+    );
+    assert_eq!(
+        t.admin(Some(
+            json!({"action":"set_weight_editor","worker":"existing",
+        "revision":0,"enabled":true})
+        ))
+        .0,
+        200
+    );
+    let library = parent["id"].as_str().unwrap();
+    let (status, base) = t.request(
+        "/api/scratch",
+        "",
+        Some(json!({
+            "parent_id":library,"parent_sha256":sha(&fs::read(&source).unwrap())
+        })),
+    );
+    assert_eq!(status, 201, "{base}");
+    let base = base["id"].as_str().unwrap();
+    let edit = |row, col, add| {
+        let (status, child) = t.request(&format!("/api/scratch/{base}/edits"), "", Some(json!({
+            "operations":[{"op":"add","tensor":"w","origin":[row,col],"shape":[1,1],"values":[add]}]
+        })));
+        assert_eq!(status, 201, "{child}");
+        child["id"].as_str().unwrap().to_owned()
+    };
+    let child = edit(0, 1, 6.);
+    let sibling = edit(1, 0, 2.);
+    let report = |a: &str, b: &str| {
+        let (status, diff) = t.request(&format!("/api/diff/tensors?a={a}&b={b}"), "", None);
+        assert_eq!(status, 200, "{diff}");
+        diff
+    };
+    let direct = report(base, &child);
+    assert_eq!(direct["tensors"], report(library, &child)["tensors"]);
+    let w = &direct["tensors"][0];
+    for (field, value) in [
+        ("name", json!("w")),
+        ("shape", json!([2, 3])),
+        ("dtype", json!("F32")),
+        ("changed_elements", json!(1)),
+        ("bounds", json!({"start":[0,1],"end":[1,2]})),
+        ("l2", json!(6.)),
+        ("linf", json!(6.)),
+        (
+            "low_rank",
+            json!({"sample_shape":[1,1],"singular_values":[6.],"sample_rank":1}),
+        ),
+    ] {
+        assert_eq!(w[field], value, "{field}");
+    }
+    let ratio = |diff: &Value| diff["tensors"][0]["relative_frobenius"].as_f64().unwrap();
+    assert!((ratio(&direct) - 6. / 91f64.sqrt()).abs() < 1e-12);
+    assert!((ratio(&report(&child, base)) - 6. / 151f64.sqrt()).abs() < 1e-12);
+    assert_eq!(report(base, base)["tensors"], json!([]));
+    let cross = report(&child, &sibling);
+    assert_eq!(cross["tensors"][0]["changed_elements"], 2);
+    assert_eq!(
+        cross["tensors"][0]["bounds"],
+        json!({"start":[0,0],"end":[2,2]})
+    );
+    assert_eq!(
+        cross["tensors"][0]["low_rank"]["singular_values"],
+        json!([6., 2.])
+    );
+
+    let artifact = t.root.path().join("state/scratch").join(&child);
+    let path = format!("/api/diff/behavior?a={base}&b={child}");
+    assert_eq!(t.request(&path, "", None).0, 404);
+    let file = artifact.join("behavior.v1.json");
+    let mut input = json!({"schema_version":1,"parent_id":base,"child_id":child,"metrics":[
+        {"name":"locality","parent":1.0,"child":0.75,"better":"higher"},
+        {"name":"ppl","parent":12.0,"child":12.1,"better":"lower","threshold":0.2},
+        {"name":"output","parent":"Paris","child":"Rome"},
+        {"name":"gsm8k","parent":null,"child":0.5}
+    ]});
+    fs::write(&file, input.to_string()).unwrap();
+    let (status, behavior) = t.request(&path, "", None);
+    assert_eq!(status, 200, "{behavior}");
+    assert_eq!(behavior["qualification"], "not release-qualified");
+    let metrics = behavior["metrics"].as_array().unwrap();
+    for (name, delta, flag) in [
+        ("locality", Some(-0.25), "regressed"),
+        ("output", None, "changed"),
+        ("ppl", Some(0.1), "within_threshold"),
+        ("gsm8k", None, "missing"),
+    ] {
+        let m = metrics.iter().find(|m| m["name"] == name).unwrap();
+        assert_eq!(m["flag"], flag);
+        if let Some(delta) = delta {
+            assert!((m["delta"].as_f64().unwrap() - delta).abs() < 1e-12);
+        } else {
+            assert!(m["delta"].is_null());
+        }
+    }
+    input["schema_version"] = json!(2);
+    fs::write(&file, input.to_string()).unwrap();
+    assert_eq!(t.request(&path, "", None).0, 422);
+    fs::write(&file, vec![b' '; (256 << 10) + 1]).unwrap();
+    assert_eq!(t.request(&path, "", None).0, 413);
+
+    // An earlier cached report does not hide damage to the delta or a mutable Library parent.
+    let delta = artifact.join("delta.bin");
+    let mut bytes = fs::read(&delta).unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    fs::set_permissions(&delta, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&delta, bytes).unwrap();
+    assert_eq!(
+        t.request(&format!("/api/diff/tensors?a={base}&b={child}"), "", None)
+            .0,
+        422
+    );
+    let mut bytes = fs::read(&source).unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    fs::write(&source, bytes).unwrap();
+    assert_eq!(
+        t.request(&format!("/api/diff/tensors?a={library}&b={base}"), "", None)
+            .0,
+        422
+    );
+}
+
+#[test]
 fn scratch_edits_keep_parents_and_require_separate_publish_approval() {
     let mut t = Test::new();
     let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
