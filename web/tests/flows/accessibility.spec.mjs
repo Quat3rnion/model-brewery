@@ -26,7 +26,8 @@ for (const [view, route, heading, ready] of views) {
     await controller.open(page, route);
     const main = page.getByRole('main');
     await expect(main.getByRole('heading', { level: 1, name: heading, exact: true })).toBeVisible();
-    await expect(main.getByText(ready, { exact: true })).toBeVisible();
+    const readyScope = view === 'library' ? main.getByRole('table') : main;
+    await expect(readyScope.getByText(ready, { exact: true })).toBeVisible();
     await scan(page, info);
   });
 }
@@ -60,7 +61,7 @@ const scanJob = (id, ready, setup) => [id, async (page, controller) => {
 
 const supplementary = [
   ['Library: empty', async (page, c) => { c.load('empty'); await c.open(page); await expect(page.getByText('No saved prompts.')).toBeVisible(); }],
-  ['Library: identity', async (page, c) => { libraryWeights(c); await c.open(page); await expect(page.getByText('Verified GGUF', { exact: true })).toBeVisible(); }],
+  ['Library: identity', async (page, c) => { libraryWeights(c); await c.open(page); await expect(page.getByRole('table').getByText('Verified GGUF', { exact: true })).toBeVisible(); }],
   ['Library: Remove confirmation', async (page, c) => {
     libraryWeights(c); await c.open(page);
     await page.getByRole('button', { name: 'Remove Verified GGUF from library' }).click();
