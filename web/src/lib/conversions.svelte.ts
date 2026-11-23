@@ -3,8 +3,9 @@
 // reloads because it lives in the controller.
 
 import { api, errorText } from './api';
-import { ConversionSubmitter, isActiveConversion, newerConversion, parseConversions, type Conversion, type ConversionBody } from './conversion';
-import { captureSubmissionVisit } from './route.svelte';
+import { isActiveConversion, newerConversion, parseConversion, parseConversions, type Conversion, type ConversionBody } from './conversion';
+import { Submission } from './submit.svelte';
+import { captureResultFocus } from './focus';
 
 const ACTIVE_MS = 2_000;
 const IDLE_MS = 10_000;
@@ -65,29 +66,44 @@ class Conversions {
 
 export const conversions = new Conversions();
 
-/** Svelte-reactive wrapper of the single-submission logic. */
-export class ConversionStarter {
-  busy = $state(false);
-  error = $state<string | null>(null);
-  last = $state<Conversion | null>(null);
-  /** True when the last click replayed an earlier identical request instead of starting a new workflow. */
+type PostConversion = (body: ConversionBody, key: string) => Promise<{ data: unknown; status: number }>;
+
+export class ConversionSubmitter extends Submission {
   replayed = $state(false);
-  #inner: ConversionSubmitter;
 
-  constructor(launcher: string) { this.#inner = new ConversionSubmitter(launcher, api.startConversion); }
+  constructor(private launcher: string, private post: PostConversion) { super(); }
 
-  async start(body: ConversionBody): Promise<Conversion | null> {
-    if (this.busy) return null;
-    this.busy = true;
-    this.error = null;
-    const c = await this.#inner.submit(body, captureSubmissionVisit());
-    this.busy = false;
-    this.error = this.#inner.error;
+  async submit(body: ConversionBody, event?: MouseEvent): Promise<Conversion | null> {
+    const snapshot: ConversionBody = JSON.parse(JSON.stringify(body));
+    const result = await this.send(this.launcher, snapshot, async (request, key) => {
+      const { data, status } = await this.post(request, key);
+      const c = parseConversion(data);
+      if (!c?.id) throw new Error('The controller answered without a conversion record.');
+      return { c, status };
+    }, event);
+    if (!result) return null;
+    this.replayed = result.status === 200;
+    return result.c;
+  }
+}
+
+/** Present the accepted workflow and update the shared run list. */
+export class ConversionStarter extends ConversionSubmitter {
+  last = $state<Conversion | null>(null);
+
+  constructor(launcher: string) { super(launcher, api.startConversion); }
+
+  async start(body: ConversionBody, event: MouseEvent, result: () => HTMLElement | undefined): Promise<Conversion | null> {
+    const focus = captureResultFocus(event);
+    const trigger = event.currentTarget;
+    const c = await this.submit(body, event);
     if (c) {
-      this.replayed = this.#inner.replayed;
       this.last = c;
+      void focus?.(result);
       conversions.upsert(c);
       void conversions.refresh();
+    } else if (this.error && trigger instanceof HTMLElement) {
+      void focus?.(() => trigger);
     }
     return c;
   }

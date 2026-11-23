@@ -41,7 +41,7 @@ test('Library warns before removing a download and returns focus after Keep and 
   const group = page.getByRole('group', { name: 'Confirm removal' });
   await remove.press('Enter');
   await expect(group).toContainText('You cannot register it again by hand.');
-  await expect(group).toContainText('start a verified download');
+  await expect(group).toContainText('Download the source again');
   const keep = group.getByRole('button', { name: 'Keep' });
   await expect(keep).toBeFocused();
   await keep.press('Enter');
@@ -53,20 +53,28 @@ test('Library warns before removing a download and returns focus after Keep and 
   await expect(page.getByRole('searchbox', { name: 'Filter entries' })).toBeFocused();
 });
 
-test('Library explains how to restore a removed backend weight revision', async ({ page, controller }) => {
+test('Library distinguishes backend weight revision and calibration batch removal', async ({ page, controller }) => {
   const data = scenario('weight-reads');
   data.jobs.push(job('apply-a', 'weight_apply', { host: 'backend-hf', state: 'succeeded' }));
   data.models.push({
     id: 'edited-a', name: 'Edited HF', host: 'backend-hf', kind: 'hf',
     path: '/fixtures/edits/apply-a/edited.hf', job_id: 'apply-a', available: true,
   });
+  data.models.push({
+    id: 'split-a', name: 'Fixture split', host: 'backend-hf', kind: 'weight-calibration',
+    path: '/fixtures/split.json', available: true,
+  });
   controller.respond('GET', '/api/state', { json: data });
   await controller.open(page);
   await page.getByRole('button', { name: 'Remove Edited HF from library' }).press('Enter');
   const group = page.getByRole('group', { name: 'Confirm removal' });
   await expect(group).toContainText('The files stay on the host.');
-  await expect(group).toContainText('review a new weight edit proposal');
+  await expect.soft(group).toContainText('You cannot restore this revision');
+  await expect.soft(group).toContainText('A new Apply needs the input files and creates a new entry');
   await expect(group).not.toContainText('download');
+  await group.getByRole('button', { name: 'Keep' }).press('Enter');
+  await page.getByRole('button', { name: 'Remove Fixture split from library' }).press('Enter');
+  await expect(group).toContainText('Upload the calibration batch again in Weights');
 });
 
 test('Library updates a saved prompt and shows the controller job conflict before deletion', async ({ page, controller }) => {

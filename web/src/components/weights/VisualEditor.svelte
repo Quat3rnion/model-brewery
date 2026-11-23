@@ -82,7 +82,6 @@
     if (job?.state === 'succeeded' && !brewery.details[job.id]) void brewery.loadJob(job.id).catch(() => {});
   }
   async function read(job: ReturnType<typeof inventoryJob>, event: MouseEvent) {
-    if (reads.busy) return;
     readKey = JSON.stringify(job.options);
     const focus = captureResultFocus(event);
     const created = await reads.submit(job, event, false);
@@ -116,7 +115,7 @@
     if (canVisual) want(inv.job ?? null);
   });
   function readInventoryPage(event: MouseEvent) {
-    if (!canVisual || reads.busy || (inv.job && !inv.error) || event.detail > 1) return;
+    if (!canVisual || (inv.job && !inv.error)) return;
     if (!inventoryRequest) {
       ignoreReads(j => j.options?.mode === 'inventory');
       void read(inventoryJob(source.id, source.host, 0, undefined, packedHost), event);
@@ -180,7 +179,7 @@
   function readCurrentTile(event: MouseEvent) {
     const request = tileRead;
     const options = request?.options;
-    if (!canVisual || !request || !options || reads.busy || otherTileActive || (tileJobFound && !tileError) || event.detail > 1) return;
+    if (!canVisual || !request || !options || otherTileActive || (tileJobFound && !tileError)) return;
     if (tileJobFound) ignoreReads(j => !!findRead([j], source.id, options));
     void read(request, event);
   }

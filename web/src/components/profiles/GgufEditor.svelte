@@ -61,24 +61,23 @@
   const host = $derived(brewery.state?.hosts.find(h => h.id === source?.host));
   const blocked = $derived(source ? inventoryBlocker(source, host) : null);
   const packed = $derived(!!source && !isSafeSource(source.kind) && host?.capabilities?.weight_packed === true);
-  const submitted = new SvelteMap<string, JobSummary | string | null>();
-  const reads = new Submitter('profiles.gguf.inventory');
+  const submitted = new SvelteMap<string, JobSummary>();
+  const reads = new SvelteMap<string, Submitter>();
   const detailErrors = new SvelteMap<string, string>();
-  const inventoryJobs = $derived([...jobs, ...[...submitted.values()].filter((j): j is JobSummary =>
-    !!j && typeof j !== 'string' && !jobs.some(row => row.id === j.id))]);
+  const inventoryJobs = $derived([...jobs, ...[...submitted.values()].filter(j => !jobs.some(row => row.id === j.id))]);
   const inv = $derived(source && lookup && !lookup.exact ? walkInventory(source, inventoryJobs, brewery.details, {
     format: source.kind, packed, matchHost: true,
     sha: source.kind === 'hf' ? validSha(source.bundle_sha256) ?? validSha(source.sha256) : validSha(source.sha256),
   }) : null);
   const need = $derived(source && inv?.need ? inventoryJob(source.id, source.host, inv.need.offset, inv.need.sha, packed) : null);
   const needKey = $derived(need ? JSON.stringify([sourceKey, need.options]) : '');
-  const readPending = $derived(!!needKey && submitted.get(needKey) === null);
-  let lastRead = $state<{ key: string; job: JobSummary; matched: boolean } | null>(null);
+  const readPending = $derived(reads.get(needKey)?.busy ?? false);
+  const lastReads = new SvelteMap<string, { job: JobSummary; matched: boolean }>();
+  const lastRead = $derived(lastReads.get(sourceKey));
   let readLink: HTMLAnchorElement | undefined = $state();
-  const readJob = $derived(inv?.job ?? (lastRead?.key === sourceKey
-    ? jobs.find(j => j.id === lastRead?.job.id) ?? lastRead.job : null));
+  const readJob = $derived(inv?.job ?? jobs.find(j => j.id === lastRead?.job.id) ?? lastRead?.job ?? null);
   const invError = $derived(inv?.error || (inv?.job && detailErrors.get(inv.job.id)) ||
-    (typeof submitted.get(needKey) === 'string' ? submitted.get(needKey) as string : null));
+    reads.get(needKey)?.error);
   $effect(() => {
     const job = inv?.job;
     if (job?.state !== 'succeeded' || brewery.details[job.id]) return;
@@ -87,19 +86,23 @@
   async function readTensors(event: MouseEvent) {
     const key = needKey;
     const request = need;
-    if (!key || !request || blocked || reads.busy || event.detail > 1) return;
+    if (!key || !request || blocked) return;
     const modelKey = sourceKey;
     const focus = captureResultFocus(event);
-    submitted.set(key, null);
-    const accepted = await reads.submit(request, event, false);
-    if (!accepted) {
-      if (reads.error) submitted.set(key, reads.error);
-      else submitted.delete(key);
-      return;
+    let read = reads.get(key);
+    if (!read) {
+      read = new Submitter('profiles.gguf.inventory');
+      reads.set(key, read);
     }
+    const accepted = await read.submit(request, event, false);
+    if (!accepted) return;
     const job = acceptedJobSummary(accepted, request);
     submitted.set(key, job);
-    lastRead = { key: modelKey, job, matched: reads.replayed };
+    // A slow reply from an earlier page must not replace a newer page's result.
+    const previousOffset = lastReads.get(modelKey)?.job.options?.offset;
+    if (previousOffset === undefined || Number(previousOffset) <= Number(request.options?.offset)) {
+      lastReads.set(modelKey, { job, matched: read.replayed });
+    }
     if (modelKey === sourceKey) void focus?.(() => readLink);
   }
   const native = $derived(inv?.pages.flatMap(p => p.tensors) ?? []);
@@ -264,10 +267,10 @@
     </div>
     <div class="stack">
       <ModelSelect bind:value={sourceId} kinds={WEIGHT_SOURCES} label="Source model" hint="Choose a Library model. You can also add overrides by exact name without a source." />
-      {#if source && need && !blocked}
+      {#if source && !blocked && (need || readJob)}
         <div class="row">
-          <button type="button" class="btn" onclick={readTensors} disabled={reads.busy}>
-            {inv?.pages.length ? 'Read next tensors' : 'Read tensor list'}
+          <button type="button" class="btn" onclick={readTensors} disabled={!need || readPending}>
+            {need && inv?.pages.length ? 'Read next tensors' : 'Read tensor list'}
           </button>
           <span class="hint">This queues a <code>weight_inspect</code> job on {hostName(brewery.state?.hosts ?? [], source.host)}.</span>
         </div>

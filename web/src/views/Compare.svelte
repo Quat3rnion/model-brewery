@@ -118,7 +118,7 @@
   });
   async function submit(event: MouseEvent) {
     attempted = true;
-    if (blockers.length || s.busy) return;
+    if (blockers.length) return;
     const submitted = request;
     const job = await s.submit(submitted, event);
     if (job) {

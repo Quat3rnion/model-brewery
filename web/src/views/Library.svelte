@@ -330,10 +330,12 @@
                         This removes only the entry. The files stay on the host.
                         {#if m.host === 'backend-hf'}
                           You cannot register it again by hand.
-                          {#if jobs.some((j) => j.id === m.job_id && j.kind === 'weight_apply')}
-                            To restore this revision through the workbench, review a new weight edit proposal and apply it.
+                          {#if m.kind === 'weight-calibration'}
+                            Upload the calibration batch again in Weights.
+                          {:else if jobs.some((j) => j.id === m.job_id && j.kind === 'weight_apply')}
+                            You cannot restore this revision. A new Apply needs the input files and creates a new entry.
                           {:else}
-                            To add the source again, start a verified download.
+                            Download the source again to add the entry.
                           {/if}
                         {/if}
                       </span>

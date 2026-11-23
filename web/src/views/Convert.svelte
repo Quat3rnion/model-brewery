@@ -2,7 +2,6 @@
   import Advanced from '../components/Advanced.svelte';
   import { brewery } from '../lib/store.svelte';
   import { Submitter } from '../lib/submit.svelte';
-  import { captureResultFocus } from '../lib/focus';
   import { CONVERT_SOURCE_KINDS, capability, hostName, isSafeSource } from '../lib/format';
   import { CONVERT_ENUMS, VERIFY_OUTPUT_KINDS, buildConvertJob, poolHosts, type ConvertForm, type ConvertStep } from '../lib/convert';
   import HostSelect from '../components/HostSelect.svelte';
@@ -252,12 +251,11 @@
   const visible = $derived(visibleBlockers(wfBlockers, touched, attempted || !!checkBody || (!!wfSource && !!form.profile)));
   const starter = new ConversionStarter('convert.managed');
   let runLink: HTMLAnchorElement | undefined = $state();
-  async function startConversion(event: MouseEvent) {
+  function startConversion(event: MouseEvent) {
     // Submit only on a click, never from an effect.
     attempted = true;
-    if (!wfBuilt.body || starter.busy || !checkKey || checked?.key !== checkKey || !checked.decision?.eligible || event.detail > 1) return;
-    const focus = captureResultFocus(event);
-    if (await starter.start(wfBuilt.body)) void focus?.(() => runLink);
+    if (!wfBuilt.body || !checkKey || checked?.key !== checkKey || !checked.decision?.eligible) return;
+    void starter.start(wfBuilt.body, event, () => runLink);
   }
   $effect(() => conversions.watch());
   const runs = $derived(conversions.list);
@@ -290,7 +288,7 @@
 
   const s = new Submitter(job => `convert.${job.kind}`);
   function submit(event: MouseEvent) {
-    if (built.job && !blockers.length && !s.busy) s.submit(built.job, event);
+    if (built.job && !blockers.length) s.submit(built.job, event);
   }
   const usesBackends = $derived(step === 'inspect' || step === 'plan' || step === 'convert');
   const usesPlanOpts = $derived(step === 'plan' || step === 'convert');

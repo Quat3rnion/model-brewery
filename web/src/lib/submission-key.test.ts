@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import { PlainAttempt } from './submission-key';
-import { stripEmpty } from './submit.svelte';
+import { stripEmpty, Submission } from './submit.svelte';
 
 it('canonicalizes only set-valued wire fields', () => {
   const first = stripEmpty({ kind: 'transfer', input_ids: ['b', 'a'] });
@@ -28,4 +28,18 @@ it('reuses an unconfirmed key only for the same launcher and body in the same vi
   const afterSuccess = plain.take('convert.plan', body, () => true);
   expect(afterSuccess.key).not.toBe(next.key);
   expect(plain.take('convert.inspect', body, () => true).key).not.toBe(afterSuccess.key);
+});
+
+it('suppresses a multi-click only after a recent send with the same launcher and body', async () => {
+  const submission = new Submission();
+  const body = { input_ids: ['model-a'] };
+  const changed = { input_ids: ['model-b'] };
+  const post = async () => true;
+  const click = (detail: number, timeStamp: number) => ({ detail, timeStamp });
+  expect(await submission.send('preview', body, post, click(2, 10))).toBe(true);
+  expect(await submission.send('preview', body, post, click(3, 20))).toBeNull();
+  expect(await submission.send('preview', changed, post, click(4, 30))).toBe(true);
+  expect(await submission.send('copy', changed, post, click(5, 40))).toBe(true);
+  expect(await submission.send('copy', changed, post, click(6, 600))).toBe(true);
+  expect(await submission.send('copy', changed, post, click(1, 610))).toBe(true);
 });

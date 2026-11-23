@@ -3,6 +3,7 @@
     choice: string;
     assets: string;
     imatrix: string;
+    imatrixLabel?: string;
     threads: number | null;
   }
 </script>
@@ -24,6 +25,7 @@
   import ComponentPicker from './ComponentPicker.svelte';
   import Blockers from './Blockers.svelte';
   import Submit from './Submit.svelte';
+  import SelectionReview from './SelectionReview.svelte';
 
   let { catalog, source = $bindable(''), draft = $bindable() }: {
     catalog: GgufCatalog; source?: string; draft: GgufDraft;
@@ -43,16 +45,21 @@
   const standalone = $derived(src?.kind==='safetensors');
   const assetChoices = $derived(models.filter(m=>m.kind==='assets' && m.host===src?.host && m.available!==false));
   const sameHostMatrix = $derived(models.filter(m=>m.kind===IMATRIX_KIND && m.host===src?.host && m.available!==false));
+  const missingMatrix = $derived(draft.imatrix && !sameHostMatrix.some(m => m.id === draft.imatrix)
+    ? [{ id: draft.imatrix, label: draft.imatrixLabel || draft.imatrix }] : []);
   $effect(() => {
     if (!brewery.state) return;
-    if (draft.imatrix && !sameHostMatrix.some(m => m.id === draft.imatrix)) draft.imatrix = '';
     if (draft.assets && !assetChoices.some(m => m.id === draft.assets)) draft.assets = '';
   });
+  function selectMatrix(id: string) {
+    draft.imatrix = id;
+    draft.imatrixLabel = id ? modelLabel(sameHostMatrix.find(m => m.id === id)) : '';
+  }
   function selectSource(id: string) {
     if (id === source) return;
     source = id;
     draft.assets = '';
-    draft.imatrix = '';
+    selectMatrix('');
   }
   const rev = $derived(draft.choice.startsWith('rev:') ? profileStore.ggufSaved.find((p) => p.revision === draft.choice.slice(4)) : undefined);
   const preset = $derived(draft.choice.startsWith('preset:') ? draft.choice.slice(7) : '');
@@ -85,15 +92,17 @@
     if (source && (!src || src.available===false || !['hf','gguf','safetensors'].includes(src.kind))) out.push('Choose an available HF checkpoint, standalone SafeTensors file or GGUF input.');
     if (hostBlockers.length) out.push('Select a source on a host that can write GGUF.');
     if (standalone && draft.assets && !assetChoices.some(m=>m.id===draft.assets)) out.push('Choose available assets on the source host.');
-    if (draft.imatrix && !sameHostMatrix.some(m=>m.id===draft.imatrix)) out.push('Choose an available importance matrix on the source host.');
+    if (missingMatrix.length) out.push('Review the importance matrix selection.');
     if (draft.choice.startsWith('rev:') && !rev) out.push('The chosen GGUF profile revision is no longer listed.');
     if (conversions.status === 'unavailable') out.push('This controller does not provide managed conversions.');
     return out;
   });
   const starter = new ConversionStarter('convert.gguf');
-  async function start() {
-    if (!built.body || starter.busy || blockers.length) return;
-    await starter.start(built.body as unknown as ConversionBody);
+  let runLink: HTMLAnchorElement | undefined = $state();
+  let typeSelect: HTMLSelectElement | undefined = $state();
+  function start(event: MouseEvent) {
+    if (!built.body || blockers.length) return;
+    void starter.start(built.body as unknown as ConversionBody, event, () => runLink);
   }
 </script>
 
@@ -102,7 +111,7 @@
     <ModelSelect bind:value={() => source, selectSource} kinds={['hf','gguf','safetensors']} label="Source checkpoint" hint="HF checkpoint, standalone SafeTensors file, or GGUF. Worker support depends on the input format." id="gg-source" />
     <div class="field">
       <label for="gg-choice">GGUF type</label>
-      <select id="gg-choice" class="input" bind:value={draft.choice} aria-describedby="gg-choice-h" aria-required="true">
+      <select id="gg-choice" class="input" bind:this={typeSelect} bind:value={draft.choice} aria-describedby="gg-choice-h" aria-required="true">
         <option value="" disabled>Choose a preset or profile</option>
         <optgroup label="llama.cpp presets">
           {#each catalog.presets as p (p.id)}<option value="preset:{p.id}">{p.label ?? p.id}{p.fork ? ' · ROCmFPX' : ''}{p.requiresImatrix ? ' (needs imatrix)' : ''}</option>{/each}
@@ -140,7 +149,7 @@
   {#if src?.kind==='hf' || standalone}<p class="xs muted">The GGUF exporter does not support the Flash-Next layout. For a Flash-Next HF checkpoint, choose Managed HGN instead.</p>{/if}
   <div class="grid-2">
     {#if needsImatrix || draft.imatrix}
-      <ModelSelect bind:value={draft.imatrix} kinds={[IMATRIX_KIND]} exclude={models.filter(m=>!sameHostMatrix.some(x=>x.id===m.id)).map(m=>m.id)} label="Importance matrix (imatrix)" optional={!needsImatrix} hint="Register a matching importance matrix on the source host." id="gg-imatrix" />
+      <ModelSelect bind:value={() => draft.imatrix, selectMatrix} kinds={[IMATRIX_KIND]} exclude={models.filter(m=>!sameHostMatrix.some(x=>x.id===m.id)).map(m=>m.id)} label="Importance matrix (imatrix)" optional={!needsImatrix} hint="Register a matching importance matrix on the source host." id="gg-imatrix" />
   {/if}
     <div class="field">
       <label for="gg-threads">Threads <span class="muted">(optional)</span></label>
@@ -148,12 +157,15 @@
       <span class="hint">1 to 64.</span>
     </div>
   </div>
+  <SelectionReview missing={missingMatrix} acknowledge={(shown) => {
+    if (shown.some(item => item.id === draft.imatrix)) selectMatrix('');
+  }} focusRemaining={() => typeSelect} />
   <p class="xs muted">The output is a single .gguf file on the worker, registered in the Library when the workflow finishes. The workflow runs inspect, plan, convert and verify like an HGN conversion.</p>
   <Submit {blockers} busy={starter.busy} onclick={start}>Start GGUF conversion</Submit>
   <div aria-live="polite" class="xs">
     {#if starter.error}<p class="note bad" role="alert">{starter.error}</p>
     {:else if starter.last}
-      <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a href={conversionRunHref(starter.last.id, 'gguf')}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : ''}</p>
+      <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a bind:this={runLink} href={conversionRunHref(starter.last.id, 'gguf')}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : ''}</p>
     {/if}
   </div>
 </div>

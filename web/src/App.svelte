@@ -37,7 +37,10 @@
     const v = route.view;
     if (v !== previous) {
       previous = v;
-      queueMicrotask(() => main?.querySelector<HTMLElement>('h1')?.focus());
+      // Infrastructure links manage focus for their specific destination.
+      if (v !== 'settings' || route.hash.split('?')[0] !== '#/settings/infrastructure') {
+        queueMicrotask(() => main?.querySelector<HTMLElement>('h1')?.focus());
+      }
     }
   });
 

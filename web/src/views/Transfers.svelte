@@ -21,6 +21,7 @@
   const models = $derived(brewery.state?.models ?? []);
   const hosts = $derived(brewery.state?.hosts ?? []);
   type CopyKind = 'transfer_preview' | 'transfer';
+  const MAX_COPY_INPUTS = 32; // Controller limit for POST /api/jobs inputs.
   const decision = (h: Host, kind: CopyKind) => hostWorkflowEligibility(brewery.state?.eligibility, h.id, kind);
   const allows = (h: Host, kind: CopyKind) => decision(h, kind)?.eligible ?? capability(h, kind).allowed;
   const destinationOptions = $derived(hostOptions(hosts.filter((h) => allows(h, 'transfer') || allows(h, 'transfer_preview'))));
@@ -41,6 +42,7 @@
   const candidates = $derived(models.filter((m) => m.host !== dest && m.available !== false));
   const missing = $derived(selection.missing(candidates));
   const selected = $derived(selection.ids.filter(id => !missing.some(item => item.id === id)));
+  let checklist: HTMLFieldSetElement | undefined = $state();
   let txFilter = $state('');
   const listed = $derived(
     visibleChecklist(
@@ -55,6 +57,10 @@
     if (!destHost) out.push({ text: 'Select a destination host.' });
     if (selected.length === 0) out.push({ text: 'Select at least one entry to copy.' });
     if (missing.length) out.push({ text: 'Review the change to the selection.' });
+    if (selected.length > MAX_COPY_INPUTS) out.push({ text: `Select at most ${MAX_COPY_INPUTS} entries to copy.` });
+    if (candidates.some(m => m.host === 'backend-hf' && selection.has(m.id))) {
+      out.push({ text: 'Backend files are only available for local weight jobs.' });
+    }
     return out;
   }
 
@@ -148,8 +154,8 @@
       <div class="grid-2">
         <Combobox id="tx-host" bind:value={dest} options={destinationOptions} label="Destination host" placeholder="Select or type a host" emptyText="No eligible destination matches." />
       </div>
-      <fieldset class="pick">
-        <legend class="small">Entries to copy</legend>
+      <fieldset class="pick" bind:this={checklist}>
+        <legend class="small" tabindex="-1">Entries to copy</legend>
         {#if !dest}
           <p class="xs muted">Select a destination first.</p>
         {:else if candidates.length === 0}
@@ -158,7 +164,7 @@
           <div class="tx-filter">
             <label class="sr-only" for="tx-filter">Filter entries to copy</label>
             <input id="tx-filter" class="input" type="search" bind:value={txFilter} placeholder="Filter by name, host or path…" autocomplete="off" spellcheck="false" aria-describedby="tx-filter-hint" />
-            <span class="xs muted" id="tx-filter-hint" aria-live="polite">{selected.length} selected{txFilter.trim() ? ` · ${listed.length} of ${candidates.length} shown; selected entries stay listed` : ''}</span>
+            <span class="xs muted" id="tx-filter-hint" aria-live="polite">{selected.length} selected (maximum {MAX_COPY_INPUTS}){txFilter.trim() ? ` · ${listed.length} of ${candidates.length} shown; selected entries stay listed` : ''}</span>
           </div>
           <ul>
             {#each listed as { m } (m.id)}
@@ -169,6 +175,7 @@
                   <span class="entry">
                     <span>{modelLabel(m)}</span>
                     <span class="xs muted">{kindLabel(m.kind)} · from {hostName(hosts, m.host)}</span>
+                    {#if m.host === 'backend-hf'}<span class="xs muted">Local weight jobs only</span>{/if}
                   </span>
                 </label>
               </li>
@@ -177,7 +184,8 @@
           {#if listed.length === 0}<p class="xs muted">No entry matches the filter.</p>{/if}
         {/if}
       </fieldset>
-      <SelectionReview {missing} acknowledge={() => selection.remove(missing)} />
+      <SelectionReview {missing} acknowledge={(shown) => selection.remove(shown)}
+        focusRemaining={() => checklist?.querySelector<HTMLElement>('input:checked') ?? checklist?.querySelector('legend')} />
       <div class="row actions">
         <button type="button" class="btn" aria-describedby={copyBlockers.length || previewHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={preview.busy}
           disabled={preview.busy || copyBlockers.length > 0 || previewHostBlockers.length > 0}

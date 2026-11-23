@@ -6,10 +6,11 @@ export function captureResultFocus(event: MouseEvent) {
   const trigger = event.currentTarget;
   if (trigger !== document.activeElement) return;
   const visit = route.capture();
+  const preventScroll = event.detail > 0;
   return async (result: () => HTMLElement | null | undefined) => {
     await tick();
     if (visit.canPresent() && (document.activeElement === trigger || document.activeElement === document.body)) {
-      result()?.focus();
+      result()?.focus({ preventScroll });
     }
   };
 }
