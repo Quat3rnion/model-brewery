@@ -7,8 +7,8 @@ use serde_json::Value;
 pub const JOB: &str = "scratch_locate_edit";
 pub const EXECUTABLE: &str = "BREWERY_LANTERNFISH_EDIT";
 pub const LIB_DIR: &str = "BREWERY_LANTERNFISH_EDIT_LIB_DIR";
-pub const COMMIT: &str = "63e80de35cd690b2c6095eddea1df25477daf3f4";
-pub const SHA256: &str = "1c7196f7b502dcc4ea8fcd84a54b6d4ea87d3b9396b578d9b529a865cb14242f";
+pub const COMMIT: &str = "f8bbba37318cc6d5a11462662ab165b22bc791bf";
+pub const SHA256: &str = "f21adb9c95eef7b0a9ccc0a367df1d9daf242fd9bc69a2254e8d016aefa4e5d1";
 pub const LIBRARIES: [(&str, &str); 4] = [
     (
         "libllama.so.0",
@@ -163,10 +163,7 @@ impl Factors {
                     .eq(request.edit.layers.iter().copied()),
             "edit factors do not match the pinned input and request"
         );
-        let rank = match request.method {
-            Method::Rome => 1,
-            _ => request.edit.facts.len() * 2,
-        };
+        let rank = request.edit.facts.len();
         let mut touched = 0usize;
         for u in &self.updates {
             ensure!(

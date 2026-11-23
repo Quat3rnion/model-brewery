@@ -17,6 +17,8 @@ from weight_space_acceptance import (
 )
 
 RUNTIME = ARB / "w9-runtime"
+LIBRARIES = ARB / "llama-w9/build/bin"
+LIBRARY_NAMES = ("libllama.so.0", "libggml.so.0", "libggml-base.so.0", "libggml-cpu.so.0")
 CASE_IDS = (7, 0, 1, 2, 3)
 METHODS = ("rome", "memit", "alphaedit")
 CHECKS = REPO / "tools/scratch_checks.py"
@@ -116,7 +118,10 @@ async def exercise(base, run, args):
         parent_path = root / parent_id / "model.gguf"
         require(sha(parent_path) == parent_gguf["gguf"]["sha256"], "private parent pin mismatch")
         report = {"qualification": "not release-qualified", "parent_safetensors": parent_sha,
-                  "parent_gguf": parent_gguf["gguf"]["sha256"], "methods": {}}
+                  "parent_gguf": parent_gguf["gguf"]["sha256"],
+                  "lanternfish_sha256": sha(RUNTIME / "lanternfish"),
+                  "library_sha256": {n: sha(LIBRARIES / n) for n in LIBRARY_NAMES},
+                  "methods": {}}
 
         for method in (args.method or METHODS):
             ids = CASE_IDS[:1] if method == "rome" else CASE_IDS
@@ -142,11 +147,13 @@ async def exercise(base, run, args):
             require(bundle["integrity"]["status"] == "passed"
                     and all(measured.get(k) for k in ("parent_generation", "child_generation"))
                     and len(measured["metrics"]) == 17, "W4 checks incomplete")
-            exact = exact_scores(parent_path, root / child_id / "model.gguf", ids)
+            child_path = root / child_id / "model.gguf"
+            exact = exact_scores(parent_path, child_path, ids)
             summary = {
                 "case_ids": list(ids), "layers": layers, "steps": args.steps,
                 "optimization_nll": result["optimization_nll"],
                 "targeted_counterfact": exact,
+                "common_case_7": exact if method == "rome" else exact_scores(parent_path, child_path, CASE_IDS[:1]),
                 "w4_metrics": measured["metrics"], "integrity": bundle["integrity"],
                 "smoke": [measured[k] for k in ("parent_generation", "child_generation")],
                 "child": child_sha, "tensors": sorted(expected),
@@ -165,7 +172,7 @@ async def run_acceptance(run, args):
     doc = json.loads(config.read_text())
     doc["engine_env"].update({
         "BREWERY_LANTERNFISH_EDIT": str(RUNTIME / "lanternfish"),
-        "BREWERY_LANTERNFISH_EDIT_LIB_DIR": str(ARB / "llama-w9/build/bin"),
+        "BREWERY_LANTERNFISH_EDIT_LIB_DIR": str(LIBRARIES),
         "BREWERY_CPU_THREADS": "6",
     })
     config.write_text(json.dumps(doc))
