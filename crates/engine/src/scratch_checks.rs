@@ -33,11 +33,9 @@ fn run_with_libraries(
     progress: &Progress,
     libraries: &[(&str, &str)],
 ) -> Result<Value> {
+    let behavior = scratch_eval::check_options(&job.options)?;
     ensure!(
-        job.options
-            .as_object()
-            .is_some_and(|options| options.is_empty())
-            && job.prompt.is_none()
+        job.prompt.is_none()
             && job
                 .inputs
                 .iter()
@@ -99,6 +97,14 @@ fn run_with_libraries(
         .arg("--threads")
         .arg(threads.to_string());
     child_budget(&mut cmd, threads);
+    if let Some(config) = &behavior {
+        let path = configured(scratch_eval::CONTRAST_CACHE)?;
+        ensure!(path.is_dir(), "invalid contrast cache directory");
+        cmd.arg("--contrast-cache")
+            .arg(path)
+            .arg("--behavior-config")
+            .arg(serde_json::to_string(config)?);
+    }
     for (flag, input) in [
         "--parent-gguf",
         "--child-gguf",
@@ -122,6 +128,7 @@ fn run_with_libraries(
         &report,
         std::array::from_fn(|i| ids[i].sha256.as_str()),
         &runner.sha,
+        behavior.as_ref(),
     )?;
     Ok(report)
 }

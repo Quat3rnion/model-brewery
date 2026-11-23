@@ -637,11 +637,12 @@
       "post": {
         "operationId": "runScratchChecks",
         "summary": "Check a scratch revision and save the results",
-        "description": "Checks the exact child and immediate parent SafeTensors files. With private GGUF files, the local worker loads both models, generates text and measures behavior on fixed datasets. Poll the returned job ID. Without both files, or if integrity fails, the controller saves an integrity-only bundle. For a compiled program, checks the pinned weights and config and runs all valid inputs on the local CPU runtime. Language-model behavior checks do not apply. Do not send measured values or job references.",
+        "description": "Checks the exact child and immediate parent SafeTensors files. With private GGUF files, the local worker loads both models, generates text and measures behavior on fixed datasets. Poll the returned job ID. Set behavior_direction to also score held-out chat prompts from the verified worker cache. An opt-in request requires both GGUF files and passing integrity checks. Without opt-in, if either GGUF is missing or integrity fails, the controller saves an integrity-only bundle. For a compiled program, checks pinned weights and config and runs all valid inputs on the local CPU runtime. Language-model behavior checks do not apply. Do not send measured values or job references.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {
           "type": "object", "additionalProperties": false, "required": ["sha256"], "properties": {
-            "sha256": {"$ref": "#/components/schemas/ScratchHash"}
+            "sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionConfig"}
           }
         }}}},
         "responses": {
@@ -2019,6 +2020,67 @@
           "child_generation": {"type": "string", "minLength": 1, "maxLength": 4096}
         }
       },
+      "BehaviorDirectionConfig": {
+        "type": "object", "additionalProperties": false, "required": ["prompt_sets"],
+        "properties": {
+          "prompt_sets": {"type": "object", "additionalProperties": false,
+            "description": "SHA-256 of each normalized prompt set in the operator's local contrast cache. Refusal is optional; use synthetic refusal fixtures until a dataset is approved.",
+            "required": ["slop", "sycophancy", "response_length"],
+            "properties": {
+              "slop": {"$ref": "#/components/schemas/ScratchHash"},
+              "sycophancy": {"$ref": "#/components/schemas/ScratchHash"},
+              "response_length": {"$ref": "#/components/schemas/ScratchHash"},
+              "refusal": {"$ref": "#/components/schemas/ScratchHash"}
+            }
+          },
+          "refusal_prefixes": {
+            "description": "Replace the default refusal prefixes. Requires a refusal set.",
+            "type": "array", "maxItems": 32, "items": {
+              "type": "string", "minLength": 1, "maxLength": 160, "x-brewery-max-utf8-bytes": 160
+            }
+          }
+        }
+      },
+      "BehaviorDirectionReport": {
+        "type": "object", "additionalProperties": false,
+        "required": ["schema", "config", "max_new_tokens", "max_continuation_tokens", "cpu_threads", "counts", "kl_prompts", "kl_continuation_positions", "metrics", "samples"],
+        "properties": {
+          "schema": {"const": "brewery.behavior-direction.v1"},
+          "config": {"$ref": "#/components/schemas/BehaviorDirectionConfig"},
+          "max_new_tokens": {"const": 64},
+          "max_continuation_tokens": {"const": 4},
+          "cpu_threads": {"type": "integer", "minimum": 1, "maximum": 16},
+          "counts": {
+            "type": "object", "propertyNames": {"enum": ["slop", "sycophancy", "response_length", "refusal"]},
+            "additionalProperties": {"type": "integer", "minimum": 1, "maximum": 32},
+            "required": ["slop", "sycophancy", "response_length"]
+          },
+          "kl_prompts": {"type": "integer", "minimum": 1, "maximum": 32},
+          "kl_continuation_positions": {"type": "integer", "minimum": 0, "maximum": 128},
+          "metrics": {
+            "type": "array", "minItems": 5, "maxItems": 6, "items": {
+              "type": "object", "additionalProperties": false, "required": ["name", "parent", "child", "better"],
+              "properties": {
+                "name": {"enum": ["refusal_rate", "slop_marker_rate", "sycophancy_agreement_rate", "response_length_tokens", "kl_first_token_nats", "kl_continuation_nats"]},
+                "parent": {"type": "number", "minimum": 0},
+                "child": {"type": "number", "minimum": 0},
+                "better": {"enum": ["lower", "neither"]}
+              }
+            }
+          },
+          "samples": {
+            "type": "object", "propertyNames": {"enum": ["slop", "sycophancy", "response_length"]},
+            "required": ["slop", "sycophancy", "response_length"],
+            "additionalProperties": {
+              "type": "object", "additionalProperties": false, "required": ["parent", "child"],
+              "properties": {
+                "parent": {"type": "string", "maxLength": 160, "x-brewery-max-utf8-bytes": 160},
+                "child": {"type": "string", "maxLength": 160, "x-brewery-max-utf8-bytes": 160}
+              }
+            }
+          }
+        }
+      },
       "ScratchCheckBundle": {
         "type": "object",
         "required": ["schema", "id", "revision_sha256", "parent_sha256", "created_at_ms", "qualification", "integrity", "smoke", "behavior", "job_refs", "acknowledged_at_ms"],
@@ -2031,6 +2093,7 @@
           "integrity": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "smoke": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "behavior": {"$ref": "#/components/schemas/ScratchCheckStatus"},
+          "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionReport"},
           "program_correctness": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "program_cases": {"type": "integer", "minimum": 0, "maximum": 340},
           "offline_report": {"$ref": "#/components/schemas/ScratchOfflineReport"},
