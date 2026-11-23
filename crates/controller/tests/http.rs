@@ -12,6 +12,9 @@ mod infra_hosts;
 #[path = "support/interventions.rs"]
 mod interventions;
 
+#[path = "support/mcp.rs"]
+mod mcp;
+
 #[path = "support/weights.rs"]
 mod weights;
 
