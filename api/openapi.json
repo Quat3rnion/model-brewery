@@ -344,6 +344,62 @@
         }
       }
     },
+    "/api/scratch/compile_program": {
+      "post": {
+        "operationId": "compileProgram",
+        "summary": "Compile a built-in program into a standalone SafeTensors scratch revision",
+        "description": "Use an enabled local SafeTensors editor with the offline CPU program runtime. No user code is accepted. The revision has no parent model.",
+        "parameters": [{"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false, "required": ["worker", "program"],
+          "properties": {
+            "worker": {"type": "string"},
+            "program": {"enum": ["sort", "histogram", "reverse", "frac_prevs", "alta_parity_relative", "alta_parity_absolute"]}
+          }
+        }}}},
+        "responses": {
+          "200": {"$ref": "#/components/responses/ScratchRow"},
+          "201": {"$ref": "#/components/responses/ScratchRow"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "503": {"$ref": "#/components/responses/ScratchBusy"}
+        }
+      }
+    },
+    "/api/scratch/{id}/run_program": {
+      "post": {
+        "operationId": "runProgram",
+        "summary": "Run the compiled weights on a short token sequence",
+        "description": "Use integer tokens 0 to 3 for Tracr or 0 to 1 for ALTA. Output has one value for each input position. This operation does not save a result.",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "additionalProperties": false, "required": ["sha256", "tokens"],
+          "properties": {
+            "sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "tokens": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"type": "integer", "minimum": 0, "maximum": 3}}
+          }
+        }}}},
+        "responses": {
+          "200": {"description": "The decoded output from the pinned model and config.", "content": {"application/json": {"schema": {
+            "type": "object", "required": ["id", "sha256", "config_sha256", "output", "qualification"],
+            "properties": {
+              "id": {"$ref": "#/components/schemas/Id"},
+              "sha256": {"$ref": "#/components/schemas/ScratchHash"},
+              "config_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+              "output": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"type": "number"}},
+              "qualification": {"const": "not release-qualified"}
+            }
+          }}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/ScratchConflict"},
+          "422": {"$ref": "#/components/responses/InvalidJsonData"},
+          "503": {"$ref": "#/components/responses/ScratchBusy"}
+        }
+      }
+    },
     "/api/scratch/{id}": {
       "get": {
         "operationId": "getScratch",
@@ -428,7 +484,7 @@
       "post": {
         "operationId": "runScratchChecks",
         "summary": "Check a scratch revision and save the results",
-        "description": "Checks the exact child and immediate parent SafeTensors files. With private GGUF files, the local worker loads both models, generates text and measures behavior on fixed datasets. Poll the returned job ID. Without both files, or if integrity fails, the controller saves an integrity-only bundle. Do not send measured values or job references.",
+        "description": "Checks the exact child and immediate parent SafeTensors files. With private GGUF files, the local worker loads both models, generates text and measures behavior on fixed datasets. Poll the returned job ID. Without both files, or if integrity fails, the controller saves an integrity-only bundle. For a compiled program, checks the pinned weights and config and runs all valid inputs on the local CPU runtime. Language-model behavior checks do not apply. Do not send measured values or job references.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {
           "type": "object", "additionalProperties": false, "required": ["sha256"], "properties": {
@@ -436,7 +492,7 @@
           }
         }}}},
         "responses": {
-          "200": {"description": "The current scratch record for an integrity-only bundle, or a job ID on a matching retry."},
+          "200": {"description": "The current scratch record for an integrity-only or compiled program bundle, or a job ID on a matching retry."},
           "202": {"description": "Queued worker check job.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
           "400": {"$ref": "#/components/responses/BadRequest"},
           "403": {"$ref": "#/components/responses/Forbidden"},
@@ -1369,18 +1425,26 @@
         "properties": {
           "schema": {"const": "brewery.scratch-provenance.v1"}, "parent_id": {"$ref": "#/components/schemas/Id"},
           "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "revision_id": {"$ref": "#/components/schemas/Id"},
-          "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "worker": {"type": "string"}, "method": {"enum": ["copy", "direct"]},
+          "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "worker": {"type": "string"}, "method": {"enum": ["copy", "direct", "compile_program"]},
           "operations": {"type": "array", "items": {"$ref": "#/components/schemas/ScratchOperation"}},
           "tensors": {"type": "array", "items": {"type": "object", "required": ["name", "shape", "dtype"], "properties": {
-            "name": {"type": "string"}, "shape": {"type": "array", "items": {"type": "integer"}}, "dtype": {"enum": ["F32", "F16", "BF16"]}
+            "name": {"type": "string"}, "shape": {"type": "array", "items": {"type": "integer"}}, "dtype": {"enum": ["F64", "F32", "F16", "BF16"]}
           }}},
+          "compiled_program": {
+            "type": "object", "required": ["program", "config_sha256", "runner_sha256"],
+            "properties": {
+              "program": {"enum": ["sort", "histogram", "reverse", "frac_prevs", "alta_parity_relative", "alta_parity_absolute"]},
+              "config_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+              "runner_sha256": {"$ref": "#/components/schemas/ScratchHash"}
+            }
+          },
           "tool": {"type": "string"}, "tool_version": {"type": "string"}, "runtime_version": {"type": "string"}, "created_at_ms": {"type": "integer"}
         }
       },
       "ScratchRevision": {
         "type": "object", "required": ["id", "kind", "state", "sha256", "qualification", "library_model_id", "provenance", "delta"],
         "properties": {
-          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"const": "scratch"},
+          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"enum": ["scratch", "compiled_program"]},
           "state": {"enum": ["scratch", "publish_requested", "approved", "discarded"]},
           "sha256": {"$ref": "#/components/schemas/ScratchHash"}, "qualification": {"const": "not release-qualified"},
           "library_model_id": {"anyOf": [{"$ref": "#/components/schemas/Id"}, {"type": "null"}]},
@@ -1444,6 +1508,8 @@
           "integrity": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "smoke": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "behavior": {"$ref": "#/components/schemas/ScratchCheckStatus"},
+          "program_correctness": {"$ref": "#/components/schemas/ScratchCheckStatus"},
+          "program_cases": {"type": "integer", "minimum": 0, "maximum": 340},
           "offline_report": {"$ref": "#/components/schemas/ScratchOfflineReport"},
           "measured_report": {"$ref": "#/components/schemas/ScratchOfflineReport"},
           "measured_job_id": {"$ref": "#/components/schemas/Id"},

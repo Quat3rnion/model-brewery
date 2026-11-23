@@ -19,6 +19,8 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("register_model", "post", "/api/models"),
     ("list_scratch", "get", "/api/scratch"),
     ("get_scratch", "get", "/api/scratch/{id}"),
+    ("compile_program", "post", "/api/scratch/compile_program"),
+    ("run_program", "post", "/api/scratch/{id}/run_program"),
     ("start_trace", "post", "/api/jobs"),
     ("get_job", "get", "/api/jobs/{id}"),
     ("list_interventions", "get", "/api/interventions"),

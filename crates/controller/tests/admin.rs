@@ -82,6 +82,9 @@ impl Test {
                 root.join(format!("editor-{name}")),
             );
         }
+        command
+            .env("BREWERY_COMPILED_PROGRAM_PYTHON", "/usr/bin/python3")
+            .env("BREWERY_COMPILED_PROGRAM_SCRIPT", root.join("program.py"));
         let mut child = command.spawn().unwrap();
         let until = Instant::now() + Duration::from_secs(4);
         self.addr = loop {

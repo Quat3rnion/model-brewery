@@ -103,6 +103,10 @@ pub(super) fn location(store: &Store, id: &str, leaf: &str) -> PathBuf {
 }
 
 fn origin(store: &Store, row: &Revision) -> Result<(String, String)> {
+    // The nil parent denotes absence, not a common source for compiled roots.
+    if row.is_compiled_program() {
+        return Ok((row.id.clone(), row.sha256.clone()));
+    }
     let mut id = row.provenance.parent_id.clone();
     let mut sha = row.provenance.parent_sha256.clone();
     for _ in 0..64 {

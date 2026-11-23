@@ -170,7 +170,7 @@
         {#if fresh.has(n.rev.id)}<span class="new xs">New</span>{/if}
       </span>
       <span class="line2 xs muted">
-        {n.rev.provenance.method === 'copy' ? 'Copy of the parent' : `${plural(n.rev.provenance.operations.length, 'edit')}, ${plural(n.rev.delta.changed_tensors, 'tensor')}`}
+        {n.rev.provenance.compiled_program ? n.rev.provenance.compiled_program.program : n.rev.provenance.method === 'copy' ? 'Copy of the parent' : `${plural(n.rev.provenance.operations.length, 'edit')}, ${plural(n.rev.delta.changed_tensors, 'tensor')}`}
         · {checks.length ? checks.map((c) => `${c.name} ${c.label.toLowerCase()}`).join(', ') : 'No checks'}
       </span>
     </a>
@@ -184,7 +184,7 @@
   <div class="head">
     <h1 tabindex="-1">Edit sessions</h1>
     <p class="muted small">
-      Scratch revisions are child copies of a SafeTensors model with a reversible delta. Agents can create, edit and check them freely. Only an operator can approve a publish request here. A scratch revision is not release-qualified.
+      Scratch revisions are SafeTensors models. An edit makes a child with a reversible delta. A compiled program has no parent. Only an operator can approve a publish request here. A scratch revision is not release-qualified.
     </p>
   </div>
 
@@ -202,8 +202,9 @@
           <p class="empty">No scratch revisions. An agent or the API creates them from a SafeTensors model.</p>
         {/if}
         {#each forest as tree (tree.source)}
-          <nav class="tree" aria-label="Revisions of {sourceName(tree.source)}">
-            <p class="src small"><span class="muted xs">Source</span> <span class="break">{sourceName(tree.source)}</span></p>
+          {@const source = tree.nodes.every((n) => n.rev.provenance.compiled_program) ? 'Compiled programs' : sourceName(tree.source)}
+          <nav class="tree" aria-label="Revisions of {source}">
+            <p class="src small"><span class="muted xs">Source</span> <span class="break">{source}</span></p>
             <ul>{#each tree.nodes as n (n.rev.id)}{@render node(n)}{/each}</ul>
           </nav>
         {/each}
@@ -217,6 +218,7 @@
       {:else}
         {@const st = SCRATCH_STATE[selected.state] ?? { label: selected.state, tone: 'muted' as const }}
         {@const p = selected.provenance}
+        {@const program = p.compiled_program}
         {@const conversion = newestFirst(jobs.filter((j) => j.kind === 'scratch_gguf' && j.input_ids[0] === selectedId))[0]}
         {@const workerChecks = newestFirst(jobs.filter((j) => j.kind === 'scratch_checks' && j.input_ids[3] === selectedId))[0]}
         <header>
@@ -228,8 +230,15 @@
           <dl class="kv small">
             <dt>ID</dt><dd class="mono break">{selected.id}</dd>
             <dt>SHA-256</dt><dd class="mono break">{selected.sha256}</dd>
-            <dt>Parent</dt><dd class="break">{#if byId.has(p.parent_id)}<a href="#/edits?rev={encodeURIComponent(p.parent_id)}">{parentLabel(selected)}</a>{:else}{parentLabel(selected)}{/if} <span class="mono xs muted" title={p.parent_sha256}>{shortHash(p.parent_sha256)}</span></dd>
-            <dt>Method</dt><dd>{p.method === 'copy' ? 'Copy' : 'Direct edit'}</dd>
+            {#if program}
+              <dt>Parent</dt><dd>None</dd>
+              <dt>Method</dt><dd>Compile program</dd>
+              <dt>Program</dt><dd class="mono">{program.program}</dd>
+              <dt>Config SHA-256</dt><dd class="mono break">{program.config_sha256}</dd>
+            {:else}
+              <dt>Parent</dt><dd class="break">{#if byId.has(p.parent_id)}<a href="#/edits?rev={encodeURIComponent(p.parent_id)}">{parentLabel(selected)}</a>{:else}{parentLabel(selected)}{/if} <span class="mono xs muted" title={p.parent_sha256}>{shortHash(p.parent_sha256)}</span></dd>
+              <dt>Method</dt><dd>{p.method === 'copy' ? 'Copy' : 'Direct edit'}</dd>
+            {/if}
             <dt>Worker</dt><dd class="mono">{p.worker}</dd>
             <dt>Tool</dt><dd class="mono break">{p.tool} {p.tool_version}</dd>
             <dt>Runtime</dt><dd class="mono break">{p.runtime_version}</dd>
@@ -248,12 +257,18 @@
 
           <div>
             <h3>Delta</h3>
-            <p class="small num break">{plural(selected.delta.changed_tensors, 'tensor')}, {formatBytes(selected.delta.changed_bytes)} changed, delta file {formatBytes(selected.delta.delta_bytes)} <span class="mono xs muted" title={selected.delta.delta_sha256}>{shortHash(selected.delta.delta_sha256)}</span></p>
+            {#if program}
+              <p class="small muted">No delta. This program has no parent.</p>
+            {:else}
+              <p class="small num break">{plural(selected.delta.changed_tensors, 'tensor')}, {formatBytes(selected.delta.changed_bytes)} changed, delta file {formatBytes(selected.delta.delta_bytes)} <span class="mono xs muted" title={selected.delta.delta_sha256}>{shortHash(selected.delta.delta_sha256)}</span></p>
+            {/if}
           </div>
 
           <div>
             <h3>Checks</h3>
-            {#if selected.gguf}
+            {#if program}
+              <p class="small muted">GGUF does not support this program.</p>
+            {:else if selected.gguf}
               <p class="small">Private GGUF: Ready <span class="mono xs muted" title={selected.gguf.sha256}>{shortHash(selected.gguf.sha256)}</span> · <JobLink id={selected.gguf.job_id} label="Conversion job" /></p>
             {:else if conversion}
               <p class="small">Private GGUF: <JobLink id={conversion.id} label={conversion.state} /></p>
@@ -272,6 +287,9 @@
                   <li><Badge tone={c.tone} label="{c.name}: {c.label}" />{#if c.reason}<span class="xs muted">{c.reason}</span>{/if}</li>
                 {/each}
               </ul>
+              {#if b.program_cases !== undefined}
+                <p class="small">Exact program outputs: {b.program_cases}</p>
+              {/if}
               <p class="xs muted">
                 Bundle <span class="mono">{b.id.slice(0, 8)}</span>, {formatTime(b.created_at_ms)}.{#if b.revision_sha256 !== selected.sha256}{' '}<strong class="err">The bundle is for another hash.</strong>{/if}{#if b.acknowledged_at_ms}{` Acknowledged ${formatTime(b.acknowledged_at_ms)}.`}{/if}
               </p>
@@ -292,6 +310,7 @@
             </div>
           {/if}
 
+          {#if !program}
           <div class="diffs">
             <h3>Compare with the parent</h3>
             <div class="row">
@@ -351,6 +370,7 @@
               {/if}
             {/if}
           </div>
+          {/if}
         </div>
       {/if}
     </section>

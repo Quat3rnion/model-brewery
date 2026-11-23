@@ -271,6 +271,16 @@ describe('checks and approval', () => {
     expect(other.can).toBe(false);
     expect(other.reason).toBe('The check bundle is for a different hash.');
   });
+
+  it('shows program correctness for a compiled root', () => {
+    const compiled = { ...bundle, program_correctness: { status: 'passed' as const } };
+    expect(checkRows(compiled).map(({ name, label }) => [name, label])).toEqual([
+      ['Integrity', 'Passed'],
+      ['Load and run', 'Failed'],
+      ['Behavior', 'Not run'],
+      ['Program correctness', 'Passed'],
+    ]);
+  });
 });
 
 describe('trace diff query', () => {

@@ -63,7 +63,7 @@ pub(super) fn run(app: &App, q: Pair) -> Result<Bytes> {
         let store = app.store.lock().map_err(ApiError::storage)?;
         let child = tensors::scratch(&store, &q.b)?
             .ok_or_else(|| ApiError::not_found("scratch revision"))?;
-        if child.provenance.parent_id != q.a {
+        if child.is_compiled_program() || child.provenance.parent_id != q.a {
             return Err(invalid("a is not the parent of scratch revision b"));
         }
         tensors::location(&store, &q.b, ARTIFACT)
