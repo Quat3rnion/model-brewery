@@ -120,6 +120,78 @@ fi
 }
 
 #[test]
+fn trace_worker_publishes_slices_rejects_corruption_and_prunes_only_traces() {
+    let t = Rig::new();
+    let mut cfg: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
+    cfg["engine_env"] = json!({"BREWERY_LANTERNFISH_TRACE":"/unused-in-fixture"});
+    fs::write(&t.b, cfg.to_string()).unwrap();
+    fs::write(
+        t.root.join("engine"),
+        r#"#!/usr/bin/python3
+import hashlib, json, pathlib, struct, sys
+job = json.load(sys.stdin)
+if job["kind"] != "trace":
+    pathlib.Path("unrelated-artifact").write_text("keep")
+    print('{"completed":true}')
+    sys.exit()
+src = job["inputs"][0]
+spec = {key: job["options"][key] for key in ["layers", "roles", "positions", "top_k", "byte_cap"]}
+path = pathlib.Path("trace/0")
+path.mkdir(parents=True)
+b = struct.pack("<f", 1)
+sha = lambda data: hashlib.sha256(data).hexdigest()
+leaf = "tensor-000000.f32"
+(path / leaf).write_bytes(b if job["prompt"] != "corrupt" else b"NOPE")
+manifest = dict(schema_version=1, kind="trace", model={"path":src["path"],"arch":"test"},
+                spec=spec, tokens=[{"position":0,"token_id":3}], missing=[], interventions=[],
+                tensors=[dict(layer=0, role="l_out", position=0, node="l_out-0", file=leaf,
+                              shape=[1], dtype="f32_le", bytes=4, sha256=sha(b))],
+                model_logits=[{"position":0,"top":[{"token_id":7,"logit":2.0}]}],
+                logit_lens=[{"layer":0,"position":0,"top":[{"token_id":8,"logit":3.0}]}])
+data = json.dumps(manifest).encode()
+(path / "manifest.json").write_bytes(data)
+size = len(data) + len(b)
+print(json.dumps(dict(kind="trace",schema_version=1,model_id=src["id"],model_sha256=src["sha256"],
+    lanternfish_commit="0ea30b37729a136a76b8412e7ad1ec91bd7de9b5",
+    executable_sha256="0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f",
+    bytes=size,prompts=[dict(bytes=size,manifest_sha256=sha(data))])))
+"#,
+    ).unwrap();
+    let src = t.src.join("source.gguf");
+    fs::write(&src, b"GGUF").unwrap();
+    t.dispatch("start", "non-trace", Some(&json!({"kind":"unrelated","inputs":[]})));
+    t.wait("non-trace", "succeeded");
+    let submit = |id, prompt| t.dispatch("start", id, Some(&json!({
+        "kind":"trace","inputs":[{"host":"b","path":src,"kind":"gguf","id":"v1"}],
+        "prompt":prompt,"options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":1,
+            "byte_cap":65536,"retain_jobs":1}
+    })));
+    submit("trace-old", "test");
+    t.wait("trace-old", "succeeded");
+    let summary = t.dispatch("trace-read", "trace-old", Some(&json!({"view":"manifest"})));
+    assert_eq!(summary["data"]["tensor_count"], 1);
+    assert!(summary["data"]["model"].get("path").is_none());
+    let tensor = t.dispatch("trace-read", "trace-old", Some(&json!(
+        {"view":"tensor","layer":0,"role":"l_out","start":0,"end":1})));
+    assert_eq!(tensor["data"]["rows"][0]["data_base64"], "AACAPw==");
+    for (view, token) in [("logit_lens", 8), ("model_logits", 7)] {
+        let value = t.dispatch("trace-read", "trace-old", Some(&json!({"view":view})));
+        assert_eq!(value["data"]["rows"][0]["top"][0]["token_id"], token);
+    }
+    submit("trace-corrupt", "corrupt");
+    assert!(t.wait("trace-corrupt", "failed")["error"].as_str().unwrap().contains("SHA-256"));
+    assert!(!t.root.join("b/jobs/trace-corrupt/work").exists());
+    assert!(!t.root.join("b/trace-results/trace-corrupt").exists());
+
+    submit("trace-new", "test");
+    t.wait("trace-new", "succeeded");
+    assert_eq!(t.dispatch("trace-read", "trace-old", Some(&json!({"view":"manifest"}))),
+        json!({"status":"missing"}));
+    t.wait("trace-old", "succeeded");
+    assert!(t.root.join("b/jobs/non-trace/work/unrelated-artifact").is_file());
+}
+
+#[test]
 fn pinned_hf_resolution_passes_expected_manifest_without_reading_model_payloads() {
     let t = Rig::new();
     let (_, _) = pinned_fixture(&t);

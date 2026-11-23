@@ -1,12 +1,13 @@
 use crate::{
     App,
     conversion::{Conversion, NewConversion},
-    domain::{KINDS, NewJob, NewModel, NewPrompt, candidates},
+    domain::{KINDS, NewJob, NewModel, NewPrompt, State as JobState, candidates},
     feed, hf_tokens,
     idempotency::{self, Replay, Submission},
     store::Store,
     suggestions::{self, SuggestError, Suggestions},
 };
+use brewery_worker::trace::{self, ReadReply, Slice, View};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, Request, State, rejection::JsonRejection},
@@ -60,6 +61,10 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
         .route("/prompts", post(add_prompt))
         .route("/jobs", post(add_job))
         .route("/jobs/{id}", get(job))
+        .route("/jobs/{id}/trace", get(trace_manifest))
+        .route("/jobs/{id}/trace/tensor", get(trace_tensor))
+        .route("/jobs/{id}/trace/logit-lens", get(trace_logit_lens))
+        .route("/jobs/{id}/trace/model-logits", get(trace_model_logits))
         .route("/jobs/{id}/cancel", post(cancel))
         .route("/conversions", get(list_conversions).post(add_conversion))
         .route("/conversions/{id}", get(get_conversion))
@@ -267,7 +272,7 @@ async fn get_settings(State(app): State<Shared>) -> Result<Json<Value>> {
         .map(|host| app.settings.view(&store, host, app.admin.is_some()))
         .collect::<std::result::Result<_, _>>()
         .map_err(ApiError::storage)?;
-    Ok(Json(json!({"hosts": views})))
+    Ok(Json(json!({"hosts": views, "trace":app.trace_policy})))
 }
 
 async fn put_settings(
@@ -688,6 +693,14 @@ async fn add_job(
         (None, prompt) => prompt.clone(),
     };
     let (mut job, mut envelope) = request.build(host, inputs, prompt).map_err(ApiError::bad)?;
+    if job.kind == trace::JOB {
+        let request = trace::Request::controller(
+            &Value::Object(envelope.options.clone()), envelope.prompt.as_deref(), app.trace_policy,
+        ).map_err(|e| ApiError::bad(e.to_string()))?;
+        job.options.insert("byte_cap".into(), json!(request.capture.byte_cap));
+        envelope.options = job.options.clone();
+        envelope.options.insert("retain_jobs".into(), json!(request.retain_jobs));
+    }
     let hosts = app.effective_hosts().map_err(ApiError::storage)?;
     if crate::weights::is_kind(&job.kind)
         && let Some(entry) = hosts.iter().find(|entry| entry.id == job.host)
@@ -781,6 +794,53 @@ async fn job(State(app): State<Shared>, Path(id): Path<String>) -> Result<Json<V
             .map_err(ApiError::storage)?
             .ok_or_else(|| ApiError::not_found("job"))?,
     ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TraceQuery {
+    #[serde(default)]
+    prompt: usize,
+    layer: Option<usize>,
+    role: Option<trace::Role>,
+    start: Option<usize>,
+    end: Option<usize>,
+}
+
+type TraceQueryResult = std::result::Result<Query<TraceQuery>, axum::extract::rejection::QueryRejection>;
+
+async fn trace_manifest(State(app): State<Shared>, Path(id): Path<String>, query: TraceQueryResult) -> Result<Json<Value>> {
+    trace_slice(app, id, query, View::Manifest).await
+}
+
+async fn trace_tensor(State(app): State<Shared>, Path(id): Path<String>, query: TraceQueryResult) -> Result<Json<Value>> {
+    trace_slice(app, id, query, View::Tensor).await
+}
+
+async fn trace_logit_lens(State(app): State<Shared>, Path(id): Path<String>, query: TraceQueryResult) -> Result<Json<Value>> {
+    trace_slice(app, id, query, View::LogitLens).await
+}
+
+async fn trace_model_logits(State(app): State<Shared>, Path(id): Path<String>, query: TraceQueryResult) -> Result<Json<Value>> {
+    trace_slice(app, id, query, View::ModelLogits).await
+}
+
+async fn trace_slice(app: Shared, id: String, query: TraceQueryResult, view: View) -> Result<Json<Value>> {
+    let Query(TraceQuery { prompt, layer, role, start, end }) =
+        query.map_err(|_| ApiError::bad("invalid trace query"))?;
+    let slice = Slice { view, prompt, layer, role, start, end };
+    slice.check().map_err(|e| ApiError::bad(e.to_string()))?;
+    let job = app.store.lock().map_err(ApiError::storage)?.job(&id).map_err(ApiError::storage)?
+        .filter(|j| j.kind == trace::JOB && j.state == JobState::Succeeded)
+        .ok_or_else(|| ApiError::not_found("trace result"))?;
+    match app.dispatcher.trace_read(&job, &slice).await.map_err(|e| {
+        eprintln!("Trace read failed for {id}: {e}");
+        ApiError(StatusCode::BAD_GATEWAY, "Trace worker could not read the result".into())
+    })? {
+        ReadReply::Ok(data) => Ok(Json(data)),
+        ReadReply::Missing => Err(ApiError::not_found("trace slice")),
+        ReadReply::TooLarge => Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "Select a smaller trace range".into())),
+    }
 }
 
 async fn list_profiles(State(app): State<Shared>) -> Result<Json<Vec<crate::profiles::Profile>>> {

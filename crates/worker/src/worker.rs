@@ -731,6 +731,14 @@ impl Worker {
                 Reply::error("This worker only runs Hugging Face download jobs"),
             );
         }
+        if job.kind == trace::JOB {
+            let allowed = action == "start" && job.inputs.len() == 1 && job.inputs[0].kind == "gguf"
+                && self.cfg.engine_env.get(trace::EXECUTABLE).is_some_and(|p| Path::new(p).is_absolute())
+                && trace::Request::worker(&job.options, job.prompt.as_deref()).is_ok();
+            if !allowed {
+                return self.record_prepare(id, action, job, Reply::error("Invalid trace request or unavailable CPU Lanternfish"));
+            }
+        }
         if job.options["output_format"] == hgn_recipe::FORMAT {
             if self.cfg.pinned_publication.is_some()
                 || self
@@ -1441,7 +1449,7 @@ impl Worker {
             self.cfg.weight_editor_host.is_none()
                 || !matches!(&request,
                     Rpc::Plan { .. } | Rpc::Seal { .. } | Rpc::Write { .. }
-                    | Rpc::Cleanup { .. } | Rpc::Read { .. } | Rpc::Describe { .. }
+                    | Rpc::Cleanup { .. } | Rpc::Read { .. } | Rpc::Describe { .. } | Rpc::TraceRead { .. }
                 ),
             "Remote editor does not permit transfer or cache operations"
         );
@@ -1460,6 +1468,22 @@ impl Worker {
         );
         // Reads/description may hash large files; they never mutate durable state.
         let request = match request {
+            Rpc::TraceRead { id, slice } => {
+                let root = self.cfg.root.join("trace-results");
+                let Some(result) = self.get(&id)?.and_then(|record| {
+                    (record.reply.state == "succeeded" && record.job.is_some_and(|job| job.kind == trace::JOB))
+                        .then_some(record.reply.result).flatten()
+                }) else {
+                    return Ok(to_value(trace::ReadReply::Missing)?);
+                };
+                let _trace = lock(&self.cfg.root.join("trace.lock"))?;
+                let dir = root.join(&id);
+                if !root.exists() || !dir.exists() {
+                    return Ok(to_value(trace::ReadReply::Missing)?);
+                }
+                ensure!(fs::symlink_metadata(root)?.is_dir(), "invalid trace store");
+                return Ok(to_value(trace::read(&dir, &slice, &result)?)?);
+            }
             Rpc::Describe { input } => {
                 let (p, root) = self
                     .source(&input.path)
@@ -1540,6 +1564,8 @@ impl Worker {
                 let admission = if job.kind == exl3_layer::JOB {
                     exl3_layer::Spec::parse(&job.options)
                         .is_ok_and(|spec| spec.backend != exl3_layer::Backend::Cpu)
+                } else if job.kind == trace::JOB {
+                    false
                 } else {
                     self.cfg.admission.is_some()
                 };
@@ -1725,6 +1751,7 @@ impl Worker {
             Rpc::Describe { .. }
             | Rpc::Read { .. }
             | Rpc::SuggestPaths(_)
+            | Rpc::TraceRead { .. }
             | Rpc::DescribeProgress { .. }
             | Rpc::StageProgress { .. } => unreachable!(),
         }

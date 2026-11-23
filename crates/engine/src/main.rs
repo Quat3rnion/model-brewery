@@ -10,6 +10,7 @@ mod integrity;
 mod native_progress;
 mod progress;
 mod recipe;
+mod trace;
 mod weight;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -390,6 +391,7 @@ fn run() -> Result<i32> {
     let result = match job.kind.as_str() {
         "benchmark" => benchmark::run(&job, &cwd, &progress)?,
         "compare" => compare::run(&job, &cwd, &progress)?,
+        brewery_worker::trace::JOB => trace::run(&job, &cwd, &progress)?,
         "hf_download" => hf_download::run(&job, &cwd, &progress)?,
         brewery_worker::exl3_layer::JOB => exl3_layer::run(&job, &cwd, &progress)?,
         "weight_inspect" | "weight_propose" | "weight_tune" | "weight_apply" => {

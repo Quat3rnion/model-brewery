@@ -6,6 +6,7 @@ pub mod hy4;
 pub mod operational;
 pub mod resources;
 pub mod source_grants;
+pub mod trace;
 pub mod weight_source;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -323,6 +324,10 @@ pub enum Rpc {
         detail: ProgressDetail,
     },
     SuggestPaths(SuggestRequest),
+    TraceRead {
+        id: String,
+        slice: trace::Slice,
+    },
     Read {
         root: PathBuf,
         entry: Entry,

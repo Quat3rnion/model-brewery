@@ -39,6 +39,8 @@ struct App {
     store: Mutex<Store>,
     hosts: Vec<Host>,
     settings: settings::Managed,
+    trace_policy: brewery_worker::trace::Policy,
+    dispatcher: Arc<Dispatcher>,
     hf_tokens: hf_tokens::Store,
     backend_download: bool,
     backend_calibration: Option<PathBuf>,
@@ -130,10 +132,13 @@ async fn main() -> Result<(), Error> {
         Ok(None) => {}
         Err(_) => eprintln!("Backend download storage is unavailable"),
     }
+    let dispatcher = Arc::new(dispatcher);
     let app = Arc::new(App {
         store: Mutex::new(store),
         hosts,
         settings: settings::Managed::from_config(config_value.as_ref()),
+        trace_policy: settings::trace_policy(config_value.as_ref())?,
+        dispatcher: dispatcher.clone(),
         hf_tokens,
         backend_download: dispatcher.backend.is_some(),
         backend_calibration: dispatcher

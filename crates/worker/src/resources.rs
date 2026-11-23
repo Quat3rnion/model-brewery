@@ -142,6 +142,7 @@ pub fn engine_job(kind: &str) -> bool {
             | "verify"
             | "generate"
             | "compare"
+            | crate::trace::JOB
             | "evaluate"
             | "baseline"
             | "benchmark"

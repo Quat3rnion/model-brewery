@@ -95,6 +95,13 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
         Ok(_) => execute(w, id, &base, &job, &mut created_work),
         Err(e) => Err(anyhow::anyhow!("{e}")),
     };
+    let mut _trace_lock = None;
+    let result = result.and_then(|value| {
+        if job.kind == trace::JOB {
+            _trace_lock = Some(lock(&w.cfg.root.join("trace.lock"))?);
+        }
+        Ok(value)
+    });
     let _guard = w.state_lock()?;
     let mut r = w.require(id)?;
     // The state lock orders cancellation against the durable terminal reply.
@@ -144,21 +151,76 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
             }
         }
     }
+    let result = result.and_then(|value| {
+        if !r.cancel {
+            if download {
+                publish_download(w, &base)?;
+            } else if job.kind == trace::JOB {
+                let request = trace::Request::worker(&job.options, job.prompt.as_deref())?;
+                publish_trace(w, id, &base, request.retain_jobs)?;
+            }
+        }
+        Ok(value)
+    });
+    if job.kind == trace::JOB
+        && created_work
+        && (r.cancel || result.is_err())
+        && let Err(error) =
+            fs::remove_dir_all(base.join("work")).and_then(|()| File::open(&base)?.sync_all())
+    {
+        eprintln!("Trace work directory cleanup failed: {error}");
+        r.reply = Reply::error("Trace work directory cleanup failed");
+        return w.put(id, &r);
+    }
     r.reply = if r.cancel {
         Reply::new("cancelled", "process tree stopped")
     } else {
-        let result = result.and_then(|value| {
-            if download {
-                publish_download(w, &base)?;
-            }
-            Ok(value)
-        });
         match result {
             Ok(value) => Reply::success(value),
             Err(e) => Reply::error(e.to_string()),
         }
     };
     w.put(id, &r)
+}
+
+fn publish_trace(w: &Worker, id: &str, base: &Path, retain: usize) -> Result<()> {
+    let root = w.cfg.root.join("trace-results");
+    fs::create_dir_all(&root)?;
+    ensure!(fs::symlink_metadata(&root)?.is_dir(), "invalid trace store");
+    let dest = root.join(id);
+    ensure!(!dest.exists(), "trace result already exists");
+    let source = base.join("work/trace");
+    let mut older = Vec::new();
+    for entry in fs::read_dir(&root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() && entry.file_name().to_str().is_some_and(|s| token(s).is_ok()) {
+            older.push((entry.metadata()?.modified()?, entry.path()));
+        }
+    }
+    older.sort_unstable();
+    for prompt in fs::read_dir(&source)? {
+        let dir = prompt?.path();
+        for file in fs::read_dir(&dir)? {
+            File::open(file?.path())?.sync_all()?;
+        }
+        File::open(&dir)?.sync_all()?;
+    }
+    File::open(&source)?.set_modified(std::time::SystemTime::now())?;
+    File::open(&source)?.sync_all()?;
+    fs::rename(&source, &dest)?;
+    let prune = (|| -> Result<()> {
+        let remove = (older.len() + 1).saturating_sub(retain);
+        for (_, old) in older.into_iter().take(remove) {
+            fs::remove_dir_all(old)?;
+        }
+        File::open(&root)?.sync_all()?;
+        File::open(&w.cfg.root)?.sync_all()?;
+        Ok(())
+    })();
+    if prune.is_err() {
+        let _ = fs::rename(&dest, &source);
+    }
+    prune
 }
 
 fn hy4_encode_slot(w: &Worker) -> Result<File> {
@@ -233,6 +295,11 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         None
     };
     let work = base.join("work");
+    if job.kind == trace::JOB {
+        let request = trace::Request::worker(&job.options, job.prompt.as_deref())?;
+        resources::disk_check(&w.cfg.root, w.disk_floor(job.resources.disk_reserve_bytes)
+            .checked_add(request.capture.byte_cap + (4 << 20)).context("trace disk reserve overflow")?)?;
+    }
     fs::create_dir(&work)?;
     *created_work = true;
     let jobfile = base.join("engine-input.json");
@@ -284,7 +351,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .env("OMP_NUM_THREADS", "1");
         }
         c
-    } else if let Some(wrapper) = &w.cfg.admission {
+    } else if let Some(wrapper) = w.cfg.admission.as_ref().filter(|_| job.kind != trace::JOB) {
         let mut c = Command::new(wrapper);
         c.args(["--wait", "--"]).arg(&w.cfg.engine);
         c
@@ -508,6 +575,28 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         value.is_object(),
         "Engine output is not a JSON object; check private engine-output.json"
     );
+    if job.kind == trace::JOB {
+        let request = trace::Request::worker(&job.options, job.prompt.as_deref())?;
+        ensure!(value["kind"] == trace::JOB && value["schema_version"] == 1
+            && value["model_id"].is_string() && value["model_id"] == job.inputs[0].extra["id"]
+            && value["model_sha256"].as_str().is_some_and(is_digest)
+            && value["model_sha256"] == job.inputs[0].extra["sha256"]
+            && value["lanternfish_commit"] == trace::COMMIT && value["executable_sha256"] == trace::SHA256,
+            "trace receipt does not match resolved input and runtime");
+        let exports: Vec<trace::Export> = serde_json::from_value(value["prompts"].clone())?;
+        let root = work.join(trace::JOB);
+        ensure!(fs::symlink_metadata(&root)?.is_dir()
+            && fs::read_dir(&root)?.count() == request.prompts.len() && exports.len() == request.prompts.len(),
+            "incomplete trace results");
+        let mut spec = request.capture;
+        let cap = spec.byte_cap;
+        for (i, export) in exports.into_iter().enumerate() {
+            ensure!(trace::verify(&root.join(i.to_string()), &spec)? == export, "trace receipt does not match export");
+            spec.byte_cap -= export.bytes;
+        }
+        ensure!(value["bytes"].as_u64() == Some(cap - spec.byte_cap), "invalid trace receipt byte count");
+        return Ok(value);
+    }
     if w.cfg.hy4_plan.as_ref().is_some_and(|p| p.encode.is_some()) {
         let artifact = &value["artifact"];
         let file = work.join(hy4::FILE);

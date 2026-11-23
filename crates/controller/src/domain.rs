@@ -8,6 +8,7 @@ use std::{
 
 pub const KINDS: &[&str] = &[
     "compare",
+    brewery_worker::trace::JOB,
     "inspect",
     "plan",
     "convert",
@@ -518,6 +519,7 @@ impl Host {
                     | "baseline"
                     | "benchmark"
                     | "hf_download"
+                    | brewery_worker::trace::JOB
                     | brewery_worker::exl3_layer::JOB
             ) || crate::weights::is_kind(kind);
             let enabled = options.remove(kind).unwrap_or(!opt_in)
@@ -529,6 +531,8 @@ impl Host {
                         "Configure benchmark targets and suites and opt in on this worker"
                     } else if kind == "hf_download" {
                         "Configure Hugging Face downloads and opt in on this worker"
+                    } else if kind == brewery_worker::trace::JOB {
+                        "Configure pinned CPU Lanternfish and opt in on this worker"
                     } else if kind == brewery_worker::exl3_layer::JOB {
                         "Configure a native EXL3 helper and opt in on this worker"
                     } else if crate::weights::is_kind(kind) {
@@ -946,6 +950,7 @@ impl NewJob {
         } else {
             match self.kind.as_str() {
                 "compare" => n == 2 && main == "gguf" && second == "gguf" && prompt.is_some(),
+                brewery_worker::trace::JOB => n == 1 && main == "gguf" && host == inputs[0].host,
                 "inspect" | "plan" | "convert" => (1..=5).contains(&n) && source,
                 "verify" => (2..=6).contains(&n) && source && second == "hgn",
                 "generate" => n == 1 && hgn(main) && prompt.is_some(),
@@ -977,7 +982,7 @@ impl NewJob {
                 self.kind
             ));
         }
-        if prompt.is_some() && !matches!(self.kind.as_str(), "compare" | "generate") {
+        if prompt.is_some() && !matches!(self.kind.as_str(), "compare" | "generate" | brewery_worker::trace::JOB) {
             return Err("this workflow does not accept a prompt".into());
         }
         if self.options.contains_key(brewery_worker::hy4::OPTION) {
@@ -1056,7 +1061,7 @@ impl NewJob {
 fn check_options(job: &str, options: &Map<String, Value>, inputs: &[Model]) -> Result<(), String> {
     // Benchmark options are validated as a whole against the selected host
     // before enqueue and again by the scheduler before dispatch.
-    if job == "benchmark" {
+    if matches!(job, "benchmark" | brewery_worker::trace::JOB) {
         return Ok(());
     }
     if job == "hf_download" {

@@ -67,6 +67,7 @@ pub fn live(base: &Path, kind: &str, admission: bool, started: u64) -> String {
 fn stage(kind: &str) -> &'static str {
     match kind {
         "compare" => "Comparing models",
+        brewery_worker::trace::JOB => "Preparing CPU trace",
         "inspect" => "Inspecting model",
         "plan" => "Planning conversion",
         "convert" => "Converting model",

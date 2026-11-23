@@ -319,6 +319,69 @@ generic `admission` wrapper; CPU EXL3 does not use either GPU gate.
 The worker owns its cache. The workbench never changes or deletes an original
 model file. Unregistering a library entry removes only the entry.
 
+## CPU trace jobs
+
+Use `trace` to record selected activations and top logits for a single-file
+Library GGUF.
+The worker runs the Lanternfish CLI on the CPU. It reads files from the CLI.
+It does not start a Lanternfish service or use a Lanternfish HTTP API.
+It does not change the model or qualify a release.
+
+1. Install the headless binary from Lanternfish commit
+   `0ea30b37729a136a76b8412e7ad1ec91bd7de9b5`. Check its SHA-256:
+   `0e4ca38c55a9afa0436eeadd06e89bf295eb201b986dd2f40305f95d3a61e46f`.
+   The engine rejects other binaries.
+2. Install the matching CPU libraries from llama.cpp `184f653` with
+   Lanternfish patches `0001` and `0002`. This binary uses
+   `/arboretum/llama-w0/build/bin` as its library search path. Keep that path
+   and its libraries under operator control. Use `readelf -d` and `ldd` to
+   check the library paths before you enable the worker. The engine runs a
+   verified copy of the binary with no inherited `LD_LIBRARY_PATH`.
+3. Add `"BREWERY_LANTERNFISH_TRACE": "/absolute/path/to/lanternfish"` to the
+   worker JSON `engine_env`. Add `"trace": true` to the host `capabilities`
+   in dispatch JSON. The capability is off by default. Use a regular worker
+   with access to the registered GGUF. Dedicated download and weight editor
+   workers do not run traces. The existing GPU `compare` job still uses
+   `BREWERY_LANTERNFISH` and its `run` command.
+
+To set the limits, add this top-level object to the controller dispatch JSON:
+
+```json
+{"trace":{"default_byte_cap":2097152,"max_byte_cap":16777216,"retain_jobs":8}}
+```
+
+These are the defaults. `GET /api/settings` shows the active values under
+`trace`. Restart the controller to apply changes. The job cap includes all
+manifests and tensor files for all prompts. It cannot exceed 33554432 bytes.
+The cap does not limit model memory. Retention keeps 1 to 64 trace results
+per worker. After a new result, the worker removes the oldest trace results
+over the limit. It does not remove job records, inputs, or other artifacts.
+An old job can show success after its trace files are removed. The trace
+endpoints then return 404.
+
+Submit one same-worker GGUF `input_ids` entry to `POST /api/jobs` with
+`kind: "trace"`. Supply `prompt`, `prompt_id`, or an `options.prompts` array
+with 1 to 4 entries. This example shows `options` for one prompt:
+
+```json
+{"layers":[0,11],"roles":["l_out","attn_out"],"positions":[0,1],"top_k":5}
+```
+
+Layers and token positions start at zero. The CLI does not use a chat
+template or generate tokens. It accepts at most 4096 prompt tokens. An
+optional `byte_cap` can override the default within the configured maximum.
+Set `full_dump: true` to pass larger explicit selections. This flag does not
+select more data or raise the cap. Optional `interventions` are inline
+Lanternfish rules. Save the request to repeat the run.
+
+Use job events to follow progress. After success, use
+`GET /api/jobs/{id}/trace` for the summary. Use `/tensor` for F32 rows,
+`/logit-lens` for layer logits, or `/model-logits` for native logits. All
+four routes take the optional zero-based `prompt` index. Slice routes use
+the half-open token position range `start` and `end`. Tensor reads also
+require `layer` and `role`; logit lens reads can filter by `layer`. Narrow
+the range if a response exceeds 4 MiB (HTTP 413).
+
 ## Operator paths and environment
 
 The operator sets these variables. The controller uses the first group. The
@@ -334,7 +397,8 @@ worker environment applies to jobs that run on that worker.
 | `BREWERY_WORKER_CONFIG` | worker | Worker JSON path. Default `~/.config/model-brewery/worker.json`. |
 | `BREWERY_CPU_THREADS` | worker, engine, native tools | CPU work budget per process. Default `4`; range `1`–`64`. Set this on each worker host. Available CPUs and the number of independent work items can lower the effective count. |
 | `BREWERY_HASH_THREADS` | worker, engine | Optional limit for concurrent file hashes (`1`–`16`). Hashing uses the CPU budget by default, up to `16` files at a time. |
-| `BREWERY_LANTERNFISH` | engine | Pinned Lanternfish binary for `compare`. |
+| `BREWERY_LANTERNFISH` | engine | Configured Lanternfish `run` binary for `compare`. This lookup does not check the trace pin. |
+| `BREWERY_LANTERNFISH_TRACE` | engine | Absolute path to the pinned CPU Lanternfish binary for `trace`. |
 | `BREWERY_CONVERTER` | engine | Pinned bf16-to-hgn converter for `inspect`, `plan`, `convert`, and `verify`. |
 | `BREWERY_COMPONENT_CONVERTER` | engine | Separate role-overlay converter build for HF jobs that replace a component. See [Conversion components](#conversion-components). |
 | `BREWERY_COMPONENT_CPU_ONLY` | engine | Set to `1` to refuse non-CPU backends for those jobs. |

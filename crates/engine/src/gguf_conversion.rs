@@ -129,10 +129,16 @@ impl Tool {
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
             "{sha} must be lowercase hexadecimal SHA-256"
         );
+        Self::pinned_digest(work, var, &expected, name, label)
+    }
+
+    pub(crate) fn pinned_digest(
+        work: &Path, var: &str, expected: &str, name: &str, label: &str,
+    ) -> Result<Self> {
         let configured = Tool::open(var)?;
         ensure!(configured.sha == expected, "{label} SHA-256 mismatch");
         // Run private verified bytes, not the mutable configured pathname.
-        // The operator must supply a self-contained CPU quantizer (no adjacent libraries).
+        // The tool cannot depend on libraries relative to the configured executable.
         let path = work.join(name);
         fs::copy(&configured.path, &path)?;
         configured.stamp.check(&configured.path)?;

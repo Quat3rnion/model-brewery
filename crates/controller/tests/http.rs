@@ -420,6 +420,60 @@ fn hy4_gate_encode_requires_the_exact_same_worker_opt_in() {
 }
 
 #[test]
+fn trace_admission_and_reads_are_bounded() {
+    let mut app = Fixture::new();
+    fs::write(app.path("dispatch.json"), json!({
+        "hosts": {"alpha":{"local":true,"capabilities":{"trace":true}}, "beta":{"local":true}},
+        "trace":{"default_byte_cap":65536,"max_byte_cap":131072,"retain_jobs":2}
+    }).to_string()).unwrap();
+    app.launch();
+    let model = app.register("alpha", "gguf", "/models/trace.gguf");
+    let body = json!({"kind":"trace","host":"alpha","input_ids":[model],"prompt":"one two",
+        "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":2}});
+    for (key, value) in [
+        ("byte_cap", json!(131073)),
+        ("roles", json!(["../weights"])),
+        ("positions", json!([4096])),
+        ("prompts", json!(["conflicts with prompt"])),
+        ("layers", json!((0..65).collect::<Vec<_>>())),
+        ("retain_jobs", json!(10)),
+        ("interventions", json!([{"op":"zero","layer":0,"role":"kq_soft_max","positions":[0]}])),
+    ] {
+        let mut bad = body.clone();
+        bad["options"][key] = value;
+        app.json("POST", "/api/jobs", Some(bad), 400);
+    }
+    let mut off = body.clone();
+    off["host"] = json!("beta");
+    app.json("POST", "/api/jobs", Some(off), 409);
+    assert!(app.launches().is_empty());
+    assert_eq!(app.json("GET", "/api/settings", None, 200)["trace"],
+        json!({"default_byte_cap":65536,"max_byte_cap":131072,"retain_jobs":2}));
+    let id = app.enqueue(body);
+    let job = app.await_job(&id, |job| job["state"] == "succeeded");
+    assert_eq!(job["result"]["envelope"]["options"]["byte_cap"], 65536);
+    assert_eq!(job["result"]["envelope"]["options"]["retain_jobs"], 2);
+    let path = format!("/api/jobs/{id}/trace");
+    assert_eq!(app.json("GET", &path, None, 200)["schema_version"], 1);
+    app.json("GET", &format!("{path}/tensor?layer=0&role=l_out&start=2&end=1"), None, 400);
+    assert_eq!(app.json("GET", &format!("{path}/tensor?layer=0&role=l_out&start=0&end=1"), None, 200)
+        ["rows"][0]["data_base64"], "AACAPw==");
+    app.json("GET", &format!("{path}/tensor?layer=0&role=l_out"), None, 413);
+    fs::write(app.path("trace-pruned"), "").unwrap();
+    app.json("GET", &path, None, 404);
+
+    let mut large = json!({"kind":"trace","input_ids":[model],
+        "options":{"layers":(0..65).collect::<Vec<_>>(),"roles":["l_out"],"positions":[0],"top_k":0,
+            "full_dump":true,"byte_cap":33554433,"prompts":["one","two"],
+            "interventions":[{"op":"scale","factor":0.5,"layer":0,"role":"l_out","positions":[0]}]}});
+    app.json("POST", "/api/jobs", Some(large.clone()), 400);
+    large["options"]["byte_cap"] = json!(131072);
+    let multi = app.enqueue(large);
+    let done = app.await_job(&multi, |job| job["state"] == "succeeded");
+    assert_eq!(done["result"]["envelope"]["options"]["prompts"], json!(["one","two"]));
+}
+
+#[test]
 fn hy4_plan_requires_an_opted_in_source_host_and_exact_override() {
     let mut app = Fixture::new();
     fs::write(app.path("dispatch.json"), json!({"hosts":{

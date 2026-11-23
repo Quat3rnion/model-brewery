@@ -71,7 +71,20 @@ if (root / "offline").exists():
     sys.exit(255)
 
 prior = json.loads(job.read_text()) if job.exists() else None
-if action == "status":
+if action == "trace-read":
+    query = json.load(sys.stdin)
+    assert prior and prior["state"] == "succeeded"
+    if (root / "trace-pruned").exists():
+        out({"status": "missing"})
+    elif query["view"] == "manifest":
+        out({"status": "ok", "data": {"schema_version": 1}})
+    elif query["end"] is None:
+        out({"status": "too_large"})
+    else:
+        assert query == {"view": "tensor", "prompt": 0, "layer": 0,
+                         "role": "l_out", "start": 0, "end": 1}
+        out({"status": "ok", "data": {"rows": [{"data_base64": "AACAPw=="}]}})
+elif action == "status":
     sampling = root / f"{job_id}.sampling"
     if sampling.exists() and prior and prior["state"] == "queued":
         polls = root / f"{job_id}.polls"

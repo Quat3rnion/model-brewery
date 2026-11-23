@@ -409,6 +409,66 @@
         }
       }
     },
+    "/api/jobs/{id}/trace": {
+      "get": {
+        "operationId": "getTraceManifest",
+        "summary": "Read the summary for one retained trace prompt",
+        "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/TracePrompt"}],
+        "responses": {
+          "200": {"description": "Verified export summary without worker paths.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TraceSummary"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"}, "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/TraceNotFound"}, "413": {"$ref": "#/components/responses/TraceTooLarge"}, "502": {"$ref": "#/components/responses/TraceReadFailed"}
+        }
+      }
+    },
+    "/api/jobs/{id}/trace/tensor": {
+      "get": {
+        "operationId": "getTraceTensor",
+        "summary": "Read tensor rows for one layer and role",
+        "parameters": [
+          {"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/TracePrompt"},
+          {"name":"layer","in":"query","required":true,"schema":{"$ref":"#/components/schemas/TraceLayer"}},
+          {"name":"role","in":"query","required":true,"schema":{"$ref":"#/components/schemas/TraceRole"}},
+          {"$ref": "#/components/parameters/TraceStart"}, {"$ref": "#/components/parameters/TraceEnd"}
+        ],
+        "responses": {
+          "200": {"description": "F32 rows and positions for which the runtime could not capture a row.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TraceTensor"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"}, "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/TraceNotFound"}, "413": {"$ref": "#/components/responses/TraceTooLarge"}, "502": {"$ref": "#/components/responses/TraceReadFailed"}
+        }
+      }
+    },
+    "/api/jobs/{id}/trace/logit-lens": {
+      "get": {
+        "operationId": "getTraceLogitLens",
+        "summary": "Read logit lens rows, with an optional layer filter",
+        "parameters": [
+          {"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/TracePrompt"},
+          {"name":"layer","in":"query","schema":{"$ref":"#/components/schemas/TraceLayer"}},
+          {"$ref": "#/components/parameters/TraceStart"}, {"$ref": "#/components/parameters/TraceEnd"}
+        ],
+        "responses": {
+          "200": {"description": "Projected top logits at selected layers and positions.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TraceLens"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"}, "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/TraceNotFound"}, "413": {"$ref": "#/components/responses/TraceTooLarge"}, "502": {"$ref": "#/components/responses/TraceReadFailed"}
+        }
+      }
+    },
+    "/api/jobs/{id}/trace/model-logits": {
+      "get": {
+        "operationId": "getTraceModelLogits",
+        "summary": "Read native model logits at selected positions",
+        "parameters": [
+          {"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/TracePrompt"},
+          {"$ref": "#/components/parameters/TraceStart"}, {"$ref": "#/components/parameters/TraceEnd"}
+        ],
+        "responses": {
+          "200": {"description": "Native top logits at selected positions.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TraceLogits"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"}, "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/TraceNotFound"}, "413": {"$ref": "#/components/responses/TraceTooLarge"}, "502": {"$ref": "#/components/responses/TraceReadFailed"}
+        }
+      }
+    },
     "/api/jobs/{id}/cancel": {
       "post": {
         "operationId": "cancelJob",
@@ -878,6 +938,9 @@
         "name": "id", "in": "path", "required": true, "schema": {"type": "string"},
         "description": "ID returned by the controller.", "example": "ed205d69-459b-4088-b750-8cdaec2a9bf7"
       },
+      "TracePrompt": {"name":"prompt","in":"query","description":"Zero-based index in the trace request.","schema":{"type":"integer","minimum":0,"maximum":3,"default":0}},
+      "TraceStart": {"name":"start","in":"query","description":"Inclusive token position.","schema":{"type":"integer","minimum":0,"maximum":4095,"default":0}},
+      "TraceEnd": {"name":"end","in":"query","description":"Exclusive token position. Must be greater than start.","schema":{"type":"integer","minimum":1,"maximum":4096,"default":4096}},
       "IdempotencyKey": {
         "name": "Idempotency-Key",
         "in": "header",
@@ -897,6 +960,9 @@
       "CreateReplay": {"description": "Same bound idempotency key and typed request; no write. This response contains only the originally allocated ID.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreatedId"}, "example": {"id": "ed205d69-459b-4088-b750-8cdaec2a9bf7"}}}},
       "CreateConflict": {"description": "The idempotency key is bound to a different request for this operation.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "PayloadTooLarge": {"description": "The request exceeds this operation's body limit, in bytes.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "TraceNotFound": {"description":"No successful trace, retained prompt, or requested tensor slice.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},
+      "TraceTooLarge": {"description":"The slice exceeds the 4 MiB response limit. Select a smaller range.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},
+      "TraceReadFailed": {"description":"The worker could not read or verify the result.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}},
       "UnsupportedMediaType": {"description": "Send Content-Type: application/json for JSON requests or a CLI cancel request.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "InvalidJsonData": {"description": "JSON could not be decoded as the request type (for example, wrong field type, unknown top-level field, or missing required field). Kind-specific validation after decoding instead returns 400.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "StorageError": {"description": "A controller storage operation failed.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}, "example": {"error": "controller storage error"}}}},
@@ -1032,7 +1098,7 @@
           "truncated": {"type": "boolean"}
         }
       },
-      "JobKind": {"type": "string", "enum": ["compare", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer"]},
+      "JobKind": {"type": "string", "enum": ["compare", "trace", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer"]},
       "JobState": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled"]},
       "CapabilityMap": {
         "type": "object", "description": "Map from each known job kind to its availability.",
@@ -1172,7 +1238,7 @@
           {"$ref": "#/components/schemas/HfDownloadJob"},
           {"$ref": "#/components/schemas/WeightInspectJob"}, {"$ref": "#/components/schemas/WeightProposeJob"},
           {"$ref": "#/components/schemas/WeightTuneJob"}, {"$ref": "#/components/schemas/WeightApplyJob"},
-          {"$ref": "#/components/schemas/Exl3LayerJob"}
+          {"$ref": "#/components/schemas/Exl3LayerJob"}, {"$ref": "#/components/schemas/TraceJob"}
         ],
         "discriminator": {
           "propertyName": "kind",
@@ -1184,7 +1250,7 @@
             "hf_download": "#/components/schemas/HfDownloadJob",
             "weight_inspect": "#/components/schemas/WeightInspectJob", "weight_propose": "#/components/schemas/WeightProposeJob",
             "weight_tune": "#/components/schemas/WeightTuneJob", "weight_apply": "#/components/schemas/WeightApplyJob",
-            "exl3_layer": "#/components/schemas/Exl3LayerJob"
+            "exl3_layer": "#/components/schemas/Exl3LayerJob", "trace": "#/components/schemas/TraceJob"
           }
         }
       },
@@ -1213,6 +1279,113 @@
         }}
       },
       "RequiredHost": {"required": ["host"], "properties": {"host": {"$ref": "#/components/schemas/HostId"}}},
+      "TraceLayer": {"type":"integer","minimum":0,"maximum":4095},
+      "TracePosition": {"type":"integer","minimum":0,"maximum":4095},
+      "TraceRole": {"enum":["l_out","attn_out","ffn_inp","ffn_out","kq_soft_max"]},
+      "TraceCapture": {
+        "type":"object", "required":["layers","roles","positions","top_k"],
+        "properties":{
+          "layers":{"type":"array","items":{"$ref":"#/components/schemas/TraceLayer"}},
+          "roles":{"type":"array","items":{"$ref":"#/components/schemas/TraceRole"}},
+          "positions":{"type":"array","minItems":1,"items":{"$ref":"#/components/schemas/TracePosition"}},
+          "top_k":{"type":"integer","minimum":0,"maximum":100,"description":"Use 0 to omit logits."},
+          "byte_cap":{"type":"integer","minimum":1,"maximum":33554432,"description":"In a request, the total for all prompts; omit to use Settings. In a manifest, the remaining cap at the start of that prompt."}
+        }
+      },
+      "TraceJob": {
+        "description":"Run a CPU trace of one single-file Library GGUF on its own opted-in worker. Supply exactly one of prompt, prompt_id, or options.prompts. Token positions include special tokens. There is no generation.",
+        "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"}],
+        "required":["input_ids","options"],
+        "properties":{
+          "kind":{"const":"trace"},
+          "input_ids":{"minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
+          "prompt":{"maxLength":16384,"x-brewery-max-utf8-bytes":16384},
+          "options":{"$ref":"#/components/schemas/TraceOptions"}
+        },
+        "oneOf":[
+          {"allOf":[{"$ref":"#/components/schemas/OnePrompt"}],"properties":{"options":{"not":{"required":["prompts"]}}}},
+          {"allOf":[{"$ref":"#/components/schemas/NoPrompt"}],"properties":{"options":{"required":["prompts"]}}}
+        ]
+      },
+      "TraceOptions": {
+        "type":"object",
+        "allOf":[{"$ref":"#/components/schemas/TraceCapture"}],
+        "unevaluatedProperties":false,
+        "properties":{
+          "prompts":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"string","minLength":1,"maxLength":16384,"x-brewery-max-utf8-bytes":16384}},
+          "full_dump":{"type":"boolean","default":false,"description":"Required above 64 layers, 128 positions, or 2048 layer-role-position selections. Does not raise the byte cap or add selections."},
+          "interventions":{"type":"array","maxItems":64,"items":{"$ref":"#/components/schemas/TraceIntervention"}}
+        }
+      },
+      "TraceIntervention": {
+        "type":"object","additionalProperties":false,"required":["layer","role","positions","op"],
+        "properties":{
+          "layer":{"$ref":"#/components/schemas/TraceLayer"}, "role":{"enum":["l_out","attn_out","ffn_inp","ffn_out"]},
+          "positions":{"type":"array","minItems":1,"items":{"$ref":"#/components/schemas/TracePosition"}},
+          "op":{"enum":["zero","scale","add","replace"]}, "factor":{"type":"number"},
+          "vector":{"type":"array","minItems":1,"maxItems":16384,"items":{"type":"number"}}
+        },
+        "oneOf":[
+          {"properties":{"op":{"const":"zero"}}, "not":{"anyOf":[{"required":["factor"]},{"required":["vector"]}]}},
+          {"properties":{"op":{"const":"scale"}},"required":["factor"],"not":{"required":["vector"]}},
+          {"properties":{"op":{"enum":["add","replace"]}},"required":["vector"],"not":{"required":["factor"]}}
+        ]
+      },
+      "TraceExport": {
+        "type":"object","required":["bytes","manifest_sha256"],
+        "properties":{"bytes":{"$ref":"#/components/schemas/ByteCount"},"manifest_sha256":{"$ref":"#/components/schemas/Sha256"}}
+      },
+      "TraceSummary": {
+        "type":"object",
+        "allOf":[{"$ref":"#/components/schemas/TraceExport"}],
+        "required":["schema_version","prompt","model","model_id","model_sha256","lanternfish_commit","spec","tokens","tensor_count","missing_count","intervention_count","logit_lens_count","model_logits_count"],
+        "properties":{
+          "schema_version":{"const":1},"prompt":{"type":"integer"},"model":{"type":"object"},
+          "model_id":{"$ref":"#/components/schemas/Id"},"model_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "lanternfish_commit":{"type":"string"},"spec":{"$ref":"#/components/schemas/TraceCapture"},
+          "tokens":{"type":"array","items":{"type":"object","required":["position","token_id"],"properties":{"position":{"$ref":"#/components/schemas/TracePosition"},"token_id":{"type":"integer"}}}},
+          "tensor_count":{"type":"integer"},"missing_count":{"type":"integer"},"intervention_count":{"type":"integer"},
+          "logit_lens_count":{"type":"integer"},"model_logits_count":{"type":"integer"}
+        }
+      },
+      "TraceTensor": {
+        "type":"object","required":["prompt","layer","role","dtype","rows","missing_positions"],
+        "properties":{
+          "prompt":{"type":"integer"},"layer":{"$ref":"#/components/schemas/TraceLayer"},"role":{"$ref":"#/components/schemas/TraceRole"},
+          "dtype":{"const":"f32_le"},
+          "rows":{"type":"array","items":{"type":"object","required":["position","shape","node","sha256","data_base64"],"properties":{
+            "position":{"$ref":"#/components/schemas/TracePosition"},"shape":{"type":"array","items":{"type":"integer","minimum":1}},
+            "node":{"type":"string"},"sha256":{"$ref":"#/components/schemas/Sha256"},
+            "data_base64":{"type":"string","contentEncoding":"base64","description":"Row-major little-endian F32 bytes."}
+          }}},
+          "missing_positions":{"type":"array","items":{"$ref":"#/components/schemas/TracePosition"}}
+        }
+      },
+      "TraceLogitRow": {
+        "type":"object","required":["position","top"],
+        "properties":{
+          "position":{"$ref":"#/components/schemas/TracePosition"},
+          "top":{"type":"array","items":{"type":"object","required":["token_id","logit"],"properties":{"token_id":{"type":"integer"},"logit":{"type":"number"}}}}
+        }
+      },
+      "TraceLogits": {
+        "type":"object","required":["prompt","rows"],
+        "properties":{"prompt":{"type":"integer"},"rows":{"type":"array","items":{"$ref":"#/components/schemas/TraceLogitRow"}}}
+      },
+      "TraceLens": {
+        "type":"object","required":["prompt","rows"],
+        "properties":{"prompt":{"type":"integer"},"rows":{"type":"array","items":{
+          "allOf":[{"$ref":"#/components/schemas/TraceLogitRow"}],"required":["layer"],"properties":{"layer":{"$ref":"#/components/schemas/TraceLayer"}}
+        }}}
+      },
+      "TraceSettings": {
+        "type":"object","required":["default_byte_cap","max_byte_cap","retain_jobs"],"additionalProperties":false,
+        "properties":{
+          "default_byte_cap":{"type":"integer","minimum":1,"maximum":33554432,"default":2097152},
+          "max_byte_cap":{"type":"integer","minimum":1,"maximum":33554432,"default":16777216},
+          "retain_jobs":{"type":"integer","minimum":1,"maximum":64,"default":8,"description":"Maximum number of retained trace exports per worker after successful publication."}
+        }
+      },
       "CompareJob": {
         "description": "Compare two GGUF inputs on one worker. Supply exactly one of an inline prompt or saved prompt ID; the resolved text is limited to 8192 UTF-8 bytes.",
         "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/DefaultInputHost"}, {"$ref": "#/components/schemas/OnePrompt"}],
@@ -1356,8 +1529,8 @@
         }
       },
       "SettingsList": {
-        "type": "object", "required": ["hosts"], "additionalProperties": false,
-        "properties": {"hosts": {"type": "array", "items": {"$ref": "#/components/schemas/HostSettings"}}}
+        "type": "object", "required": ["hosts", "trace"], "additionalProperties": false,
+        "properties": {"hosts": {"type": "array", "items": {"$ref": "#/components/schemas/HostSettings"}}, "trace": {"$ref": "#/components/schemas/TraceSettings"}}
       },
       "HfTokenStatus": {
         "type": "object", "required": ["id", "configured"], "additionalProperties": false,
@@ -2158,16 +2331,26 @@
           {"$ref": "#/components/schemas/WeightApplyResult"},
           {"$ref": "#/components/schemas/HfDownloadResult"},
           {"$ref": "#/components/schemas/Exl3LayerResult"},
+          {"$ref": "#/components/schemas/TraceResult"},
           {"type": "object", "not": {"anyOf": [
             {"$ref": "#/components/schemas/CompareResult"}, {"$ref": "#/components/schemas/ConversionResult"},
             {"$ref": "#/components/schemas/GenerateResult"}, {"$ref": "#/components/schemas/Gsm8kResult"},
             {"$ref": "#/components/schemas/BenchmarkResult"}, {"$ref": "#/components/schemas/TransferResult"},
              {"$ref": "#/components/schemas/CacheCleanupResult"}, {"$ref": "#/components/schemas/WeightApplyResult"},
-             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer"]}}}
+             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace"]}}}
           ]}}
         ]
       },
       "ByteCount": {"type": "integer", "minimum": 0},
+      "TraceResult": {
+        "type":"object","required":["kind","schema_version","model_id","model_sha256","lanternfish_commit","executable_sha256","bytes","prompts"],
+        "properties":{
+          "kind":{"const":"trace"},"schema_version":{"const":1},"model_id":{"$ref":"#/components/schemas/Id"},
+          "model_sha256":{"$ref":"#/components/schemas/Sha256"},"lanternfish_commit":{"type":"string"},
+          "executable_sha256":{"$ref":"#/components/schemas/Sha256"},"bytes":{"$ref":"#/components/schemas/ByteCount"},
+          "prompts":{"type":"array","minItems":1,"maxItems":4,"items":{"$ref":"#/components/schemas/TraceExport"}}
+        }
+      },
       "Exl3LayerResult": {
         "type": "object", "required": ["kind", "host", "source_sha256", "source_format", "verified", "release_qualified", "artifact", "report"],
         "properties": {
