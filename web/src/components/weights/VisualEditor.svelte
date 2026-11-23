@@ -48,6 +48,7 @@
     heldOutId,
     tuneReason,
     tuneRetry,
+    retryLoading,
     mode = $bindable('manual'),
     onproposal,
     pending,
@@ -60,6 +61,7 @@
     heldOutId: string;
     tuneReason: string | null;
     tuneRetry: RetrySubmission;
+    retryLoading: boolean;
     mode?: 'manual' | 'auto';
     onproposal: (jobId: string) => void;
     pending: SvelteMap<string, DraftEdit>;
@@ -75,17 +77,17 @@
   const packedHost = $derived(!isSafeSource(source.kind) && brewery.state?.hosts.find(h => h.id === source.host)?.capabilities?.weight_packed === true);
   const usable = $derived(jobs.filter((j) => !ignored.has(j.id)));
   const sourceHost = $derived(hostName(brewery.state?.hosts ?? [], source.host));
-  const reads = new Submitter();
+  const reads = new Submitter(job => job.options?.mode === 'tile' ? 'weights.visual.tile' : 'weights.visual.inventory');
   let readKey = $state('');
 
   function want(job: JobSummary | null): void {
     if (job?.state === 'succeeded' && !brewery.details[job.id]) void brewery.loadJob(job.id).catch(() => {});
   }
   async function read(job: ReturnType<typeof inventoryJob>) {
-    if (reads.busy) return;
+    if (retryLoading || reads.busy) return;
     readKey = JSON.stringify(job.options);
     const created = await reads.submit(job);
-    if (created) submitted = [created, ...submitted];
+    if (created && 'state' in created) submitted = [created, ...submitted];
   }
   function ignoreReads(match: (job: JobSummary) => boolean) {
     const next = new Set(ignored);
@@ -106,7 +108,7 @@
     if (canVisual) want(inv.job ?? null);
   });
   function readInventoryPage() {
-    if (!canVisual || reads.busy || (inv.job && !inv.error)) return;
+    if (retryLoading || !canVisual || reads.busy || (inv.job && !inv.error)) return;
     if (!inventoryRequest) {
       ignoreReads(j => j.options?.mode === 'inventory');
       void read(inventoryJob(source.id, source.host, 0, undefined, packedHost));
@@ -169,7 +171,7 @@
   function readCurrentTile() {
     const request = tileRead;
     const options = request?.options;
-    if (!canVisual || !request || !options || reads.busy || otherTileActive || (tileJobFound && !tileError)) return;
+    if (retryLoading || !canVisual || !request || !options || reads.busy || otherTileActive || (tileJobFound && !tileError)) return;
     if (tileJobFound) ignoreReads(j => !!findRead([j], source.id, options));
     void read(request);
   }
@@ -311,7 +313,7 @@
     return cap;
   });
   const maxUpdate = $derived(maxText.trim() ? parseMaxUpdate(maxText) : ({ ok: true, value: maxFromSlider(maxIdx) } as const));
-  const tuneSub = new Submitter();
+  const tuneSub = new Submitter('weights.visual.tune');
   const sameHost = (id: string) => models.find((m) => m.id === id)?.host === source.host;
   const tuneBlockers = $derived.by(() => {
     const out: string[] = [];
@@ -363,7 +365,7 @@
       {/if}
       {#if !inv.job || inv.error}
         <div class="row">
-          <button type="button" class="btn small" onclick={readInventoryPage} disabled={reads.busy}>
+          <button type="button" class="btn small" onclick={readInventoryPage} disabled={retryLoading || reads.busy} aria-describedby={retryLoading ? 'w-retry-loading' : undefined}>
             {!inventoryRequest ? 'Read tensor list again' : inv.pages.length ? 'Read next tensors' : 'Read tensor list'}
           </button>
           <span class="hint">This queues a <code>weight_inspect</code> job on {sourceHost}.</span>
@@ -445,7 +447,7 @@
         {#if tileError}<p class="note bad" role="alert">{tileError}</p>{/if}
         {#if !tileJobFound || tileError}
           <div class="row">
-            <button type="button" class="btn small" onclick={readCurrentTile} disabled={reads.busy || otherTileActive}>{tileError ? 'Read tile again' : 'Read tile'}</button>
+            <button type="button" class="btn small" onclick={readCurrentTile} disabled={retryLoading || reads.busy || otherTileActive} aria-describedby={retryLoading ? 'w-retry-loading' : undefined}>{tileError ? 'Read tile again' : 'Read tile'}</button>
             <span class="hint">This queues a <code>weight_inspect</code> job on {sourceHost}.</span>
           </div>
           {#if otherTileActive}<p class="hint" role="status">Wait for the previous tile read to finish.</p>{/if}

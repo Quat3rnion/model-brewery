@@ -1,67 +1,65 @@
 // Compare wire values, not property insertion order or form-only state.
 export function bodyKey(body: unknown): string | undefined {
-  return JSON.stringify(body, (_, value: unknown) => value && typeof value === 'object' && !Array.isArray(value)
-    ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
+  const json = JSON.stringify(body);
+  return json === undefined ? undefined : sortedJson(JSON.parse(json));
 }
 
-/** Fresh ASCII key within the controller's size and character limits. */
-export function newKey(): string {
-  const b = new Uint8Array(16);
-  crypto.getRandomValues(b);
-  return `conv-${[...b].map(x => x.toString(16).padStart(2, '0')).join('')}`;
+function sortedJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(sortedJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const fields = Object.entries(value).sort(([a], [b]) => {
+      // Rust sorts strings by UTF-8 bytes, which have Unicode code point order.
+      const left = [...a], right = [...b];
+      for (let i = 0; i < Math.min(left.length, right.length); i++) {
+        const diff = left[i].codePointAt(0)! - right[i].codePointAt(0)!;
+        if (diff) return diff;
+      }
+      return left.length - right.length;
+    });
+    // Emit keys directly: JSON.stringify on an object reorders integer-like keys.
+    return `{${fields.map(([key, field]) => `${JSON.stringify(key)}:${sortedJson(field)}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
-export interface RetryIdentity {
-  slot: string;
-  id: string;
-  entry: string;
-  action: string;
+async function sha256(value: string): Promise<string> {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return hex(new Uint8Array(bytes));
+}
+
+const hex = (bytes: Uint8Array) => [...bytes].map(x => x.toString(16).padStart(2, '0')).join('');
+const keyChars = /^[A-Za-z0-9._-]+$/;
+const keyLimit = 128;
+
+/** Stable over document reloads. The launcher is a fixed, short ASCII action ID. */
+export async function retryKey(failedId: string, launcher: string, body: object): Promise<string> {
+  if (!keyChars.test(launcher) || launcher.length > 60) throw new Error('Invalid retry launcher ID.');
+  const id = keyChars.test(failedId) && failedId.length + launcher.length + 4 < keyLimit
+    ? failedId : `sha256.${(await sha256(failedId)).slice(0, 32)}`;
+  const prefix = `r-${id}-${launcher}-`;
+  return prefix + (await sha256(bodyKey(body)!)).slice(0, keyLimit - prefix.length);
 }
 
 export interface RetrySubmission {
   blocked: boolean;
-  history?: RetryIdentity;
+  failedId?: string;
 }
 
-type Attempt<T> = { key: string; request?: string; result?: T };
-const attempts = new Map<string, Attempt<unknown>>();
-// Retry entries outlive a mounted launcher, but not the browser document.
-const unconfirmed = new Map<string, Attempt<unknown>>();
+/** Keep only a plain launcher’s unconfirmed request in the current visit.
+ * Retry keys and accepted results never enter this cache. */
+export class PlainAttempt {
+  #pending?: { request: string; key: string; current: () => boolean };
 
-/** One instance per launcher. History sharing requires the same action, job
- * kind and wire body, including after a remount. */
-export class RetryKeys<T extends object> {
-  #last?: { request: string; attempt: Attempt<T>; retry: boolean };
-
-  constructor(private mint = newKey, private replayAccepted = false) {}
-
-  take(kind: string, body: unknown, history?: RetryIdentity) {
-    const request = JSON.stringify([kind, bodyKey(body)]);
-    const last = this.#last;
-    const retryRequest = history && JSON.stringify([history.slot, history.action, history.id, request]);
-    const entry = history && JSON.stringify([retryRequest, history.entry]);
-    const make = (): Attempt<T> => ({ key: this.mint(), request: retryRequest });
-    let attempt: Attempt<T>;
-    if (retryRequest && entry) {
-      // The same action and kind in the same slot use one response type.
-      const prior = (attempts.get(entry) ?? unconfirmed.get(retryRequest)) as Attempt<T> | undefined;
-      attempt = prior ?? make();
-      attempts.set(entry, attempt);
-      if (!attempt.result) unconfirmed.set(retryRequest, attempt);
-    } else if (last && last.request === request && (!last.attempt.result || last.retry || this.replayAccepted)) {
-      attempt = last.attempt;
-    } else {
-      attempt = make();
-    }
-    this.#last = { request, attempt, retry: !!history || (last?.attempt === attempt && last.retry) };
+  take(launcher: string, body: object, current: () => boolean) {
+    const request = bodyKey([launcher, body])!;
+    const prior = this.#pending;
+    const pending = prior?.current() && prior.request === request ? prior : {
+      request, key: `conv-${hex(crypto.getRandomValues(new Uint8Array(16)))}`, current,
+    };
+    this.#pending = pending;
     return {
-      key: attempt.key,
-      result: attempt.result,
-      accept: (result: T) => {
-        attempt.result ??= result;
-        const request = attempt.request;
-        if (request && unconfirmed.get(request) === attempt) unconfirmed.delete(request);
-      },
+      key: pending.key,
+      complete: () => { if (this.#pending === pending) this.#pending = undefined; },
     };
   }
 }

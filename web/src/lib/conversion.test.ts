@@ -1,18 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { buildConversion, parseConversion, parseConversions, stageRows, isActiveConversion, ConversionSubmitter, STAGES } from './conversion';
 
-it('replays the accepted conversion for the identical body after retry query removal', async () => {
+it('uses a new key for an identical plain conversion after retry query removal', async () => {
   const sent: string[] = [];
-  const s = new ConversionSubmitter(async (_body, key) => {
+  const s = new ConversionSubmitter('convert.managed', async (_body, key) => {
     sent.push(key);
-    return { id: 'started', state: 'running' };
+    return { data: { id: 'started', state: 'running' }, status: 201 };
   });
-  await s.submit({ input_ids: ['source'] }, { blocked: false, history: { slot: 'managed-test', id: 'retry-run', entry: 'one', action: 'managed' } });
+  await s.submit({ input_ids: ['source'] }, { blocked: false, failedId: 'retry-run' });
   expect((await s.submit({ input_ids: ['source'] }))?.id).toBe('started');
-  expect(s.replayed).toBe(true);
-  expect(sent).toHaveLength(1);
-  await s.submit({ input_ids: ['different'] });
+  expect(s.replayed).toBe(false);
   expect(sent).toHaveLength(2);
+  expect(sent[0]).toMatch(/^r-retry-run-convert\.managed-/);
   expect(sent[1]).not.toBe(sent[0]);
 });
 import type { ConvertForm } from './convert';
@@ -83,14 +82,14 @@ describe('single submission', () => {
   it('sends exactly one POST per click even when clicked twice, and reuses the key on retry', async () => {
     const calls: { key: string; body: unknown }[] = [];
     let fail = true;
-    const s = new ConversionSubmitter(async (body, key) => {
+    const s = new ConversionSubmitter('convert.managed', async (body, key) => {
       calls.push({ key, body });
       await Promise.resolve();
       if (fail) {
         fail = false;
         throw new Error('network');
       }
-      return wf();
+      return { data: wf(), status: 201 };
     });
     const body = { input_ids: ['src'], options: { profile: 'ht43' } };
     const [a, b] = await Promise.all([s.submit(body), s.submit(body)]);
@@ -109,18 +108,16 @@ describe('single submission', () => {
 });
 
 describe('repeat start after success', () => {
-  it('an identical second Start replays the accepted record; a changed body gets a new key', async () => {
+  it('a second plain Start gets a fresh key even with the same accepted body', async () => {
     const keys: string[] = [];
-    const s = new ConversionSubmitter(async (_b, key) => {
+    const s = new ConversionSubmitter('convert.managed', async (_b, key) => {
       keys.push(key);
-      return wf();
+      return { data: wf(), status: 201 };
     });
     const body = { input_ids: ['src'], options: { profile: 'ht43' } };
     await s.submit(body);
     expect((await s.submit(body))?.id).toBe('c1');
-    expect(s.replayed).toBe(true);
-    expect(keys).toHaveLength(1);
-    await s.submit({ ...body, options: { profile: 'v2' } });
+    expect(s.replayed).toBe(false);
     expect(keys).toHaveLength(2);
     expect(keys[1]).not.toBe(keys[0]);
   });

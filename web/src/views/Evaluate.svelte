@@ -48,8 +48,7 @@
   const evaluationSettings = (host: Host) => `#/settings/evaluation?host=${encodeURIComponent(host.id)}`;
   const touched = $state<Record<string, boolean>>({});
   const touch = (field: string) => () => { touched[field] = true; };
-  const refInputs = ['gsm8k-predictions', 'gsm8k-baseline'];
-  const refResults = [...refInputs, 'gsm8k-evaluation'];
+  const refResults = ['gsm8k-predictions', 'gsm8k-baseline', 'gsm8k-evaluation'];
 
   // ---- Report status per bundle (three separate lines) ----
   // Load terminal detail records for the latest verify/generate/evaluate job of each bundle.
@@ -82,7 +81,7 @@
   let submittedText = $state('');
   let gMaxTokens = $state<number>();
   unsavedChanges(() => gText !== '' && gText !== submittedText);
-  const gen = new Submitter();
+  const gen = new Submitter('evaluate.generate');
   const gHostBlockers = $derived(hostBlockers('generate', hostOf(gBundle, gHost)));
   const gFields = $derived<Blocker[]>([
     ...(!bundles.some((b) => b.id === gBundle && b.available !== false) ? [{ field: 'g-bundle', text: 'Select an available bundle.' }] : []),
@@ -104,7 +103,7 @@
   let eSource = $state('');
   const eWorker = $derived(hostOf(eBundle, eHost));
   const eSources = $derived(sources(eWorker));
-  const ev = new Submitter();
+  const ev = new Submitter('evaluate.gsm8k');
   const eHostBlockers = $derived(hostBlockers('evaluate', eWorker));
   const usableBundle = $derived(bundles.some((b) => b.id === eBundle && b.available !== false));
   const eFields = $derived<Blocker[]>([
@@ -121,10 +120,10 @@
   let bSource = $state('');
   const bWorker = $derived(hostOf(bMode === 'file' ? bFile : '', bHost));
   const bSources = $derived(sources(bWorker));
-  const base = new Submitter();
+  const base = new Submitter('evaluate.baseline');
   const bHostBlockers = $derived(hostBlockers('baseline', bWorker));
   const bFields = $derived<Blocker[]>([
-    ...(bMode === 'file' && !availableId(bFile, models.filter(m => refInputs.includes(m.kind))) ?
+    ...(bMode === 'file' && !availableId(bFile, models.filter(m => refResults.includes(m.kind))) ?
       [{ field: 'b-file', text: 'Select available reference results or predictions.' }] : []),
     ...(bMode === 'source' && !bHost ? [{ field: 'b-host', text: 'Select a host.' }] : []),
     ...(bMode === 'source' && !bSources.some((s) => s.id === bSource) ? [{ field: 'b-src', text: 'Select a reference endpoint.' }] : []),
@@ -181,7 +180,7 @@
           retains: draft => !!draft.eBundle && draft.eBundle === first,
         };
       }
-      const references = () => models.filter(m => refInputs.includes(m.kind));
+      const references = () => models.filter(m => refResults.includes(m.kind));
       return {
         actions: ['baseline'], focus: endpoint ? 'b-host' : 'b-file',
         patch: { bHost: host, bFile: availableId(first, references()), bSource: availableId(endpoint, sources(hostOf('', host))), bMode: endpoint ? 'source' : 'file' },
@@ -320,8 +319,8 @@
         <div class="grid-2">
           {#if bMode === 'file'}
             <div class="stack">
-              <ModelSelect id="b-file" bind:value={bFile} kinds={refInputs} label="Reference results or predictions" error={error('b-file')} onblur={touch('b-file')} />
-              {#if !models.some((model) => refInputs.includes(model.kind))}
+              <ModelSelect id="b-file" bind:value={bFile} kinds={refResults} label="Reference results or predictions" error={error('b-file')} onblur={touch('b-file')} />
+              {#if !models.some((model) => refResults.includes(model.kind))}
                 <p class="hint">Register a reference file in <a href="#/library">Library</a>.</p>
               {/if}
             </div>

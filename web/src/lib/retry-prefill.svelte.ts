@@ -1,9 +1,9 @@
 import { onDestroy, tick, untrack } from 'svelte';
-import { bodyKey, type RetryIdentity, type RetrySubmission } from './retry-keys';
+import { bodyKey, type RetrySubmission } from './retry-keys';
 import { hashParam, route } from './route.svelte';
 import { readRetry } from './rerun';
 
-export { RetryKeys, type RetrySubmission } from './retry-keys';
+export type { RetrySubmission } from './retry-keys';
 
 export function omittedInputs(original: readonly string[], restored: readonly string[]): string[] {
   return [...new Set(original)].filter(id => !restored.includes(id));
@@ -53,8 +53,10 @@ function resetRestored<D>(value: D, restored: unknown, defaults: unknown): D {
 
 interface Restoration<D, C> {
   actions: readonly string[];
-  /** Other actions can share omission checks without replaying the retry. */
-  historyActions?: readonly string[];
+  /** Other actions can share omission checks without using the retry key. */
+  retryActions?: readonly string[];
+  /** Use the original run or job ID if the loader needed a prefixed selector. */
+  failedId?: string;
   patch: Partial<D>;
   context?: C;
   focus?: string;
@@ -82,11 +84,8 @@ interface HistoryRecord<R> {
 // A browser history entry may outlive the component that first filled it.
 const historyRequests = new Map<string, HistoryRecord<unknown>>();
 
-type Origin = Omit<RetryIdentity, 'action'>;
 interface Applied<D> {
-  origin: Origin;
   actions: readonly string[];
-  historyActions?: readonly string[];
   omissions?: (draft: D) => readonly RetryOmission[];
   retains?: (draft: D) => boolean;
 }
@@ -104,13 +103,13 @@ interface Applied<D> {
  *   on restored inputs. One acknowledgment covers only the current omissions.
  * - During retry loading, block Queue and show the reason. Discard work from
  *   departed route entries; clean up untouched retry fields on exit.
- * - Bind each key to one launcher, job kind and exact wire body. Only actions
- *   restored by this retry share its history. An ambiguous reply keeps the
- *   key across Back/Forward and retry query removal. On acceptance, retire
- *   the key and show the accepted record on replay from the same entry. A
- *   fresh retry entry after acceptance is intentional new work. Controller
- *   idempotency remains the backstop; browser keys do not survive reload.
- * - Async replies may update stored results. Only the visit that started
+ * - On a retry route, the matching action gets a deterministic key from
+ *   the failed ID, launcher and wire body, even if the operator enters the
+ *   inputs by hand. Bind the action before enabling Queue. The controller
+ *   matches it across visits and reloads and returns the accepted record.
+ *   On a plain route, a hand-rebuilt identical body is a new run by design.
+ *   Plain keys can only be reused for an unconfirmed submission in its visit.
+ * - Async replies may update visible results. Only the visit that started
  *   the request may navigate or move focus, and only before the user moves
  *   on. Returning to the same history entry starts a different visit.
  */
@@ -121,7 +120,9 @@ export class RetryPrefill<D extends object, R, C = never> {
   context = $state.raw<C | undefined>(undefined);
   pending = $state.raw<R | undefined>(undefined);
   get offered() { return this.pending !== undefined; }
-  #origin = $state.raw<Origin | undefined>(undefined);
+  #id: string | null = null;
+  #binding = $state.raw<{ failedId: string; actions: readonly string[] } | undefined>(undefined);
+  #current = $state.raw<Applied<D> | undefined>(undefined);
   #applied = $state.raw<Applied<D>[]>([]);
   #acknowledged = $state.raw(new Map<Applied<D>, string>());
   #route = '';
@@ -138,15 +139,17 @@ export class RetryPrefill<D extends object, R, C = never> {
   constructor(private form: Prefill<D, R, C>) {}
 
   #policy(action: string) {
-    return this.#applied.find(p => p.actions.includes(action) && (p.origin === this.#origin || p.retains?.(this.form.read())));
+    return this.#applied.find(p => p.actions.includes(action) && (p === this.#current || p.retains?.(this.form.read())));
   }
+
+  restoredAction(action: string) { return this.#current?.actions.includes(action) ?? false; }
 
   omissions(action: string): readonly RetryOmission[] {
     return this.#policy(action)?.omissions?.(this.form.read()) ?? [];
   }
 
   #omissionKey(items: readonly RetryOmission[]) {
-    return JSON.stringify(items.map(item => item.id).sort());
+    return JSON.stringify(items.map(item => [item.id, !!item.required] as const).sort());
   }
 
   acknowledged(action: string): boolean {
@@ -163,12 +166,20 @@ export class RetryPrefill<D extends object, R, C = never> {
     this.#acknowledged = next;
   }
 
+  reconcileAcknowledgments() {
+    const next = new Map(this.#acknowledged);
+    const draft = this.form.read();
+    for (const [policy, key] of this.#acknowledged) {
+      if (key !== this.#omissionKey(policy.omissions?.(draft) ?? [])) next.delete(policy);
+    }
+    if (next.size !== this.#acknowledged.size) this.#acknowledged = next;
+  }
+
   action(action: string): RetrySubmission {
-    const policy = this.#policy(action);
     const missing = this.omissions(action);
     return {
       blocked: this.loading || (missing.length > 0 && (missing.some(item => item.required) || !this.acknowledged(action))),
-      history: policy && (policy.historyActions ?? policy.actions).includes(action) ? { ...policy.origin, action } : undefined,
+      failedId: this.#binding?.actions.includes(action) ? this.#binding.failedId : undefined,
     };
   }
 
@@ -191,7 +202,9 @@ export class RetryPrefill<D extends object, R, C = never> {
     }
     this.#restored = undefined;
     this.context = undefined;
-    this.#origin = id ? { slot: this.form.slot, id, entry } : undefined;
+    this.#id = id;
+    this.#binding = undefined;
+    this.#current = undefined;
     this.#applied = this.#applied.filter(policy => policy.retains?.(this.form.read()));
     this.#acknowledged = new Map([...this.#acknowledged].filter(([policy]) => this.#applied.includes(policy)));
     this.#baseline = bodyKey(this.form.read());
@@ -259,7 +272,10 @@ export class RetryPrefill<D extends object, R, C = never> {
     const target = document.getElementById(id);
     if (!target) return;
     this.#deferredFocus = undefined;
-    if (document.activeElement === document.body || document.activeElement?.matches('main h1')) target.focus();
+    if (document.activeElement === document.body || document.activeElement?.matches('main h1')) {
+      target.focus();
+      if (document.activeElement !== target) document.querySelector<HTMLElement>('main h1')?.focus();
+    }
   }
 
   #receive(record: HistoryRecord<R>) {
@@ -270,27 +286,35 @@ export class RetryPrefill<D extends object, R, C = never> {
   #settle() {
     if (!this.#ready || !this.#record || !this.loading || this.#visit?.current() === false) return;
     const { request } = this.#record;
-    this.loading = false;
+    const restoration = this.#restore(request);
+    if (!restoration) return;
+    this.#binding = { failedId: restoration.failedId ?? this.#id!, actions: restoration.retryActions ?? restoration.actions };
     if (this.#edited || bodyKey(this.form.read()) !== this.#baseline) this.pending = request;
-    else this.#apply(false);
+    else this.#apply(false, restoration);
+    this.loading = false;
   }
 
-  #apply(explicit: boolean) {
-    const record = this.#record;
-    const origin = this.#origin;
-    if (!record || !origin || this.#visit?.current() === false) return;
-    let restoration: Restoration<D, C>;
+  #restore(request: R): Restoration<D, C> | undefined {
     try {
-      restoration = this.form.restore(record.request);
+      return this.form.restore(request);
     } catch {
       this.#fail();
-      return;
     }
+  }
+
+  #apply(explicit: boolean, initial?: Restoration<D, C>) {
+    const record = this.#record;
+    if (!record || !this.#id || this.#visit?.current() === false) return;
+    const restoration = initial ?? this.#restore(record.request);
+    if (!restoration) return;
     this.#restored = copy(restoration.patch);
     this.form.write({ ...this.form.read(), ...copy(restoration.patch) });
-    const { actions, historyActions, omissions, retains } = restoration;
-    this.#applied = [{ origin, actions, historyActions, omissions, retains },
+    const { actions, omissions, retains } = restoration;
+    const applied = { actions, omissions, retains };
+    this.#current = applied;
+    this.#applied = [applied,
       ...this.#applied.filter(policy => !policy.actions.some(action => actions.includes(action)))];
+    this.#acknowledged = new Map([...this.#acknowledged].filter(([policy]) => this.#applied.includes(policy)));
     this.context = restoration.context;
     this.pending = undefined;
     this.form.applied?.(restoration.patch);
@@ -302,9 +326,9 @@ export class RetryPrefill<D extends object, R, C = never> {
       const focus = this.form.focus ?? ((id: string) => {
         const control = document.getElementById(id);
         control?.focus();
-        if (explicit && !control) {
-          this.#deferredFocus = { id, canPresent };
-          if (document.activeElement === document.body) document.querySelector<HTMLElement>('main h1')?.focus();
+        if (explicit && (!control || document.activeElement !== control)) {
+          if (!control) this.#deferredFocus = { id, canPresent };
+          document.querySelector<HTMLElement>('main h1')?.focus();
         }
       });
       void tick().then(() => { if (canPresent()) focus(target); });
@@ -336,5 +360,6 @@ export function watchPrefill<D extends object, R, C>(
     const value = ready();
     untrack(() => retry.setReady(value));
   });
+  $effect(() => retry.reconcileAcknowledgments());
   onDestroy(() => retry.dispose());
 }

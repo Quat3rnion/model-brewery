@@ -67,7 +67,7 @@
   const visible = $derived(visibleBlockers(built.blockers, touched));
   const error = (field: string) => fieldError(visible, field);
   const setupLink = $derived(host && `#/settings/evaluation?host=${encodeURIComponent(host.id)}`);
-  const run = new Submitter();
+  const run = new Submitter('benchmarks.run');
   const retry = new RetryPrefill({
     slot: 'benchmarks', defaults: { hostId: '', target: '', picked: [] as string[] },
     read: () => ({ hostId, target, picked }),

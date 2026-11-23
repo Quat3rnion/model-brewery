@@ -440,9 +440,13 @@ omission if the form permits it. An edited selection can still have omissions
 when you return to the plain form. If you edited the form while the previous
 request loaded, select **Use previous inputs** to replace the draft.
 
-If the submission response is lost, check **Jobs** first. To retry the
-submission, use the same inputs in the same tab without reloading. The
-workbench reuses the request key. Reloading loses this duplicate protection.
+If the submission response is lost, check **Jobs** first. To resend a
+request from a retry form, open the same failed job and submit with the same
+inputs. If the controller already queued the request, the form shows a link
+to that job, even after a reload. This also applies if you enter the same
+inputs by hand on the retry form. To start new work with those inputs, use
+the plain form. If you lose a reply from the plain form, resend without
+leaving or reloading the page.
 
 ### Convert a model
 
