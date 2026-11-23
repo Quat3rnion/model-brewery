@@ -993,34 +993,40 @@ impl Worker {
             );
         }
         if job.kind == trace::JOB {
+            let absolute = |var| {
+                self.cfg
+                    .engine_env
+                    .get(var)
+                    .is_some_and(|p| Path::new(p).is_absolute())
+            };
+            let request = trace::Request::worker(&job.options, job.prompt.as_deref());
             let allowed = action == "start"
                 && job.inputs.len() == 1
-                && job.inputs[0].kind == "gguf"
-                && self
-                    .cfg
-                    .engine_env
-                    .get(trace::EXECUTABLE)
-                    .is_some_and(|p| Path::new(p).is_absolute())
-                && trace::Request::worker(&job.options, job.prompt.as_deref()).is_ok();
+                && request
+                    .as_ref()
+                    .is_ok_and(|request| match job.inputs[0].kind.as_str() {
+                        "gguf" => absolute(trace::EXECUTABLE) && absolute(trace::LIB_DIR),
+                        trace::HGN_KIND => {
+                            Path::new(&job.inputs[0].path)
+                                .extension()
+                                .is_some_and(|e| e == "hgn")
+                                && absolute(trace::HGN_PYTHON)
+                                && absolute(trace::HGN_ASSETS)
+                                && self
+                                    .cfg
+                                    .engine_env
+                                    .get(trace::HGN_PYTHON_SHA256)
+                                    .is_some_and(|s| is_digest(s))
+                                && request.interventions.is_empty()
+                        }
+                        _ => false,
+                    });
             if !allowed {
                 return self.record_prepare(
                     id,
                     action,
                     job,
-                    Reply::error("Invalid trace request or unavailable CPU Lanternfish"),
-                );
-            }
-            if !self
-                .cfg
-                .engine_env
-                .get(trace::LIB_DIR)
-                .is_some_and(|p| Path::new(p).is_absolute())
-            {
-                return self.record_prepare(
-                    id,
-                    action,
-                    job,
-                    Reply::error("BREWERY_LANTERNFISH_TRACE_LIB_DIR must be an absolute path"),
+                    Reply::error("Invalid trace request or unavailable pinned CPU trace runtime"),
                 );
             }
         }

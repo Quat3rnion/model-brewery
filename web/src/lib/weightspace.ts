@@ -7,10 +7,11 @@ import type { Tone } from './format';
 import type { NewJob } from './types';
 
 export const TRACE_ROLES = ['l_out', 'attn_out', 'ffn_inp', 'ffn_out', 'kq_soft_max'] as const;
-export type TraceRole = (typeof TRACE_ROLES)[number];
-export type PatchRole = Exclude<TraceRole, 'kq_soft_max'>;
+export type TraceRole = (typeof TRACE_ROLES)[number] | 'final_norm';
+export type PatchRole = Exclude<TraceRole, 'kq_soft_max' | 'final_norm'>;
 export const ROLE_LABELS: Record<TraceRole, string> = {
   l_out: 'Block output (l_out)',
+  final_norm: 'Normalized final mix (final_norm)',
   attn_out: 'Attention write (attn_out)',
   ffn_inp: 'FFN input (ffn_inp)',
   ffn_out: 'FFN write (ffn_out)',
@@ -194,7 +195,9 @@ export interface TraceSummary {
   prompt: number;
   model_id: string;
   model_sha256: string;
-  lanternfish_commit: string;
+  lanternfish_commit?: string;
+  runtime?: 'hgn_cpu';
+  runtime_sha256?: string;
   spec: { layers: number[]; roles: string[]; positions: number[]; top_k: number; byte_cap?: number };
   tokens: { position: number; token_id: number }[];
   tensor_count: number;

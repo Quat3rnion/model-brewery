@@ -473,6 +473,17 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         if gpu_edit {
             command.env("PATH", "/usr/bin:/bin");
         }
+    } else if job.kind == trace::JOB && job.inputs[0].kind == trace::HGN_KIND {
+        command.env_clear().envs(
+            [
+                trace::HGN_PYTHON,
+                trace::HGN_PYTHON_SHA256,
+                trace::HGN_ASSETS,
+                "BREWERY_CPU_THREADS",
+            ]
+            .into_iter()
+            .filter_map(|key| w.cfg.engine_env.get(key).map(|value| (key, value))),
+        );
     } else {
         command.envs(&w.cfg.engine_env);
     }
@@ -749,6 +760,23 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     }
     if job.kind == trace::JOB {
         let request = trace::Request::worker(&job.options, job.prompt.as_deref())?;
+        let runtime_matches = if job.inputs[0].kind == trace::HGN_KIND {
+            let python_pin = w
+                .cfg
+                .engine_env
+                .get(trace::HGN_PYTHON_SHA256)
+                .map(String::as_str);
+            value["runtime"] == trace::HGN_RUNTIME
+                && value["runtime_sha256"] == trace::HGN_RUNTIME_SHA256.trim_end()
+                && python_pin.is_some()
+                && value["executable_sha256"].as_str() == python_pin
+                && ["sidecar", "config", "tokenizer"]
+                    .into_iter()
+                    .all(|name| value["assets_sha256"][name].as_str().is_some_and(is_digest))
+        } else {
+            value["lanternfish_commit"] == trace::COMMIT
+                && value["executable_sha256"] == trace::SHA256
+        };
         ensure!(
             value["kind"] == trace::JOB
                 && value["schema_version"] == 1
@@ -756,8 +784,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 && value["model_id"] == job.inputs[0].extra["id"]
                 && value["model_sha256"].as_str().is_some_and(is_digest)
                 && value["model_sha256"] == job.inputs[0].extra["sha256"]
-                && value["lanternfish_commit"] == trace::COMMIT
-                && value["executable_sha256"] == trace::SHA256,
+                && runtime_matches,
             "trace receipt does not match resolved input and runtime"
         );
         let exports: Vec<trace::Export> = serde_json::from_value(value["prompts"].clone())?;

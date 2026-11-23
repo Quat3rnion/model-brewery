@@ -65,6 +65,18 @@ impl TracePlan {
             policy,
         )
         .map_err(|e| ApiError::bad(e.to_string()))?;
+        let model = &envelope.inputs[0];
+        if model.kind == trace::HGN_KIND
+            && (saved.is_some()
+                || !patches.is_empty()
+                || sae.is_some()
+                || steering.is_some()
+                || !request.interventions.is_empty())
+        {
+            return Err(ApiError::bad(
+                "HGN traces do not support interventions or SAE",
+            ));
+        }
         let mut rules = request.interventions;
         job.options
             .insert("byte_cap".into(), json!(request.capture.byte_cap));
@@ -79,7 +91,6 @@ impl TracePlan {
                 "Expected at most 8 patch selectors and 1 to 64 positions per selector",
             ));
         }
-        let model = &envelope.inputs[0];
         let mut digest = envelope.scratch_pins.get(&model.path).cloned();
         if let Some(saved) = saved {
             let saved = artifact(store, &saved.id, saved.version)?;

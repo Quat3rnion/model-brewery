@@ -321,8 +321,8 @@ model file. Unregistering a library entry removes only the entry.
 ## CPU trace jobs
 
 Use `trace` to record selected activations and top logits for a single-file
-Library GGUF or a scratch revision with private GGUF.
-The worker runs the Lanternfish CLI on the CPU. It reads files from the CLI.
+Library GGUF or HGN, or a scratch revision with private GGUF.
+For GGUF, the worker runs the Lanternfish CLI on the CPU. It reads files from the CLI.
 It does not start a Lanternfish service or use a Lanternfish HTTP API.
 It does not change the model or qualify a release.
 
@@ -369,7 +369,7 @@ over the limit. It does not remove job records, inputs, or other artifacts.
 An old job can show success after its trace files are removed. The trace
 endpoints then return 404.
 
-Submit one Library GGUF or scratch revision ID in `input_ids` to
+Submit one Library GGUF or HGN ID, or one scratch revision ID, in `input_ids` to
 `POST /api/jobs` with `kind: "trace"`. Supply `prompt`, `prompt_id`, or an `options.prompts` array
 with 1 to 4 entries. This example shows `options` for one prompt:
 
@@ -378,10 +378,53 @@ with 1 to 4 entries. This example shows `options` for one prompt:
 ```
 
 Layers and token positions start at zero. The CLI does not use a chat
-template or generate tokens. It accepts at most 4096 prompt tokens. An
+template or generate tokens. It accepts at most 4096 GGUF prompt tokens or
+512 HGN prompt tokens. HGN uses the raw tokenizer without special tokens. An
 optional `byte_cap` can override the default within the configured maximum.
 Set `full_dump: true` to pass larger explicit selections. This flag does not
 select more data or raise the cap. Save the request to repeat the run.
+
+### HGN CPU setup
+
+Use a regular worker with the Qwen3.8 Flash Next v2 `.hgn` checkpoint in its
+Library. Add `"trace": true` to its dispatch capabilities. Install the CPU
+environment from the same Brewery revision as the engine. These commands
+use the network only for setup:
+
+```sh
+install -d -m 700 "$runtime"
+uv venv "$runtime/venv" --managed-python --python 3.12.13
+uv pip sync --python "$runtime/venv/bin/python" --only-binary :all: --require-hashes \
+  --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match \
+  tools/hgn_trace/requirements.lock.txt
+cp --remove-destination "$(readlink -f "$runtime/venv/bin/python")" "$runtime/venv/bin/python"
+sha256sum "$runtime/venv/bin/python"
+```
+
+Use absolute canonical paths and keep the environment and asset registry
+under operator control. Set `BREWERY_HGN_TRACE_PYTHON` to the copied
+`venv/bin/python`, `BREWERY_HGN_TRACE_PYTHON_SHA256` to its hash, and
+`BREWERY_HGN_TRACE_ASSETS` to a JSON file with this layout:
+
+```json
+{
+  "<checkpoint SHA-256>": {
+    "sidecar": {"path": "/models/qwen38-flash-next-ngram.hgn", "sha256": "<sidecar SHA-256>"},
+    "config": {"path": "/models/config.json", "sha256": "<config SHA-256>"},
+    "tokenizer": {"path": "/models/tokenizer.json", "sha256": "<tokenizer SHA-256>"}
+  }
+}
+```
+
+Register the checkpoint itself as `hgn`, not the sidecar or a bundle manifest.
+The worker checks the model and all three assets before prefill. It checks the
+runtime source pin and package versions and does not download files in a job.
+Keep about 16 GiB of RAM free and run one large CPU trace at a time. Use a
+narrow selection first. Each HGN `l_out` row has shape `[4,2560]` in
+`[stream,hidden]` order. Capture `final_norm` at the last layer for the
+normalized final mix. The lens uses the same mixer and head as model logits.
+Other tensor roles are reported as missing. HGN does not support interventions,
+activation patches, or SAE steering.
 
 Use job events to follow progress. After success, use
 `GET /api/jobs/{id}/trace` for the summary. Use `/tensor` for F32 rows,
@@ -579,6 +622,9 @@ worker environment applies to jobs that run on that worker.
 | `BREWERY_LANTERNFISH` | engine | Configured Lanternfish `run` binary for `compare`. This lookup does not check the trace pin. |
 | `BREWERY_LANTERNFISH_TRACE` | engine | Absolute path to the pinned CPU Lanternfish binary for `trace`. |
 | `BREWERY_LANTERNFISH_TRACE_LIB_DIR` | engine | Absolute path to the directory with the four pinned CPU trace libraries. |
+| `BREWERY_HGN_TRACE_PYTHON` | engine | Absolute path to the copied CPython 3.12.13 HGN trace environment executable. |
+| `BREWERY_HGN_TRACE_PYTHON_SHA256` | engine | SHA-256 pin for that executable. |
+| `BREWERY_HGN_TRACE_ASSETS` | engine | Absolute path to the HGN model asset registry keyed by checkpoint SHA-256. |
 | `BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR` | engine | Absolute path to the directory with the four pinned CPU scratch-check libraries. |
 | `BREWERY_LANTERNFISH_EDIT` | engine | Absolute path to the pinned CPU Lanternfish binary for locate-then-edit jobs. |
 | `BREWERY_LANTERNFISH_EDIT_LIB_DIR` | engine | Absolute path to the directory with the four pinned llama.cpp and ggml libraries. |

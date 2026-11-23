@@ -191,7 +191,11 @@
     <dl class="facts small">
       <div><dt>Model</dt><dd class="mono break">{summary.model_id}</dd></div>
       <div><dt>Model SHA-256</dt><dd class="mono" title={summary.model_sha256}>{shortHash(summary.model_sha256)}</dd></div>
-      <div><dt>Lanternfish</dt><dd class="mono" title={summary.lanternfish_commit}>{shortHash(summary.lanternfish_commit)}</dd></div>
+      {#if summary.runtime === 'hgn_cpu'}
+        <div><dt>HGN CPU</dt><dd class="mono" title={summary.runtime_sha256}>{shortHash(summary.runtime_sha256 ?? '')}</dd></div>
+      {:else}
+        <div><dt>Lanternfish</dt><dd class="mono" title={summary.lanternfish_commit}>{shortHash(summary.lanternfish_commit ?? '')}</dd></div>
+      {/if}
       <div><dt>Export</dt><dd class="num">{formatBytes(summary.bytes)}{#if summary.spec.byte_cap}{` of ${formatBytes(summary.spec.byte_cap)} cap`}{/if}</dd></div>
       <div><dt>Tokens</dt><dd class="num">{summary.tokens.length}</dd></div>
       <div><dt>Tensors</dt><dd class="num">{summary.tensor_count}{#if summary.missing_count}{` (${summary.missing_count} not captured)`}{/if}</dd></div>

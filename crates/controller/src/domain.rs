@@ -1240,7 +1240,11 @@ impl NewJob {
         } else {
             match self.kind.as_str() {
                 "compare" => n == 2 && main == "gguf" && second == "gguf" && prompt.is_some(),
-                brewery_worker::trace::JOB => n == 1 && main == "gguf" && host == inputs[0].host,
+                brewery_worker::trace::JOB => {
+                    n == 1
+                        && matches!(main, "gguf" | brewery_worker::trace::HGN_KIND)
+                        && host == inputs[0].host
+                }
                 "inspect" | "plan" | "convert" => (1..=5).contains(&n) && source,
                 "verify" => (2..=6).contains(&n) && source && second == "hgn",
                 "generate" => n == 1 && hgn(main) && prompt.is_some(),
