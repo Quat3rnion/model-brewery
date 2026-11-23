@@ -1390,6 +1390,46 @@ to 4 MiB from the controller and 8 MiB for the whole MCP response. Use a
 smaller trace slice or read the [controller API](api/openapi.json) directly
 if a result is too large.
 
+### Hosted workbench agent
+
+1. In Settings, select Anthropic or an OpenAI-compatible provider. Set the
+   model ID and API base URL. For example, use `https://api.anthropic.com/v1`
+   or `https://api.openai.com/v1`. Do not include `/messages` or
+   `/chat/completions`. Use HTTPS. The controller accepts HTTP only on a
+   numeric loopback address for local providers and tests.
+2. Save the settings, then set the API key. Settings shows only whether a
+   key is set. Use the same control to replace or remove it. A change to
+   the provider kind or base URL removes the key. The controller does not
+   test the key when you save it, use a proxy, or follow redirects.
+3. Open Agent, select the Library model, and enter the goal. The controller
+   sends the goal, model ID, MCP tool schemas, and conversation to the
+   selected provider. Tool results can include model paths, prompts, and
+   trace or check data. Use a provider that may receive this data. Do not
+   put secrets in goals, prompts, or model records.
+4. Follow the transcript and open scratch revisions in Edits. The agent
+   uses the same tools and admission rules as `/mcp`. It can request
+   publication, but only an operator can approve it in Edits. Results are
+   not release-qualified.
+
+Only one session can run at a time. Settings limits the number of hosted
+requests, tool calls, and output tokens per request. The session token
+limit uses the input and output counts that the provider reports. A
+request can exceed the remaining budget because input token use is known
+only after the reply. If this occurs, the controller does not execute
+tools from that reply. The request timeout and the session time limit
+also stop the loop. Cancel stops new requests and tool calls. A tool
+already admitted can finish, and queued jobs continue. Cancel those jobs
+separately when necessary.
+
+The controller keeps the session transcript and tool results in its
+database. Agent shows the most recent 100 sessions. A restart does not
+resume an interrupted session. The provider key is in a separate
+owner-only file, not the database. Do not serve the controller data
+directory or include private credential files in exports. Provider
+settings and sessions use the same trust boundary as the workbench.
+Every client with workbench access can use the configured provider and
+read session transcripts.
+
 ### JSON command-line client
 
 ```sh

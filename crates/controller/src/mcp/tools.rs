@@ -81,7 +81,7 @@ struct Route {
     description: String,
 }
 
-pub(super) struct Server {
+pub(crate) struct Server {
     api: Router,
     routes: BTreeMap<&'static str, Route>,
     trace_views: BTreeMap<&'static str, Route>,
@@ -89,7 +89,7 @@ pub(super) struct Server {
 }
 
 impl Server {
-    pub(super) fn new(api: Router) -> Self {
+    pub(crate) fn new(api: Router) -> Self {
         let contract: Value = serde_json::from_str(API).expect("valid OpenAPI");
         let routes: BTreeMap<_, _> = ROUTES
             .iter()
@@ -166,11 +166,11 @@ impl Server {
         }
     }
 
-    pub(super) fn list(&self) -> Value {
+    pub(crate) fn list(&self) -> Value {
         self.catalog.clone()
     }
 
-    pub(super) async fn call(&self, params: &Value) -> Result<Value, &'static str> {
+    pub(crate) async fn call(&self, params: &Value) -> Result<Value, &'static str> {
         let name = params["name"].as_str().ok_or("tool name is required")?;
         let mut args = match params.get("arguments") {
             Some(value) => value

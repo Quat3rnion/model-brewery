@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "agent.rs"]
+mod agent;
+
 fn fixture(t: &Test, values: &[f32]) -> std::path::PathBuf {
     let dir = t.root.path().join("scratch-fixtures");
     fs::create_dir(&dir).unwrap();
@@ -412,11 +415,7 @@ fn mcp_expert_apply_cannot_publish_or_make_a_partial_scratch() {
     );
 }
 
-#[test]
-fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
-    let mut t = Test::new();
-    let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
-    let digest = sha(&fs::read(&source).unwrap());
+fn mock_scratch_worker(t: &Test) {
     let mock = t.root.path().join("editor-DISPATCH");
     fs::write(
         t.root.path().join("mock-check-protocol.json"),
@@ -487,6 +486,14 @@ print(json.dumps({"state":"succeeded","progress":"done","result":{"kind":"trace"
   *) exit 1 ;;
 esac
 "#).unwrap();
+}
+
+#[test]
+fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
+    let mut t = Test::new();
+    let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
+    let digest = sha(&fs::read(&source).unwrap());
+    mock_scratch_worker(&t);
     t.launch();
     assert_eq!(
         t.admin(Some(

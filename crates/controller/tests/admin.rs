@@ -112,6 +112,16 @@ impl Test {
         body: Option<Value>,
     ) -> (u16, Value) {
         let method = if body.is_some() { "POST" } else { "GET" };
+        self.request_method(method, path, headers, media_type, body)
+    }
+    fn request_method(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &str,
+        media_type: &str,
+        body: Option<Value>,
+    ) -> (u16, Value) {
         let body = body.map(|b| b.to_string()).unwrap_or_default();
         let mut stream = TcpStream::connect(&self.addr).unwrap();
         stream

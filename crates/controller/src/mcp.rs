@@ -1,5 +1,6 @@
 //! Stateless MCP Streamable HTTP. Only fixed Brewery operations are exposed.
 mod tools;
+pub(crate) use tools::Server;
 
 use crate::web::{has_json, single};
 use axum::{
@@ -15,11 +16,11 @@ use std::sync::Arc;
 const VERSION: &str = "2025-06-18";
 const RESPONSE_MAX: usize = 8 * 1024 * 1024;
 
-pub fn router(api: Router) -> Router {
+pub fn router(server: Arc<Server>) -> Router {
     Router::new()
         .route("/mcp", any(message))
         .layer(DefaultBodyLimit::max(256 * 1024))
-        .with_state(Arc::new(tools::Server::new(api)))
+        .with_state(server)
 }
 
 async fn message(State(server): State<Arc<tools::Server>>, request: Request) -> Response {

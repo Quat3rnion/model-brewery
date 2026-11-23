@@ -1117,6 +1117,98 @@
         }
       }
     },
+    "/api/settings/agent-provider": {
+      "get": {
+        "operationId": "getAgentProvider",
+        "summary": "Read hosted agent settings and key status",
+        "responses": {"200": {"$ref": "#/components/responses/AgentProviderStatus"}, "403": {"$ref": "#/components/responses/Forbidden"}}
+      },
+      "put": {
+        "operationId": "putAgentProvider",
+        "summary": "Save hosted agent settings",
+        "description": "A change to the provider kind or base URL removes the stored key. You cannot change settings while the agent or its last tool runs.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AgentProvider"}}}},
+        "responses": {
+          "200": {"$ref": "#/components/responses/AgentProviderStatus"},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/AgentBusy"},
+          "503": {"$ref": "#/components/responses/AgentKeyUnavailable"}
+        }
+      }
+    },
+    "/api/settings/agent-provider/key": {
+      "put": {
+        "operationId": "setAgentProviderKey",
+        "summary": "Set or replace the provider API key",
+        "description": "Save the provider first. The controller stores the key in an owner-only file and never returns the key. This request does not contact the provider.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "required": ["key"], "additionalProperties": false,
+          "properties": {"key": {"type": "string", "minLength": 8, "maxLength": 1024, "pattern": "^[!-~]+(?![\\s\\S])", "format": "password", "writeOnly": true}}
+        }}}},
+        "responses": {
+          "200": {"$ref": "#/components/responses/AgentProviderStatus"},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/AgentBusy"},
+          "503": {"$ref": "#/components/responses/AgentKeyUnavailable"}
+        }
+      },
+      "delete": {
+        "operationId": "removeAgentProviderKey",
+        "summary": "Remove the provider API key",
+        "responses": {
+          "200": {"$ref": "#/components/responses/AgentProviderStatus"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "409": {"$ref": "#/components/responses/AgentBusy"},
+          "503": {"$ref": "#/components/responses/AgentKeyUnavailable"}
+        }
+      }
+    },
+    "/api/agent/sessions": {
+      "get": {
+        "operationId": "listAgentSessions",
+        "summary": "Read summaries of the most recent 100 agent sessions",
+        "responses": {"200": {"description": "Session summaries, most recent first.", "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/AgentSessionSummary"}}}}}}
+      },
+      "post": {
+        "operationId": "startAgentSession",
+        "summary": "Start an agent session for a Library model",
+        "description": "Sends the goal, model ID, tool schemas, and subsequent conversation and tool results to the configured provider. The agent uses the MCP tool catalog. It cannot approve a publish request or deploy. No session qualifies a release.",
+        "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "required": ["goal", "model_id"], "additionalProperties": false,
+          "properties": {"goal": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "Goal, at most 4096 UTF-8 bytes."}, "model_id": {"$ref": "#/components/schemas/Id"}}
+        }}}},
+        "responses": {
+          "200": {"$ref": "#/components/responses/AgentSessionDetail"},
+          "201": {"$ref": "#/components/responses/AgentSessionDetail"},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "409": {"$ref": "#/components/responses/AgentBusy"},
+          "503": {"$ref": "#/components/responses/AgentKeyUnavailable"}
+        }
+      }
+    },
+    "/api/agent/sessions/{id}": {
+      "get": {
+        "operationId": "getAgentSession",
+        "summary": "Read an agent session and its saved transcript",
+        "description": "Poll this route for updates during a session.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/Id"}}],
+        "responses": {"200": {"$ref": "#/components/responses/AgentSessionDetail"}, "404": {"$ref": "#/components/responses/NotFound"}}
+      }
+    },
+    "/api/agent/sessions/{id}/cancel": {
+      "post": {
+        "operationId": "cancelAgentSession",
+        "summary": "Stop a session before it makes more tool calls",
+        "description": "A tool already admitted can finish. This request does not cancel jobs started by earlier tool calls. Repeated cancellation is safe.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/Id"}}],
+        "responses": {"200": {"$ref": "#/components/responses/AgentSessionDetail"}, "404": {"$ref": "#/components/responses/NotFound"}}
+      }
+    },
     "/api/settings/hf-tokens": {
       "get": {
         "operationId": "getHfTokenStatus",
@@ -1569,6 +1661,10 @@
       }
     },
     "responses": {
+      "AgentProviderStatus": {"description": "Provider settings and key status. Does not contain a key or file path.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AgentProviderStatus"}}}},
+      "AgentSessionDetail": {"description": "Saved session and transcript.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AgentSession"}}}},
+      "AgentBusy": {"description": "An agent or tool is active, a provider key is needed, or an Idempotency-Key was used for a different request.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "AgentKeyUnavailable": {"description": "Private key storage or the provider client is not available.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "SaeVersion": {"description":"The immutable SAE metadata and weights SHA-256. An exact retry returns the same version.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/SaeArtifact"}}}},
       "InterventionVersion": {"description": "The immutable intervention version.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/InterventionVersion"}}}},
       "ScratchRow": {"description": "The current scratch revision record.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ScratchRevision"}}}},
@@ -2592,6 +2688,43 @@
       "SettingsList": {
         "type": "object", "required": ["hosts", "trace"], "additionalProperties": false,
         "properties": {"hosts": {"type": "array", "items": {"$ref": "#/components/schemas/HostSettings"}}, "trace": {"$ref": "#/components/schemas/TraceSettings"}}
+      },
+      "AgentProvider": {
+        "type": "object", "additionalProperties": false,
+        "required": ["kind", "base_url", "model", "max_tokens", "max_steps", "max_session_tokens", "timeout_seconds", "request_timeout_seconds"],
+        "properties": {
+          "kind": {"enum": ["anthropic", "openai"], "description": "Anthropic Messages or OpenAI-compatible Chat Completions."},
+          "base_url": {"type": "string", "format": "uri", "maxLength": 512, "description": "HTTPS API base URL, or HTTP on a numeric loopback address. Do not enter credentials, a query, a fragment, or the API operation suffix."},
+          "model": {"type": "string", "minLength": 1, "maxLength": 200, "description": "Provider model ID, at most 200 UTF-8 bytes."},
+          "max_tokens": {"type": "integer", "minimum": 1, "maximum": 16384, "description": "Maximum output tokens per request. Cannot exceed max_session_tokens."},
+          "max_steps": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Maximum provider requests and maximum tool calls in one session."},
+          "max_session_tokens": {"type": "integer", "minimum": 1, "maximum": 250000, "description": "Total provider-reported input and output token limit. Input use is known only after a request finishes."},
+          "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 900},
+          "request_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120}
+        }
+      },
+      "AgentProviderStatus": {
+        "type": "object", "additionalProperties": false, "required": ["provider", "key_configured"],
+        "properties": {"provider": {"oneOf": [{"$ref": "#/components/schemas/AgentProvider"}, {"type": "null"}]}, "key_configured": {"type": "boolean"}}
+      },
+      "AgentSessionSummary": {
+        "type": "object", "required": ["id", "goal", "model_id", "status", "steps", "tokens", "scratch_ids", "message"],
+        "properties": {
+          "id": {"$ref": "#/components/schemas/Id"}, "goal": {"type": "string"}, "model_id": {"$ref": "#/components/schemas/Id"},
+          "status": {"enum": ["running", "completed", "cancelled", "failed", "budget_exhausted"]},
+          "steps": {"type": "integer", "minimum": 0}, "tokens": {"type": "integer", "minimum": 0},
+          "scratch_ids": {"type": "array", "items": {"$ref": "#/components/schemas/Id"}},
+          "message": {"type": ["string", "null"]}
+        }
+      },
+      "AgentSession": {
+        "allOf": [{"$ref": "#/components/schemas/AgentSessionSummary"}, {"type": "object", "required": ["entries"], "properties": {
+          "entries": {"type": "array", "items": {"oneOf": [
+            {"type": "object", "required": ["kind", "text"], "properties": {"kind": {"const": "assistant"}, "text": {"type": "string"}}},
+            {"type": "object", "required": ["kind", "name", "arguments"], "properties": {"kind": {"const": "tool_call"}, "name": {"type": "string"}, "arguments": {"type": "object"}}},
+            {"type": "object", "required": ["kind", "name", "result"], "properties": {"kind": {"const": "tool_result"}, "name": {"type": "string"}, "result": {}}}
+          ]}}
+        }}]
       },
       "HfTokenStatus": {
         "type": "object", "required": ["id", "configured"], "additionalProperties": false,

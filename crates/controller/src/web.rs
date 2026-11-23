@@ -118,10 +118,11 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
             )
         })
         .layer(DefaultBodyLimit::max(256 * 1024))
-        .with_state(app);
+        .with_state(app.clone());
+    let mcp = Arc::new(crate::mcp::Server::new(api.clone()));
     Router::new()
-        .nest("/api", api.clone())
-        .merge(crate::mcp::router(api))
+        .nest("/api", api.merge(crate::agent::router(app, mcp.clone())))
+        .merge(crate::mcp::router(mcp))
         .fallback_service(ServeDir::new(dist))
         .layer(middleware::from_fn_with_state(listen, guard))
 }
@@ -422,7 +423,7 @@ async fn remove_hf_token(
     change_hf_token(&app, &id, None)
 }
 
-fn read_hf_token_request<T: serde::de::DeserializeOwned>(
+pub(crate) fn read_hf_token_request<T: serde::de::DeserializeOwned>(
     payload: std::result::Result<Json<Box<RawValue>>, JsonRejection>,
 ) -> Result<T> {
     let invalid = |status| ApiError(status, "invalid token request".into());
@@ -535,6 +536,11 @@ async fn add_model(
     let path = std::path::Path::new(&model.path);
     if store.is_scratch_path(path) {
         return Err(ApiError::bad("scratch files require operator approval"));
+    }
+    if app.agent.protected_path(path) {
+        return Err(ApiError::bad(
+            "private credential storage cannot enter the Library",
+        ));
     }
     if store
         .is_private_editor_path(path)

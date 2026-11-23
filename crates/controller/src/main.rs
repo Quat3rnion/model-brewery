@@ -1,4 +1,5 @@
 mod admin;
+mod agent;
 mod backend_calibration;
 mod backend_hf;
 mod conversion;
@@ -49,6 +50,7 @@ struct App {
     trace_policy: brewery_worker::trace::Policy,
     dispatcher: Arc<Dispatcher>,
     hf_tokens: hf_tokens::Store,
+    agent: agent::Service,
     backend_download: bool,
     backend_calibration: Option<PathBuf>,
     backend_edit_formats: std::collections::BTreeSet<String>,
@@ -149,6 +151,7 @@ async fn main() -> Result<(), Error> {
         trace_policy: settings::trace_policy(config_value.as_ref())?,
         dispatcher: dispatcher.clone(),
         hf_tokens,
+        agent: agent::Service::new(&data, &dist)?,
         backend_download: dispatcher.backend.is_some(),
         backend_calibration: dispatcher
             .backend

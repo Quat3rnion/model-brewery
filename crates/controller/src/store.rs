@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) mod agent;
 mod interventions;
 mod sae;
 
@@ -76,6 +77,7 @@ impl Store {
         interventions::install(&conn)?;
         sae::install(&conn)?;
         crate::dedupe::install(&conn)?;
+        agent::install(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS profile_revisions(revision TEXT PRIMARY KEY, body TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS host_evaluation_profiles(
