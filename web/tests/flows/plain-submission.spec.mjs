@@ -84,7 +84,7 @@ for (const [view, label, setup, path = '/api/jobs'] of [
     expect(controller.requests('POST', path)).toHaveLength(1);
   });
 
-  test(`${label} ignores a multi-click after a fast reply but accepts a new click`, async ({ page, controller }) => {
+  test(`${label} ignores a multi-click after a fast reply and sends a fresh click for matching`, async ({ page, controller }) => {
     await controller.open(page, view);
     await setup(page);
     const action = button(page, label);
@@ -105,8 +105,21 @@ for (const [view, label, setup, path = '/api/jobs'] of [
     expect(controller.requests('POST', path)).toHaveLength(1);
     const next = response(page, path);
     await click(1);
-    expect((await next).status()).toBe(201);
+    const match = await next;
+    expect(match.status()).toBe(200);
+    const { id: matchedId, duplicate_of } = await match.json();
+    expect(duplicate_of).toBe(true);
+    expect(match.headers()['brewery-duplicate']).toBe(matchedId);
     expect(controller.requests('POST', path)).toHaveLength(2);
+    const explicit = response(page, path);
+    await button(page, 'Queue another').press('Enter');
+    const repeated = await explicit;
+    expect(repeated.status()).toBe(201);
+    expect((await repeated.json()).id).not.toBe(matchedId);
+    const [a, b, c] = controller.requests('POST', path);
+    expect(c.body).toEqual(a.body);
+    expect(c.headers['brewery-allow-duplicate']).toBe('1');
+    expect(new Set([a, b, c].map(r => r.headers['idempotency-key'])).size).toBe(3);
   });
 
   test(`${label} focuses the job link after an accepted reply`, async ({ page, controller }) => {
@@ -228,7 +241,7 @@ test('a disabled first click resets an older native submit sequence', async ({ p
   const second = page.waitForResponse(r => r.url().endsWith('/api/jobs') && r.request().method() === 'POST',
     { timeout: 2000 }).catch(() => null);
   await clickPoint(cdp, point, 2);
-  expect((await second)?.status()).toBe(201);
+  expect((await second)?.status()).toBe(200);
   expect(posts(controller)).toHaveLength(2);
 });
 

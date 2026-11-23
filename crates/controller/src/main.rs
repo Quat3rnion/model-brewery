@@ -2,6 +2,7 @@ mod admin;
 mod backend_calibration;
 mod backend_hf;
 mod conversion;
+mod dedupe;
 mod dispatch;
 mod domain;
 mod eligibility;

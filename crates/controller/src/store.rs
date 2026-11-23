@@ -3,7 +3,7 @@ use crate::domain::{Envelope, Event, Job, Model, NewModel, Prompt, State, now};
 use crate::idempotency::{self, Replay, Submission};
 use brewery_worker::hgn_recipe;
 use brewery_worker::operational::Settings;
-use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
+use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
@@ -68,6 +68,7 @@ impl Store {
         )?;
         crate::feed::install(&conn)?;
         idempotency::install(&conn)?;
+        crate::dedupe::install(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS profile_revisions(revision TEXT PRIMARY KEY, body TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS host_evaluation_profiles(
@@ -200,16 +201,20 @@ impl Store {
             PromptDeletion::Missing
         })
     }
+    // The web handler holds the Store lock and owns this transaction across
+    // duplicate lookup, admission, and enqueue. Admission only reads the Store.
+    pub fn submission_transaction(&self) -> rusqlite::Result<Transaction<'_>> {
+        Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+    }
+
     pub fn enqueue(
-        &mut self,
+        tx: &Transaction<'_>,
         job: &Job,
         envelope: &Envelope,
         submission: Option<&Submission<'_>>,
     ) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        insert_job(&tx, job, envelope)?;
-        idempotency::record(&tx, submission, &job.id)?;
-        tx.commit()?;
+        insert_job(tx, job, envelope)?;
+        idempotency::record(tx, submission, &job.id)?;
         Ok(())
     }
     pub fn conversions(&self) -> Result<Vec<Conversion>> {
@@ -243,20 +248,18 @@ impl Store {
         read_one(&self.conn, "SELECT body FROM conversions WHERE id=?", id)
     }
     pub fn create_conversion(
-        &mut self,
+        tx: &Transaction<'_>,
         row: &Conversion,
         job: &Job,
         envelope: &Envelope,
         submission: Option<&Submission<'_>>,
     ) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        insert_job(&tx, job, envelope)?;
+        insert_job(tx, job, envelope)?;
         tx.execute(
             "INSERT INTO conversions(id,state,current_job,body) VALUES (?,?,?,?)",
             params![row.id, row.state.key(), job.id, encode(row)?],
         )?;
-        idempotency::record(&tx, submission, &row.id)?;
-        tx.commit()?;
+        idempotency::record(tx, submission, &row.id)?;
         Ok(())
     }
     pub fn cancel_conversion(&mut self, id: &str) -> Result<Option<Conversion>> {

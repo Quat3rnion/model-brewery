@@ -165,8 +165,9 @@
   <div aria-live="polite" class="xs">
     {#if starter.error}<p class="note bad" role="alert">{starter.error}</p>
     {:else if starter.last}
-      <p class="muted">{starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a bind:this={runLink} href={conversionRunHref(starter.last.id, 'gguf')}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : ''}</p>
+      <p class="muted">{starter.matched ? 'This request is already queued as job' : starter.replayed ? 'This request was already queued as job' : 'Started conversion'} <a bind:this={runLink} href={conversionRunHref(starter.last.id, 'gguf')}>{starter.last.id}</a>. {starter.replayed ? 'No second conversion was started.' : ''}</p>
     {/if}
+    {#if starter.repeat}<button type="button" class="btn small" disabled={starter.busy} onclick={starter.repeat}>Queue another</button>{/if}
   </div>
 </div>
 

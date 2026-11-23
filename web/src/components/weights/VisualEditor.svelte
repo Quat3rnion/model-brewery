@@ -6,6 +6,7 @@
   // from the inventory, so a changed file is refused.
   import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
+  import { errorText } from '../../lib/api';
   import TensorMap from './TensorMap.svelte';
   import HeatGrid from './HeatGrid.svelte';
   import Submit from '../Submit.svelte';
@@ -14,7 +15,6 @@
   import { brewery } from '../../lib/store.svelte';
   import { acceptedJobSummary, guardReadLink, jobRequestKey, ReadVisit, Submitter } from '../../lib/submit.svelte';
   import type { PlainAttempt } from '../../lib/submission-key';
-  import { captureResultFocus } from '../../lib/focus';
   import { route } from '../../lib/route.svelte';
   import { theme } from '../../lib/theme.svelte';
   import { isSafeSource, hostName, isActive, shortHash } from '../../lib/format';
@@ -33,6 +33,7 @@
     roundTo,
     short,
     step,
+    supersededInventory,
     tileJob,
     tileRequest,
     type InventoryPage,
@@ -54,6 +55,7 @@
     pending,
     readAttempts,
     acceptedReads,
+    restarts,
   }: {
     source: Model;
     canVisual: boolean;
@@ -67,6 +69,7 @@
     pending: SvelteMap<string, DraftEdit>;
     readAttempts: PlainAttempt;
     acceptedReads: SvelteMap<string, JobSummary>;
+    restarts: SvelteMap<string, Set<string>>;
   } = $props();
 
   const stateJobs = $derived(brewery.state?.jobs ?? []);
@@ -80,7 +83,7 @@
   // Ignore old reports only when the user asks the worker to read again.
   let ignored = $state<Set<string>>(new Set());
   const packedHost = $derived(!isSafeSource(source.kind) && brewery.state?.hosts.find(h => h.id === source.host)?.capabilities?.weight_packed === true);
-  const usable = $derived(jobs.filter((j) => !ignored.has(j.id)));
+  const usable = $derived(jobs.filter((j) => !ignored.has(j.id) && !restarts.get(source.id)?.has(j.id)));
   const sourceHost = $derived(hostName(brewery.state?.hosts ?? [], source.host));
   const tileLauncher = 'weights.visual.tile';
   const inventoryLauncher = 'weights.visual.inventory';
@@ -92,36 +95,43 @@
   let tileLink: HTMLAnchorElement | undefined = $state();
   let receiptError = $state<string | null>(null);
 
-  function want(job: JobSummary | null): void {
-    if (job?.state === 'succeeded' && !brewery.details[job.id]) void brewery.loadJob(job.id).catch(() => {});
+  const detailErrors = new SvelteMap<string, string>();
+  const attempted = new Map<string, Date | null>();
+  function want(snapshot: Date | null, job?: JobSummary | null): void {
+    readVisit.observe(job);
+    if (job?.state !== 'succeeded' || brewery.details[job.id] || attempted.get(job.id) === snapshot) return;
+    attempted.set(job.id, snapshot);
+    void brewery.loadJob(job.id).then(
+      () => detailErrors.delete(job.id),
+      error => detailErrors.set(job.id, errorText(error)),
+    );
   }
-  async function read(job: ReturnType<typeof inventoryJob>, event: MouseEvent, replace?: (id: string) => void) {
+  function read(job: ReturnType<typeof inventoryJob>, event: MouseEvent, replace?: (id: string) => void, restart = false) {
     const key = jobRequestKey(readLauncher(job), job);
-    const focus = captureResultFocus(event);
-    const created = await reads.submit(job, event, false, () => {
+    void reads.submit(job, event, false, () => {
       readKey = key;
       receiptError = null;
-    });
-    if (!created) return;
-    const id = created.id;
-    const summary = acceptedJobSummary(created, job);
-    if (!findRead([summary], job.input_ids[0], job.options!, job.host)) {
-      receiptError = 'The read job does not match this request.';
-      return;
-    }
-    acceptedReadMode = job.options?.mode === 'tile' ? 'tile' : 'inventory';
-    function record(summary: JobSummary) {
-      if (summary.id !== id || !findRead([summary], job.input_ids[0], job.options!, job.host)) return;
-      readVisit.remember(id);
-      acceptedReads.delete(key);
-      acceptedReads.set(key, summary);
-    }
-    replace?.(id);
-    record(summary);
-    void focus?.(() => job.options?.mode === 'tile' ? tileLink : inventoryLink);
-    if (!('state' in created)) void brewery.loadJob(id).then(detail => {
-      if (acceptedReads.get(key)?.id === id) record(detail);
-    }).catch(() => {});
+    }, (created, focus) => {
+      const id = created.id;
+      const summary = acceptedJobSummary(created, job);
+      if (!findRead([summary], job.input_ids[0], job.options!, job.host)) {
+        receiptError = 'The read job does not match this request.';
+        return;
+      }
+      acceptedReadMode = job.options?.mode === 'tile' ? 'tile' : 'inventory';
+      function record(summary: JobSummary) {
+        if (summary.id !== id || !findRead([summary], job.input_ids[0], job.options!, job.host)) return;
+        readVisit.remember(id);
+        acceptedReads.delete(key);
+        acceptedReads.set(key, summary);
+      }
+      if (!('duplicate_of' in created)) replace?.(id);
+      record(summary);
+      void focus?.(() => job.options?.mode === 'tile' ? tileLink : inventoryLink);
+      if (!('state' in created)) void brewery.loadJob(id).then(detail => {
+        if (acceptedReads.get(key)?.id === id) record(detail);
+      }).catch(() => {});
+    }, restart);
   }
   function ignoreReads(keep: string, match: (job: JobSummary) => boolean) {
     const next = new Set(ignored);
@@ -140,21 +150,27 @@
   const inventoryRequest = $derived(inv.need ? inventoryJob(source.id, source.host, inv.need.offset, inv.need.sha, packedHost) : null);
   const firstPage = $derived(inventoryJob(source.id, source.host, 0, undefined, packedHost));
   const restartInventory = $derived(!inventoryRequest || (inv.need?.offset === 0 && shownPages.length > 0));
-  const inventoryError = $derived(readKey === jobRequestKey(inventoryLauncher, inventoryRequest ?? firstPage)
+  const canRestart = $derived(canVisual && inv.pages.length > 0 && (!!inv.need || !!inv.error));
+  const inventoryError = $derived(readKey === jobRequestKey(inventoryLauncher, inventoryRequest ?? firstPage) ||
+    (canRestart && readKey === jobRequestKey(inventoryLauncher, firstPage))
     ? reads.error ?? receiptError ?? inv.error : inv.error);
-  const lastInventoryRead = $derived(submitted.find(j => j.options?.mode === 'inventory' && !ignored.has(j.id)));
-  const inventoryJobFound = $derived(inv.job ?? jobs.find(j => j.id === lastInventoryRead?.id));
+  const lastInventoryRead = $derived(submitted.find(j => j.options?.mode === 'inventory' && usable.some(row => row.id === j.id)));
+  const inventoryJobFound = $derived(inv.job ?? usable.find(j => j.id === lastInventoryRead?.id));
+  const inventoryDetailError = $derived(inv.job && detailErrors.get(inv.job.id));
   $effect(() => {
-    void brewery.lastUpdated;
-    if (canVisual) want(inv.job ?? null);
+    if (canVisual) want(brewery.lastUpdated, inv.job);
   });
-  function readInventoryPage(event: MouseEvent) {
-    if (!canVisual || (inv.job && !inv.error)) return;
-    const request = inventoryRequest ?? firstPage;
-    void read(request, event, restartInventory ? id => {
+  function readInventoryPage(event: MouseEvent, restart = false) {
+    if (!canVisual || (restart ? !canRestart : inv.job && !inv.error)) return;
+    const request = restart ? firstPage : inventoryRequest ?? firstPage;
+    const sourceId = request.input_ids[0];
+    read(request, event, restart ? id => {
+      previousPages = [];
+      restarts.set(sourceId, supersededInventory([...stateJobs, ...acceptedReads.values()], sourceId, id));
+    } : restartInventory ? id => {
       previousPages = shownPages;
       ignoreReads(id, j => j.options?.mode === 'inventory');
-    } : undefined);
+    } : undefined, restart);
   }
 
   // ---- Current tensor and tile. ----
@@ -209,8 +225,7 @@
     (typeof tile === 'string' ? tile : null));
   const otherTileActive = $derived(jobs.some((j) => j.kind === 'weight_inspect' && j.input_ids[0] === source.id && (j.options as Record<string, unknown> | undefined)?.mode === 'tile' && isActive(j.state)));
   $effect(() => {
-    void brewery.lastUpdated;
-    if (canVisual) want(tileJobFound);
+    if (canVisual) want(brewery.lastUpdated, tileJobFound);
   });
   function readCurrentTile(event: MouseEvent) {
     const request = tileRead;
@@ -412,9 +427,10 @@
       {/if}
       {#if !inv.job || inv.error}
         <div class="row">
-          <button type="button" class="btn small" onclick={readInventoryPage} disabled={reads.busy}>
+          <button type="button" class="btn small" onclick={(event) => readInventoryPage(event)} disabled={reads.busy}>
             {restartInventory ? 'Read tensor list again' : inv.pages.length ? 'Read next tensors' : 'Read tensor list'}
           </button>
+          {#if canRestart}<button type="button" class="btn small" onclick={(event) => readInventoryPage(event, true)} disabled={reads.busy}>Read from page 1</button>{/if}
           <span class="hint">This queues a <code>weight_inspect</code> job on {sourceHost}.</span>
         </div>
       {/if}
@@ -422,6 +438,7 @@
         <p class="note warn small">The Library hash ({shortHash(source.sha256)}) differs from the file the worker read ({shortHash(sha)}). Edits use the file the worker read.</p>
       {/if}
       {#if inventoryError}<p class="note bad" role="alert">{inventoryError}</p>{/if}
+      {#if inventoryDetailError}<p class="note bad" role="alert">{inventoryDetailError} The workbench will retry the job details.</p>{/if}
       {#if reads.replayed && acceptedReadMode === 'inventory'}
         <SubmitStatus s={reads} />
       {/if}

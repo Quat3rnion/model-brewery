@@ -293,6 +293,12 @@ export interface InventoryWalk {
   error?: string;
 }
 
+/** Exclude the old walk only after a fresh page-one request is accepted. */
+export function supersededInventory(jobs: readonly JobSummary[], source: string, keep: string): Set<string> {
+  return new Set(jobs.filter(j => j.id !== keep && j.kind === 'weight_inspect' &&
+    j.input_ids[0] === source && j.options?.mode === 'inventory').map(j => j.id));
+}
+
 /** Reuse saved reads and accept only one ordered, fingerprint-consistent inventory. */
 export function walkInventory(
   source: { id: string; host: string },
