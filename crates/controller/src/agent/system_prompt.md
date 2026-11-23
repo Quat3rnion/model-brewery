@@ -34,9 +34,12 @@ Trace it with the same prompts and capture settings as the parent. Always
 call `run_checks` and read `get_checks` on the child. Compare weights, traces,
 and measured behavior with `diff_tensors`, `diff_traces`, and `diff_behavior`
 as applicable. For behavior-direction checks, pass the operator's pinned
-prompt sets to `run_checks` and reuse those pins for
-each comparison. Do not infer harmful-set refusal rates from synthetic
-fixtures. For compiled programs, use program correctness checks instead
+ prompt set digests to `run_checks` and reuse those pins for each comparison.
+ Do not infer harmful-set refusal rates from synthetic fixtures.
+The optional benign refusal rate measures over-refusal on reviewed benign
+prompts, not compliance with harmful requests. Report the flags and rates
+only. This check does not produce a refusal direction.
+For compiled programs, use program correctness checks instead
 of the GGUF loop. Report failed or missing checks and regressions, including
 locality loss and higher perplexity. Missing measurements are not passes.
 Use `request_publish` only if the user asks and after reviewing the checks.

@@ -17,7 +17,7 @@ from weight_space_acceptance import ARB, ASSETS, HF, PINS, REPO, RUNNER, SAFE, S
 from weight_space_acceptance import require, save, setup, sha
 
 
-def exercise(base, run, pins, runner):
+def exercise(base, run, pins, runner, job_timeout):
     http = build_opener(ProxyHandler({}))
 
     def call(path, body=None, key=None, status=200):
@@ -33,13 +33,14 @@ def exercise(base, run, pins, runner):
             return json.load(reply)
 
     def wait(job):
-        for _ in range(600):
+        deadline = time.monotonic() + job_timeout
+        while time.monotonic() < deadline:
             current = call("/api/jobs/" + job["id"])
             if current["state"] not in ("queued", "running"):
                 require(current["state"] == "succeeded", str(current))
                 return current
             time.sleep(2)
-        raise TimeoutError(job["id"])
+        raise TimeoutError(f"job {job['id']} did not finish within {job_timeout} seconds")
 
     require(not call("/api/scratch"), "expected an empty isolated scratch store")
     call("/api/admin/actions", {"action": "set_weight_editor", "worker": "local",
@@ -70,8 +71,16 @@ def exercise(base, run, pins, runner):
         report = bundle["behavior_direction"]
         require(report["config"]["prompt_sets"] == pins and report["cpu_threads"] == 4,
                 "unexpected replay pins or CPU settings")
-        require(len(report["metrics"]) == 6 and report["counts"]["refusal"] == 2,
-                "expected all four scorers, including synthetic refusal")
+        flags = report["benign_refusal_flags"]
+        require(len(report["metrics"]) == 6 and report["counts"]["benign_refusal"] == len(flags) == 16,
+                "expected all four scorers, including the 16 benign holdout prompts")
+        require("benign_refusal" not in report["samples"] and
+                all(set(pair) == {"parent", "child"} and
+                    all(type(flag) is bool for flag in pair.values()) for pair in flags),
+                "benign refusal results must contain flags only")
+        refusal = next(m for m in report["metrics"] if m["name"] == "benign_refusal_rate")
+        require(all(refusal[role] == sum(pair[role] for pair in flags) / len(flags)
+                    for role in ("parent", "child")), "rate does not match the flags")
         require(report["kl_continuation_positions"] > 0, "KL did not score continuation positions")
         for metric in report["metrics"]:
             require(metric["parent"] == metric["child"], str(metric))
@@ -81,14 +90,17 @@ def exercise(base, run, pins, runner):
         require(len(diff["metrics"]) == 23 and
                 all(m["delta"] == 0 and m["flag"] == "unchanged" for m in diff["metrics"]),
                 "W5 did not return all 23 metrics as unchanged")
+        print(f"check {run}: parent benign refusal {sum(pair['parent'] for pair in flags)}/{len(flags)}",
+              flush=True)
         reports.append(report)
         diffs.append(diff)
         jobs.append(job["id"])
     require(jobs[0] != jobs[1] and reports[0] == reports[1] and diffs[0] == diffs[1],
             "independent check jobs did not give identical results")
+    measured = {key: value for key, value in reports[0].items() if key != "samples"}
     return {"qualification": "not release-qualified", "jobs": jobs,
             "safetensors_sha256": root["sha256"], "gguf_sha256": receipt["sha256"],
-            "runner_sha256": sha(runner), "behavior_direction": reports[0],
+            "runner_sha256": sha(runner), "behavior_direction": measured,
             "behavior_diff": diffs[0], "repeat_identical": True}
 
 
@@ -96,25 +108,13 @@ def prepare_cache(run, source_cache, index):
     cache = run / "contrast-cache"
     cache.mkdir(mode=0o700)
     pins = dict(line.split() for line in index.read_text().splitlines() if line.strip())
-    require(set(pins) == {"slop", "sycophancy", "response_length"}, "unexpected approved set index")
+    require(set(pins) == {"slop", "sycophancy", "response_length", "benign_refusal"},
+            "unexpected approved set index")
     for pin in pins.values():
         require(re.fullmatch("[a-f0-9]{64}", pin), "invalid approved prompt pin")
         source = source_cache / f"{pin}.json"
         require(sha(source) == pin, "approved prompt cache pin mismatch")
         shutil.copyfile(source, cache / source.name)
-    refusal = {
-        "schema": "brewery.contrast-prompts.v1", "behavior": "refusal",
-        "rows": [
-            {"id": f"synthetic-{i}", "split": "held_out",
-             "positive": {"system": "Reply only with: I cannot do that.",
-                          "user": question},
-             "negative": {"system": "", "user": "Name a nearby planet."}}
-            for i, question in enumerate(("Please move the Moon.", "Please deliver this package to Mars."))
-        ],
-    }
-    raw = (json.dumps(refusal, sort_keys=True, separators=(",", ":")) + "\n").encode()
-    pins["refusal"] = hashlib.sha256(raw).hexdigest()
-    (cache / f"{pins['refusal']}.json").write_bytes(raw)
     return cache, pins
 
 
@@ -123,8 +123,13 @@ def main():
     for arg in ("root", "bins", "runner", "contrast-cache", "contrast-index"):
         parser.add_argument("--" + arg, type=lambda p: Path(p).resolve(), required=True)
     parser.add_argument("--web-dist", type=Path, default=ARB / "w8-accept/web")
+    parser.add_argument("--job-timeout", type=int, default=1200, help="seconds to wait for each job")
     args = parser.parse_args()
-    require(ARB in args.root.parents, "use an isolated run root under /arboretum")
+    if args.job_timeout < 1:
+        parser.error("--job-timeout must be positive")
+    scratch = (ARB / "xa-scratch").resolve()
+    require(ARB in args.root.parents or scratch in args.root.parents,
+            "use an isolated run root under /arboretum")
     args.root.mkdir(parents=True, exist_ok=True)
     evidence = args.root / "evidence"
     evidence.mkdir()
@@ -135,6 +140,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="isolated-", dir=args.root) as tmp:
         run = Path(tmp)
         env = setup(args, run)
+        env["TMPDIR"] = os.environ["TMPDIR"]
         cache, pins = prepare_cache(run, args.contrast_cache, args.contrast_index)
         config = run / "worker.json"
         worker = json.loads(config.read_text())
@@ -162,7 +168,7 @@ def main():
                     time.sleep(.1)
                 require(base is not None, "isolated controller did not listen")
                 # The API registers assets only within the isolated run's source roots.
-                result = exercise(base, run, pins, args.runner)
+                result = exercise(base, run, pins, args.runner, args.job_timeout)
                 result["binary_sha256"] = {
                     name: sha(args.bins / name)
                     for name in ("brewery", "brewery-worker", "brewery-engine", "brewery-dispatch")
@@ -178,5 +184,5 @@ def main():
 
 
 if __name__ == "__main__":
-    os.environ["TMPDIR"] = str(ARB / "tmp")
+    os.environ.setdefault("TMPDIR", str(ARB / "tmp"))
     main()

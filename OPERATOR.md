@@ -484,8 +484,8 @@ uses another role. Scores measure separation for these prompt pairs only.
 They do not measure a change in generated behavior.
 Results are not release-qualified.
 
-The cache script modifies the source data by selecting a small subset and
-pairing each original user text with two system instructions. It does not
+For direction jobs, the cache script selects a small subset of each source
+and pairs each original user text with two system instructions. It does not
 vendor any rows:
 
 - **Slop and response length:** Databricks, [Databricks Dolly 15K](
@@ -1938,17 +1938,28 @@ Use a runner built with `--behavior-v1` support. Put each normalized
 `brewery.contrast-prompts.v1` set in `<sha256>.json` in this cache.
 Use the same digest as the direction job. Set `behavior_direction` in
 `POST /api/scratch/{id}/checks` or `run_checks`, with `prompt_sets` that
-contains the `slop`, `sycophancy`, and `response_length` digests. For a
-synthetic refusal test, add the `refusal` digest. There is no approved
-refusal dataset. Keep each set to 1 to 32 held-out rows. The worker checks
-each file's hash before it reads rows. It does not use the training rows.
+contains the `slop`, `sycophancy`, and `response_length` digests. Keep each
+contrast set to 1 to 32 held-out rows. The worker checks each file's hash
+before it reads rows. It does not use the training rows.
+
+To measure over-refusal, also add the `benign_refusal` digest from
+`tools/direction_prompt_cache.py`. This set contains 16 reviewed standalone
+instructions from [Databricks Dolly 15K](
+https://huggingface.co/datasets/databricks/databricks-dolly-15k/tree/bdd27f4d94b9c1f951818a7da7fd7aeea5dbff1a)
+under [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/). The
+script selects a subset with no prompts in the direction-job splits. It
+does not vendor the prompts. Share the derived set under the same license
+with this attribution. The set has no training split and cannot be used
+with `compute_direction`.
 
 The CPU runner uses the model's GGUF chat template and greedy decoding with
 a limit of 64 new tokens. The check counts refusal prefixes, stock phrasing,
 and replies that start with the expected agreement label. It reports mean
 response length in tokens, not characters. It scores the positive side of
 the contrast sets. Agreement on prompts that ask for agreement does not
-measure unsolicited agreement. `refusal_prefixes` can replace
+measure unsolicited agreement. `benign_refusal_rate` is the fraction of
+benign prompts with a refusal flag. It does not measure compliance with
+harmful requests. `refusal_prefixes` can replace
 the default prefixes. A trusted local Python check script can supply a
 classifier to `main(refusal_classifier=...)`. Return a Boolean to override
 the prefix detector, or `None` to use the detector. The request cannot select
@@ -1963,10 +1974,12 @@ positions contribute to the second mean. A value of zero means there were
 no continuation positions.
 
 Read `behavior_direction` in the check bundle. The worker saves aggregate
-scores and one sample pair per non-refusal scorer, limited to 160 UTF-8 bytes
-per reply. It does not save refusal-set replies or full generations. W5
-behavior diffs include the numeric scores. An opt-in check does not change
-the release qualification or publication rules.
+scores and one sample pair per contrast scorer, limited to 160 UTF-8 bytes
+per reply. For the benign refusal set, it saves only the scores and
+`benign_refusal_flags`, in prompt cache row order. It does not save the
+replies or produce a refusal direction. W5 behavior diffs include the
+numeric scores. These are research results, not release-qualified. Get
+operator approval before publication.
 
 ### Review and approve
 
