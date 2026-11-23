@@ -35,6 +35,8 @@ const PROVENANCE: &str = "provenance.json";
 mod checks;
 #[path = "scratch_jobs.rs"]
 pub(crate) mod jobs;
+#[path = "scratch_merge.rs"]
+mod merge;
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,6 +84,8 @@ pub struct Provenance {
     worker: String,
     method: String,
     operations: Vec<Operation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    merge: Option<merge::Spec>,
     tensors: Vec<TensorInfo>,
     tool: String,
     tool_version: String,
@@ -123,6 +127,7 @@ struct Discard {}
 pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/scratch", get(list).post(create))
+        .route("/scratch/merge", post(merge::run))
         .route("/scratch/{id}", get(get_revision))
         .route("/scratch/{id}/edits", post(edit))
         .route("/scratch/{id}/delta", get(delta))
@@ -168,6 +173,7 @@ async fn create(
                 request.parent_id,
                 Some(request.parent_sha256),
                 Vec::new(),
+                None,
                 key,
             )
         },
@@ -191,7 +197,14 @@ async fn edit(
             if !(1..=32).contains(&request.operations.len()) {
                 return Err(ApiError::bad("expected 1 to 32 edit operations"));
             }
-            build(app, request_id(target)?, None, request.operations, key)
+            build(
+                app,
+                request_id(target)?,
+                None,
+                request.operations,
+                None,
+                key,
+            )
         },
     )
     .await
@@ -374,9 +387,10 @@ fn build(
     parent_id: String,
     supplied_pin: Option<String>,
     operations: Vec<Operation>,
+    merge: Option<merge::Spec>,
     key: Option<&Submission<'_>>,
 ) -> Mutation {
-    let (root, worker, source, expected, library_source, reserve) = {
+    let (root, worker, source, expected, library_source, reserve, merge_paths) = {
         let store = app.store.lock().map_err(ApiError::storage)?;
         if store.scratch_count().map_err(ApiError::storage)? >= LIMIT {
             return Err(conflict("scratch revision limit reached"));
@@ -414,6 +428,10 @@ fn build(
         if library_source {
             require_source(app, &worker, &source)?;
         }
+        let merge_paths = merge
+            .as_ref()
+            .map(|spec| spec.paths(app, &store, &root, &worker))
+            .transpose()?;
         (
             root,
             worker,
@@ -421,6 +439,7 @@ fn build(
             expected,
             library_source,
             lane.scratch_disk_reserve(),
+            merge_paths,
         )
     };
     if !brewery_worker::is_digest(&expected) {
@@ -437,11 +456,15 @@ fn build(
     }
     let budget = bytes
         .saturating_add(reserve)
-        .saturating_add(scratch::DELTA_OVERHEAD)
-        .saturating_add(if operations.is_empty() {
-            0
+        .saturating_add(if merge.is_some() {
+            bytes + scratch::MERGE_DELTA_OVERHEAD
         } else {
-            scratch::MAX_EDIT_BYTES
+            scratch::DELTA_OVERHEAD
+                + if operations.is_empty() {
+                    0
+                } else {
+                    scratch::MAX_EDIT_BYTES
+                }
         });
     if brewery_worker::available(&root).map_err(ApiError::storage)? < budget {
         return Err(conflict(
@@ -450,13 +473,17 @@ fn build(
     }
     let id = id();
     let mut output = Uncommitted::new(root.join(&id))?;
-    let result = scratch::build(&source, &expected, &output.path, &operations).map_err(|e| {
-        if e.downcast_ref::<std::io::Error>().is_some() {
-            ApiError::storage(e)
-        } else {
-            ApiError::bad(e.to_string())
-        }
-    })?;
+    let result = if let Some((spec, paths)) = merge.as_ref().zip(merge_paths.as_ref()) {
+        spec.build(&source, &expected, &output.path, paths)?
+    } else {
+        scratch::build(&source, &expected, &output.path, &operations).map_err(|e| {
+            if e.downcast_ref::<std::io::Error>().is_some() {
+                ApiError::storage(e)
+            } else {
+                ApiError::bad(e.to_string())
+            }
+        })?
+    };
     let provenance = Provenance {
         schema: "brewery.scratch-provenance.v1".into(),
         parent_id,
@@ -464,13 +491,16 @@ fn build(
         revision_id: id.clone(),
         revision_sha256: result.sha256.clone(),
         worker,
-        method: if operations.is_empty() {
+        method: if let Some(spec) = &merge {
+            spec.method()
+        } else if operations.is_empty() {
             "copy"
         } else {
             "direct"
         }
         .into(),
         operations,
+        merge,
         tensors: result.tensors,
         tool: "brewery SafeTensors scratch editor".into(),
         tool_version: env!("CARGO_PKG_VERSION").into(),
@@ -508,6 +538,12 @@ fn build(
             .is_none()
         {
             return Err(conflict("parent Library revision was removed"));
+        }
+    }
+    if let Some(spec) = &row.provenance.merge {
+        let current = spec.paths(app, &store, &root, &row.provenance.worker)?;
+        if merge_paths.as_ref() != Some(&current) {
+            return Err(conflict("merge input paths changed"));
         }
     }
     store.insert_scratch(&row, key).map_err(ApiError::storage)?;

@@ -156,6 +156,10 @@
     return j ? `${id.slice(0, 8)} · ${sourceName(j.input_ids[0])} · ${formatTime(j.created_at)}` : id;
   };
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const methodLabel = (method: string) => ({
+    copy: 'Copy', direct: 'Direct edit', linear: 'Linear merge', task_arithmetic: 'Task arithmetic',
+    ties: 'TIES', dare_linear: 'DARE-linear', dare_ties: 'DARE-TIES',
+  } as Record<string, string>)[method] ?? method;
   const vec = (v: unknown) => (Array.isArray(v) ? `[${v.join(', ')}]` : '—');
 </script>
 
@@ -170,7 +174,13 @@
         {#if fresh.has(n.rev.id)}<span class="new xs">New</span>{/if}
       </span>
       <span class="line2 xs muted">
-        {n.rev.provenance.method === 'copy' ? 'Copy of the parent' : `${plural(n.rev.provenance.operations.length, 'edit')}, ${plural(n.rev.delta.changed_tensors, 'tensor')}`}
+        {#if n.rev.provenance.method === 'copy'}
+          Copy of the parent
+        {:else if n.rev.provenance.method === 'direct'}
+          {plural(n.rev.provenance.operations.length, 'edit')}, {plural(n.rev.delta.changed_tensors, 'tensor')}
+        {:else}
+          {methodLabel(n.rev.provenance.method)}, {plural(n.rev.delta.changed_tensors, 'tensor')}
+        {/if}
         · {checks.length ? checks.map((c) => `${c.name} ${c.label.toLowerCase()}`).join(', ') : 'No checks'}
       </span>
     </a>
@@ -229,7 +239,7 @@
             <dt>ID</dt><dd class="mono break">{selected.id}</dd>
             <dt>SHA-256</dt><dd class="mono break">{selected.sha256}</dd>
             <dt>Parent</dt><dd class="break">{#if byId.has(p.parent_id)}<a href="#/edits?rev={encodeURIComponent(p.parent_id)}">{parentLabel(selected)}</a>{:else}{parentLabel(selected)}{/if} <span class="mono xs muted" title={p.parent_sha256}>{shortHash(p.parent_sha256)}</span></dd>
-            <dt>Method</dt><dd>{p.method === 'copy' ? 'Copy' : 'Direct edit'}</dd>
+            <dt>Method</dt><dd>{methodLabel(p.method)}</dd>
             <dt>Worker</dt><dd class="mono">{p.worker}</dd>
             <dt>Tool</dt><dd class="mono break">{p.tool} {p.tool_version}</dd>
             <dt>Runtime</dt><dd class="mono break">{p.runtime_version}</dd>

@@ -15,10 +15,14 @@ pub const MODEL: &str = "model.safetensors";
 pub const DELTA: &str = "delta.bin";
 pub const MAX_FILE: u64 = 4 << 30;
 pub const MAX_EDIT_BYTES: u64 = 32 << 20;
-pub const DELTA_OVERHEAD: u64 = 8 + 64 + 64 + 8 + 4 + 32 * 16;
+const DELTA_HEADER: u64 = 8 + 64 + 64 + 8 + 4;
+pub const DELTA_OVERHEAD: u64 = DELTA_HEADER + 32 * 16;
+const MAX_DELTA_RECORDS: usize = 4096;
+pub const MERGE_DELTA_OVERHEAD: u64 = DELTA_HEADER + MAX_DELTA_RECORDS as u64 * 16;
 const MAGIC: &[u8; 8] = b"BWDELTA1";
 
 pub mod diff;
+pub mod merge;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -317,7 +321,7 @@ pub fn revert(child: &Path, delta: &Path, destination: &Path) -> Result<()> {
     }
     let mut delta = open_regular(delta)?;
     ensure!(
-        delta.metadata()?.len() <= MAX_EDIT_BYTES + DELTA_OVERHEAD,
+        delta.metadata()?.len() <= MAX_FILE + MERGE_DELTA_OVERHEAD,
         "scratch delta exceeds limit"
     );
     ensure!(
@@ -329,7 +333,7 @@ pub fn revert(child: &Path, delta: &Path, destination: &Path) -> Result<()> {
     let size = u64::from_le_bytes(read(&mut delta)?);
     let records = u32::from_le_bytes(read(&mut delta)?);
     ensure!(
-        (10..=MAX_FILE).contains(&size) && records <= 32,
+        (10..=MAX_FILE).contains(&size) && records as usize <= MAX_DELTA_RECORDS,
         "invalid scratch delta size or record count"
     );
     let child = open_regular(child)?;
@@ -351,7 +355,6 @@ pub fn revert(child: &Path, delta: &Path, destination: &Path) -> Result<()> {
         "scratch delta belongs to a different child hash"
     );
     let mut last_end = 0;
-    let mut total = 0;
     let mut a = vec![0; 64 << 10];
     let mut b = a.clone();
     for _ in 0..records {
@@ -363,8 +366,6 @@ pub fn revert(child: &Path, delta: &Path, destination: &Path) -> Result<()> {
                 && offset.checked_add(length).is_some_and(|end| end <= size),
             "invalid scratch delta range"
         );
-        total += length;
-        ensure!(total <= MAX_EDIT_BYTES, "scratch delta exceeds limit");
         last_end = offset + length;
         output.seek(SeekFrom::Start(offset))?;
         let mut left = length;

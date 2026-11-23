@@ -40,6 +40,7 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ),
     ("create_scratch", "post", "/api/scratch"),
     ("apply_edit", "post", "/api/scratch/{id}/edits"),
+    ("merge_models", "post", "/api/scratch/merge"),
     ("convert_scratch_gguf", "post", "/api/scratch/{id}/gguf"),
     ("discard_scratch", "post", "/api/scratch/{id}/discard"),
     ("run_checks", "post", "/api/scratch/{id}/checks"),

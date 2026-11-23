@@ -3,7 +3,7 @@ use super::*;
 use std::io::BufReader;
 
 const BLOCK: usize = 64 << 10;
-const MAX_ROWS: usize = 4096;
+const MAX_ROWS: usize = MAX_DELTA_RECORDS;
 const SAMPLE: u64 = 32;
 
 pub struct Delta<'a> {
@@ -120,8 +120,7 @@ fn candidates(
         s.schema == "brewery.weight-delta.v1"
             && ((s.parent_sha256 == a_sha && s.revision_sha256 == b_sha)
                 || (s.parent_sha256 == b_sha && s.revision_sha256 == a_sha))
-            && pinned(delta.file, &s.delta_sha256, MAX_EDIT_BYTES + DELTA_OVERHEAD)?
-                == s.delta_bytes,
+            && pinned(delta.file, &s.delta_sha256, size + MERGE_DELTA_OVERHEAD)? == s.delta_bytes,
         "scratch delta metadata does not match the revisions"
     );
     let mut file = BufReader::new(delta.file);
@@ -139,7 +138,7 @@ fn candidates(
     );
     let count = u32::from_le_bytes(read(&mut file)?) as usize;
     ensure!(
-        count <= 32 && count == s.changed_tensors,
+        count <= MAX_DELTA_RECORDS && count == s.changed_tensors,
         "invalid scratch delta count"
     );
     let mut changed_bytes = 0;
