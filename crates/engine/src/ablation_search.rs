@@ -134,6 +134,23 @@ fn probability(logits: &[f32], marker: usize) -> f64 {
     (f64::from(logits[marker]) - log_normalizer(logits)).exp()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screen_kl_uses_the_parent_as_reference() {
+        let uniform = [0.0_f32, 0.0];
+        let skewed = [3.0_f32.ln(), 0.0];
+        assert_eq!(kl(&uniform, &uniform), 0.0);
+        assert!((kl(&uniform, &skewed) - 0.1438410362).abs() < 1e-7);
+        assert!((kl(&skewed, &uniform) - 0.1308120359).abs() < 1e-7);
+        assert!((probability(&skewed, 0) - 0.75).abs() < 1e-7);
+        let shift = [-1000.0, -1000.0];
+        assert!((kl(&uniform, &shift)).abs() < 1e-12);
+    }
+}
+
 pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let req = ScreenRequest::parse(&job.options)?;
     let [input] = job.inputs.as_slice() else {

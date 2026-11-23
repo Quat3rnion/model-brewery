@@ -213,16 +213,18 @@ pub(crate) async fn drive(app: Arc<App>, job: Job) -> std::result::Result<(), cr
     let mut store = app.store.lock().expect("store lock");
     let mut current = store.job(&job.id)?.ok_or("search job disappeared")?;
     let receipt = match result {
-        _ if current.cancel_requested => {
-            current.state = JobState::Cancelled;
-            current.progress = "Ablation search cancelled".into();
-            None
-        }
         Ok(receipt) => {
+            // A late cancel cannot hide the completed receipt and its
+            // retained children after execute's final cancellation check.
             current.state = JobState::Succeeded;
             current.progress = "Ablation search complete; not release-qualified".into();
             current.has_result = true;
             Some(receipt)
+        }
+        Err(_) if current.cancel_requested => {
+            current.state = JobState::Cancelled;
+            current.progress = "Ablation search cancelled".into();
+            None
         }
         Err(error) => {
             current.state = JobState::Failed;
