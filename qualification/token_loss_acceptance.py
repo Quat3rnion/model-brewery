@@ -33,6 +33,7 @@ def main():
     for arg in ("bins", "runner", "web-dist", "evidence", "shots", "w12"):
         parser.add_argument(f"--{arg}", type=lambda p: Path(p).resolve(), required=True)
     args = parser.parse_args()
+    require((args.web_dist / "index.html").is_file(), "build the workbench before starting the replay")
     previous = json.loads((args.w12 / "magnitude-30-repeat.json").read_text())
     w12 = json.loads((args.w12 / "report.json").read_text())
     require(w12["dense_scope"]["layer"] == 8, "unexpected W12 scope")
