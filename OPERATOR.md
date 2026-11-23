@@ -322,7 +322,7 @@ model file. Unregistering a library entry removes only the entry.
 ## CPU trace jobs
 
 Use `trace` to record selected activations and top logits for a single-file
-Library GGUF.
+Library GGUF or a scratch revision with private GGUF.
 The worker runs the Lanternfish CLI on the CPU. It reads files from the CLI.
 It does not start a Lanternfish service or use a Lanternfish HTTP API.
 It does not change the model or qualify a release.
@@ -340,8 +340,9 @@ It does not change the model or qualify a release.
 3. Add `"BREWERY_LANTERNFISH_TRACE": "/absolute/path/to/lanternfish"` to the
    worker JSON `engine_env`. Add `"trace": true` to the host `capabilities`
    in dispatch JSON. The capability is off by default. Use a regular worker
-   with access to the registered GGUF. Dedicated download and weight editor
-   workers do not run traces. The existing GPU `compare` job still uses
+   with access to the registered GGUF. For scratch, the controller uses its
+   local CPU worker. Dedicated download and remote weight editor workers do
+   not run traces. The existing GPU `compare` job still uses
    `BREWERY_LANTERNFISH` and its `run` command.
 
 To set the limits, add this top-level object to the controller dispatch JSON:
@@ -359,8 +360,8 @@ over the limit. It does not remove job records, inputs, or other artifacts.
 An old job can show success after its trace files are removed. The trace
 endpoints then return 404.
 
-Submit one same-worker GGUF `input_ids` entry to `POST /api/jobs` with
-`kind: "trace"`. Supply `prompt`, `prompt_id`, or an `options.prompts` array
+Submit one Library GGUF or scratch revision ID in `input_ids` to
+`POST /api/jobs` with `kind: "trace"`. Supply `prompt`, `prompt_id`, or an `options.prompts` array
 with 1 to 4 entries. This example shows `options` for one prompt:
 
 ```json
@@ -455,7 +456,8 @@ queues the job. The source trace must still have the rows. Each source row
 must be a verified, finite F32 vector. The controller copies each row to the
 same layer, role, and position in every target prompt. It does not align
 different token sequences. The source and target must have the same Library
-model ID and GGUF SHA-256. The worker checks the target file before the run.
+or scratch model ID and GGUF SHA-256. The worker checks the target file before
+the run.
 
 You can combine inline rules, one saved artifact version, and up to eight
 patch selectors. Do not target a row more than once. The combined limit
@@ -466,7 +468,7 @@ smaller ranges. If retention removed a row, run the source trace again.
 ### Library intervention artifacts
 
 Use `POST /api/interventions` to save an artifact. Give it a name, the
-Library GGUF `model_id`, the SHA-256 of that file, and the inline rules:
+Library GGUF or scratch `model_id`, the GGUF SHA-256, and the inline rules:
 
 ```json
 {
@@ -1537,12 +1539,14 @@ The controller stores these files in its private
 
 - `model.safetensors`: Full child checkpoint, with the original header and
   all unedited bytes.
+- `model.gguf`: Private BF16 output, if conversion completed. The scratch
+  record contains its hash and converter version.
 - `provenance.json`: `brewery.scratch-provenance.v1`. It contains the parent
   and child IDs and SHA-256 hashes, worker ID, timestamp, tool and runtime
   versions, method (`copy` or `direct`), ordered operations with parameters,
   and the name, shape and dtype of each tensor in those operations.
-- `behavior.v1.json`: An atomic file for comparisons with the immediate
-  parent. It contains the parent and child IDs and the reported metrics.
+- `behavior.v1.json`: A file for comparisons with the immediate parent.
+  It contains the parent and child IDs and the measured metrics.
   The metrics list is empty if the bundle has no behavior report.
 - `delta.bin`: Reversible XOR delta (`brewery.weight-delta.v1`). It starts
   with ASCII `BWDELTA1`, then two 64-byte lowercase ASCII SHA-256 hashes
