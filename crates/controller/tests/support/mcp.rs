@@ -10,6 +10,16 @@ fn interp_benchmark_reads_the_versioned_report_without_driving_compute() {
     let report = t.json("GET", "/api/interp/benchmark", None, 200);
     assert_eq!(report["schema_version"], 1);
     assert_eq!(report["qualification"], "not release-qualified");
+    let circuit_rows = report["methods"]["x5"].as_array().unwrap();
+    for method in ["attribution_patching", "activation_patching"] {
+        let histogram = circuit_rows
+            .iter()
+            .find(|row| row["method"] == method && row["program"] == "histogram")
+            .unwrap();
+        assert_eq!(histogram["evaluation"], "recall_only");
+        assert_eq!(histogram["precision"], Value::Null);
+        assert_eq!(histogram["roc_auc"], Value::Null);
+    }
     for method in ["x5", "w11"] {
         for program in ["sort", "histogram"] {
             assert!(

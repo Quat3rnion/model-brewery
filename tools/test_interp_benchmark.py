@@ -18,6 +18,14 @@ def call(*args):
     return json.loads(subprocess.check_output([sys.executable, "-B", CLI, *args], text=True))
 
 
+def circuit(program, directory):
+    call("compile", program, directory)
+    rows = json.loads(subprocess.check_output(
+        [sys.executable, "-B", CLI.with_name("interp_benchmark.py"), "circuit", directory], text=True,
+    ))
+    return {row["method"]: row for row in rows}
+
+
 class ReferenceTraceTest(unittest.TestCase):
     def test_histogram_exports_truth_and_trace(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -49,21 +57,46 @@ class ReferenceTraceTest(unittest.TestCase):
                     np.testing.assert_allclose(rows[block["layer"], position, "attn_out"], out, atol=1e-6)
 
     def test_histogram_patch_scores_compiler_sites(self):
-        benchmark = CLI.with_name("interp_benchmark.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = circuit("histogram", Path(tmp))
+        self.assertEqual(set(rows), {"attribution_patching", "activation_patching"})
+        for row in rows.values():
+            self.assertEqual(row["clean_output"], [2, 1, 2, 1])
+            self.assertEqual(row["corrupt_output"], [3, 1, 3, 3])
+            self.assertEqual(row["sites"], 2)
+            self.assertEqual(row["compiler_sites"], 2)
+            self.assertEqual(row["evaluation"], "recall_only")
+            self.assertIsNone(row["precision"])
+            self.assertEqual(row["recall"], 1)
+            self.assertIsNone(row["roc_auc"])
+
+    def test_sort_exact_patches_recover_three_zero_attribution_sites(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = circuit("sort", Path(tmp))
+        attribution, activation = (rows[name] for name in ("attribution_patching", "activation_patching"))
+        for field in ("precision", "recall", "roc_auc"):
+            self.assertEqual(attribution[field], 0.7)  # Three of six tied, three spots left.
+            self.assertEqual(activation[field], 1)
+        saturated = {(s["layer"], s["role"]): s["patched_delta"]
+                     for s in attribution["zero_attribution_sites_with_patch_effect"]}
+        self.assertEqual(set(saturated), {(0, "ffn_out"), (1, "ffn_out"), (2, "head_out")})
+        for delta in saturated.values():
+            self.assertAlmostEqual(delta, 2, places=4)
+
+    def test_padded_histogram_adds_one_known_negative_site(self):
         with tempfile.TemporaryDirectory() as tmp:
             model = Path(tmp)
-            call("compile", "histogram", model)
-            row = json.loads(subprocess.check_output(
-                [sys.executable, "-B", benchmark, "circuit", model], text=True,
-            ))
-        self.assertEqual(row["clean_output"], [2, 1, 2, 1])
-        self.assertEqual(row["corrupt_output"], [3, 1, 3, 3])
-        self.assertEqual(row["sites"], 2)
-        self.assertEqual(row["compiler_sites"], 2)
-        self.assertEqual(row["precision"], 1)
-        self.assertEqual(row["recall"], 1)
-        self.assertIsNone(row["roc_auc"])  # No compiler-empty block in histogram.
-        self.assertTrue(any(abs(site["patched_delta"]) > 1 for site in row["ranking"]))
+            rows = circuit("histogram_padded", model)
+            self.assertEqual(call("check", model), {"cases": 340})
+        attribution, activation = (rows[name] for name in ("attribution_patching", "activation_patching"))
+        self.assertEqual(activation["sites"], 3)
+        self.assertEqual(activation["compiler_sites"], 2)
+        negative, = [s for s in activation["ranking"] if not s["compiler_site"]]
+        self.assertEqual((negative["layer"], negative["role"], negative["head"], negative["patched_delta"]),
+                         (0, "head_out", 1, 0))
+        for field in ("precision", "recall", "roc_auc"):
+            self.assertEqual(attribution[field], 0.75)  # One true and one false site tied for last spot.
+            self.assertEqual(activation[field], 1)
 
     def test_alta_parity_tracks_shared_blocks(self):
         with tempfile.TemporaryDirectory() as tmp:

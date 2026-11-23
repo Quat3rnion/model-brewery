@@ -22,6 +22,7 @@ PAIRS = {
     "histogram": ([2, 0, 2, 1], [2, 0, 2, 2]),
     "alta_parity_relative": ([1, 0, 1, 0], [1, 0, 0, 0]),
 }
+PADDED = "histogram_padded"
 TRAIN = dict(features=64, k=8, steps=700)
 SPLIT_SEED = 9
 
@@ -52,13 +53,30 @@ def model_ref(truth, directory):
     }
 
 
+def evaluate(sites, score):
+    top_k = sum(site["compiler_site"] for site in sites)
+    ranking = sorted((dict(site, score=score(site)) for site in sites), key=lambda site: -site["score"])
+    cutoff = ranking[top_k - 1]["score"]
+    above = [site for site in ranking if site["score"] > cutoff]
+    tied = [site for site in ranking if site["score"] == cutoff]
+    found = sum(site["compiler_site"] for site in above)
+    found += (top_k - len(above)) * sum(site["compiler_site"] for site in tied) / len(tied)
+    yes = [site["score"] for site in ranking if site["compiler_site"]]
+    no = [site["score"] for site in ranking if not site["compiler_site"]]
+    auc = sum(float(a > b) + 0.5 * (a == b) for a in yes for b in no) / (len(yes) * len(no)) if no else None
+    return dict(evaluation="ranking" if no else "recall_only", sites=len(ranking),
+                compiler_sites=top_k, top_k=top_k, precision=found / top_k if no else None,
+                recall=found / top_k, roc_auc=auc, ranking=ranking)
+
+
 def circuit(config, weights, truth):
     import jax
     import jax.numpy as jnp
     from jax.nn import softmax
 
     jax.config.update("jax_enable_x64", True)
-    clean, corrupt = PAIRS[config["program"]]
+    name = config["program"]
+    clean, corrupt = PAIRS["histogram" if name == PADDED else name]
     clean_output, _ = capture(config, weights, clean)
     corrupt_output, _ = capture(config, weights, corrupt)
     heads = config["num_heads"]
@@ -89,28 +107,23 @@ def circuit(config, weights, truth):
     attribution = np.asarray(gradient * delta)
     positives = {(site["layer"], site.get("head", heads)) for op in truth["operations"]
                  for site in op["sites"]}
-    ranking = []
+    sites = []
     for layer, component in np.ndindex(delta.shape[:2]):
         score = float(np.abs(attribution[layer, component].sum(axis=-1)).sum())
         patched = float(metric(corrupt, zero.at[layer, component].set(delta[layer, component])))
         site = (dict(role="head_out", head=component) if component < heads else dict(role="ffn_out"))
-        ranking.append(dict(layer=layer, **site, compiler_site=(layer, component) in positives,
-                            score=score, patched_delta=patched - actual))
-    ranking.sort(key=lambda site: -site["score"])
-    top_k = len(positives)
-    cutoff = ranking[top_k - 1]["score"]
-    above = [site for site in ranking if site["score"] > cutoff]
-    tied = [site for site in ranking if site["score"] == cutoff]
-    found = sum(site["compiler_site"] for site in above)
-    found += (top_k - len(above)) * sum(site["compiler_site"] for site in tied) / len(tied)
-    yes = [site["score"] for site in ranking if site["compiler_site"]]
-    no = [site["score"] for site in ranking if not site["compiler_site"]]
-    auc = sum(float(a > b) + 0.5 * (a == b) for a in yes for b in no) / (len(yes) * len(no)) if no else None
-    return dict(program=config["program"], clean=clean, corrupt=corrupt, clean_output=clean_output,
-                corrupt_output=corrupt_output, target=target, contrast=contrast, output_position=pos,
-                clean_metric=float(metric(clean, zero)), corrupt_metric=actual,
-                sites=len(ranking), compiler_sites=top_k, top_k=top_k, precision=found / top_k,
-                recall=found / top_k, roc_auc=auc, ranking=ranking)
+        sites.append(dict(layer=layer, **site, compiler_site=(layer, component) in positives,
+                          attribution_score=score, patched_delta=patched - actual))
+    common = dict(program=name, clean=clean, corrupt=corrupt, clean_output=clean_output,
+                  corrupt_output=corrupt_output, target=target, contrast=contrast, output_position=pos,
+                  clean_metric=float(metric(clean, zero)), corrupt_metric=actual)
+    missed = [site for site in sites if site["compiler_site"]
+              and site["attribution_score"] == 0 and site["patched_delta"] != 0]
+    return [
+        dict(common, method="attribution_patching", zero_attribution_sites_with_patch_effect=missed)
+        | evaluate(sites, lambda site: site["attribution_score"]),
+        dict(common, method="activation_patching") | evaluate(sites, lambda site: abs(site["patched_delta"])),
+    ]
 
 
 def feature_operations(truth):
@@ -195,7 +208,7 @@ def build(directory):
     directory.mkdir()
     methods = dict(x5=[], w11=[], x6=[])
     models = {}
-    for name in (*PAIRS, "sort_descending"):
+    for name in (*PAIRS, PADDED, "sort_descending"):
         model_dir = directory / name
         model_dir.mkdir()
         subprocess.run([sys.executable, "-B", str(Path(program.__file__)), "compile", name, model_dir],
@@ -207,12 +220,14 @@ def build(directory):
         checks = program.check(config, weights)
         if "mismatch" in checks:
             raise ValueError(f"Compiled program failed its oracle: {name}: {checks}")
-        if name in PAIRS:
+        if name in PAIRS or name == PADDED:
             trace_hashes = {}
-            for side, tokens in zip(("clean", "corrupt"), PAIRS[name], strict=True):
+            pair = PAIRS["histogram" if name == PADDED else name]
+            for side, tokens in zip(("clean", "corrupt"), pair, strict=True):
                 trace = program.write_trace(config, weights, tokens, model_dir, model_dir / side)
                 trace_hashes[side] = trace["manifest_sha256"]
-            methods["x5"].append(circuit(*spec) | {"trace_sha256": trace_hashes})
+            methods["x5"].extend(row | {"trace_sha256": trace_hashes} for row in circuit(*spec))
+        if name in PAIRS:
             methods["w11"].append({"program": name} | fit_features([spec], model_dir / "sae"))
         models[name][1]["checked_inputs"] = checks["cases"]
     names = ("sort", "sort_descending")

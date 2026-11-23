@@ -1790,11 +1790,26 @@
           "methods":{
             "type":"object","required":["x5","w11","x6"],
             "properties":{
-              "x5":{"type":"array","items":{"type":"object"},"description":"Site ranking, precision, recall, ROC AUC and measured patch deltas."},
+              "x5":{"type":"array","items":{"$ref":"#/components/schemas/InterpBenchmarkCircuitRow"},"description":"Attribution and exact activation patching rows."},
               "w11":{"type":"array","items":{"type":"object"},"description":"SAE reconstruction and best feature cosine for each compiler operation."},
               "x6":{"type":"array","items":{"type":"object"},"description":"Paired crosscoder reconstruction and best feature cosine for each compiler operation."}
             }
           }
+        }
+      },
+      "InterpBenchmarkCircuitRow": {
+        "type":"object",
+        "required":["program","method","evaluation","top_k","precision","recall","roc_auc","ranking"],
+        "properties":{
+          "program":{"type":"string"},
+          "method":{"enum":["attribution_patching","activation_patching"]},
+          "evaluation":{"enum":["ranking","recall_only"]},
+          "top_k":{"type":"integer","minimum":1},
+          "precision":{"type":["number","null"],"minimum":0,"maximum":1,"description":"Fractional precision at K; null when there are no negative sites."},
+          "recall":{"type":"number","minimum":0,"maximum":1,"description":"Fractional recall at K."},
+          "roc_auc":{"type":["number","null"],"minimum":0,"maximum":1,"description":"Ties receive half credit; null when there are no negative sites."},
+          "ranking":{"type":"array","items":{"type":"object"}},
+          "zero_attribution_sites_with_patch_effect":{"type":"array","items":{"type":"object"},"description":"True sites with a zero gradient attribution score and nonzero measured patch delta."}
         }
       },
       "CrosscoderBinding": {

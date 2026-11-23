@@ -2085,24 +2085,45 @@ The sidecar binds the map to the weight and config hashes. The local
 compile command returns the sidecar hash. The controller saves the hash
 in provenance and checks the sidecar before running a program.
 
-**X5 attribution patching** (CPU reference runner):
+**X5 circuit ranking** (CPU reference runner):
 
-| Program | Precision at K | Recall at K | ROC AUC |
-| --- | ---: | ---: | ---: |
-| Sort | 0.700 | 0.700 | 0.700 |
-| Histogram | 1.000 | 1.000 | Not applicable |
-| ALTA relative parity | 1.000 | 1.000 | Not applicable |
+| Program | Method | Evaluation | Precision at K | Recall at K | ROC AUC |
+| --- | --- | --- | ---: | ---: | ---: |
+| Sort | `attribution_patching` | Ranking | 0.700 | 0.700 | 0.700 |
+| Sort | `activation_patching` | Ranking | 1.000 | 1.000 | 1.000 |
+| Histogram | `attribution_patching` | Recall-only | Not applicable | 1.000 | Not applicable |
+| Histogram | `activation_patching` | Recall-only | Not applicable | 1.000 | Not applicable |
+| Histogram with one unused head | `attribution_patching` | Ranking | 0.750 | 0.750 | 0.750 |
+| Histogram with one unused head | `activation_patching` | Ranking | 1.000 | 1.000 | 1.000 |
+| ALTA relative parity | `attribution_patching` | Recall-only | Not applicable | 1.000 | Not applicable |
+| ALTA relative parity | `activation_patching` | Recall-only | Not applicable | 1.000 | Not applicable |
 
 X5 uses exact JAX automatic differentiation through the W13 reference
 runner, not the Lanternfish GGUF gradient path. It computes gradients
 on the corrupt input for the clean-versus-corrupt logit margin at the
-last output position where the decoded outputs differ. It ranks each
-head and each MLP by the sum of the absolute attribution across tokens.
-It also runs a separate exact patch at each site and reports its
-measured margin change. K is the number of compiler sites. The score
-averages ties at the cutoff. Histogram and relative parity have no
-compiler-empty sites; their precision and recall are not evidence of
-ranking quality, and ROC AUC is undefined.
+last output position where the decoded outputs differ. Linear attribution
+ranks each head and MLP by the sum of the absolute attribution across
+tokens. Exact activation patching replaces each site's corrupt output
+with its clean output in a separate run and ranks by the absolute
+measured margin change.
+
+**Linear attribution misses saturated sites.** In Tracr sort, the
+MLPs at layers 0 and 1 and attention head 0 at layer 2 each had an
+attribution score of zero. Patching any one of these sites increased
+the margin by approximately 2.0. Tracr's sharp nonlinearities can make
+the local gradient zero even when replacing an activation changes the
+result. This is why X5 confirms selected candidates with real patches.
+Patching only the selected candidates cannot recover sites that the
+gradient ranking excludes.
+
+K is the number of compiler sites. At the cutoff, count tied sites
+fractionally: if three of six tied sites are true and three slots
+remain, count 1.5 true sites. ROC AUC gives half credit to a tied
+positive-negative pair. Histogram and relative parity have no negative
+sites. Their recall at K is automatic and does not measure ranking
+quality. The local benchmark control (`histogram_padded`) gives the same
+outputs and adds one zero-weight head as a known negative. It tests
+ranking with an unused site, not with an active competing circuit.
 
 **W11 TopK SAE** (mean best decoder cosine to the compiler subspace):
 

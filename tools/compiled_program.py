@@ -14,7 +14,7 @@ import sys
 TRACR = "9ce2b8c82b6ba10e62e86cf6f390e7536d4fd2cd"
 ALTA = "afb0559da1dc08a3819c5ae20e0547686052b75a"
 LENGTH = 4
-RASP = ("sort", "sort_descending", "histogram", "reverse", "frac_prevs")
+RASP = ("sort", "sort_descending", "histogram", "histogram_padded", "reverse", "frac_prevs")
 PROGRAMS = (*RASP, "alta_parity_relative", "alta_parity_absolute")
 SCHEMA = "brewery.compiled-program.v1"
 
@@ -37,6 +37,7 @@ def compile_tracr(program):
             rasp.tokens, rasp.Map(lambda t: 3 - int(t), rasp.tokens), max_seq_len=LENGTH, min_key=1
         ),
         "histogram": lib.make_hist,
+        "histogram_padded": lib.make_hist,
         "reverse": lambda: lib.make_reverse(rasp.tokens),
         "frac_prevs": lambda: lib.make_frac_prevs(rasp.tokens == "1"),
     }
@@ -110,6 +111,19 @@ def compile_tracr(program):
     )
     width = len(model.residual_labels)
     weights["unembed"] = unembed.apply({}, np.eye(width, dtype=np.float32)).reshape(width, -1)
+    num_heads = config.num_heads
+    if program == "histogram_padded":
+        # Add one unused head without changing the logical RASP graph or the
+        # assembled coordinates of the compiler's active heads.
+        num_heads += 1
+        for layer in range(config.num_layers):
+            prefix = f"transformer/layer_{layer}/attn"
+            for projection in ("query", "key", "value"):
+                key = f"{prefix}/{projection}"
+                weights[f"{key}/w"] = np.pad(weights[f"{key}/w"], ((0, 0), (0, config.key_size)))
+                weights[f"{key}/b"] = np.pad(weights[f"{key}/b"], (0, config.key_size))
+            key = f"{prefix}/linear/w"
+            weights[key] = np.pad(weights[key], ((0, config.key_size), (0, 0)))
     output_tokens = None
     if program != "frac_prevs":
         output_tokens = list(map(int, model.output_encoder.decode(
@@ -123,7 +137,7 @@ def compile_tracr(program):
         "layer_norm": config.layer_norm,
         "causal": config.causal,
         "num_layers": config.num_layers,
-        "num_heads": config.num_heads,
+        "num_heads": num_heads,
         "head_size": config.key_size,
         "mlp_hidden_size": config.mlp_hidden_size,
         "bos": model.input_encoder.encode([compiling.COMPILER_BOS])[0],
@@ -366,6 +380,7 @@ def check(config, weights):
         "sort": sorted,
         "sort_descending": lambda xs: sorted(xs, reverse=True),
         "histogram": lambda xs: [xs.count(x) for x in xs],
+        "histogram_padded": lambda xs: [xs.count(x) for x in xs],
         "reverse": lambda xs: xs[::-1],
         "frac_prevs": lambda xs: [xs[:i].count(1) / i for i in range(1, len(xs) + 1)],
         "alta_parity_relative": lambda xs: [sum(xs[:i]) % 2 for i in range(1, len(xs) + 1)],

@@ -31,6 +31,15 @@
       "checked_inputs": 30
     },
     {
+      "program": "histogram_padded",
+      "model_sha256": "19fb095ad16fa86fdbac44dfa05278524857138f3588d1399e9588dcca87a84d",
+      "config_sha256": "31c5a63a6f9f882880164748c14a321ba45f409c3eb19a85f5cbd75a40237313",
+      "compiler_commit": "9ce2b8c82b6ba10e62e86cf6f390e7536d4fd2cd",
+      "ground_truth_sha256": "b7671c6ea896b77e05e31c94b4ca76654b85b21aeba2782e6fd5fb6b56be2901",
+      "runtime": "python=3.12.15 numpy=1.26.4 scipy=1.14.1 safetensors=0.5.3 jax=0.4.38 jaxlib=0.4.38 dm-haiku=0.0.13",
+      "checked_inputs": 340
+    },
+    {
       "program": "sort_descending",
       "model_sha256": "69f86c2df5d6622e95aa30f3dfa224d366b62ca864c9a9fbe90683cd055cf41d",
       "config_sha256": "937973dac564fd61a714ad306962340d3ed9c6ebc54fc434c5a8c5d76d4b561c",
@@ -73,6 +82,32 @@
         "output_position": 3,
         "clean_metric": 0.9999923828281306,
         "corrupt_metric": -0.9999923826540706,
+        "method": "attribution_patching",
+        "zero_attribution_sites_with_patch_effect": [
+          {
+            "layer": 0,
+            "role": "ffn_out",
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 1.9999847654241814
+          },
+          {
+            "layer": 1,
+            "role": "ffn_out",
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 1.9999847654241814
+          },
+          {
+            "layer": 2,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 1.9999847654241814
+          }
+        ],
+        "evaluation": "ranking",
         "sites": 8,
         "compiler_sites": 5,
         "top_k": 5,
@@ -85,60 +120,182 @@
             "role": "head_out",
             "head": 0,
             "compiler_site": true,
-            "score": 1.9999847654822012,
-            "patched_delta": 1.9999847654822012
+            "attribution_score": 1.9999847654822012,
+            "patched_delta": 1.9999847654822012,
+            "score": 1.9999847654822012
           },
           {
             "layer": 2,
             "role": "ffn_out",
             "compiler_site": true,
-            "score": 0.00017954393283554953,
-            "patched_delta": 1.9999847654241814
+            "attribution_score": 0.00017954393283554953,
+            "patched_delta": 1.9999847654241814,
+            "score": 0.00017954393283554953
           },
           {
             "layer": 0,
             "role": "head_out",
             "head": 0,
             "compiler_site": false,
-            "score": 0.0,
-            "patched_delta": 0.0
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
           },
           {
             "layer": 0,
             "role": "ffn_out",
             "compiler_site": true,
-            "score": 0.0,
-            "patched_delta": 1.9999847654241814
+            "attribution_score": 0.0,
+            "patched_delta": 1.9999847654241814,
+            "score": 0.0
           },
           {
             "layer": 1,
             "role": "head_out",
             "head": 0,
             "compiler_site": false,
-            "score": 0.0,
-            "patched_delta": 0.0
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
           },
           {
             "layer": 1,
             "role": "ffn_out",
             "compiler_site": true,
-            "score": 0.0,
-            "patched_delta": 1.9999847654241814
+            "attribution_score": 0.0,
+            "patched_delta": 1.9999847654241814,
+            "score": 0.0
           },
           {
             "layer": 2,
             "role": "head_out",
             "head": 0,
             "compiler_site": true,
-            "score": 0.0,
-            "patched_delta": 1.9999847654241814
+            "attribution_score": 0.0,
+            "patched_delta": 1.9999847654241814,
+            "score": 0.0
           },
           {
             "layer": 3,
             "role": "ffn_out",
             "compiler_site": false,
-            "score": 0.0,
-            "patched_delta": 0.0
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
+          }
+        ],
+        "trace_sha256": {
+          "clean": "6e73344ebee15c3a7bc7d792e40ef4568424c53ac128a6a2cd9587d74918c36e",
+          "corrupt": "db250b090de5d2de4cacedee7b2c813d822ea827728c7cf4e0f531d0c0f3ee8c"
+        }
+      },
+      {
+        "program": "sort",
+        "clean": [
+          2,
+          0,
+          2,
+          1
+        ],
+        "corrupt": [
+          2,
+          3,
+          2,
+          1
+        ],
+        "clean_output": [
+          0,
+          1,
+          2,
+          2
+        ],
+        "corrupt_output": [
+          1,
+          2,
+          2,
+          3
+        ],
+        "target": 2,
+        "contrast": 3,
+        "output_position": 3,
+        "clean_metric": 0.9999923828281306,
+        "corrupt_metric": -0.9999923826540706,
+        "method": "activation_patching",
+        "evaluation": "ranking",
+        "sites": 8,
+        "compiler_sites": 5,
+        "top_k": 5,
+        "precision": 1.0,
+        "recall": 1.0,
+        "roc_auc": 1.0,
+        "ranking": [
+          {
+            "layer": 3,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": true,
+            "attribution_score": 1.9999847654822012,
+            "patched_delta": 1.9999847654822012,
+            "score": 1.9999847654822012
+          },
+          {
+            "layer": 0,
+            "role": "ffn_out",
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 1.9999847654241814,
+            "score": 1.9999847654241814
+          },
+          {
+            "layer": 1,
+            "role": "ffn_out",
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 1.9999847654241814,
+            "score": 1.9999847654241814
+          },
+          {
+            "layer": 2,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 1.9999847654241814,
+            "score": 1.9999847654241814
+          },
+          {
+            "layer": 2,
+            "role": "ffn_out",
+            "compiler_site": true,
+            "attribution_score": 0.00017954393283554953,
+            "patched_delta": 1.9999847654241814,
+            "score": 1.9999847654241814
+          },
+          {
+            "layer": 0,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": false,
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 1,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": false,
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 3,
+            "role": "ffn_out",
+            "compiler_site": false,
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
           }
         ],
         "trace_sha256": {
@@ -177,10 +334,22 @@
         "output_position": 3,
         "clean_metric": 1.0,
         "corrupt_metric": -1.0,
+        "method": "attribution_patching",
+        "zero_attribution_sites_with_patch_effect": [
+          {
+            "layer": 0,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 2.0
+          }
+        ],
+        "evaluation": "recall_only",
         "sites": 2,
         "compiler_sites": 2,
         "top_k": 2,
-        "precision": 1.0,
+        "precision": null,
         "recall": 1.0,
         "roc_auc": null,
         "ranking": [
@@ -188,16 +357,81 @@
             "layer": 0,
             "role": "ffn_out",
             "compiler_site": true,
-            "score": 2.0,
-            "patched_delta": 2.0
+            "attribution_score": 2.0,
+            "patched_delta": 2.0,
+            "score": 2.0
           },
           {
             "layer": 0,
             "role": "head_out",
             "head": 0,
             "compiler_site": true,
-            "score": 0.0,
-            "patched_delta": 2.0
+            "attribution_score": 0.0,
+            "patched_delta": 2.0,
+            "score": 0.0
+          }
+        ],
+        "trace_sha256": {
+          "clean": "625c7f00b81088bcb0db58f34090c3b64c9cde3e0e1874d68007617b05ffad30",
+          "corrupt": "d5a29b2d1542d198c89e0da5b58052dd2e2af31cb8d9e36f7e00f37e13f2f526"
+        }
+      },
+      {
+        "program": "histogram",
+        "clean": [
+          2,
+          0,
+          2,
+          1
+        ],
+        "corrupt": [
+          2,
+          0,
+          2,
+          2
+        ],
+        "clean_output": [
+          2,
+          1,
+          2,
+          1
+        ],
+        "corrupt_output": [
+          3,
+          1,
+          3,
+          3
+        ],
+        "target": 1,
+        "contrast": 3,
+        "output_position": 3,
+        "clean_metric": 1.0,
+        "corrupt_metric": -1.0,
+        "method": "activation_patching",
+        "evaluation": "recall_only",
+        "sites": 2,
+        "compiler_sites": 2,
+        "top_k": 2,
+        "precision": null,
+        "recall": 1.0,
+        "roc_auc": null,
+        "ranking": [
+          {
+            "layer": 0,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 2.0,
+            "score": 2.0
+          },
+          {
+            "layer": 0,
+            "role": "ffn_out",
+            "compiler_site": true,
+            "attribution_score": 2.0,
+            "patched_delta": 2.0,
+            "score": 2.0
           }
         ],
         "trace_sha256": {
@@ -236,10 +470,13 @@
         "output_position": 3,
         "clean_metric": 1.0,
         "corrupt_metric": -1.0,
+        "method": "attribution_patching",
+        "zero_attribution_sites_with_patch_effect": [],
+        "evaluation": "recall_only",
         "sites": 21,
         "compiler_sites": 21,
         "top_k": 21,
-        "precision": 1.0,
+        "precision": null,
         "recall": 1.0,
         "roc_auc": null,
         "ranking": [
@@ -247,167 +484,570 @@
             "layer": 2,
             "role": "ffn_out",
             "compiler_site": true,
-            "score": 3.39013671875,
-            "patched_delta": 2.0
+            "attribution_score": 3.39013671875,
+            "patched_delta": 2.0,
+            "score": 3.39013671875
           },
           {
             "layer": 3,
             "role": "ffn_out",
             "compiler_site": true,
-            "score": 1.91796875,
-            "patched_delta": 2.0
+            "attribution_score": 1.91796875,
+            "patched_delta": 2.0,
+            "score": 1.91796875
           },
           {
             "layer": 4,
             "role": "head_out",
             "head": 0,
             "compiler_site": true,
-            "score": 0.49609375,
-            "patched_delta": 0.0
+            "attribution_score": 0.49609375,
+            "patched_delta": 0.0,
+            "score": 0.49609375
           },
           {
             "layer": 4,
             "role": "ffn_out",
             "compiler_site": true,
-            "score": 0.40625,
-            "patched_delta": 0.0
+            "attribution_score": 0.40625,
+            "patched_delta": 0.0,
+            "score": 0.40625
           },
           {
             "layer": 5,
             "role": "head_out",
             "head": 0,
             "compiler_site": true,
-            "score": 0.40625,
-            "patched_delta": 0.0
+            "attribution_score": 0.40625,
+            "patched_delta": 0.0,
+            "score": 0.40625
           },
           {
             "layer": 3,
             "role": "head_out",
             "head": 0,
             "compiler_site": true,
-            "score": 0.36181640625,
-            "patched_delta": 2.0
+            "attribution_score": 0.36181640625,
+            "patched_delta": 2.0,
+            "score": 0.36181640625
           },
           {
             "layer": 1,
             "role": "ffn_out",
             "compiler_site": true,
-            "score": 0.36175537109375,
-            "patched_delta": 2.0
+            "attribution_score": 0.36175537109375,
+            "patched_delta": 2.0,
+            "score": 0.36175537109375
           },
           {
             "layer": 2,
             "role": "head_out",
             "head": 0,
             "compiler_site": true,
-            "score": 0.36175537109375,
-            "patched_delta": 0.0
+            "attribution_score": 0.36175537109375,
+            "patched_delta": 0.0,
+            "score": 0.36175537109375
           },
           {
             "layer": 0,
             "role": "ffn_out",
             "compiler_site": true,
-            "score": 0.35605621337890625,
-            "patched_delta": 2.0
+            "attribution_score": 0.35605621337890625,
+            "patched_delta": 2.0,
+            "score": 0.35605621337890625
           },
           {
             "layer": 1,
             "role": "head_out",
             "head": 0,
             "compiler_site": true,
-            "score": 0.35605621337890625,
-            "patched_delta": 0.0
+            "attribution_score": 0.35605621337890625,
+            "patched_delta": 0.0,
+            "score": 0.35605621337890625
           },
           {
             "layer": 0,
             "role": "head_out",
             "head": 0,
             "compiler_site": true,
-            "score": 0.3461294174194336,
-            "patched_delta": 0.0
+            "attribution_score": 0.3461294174194336,
+            "patched_delta": 0.0,
+            "score": 0.3461294174194336
           },
           {
             "layer": 5,
             "role": "ffn_out",
             "compiler_site": true,
-            "score": 0.25,
-            "patched_delta": 0.0
+            "attribution_score": 0.25,
+            "patched_delta": 0.0,
+            "score": 0.25
           },
           {
             "layer": 6,
             "role": "head_out",
             "head": 0,
             "compiler_site": true,
-            "score": 0.25,
-            "patched_delta": 0.0
+            "attribution_score": 0.25,
+            "patched_delta": 0.0,
+            "score": 0.25
           },
           {
             "layer": 0,
             "role": "head_out",
             "head": 1,
             "compiler_site": true,
-            "score": 0.0,
-            "patched_delta": 0.0
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
           },
           {
             "layer": 1,
             "role": "head_out",
             "head": 1,
             "compiler_site": true,
-            "score": 0.0,
-            "patched_delta": 0.0
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
           },
           {
             "layer": 2,
             "role": "head_out",
             "head": 1,
             "compiler_site": true,
-            "score": 0.0,
-            "patched_delta": 0.0
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
           },
           {
             "layer": 3,
             "role": "head_out",
             "head": 1,
             "compiler_site": true,
-            "score": 0.0,
-            "patched_delta": 0.0
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
           },
           {
             "layer": 4,
             "role": "head_out",
             "head": 1,
             "compiler_site": true,
-            "score": 0.0,
-            "patched_delta": 0.0
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
           },
           {
             "layer": 5,
             "role": "head_out",
             "head": 1,
             "compiler_site": true,
-            "score": 0.0,
-            "patched_delta": 0.0
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
           },
           {
             "layer": 6,
             "role": "head_out",
             "head": 1,
             "compiler_site": true,
-            "score": 0.0,
-            "patched_delta": 0.0
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
           },
           {
             "layer": 6,
             "role": "ffn_out",
             "compiler_site": true,
-            "score": 0.0,
-            "patched_delta": 0.0
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
           }
         ],
         "trace_sha256": {
           "clean": "d7ddb9de5e15297b035d67a62b2ef852a2370f6591d8913701e3d41296583dbc",
           "corrupt": "36cc5a149735f704deb9501beab72927eaeaec5d7352be5d89bdf61285fb7cc0"
+        }
+      },
+      {
+        "program": "alta_parity_relative",
+        "clean": [
+          1,
+          0,
+          1,
+          0
+        ],
+        "corrupt": [
+          1,
+          0,
+          0,
+          0
+        ],
+        "clean_output": [
+          1,
+          1,
+          0,
+          0
+        ],
+        "corrupt_output": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "target": 0,
+        "contrast": 1,
+        "output_position": 3,
+        "clean_metric": 1.0,
+        "corrupt_metric": -1.0,
+        "method": "activation_patching",
+        "evaluation": "recall_only",
+        "sites": 21,
+        "compiler_sites": 21,
+        "top_k": 21,
+        "precision": null,
+        "recall": 1.0,
+        "roc_auc": null,
+        "ranking": [
+          {
+            "layer": 0,
+            "role": "ffn_out",
+            "compiler_site": true,
+            "attribution_score": 0.35605621337890625,
+            "patched_delta": 2.0,
+            "score": 2.0
+          },
+          {
+            "layer": 1,
+            "role": "ffn_out",
+            "compiler_site": true,
+            "attribution_score": 0.36175537109375,
+            "patched_delta": 2.0,
+            "score": 2.0
+          },
+          {
+            "layer": 2,
+            "role": "ffn_out",
+            "compiler_site": true,
+            "attribution_score": 3.39013671875,
+            "patched_delta": 2.0,
+            "score": 2.0
+          },
+          {
+            "layer": 3,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": true,
+            "attribution_score": 0.36181640625,
+            "patched_delta": 2.0,
+            "score": 2.0
+          },
+          {
+            "layer": 3,
+            "role": "ffn_out",
+            "compiler_site": true,
+            "attribution_score": 1.91796875,
+            "patched_delta": 2.0,
+            "score": 2.0
+          },
+          {
+            "layer": 0,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": true,
+            "attribution_score": 0.3461294174194336,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 0,
+            "role": "head_out",
+            "head": 1,
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 1,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": true,
+            "attribution_score": 0.35605621337890625,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 1,
+            "role": "head_out",
+            "head": 1,
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 2,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": true,
+            "attribution_score": 0.36175537109375,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 2,
+            "role": "head_out",
+            "head": 1,
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 3,
+            "role": "head_out",
+            "head": 1,
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 4,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": true,
+            "attribution_score": 0.49609375,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 4,
+            "role": "head_out",
+            "head": 1,
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 4,
+            "role": "ffn_out",
+            "compiler_site": true,
+            "attribution_score": 0.40625,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 5,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": true,
+            "attribution_score": 0.40625,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 5,
+            "role": "head_out",
+            "head": 1,
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 5,
+            "role": "ffn_out",
+            "compiler_site": true,
+            "attribution_score": 0.25,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 6,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": true,
+            "attribution_score": 0.25,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 6,
+            "role": "head_out",
+            "head": 1,
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
+          },
+          {
+            "layer": 6,
+            "role": "ffn_out",
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
+          }
+        ],
+        "trace_sha256": {
+          "clean": "d7ddb9de5e15297b035d67a62b2ef852a2370f6591d8913701e3d41296583dbc",
+          "corrupt": "36cc5a149735f704deb9501beab72927eaeaec5d7352be5d89bdf61285fb7cc0"
+        }
+      },
+      {
+        "program": "histogram_padded",
+        "clean": [
+          2,
+          0,
+          2,
+          1
+        ],
+        "corrupt": [
+          2,
+          0,
+          2,
+          2
+        ],
+        "clean_output": [
+          2,
+          1,
+          2,
+          1
+        ],
+        "corrupt_output": [
+          3,
+          1,
+          3,
+          3
+        ],
+        "target": 1,
+        "contrast": 3,
+        "output_position": 3,
+        "clean_metric": 1.0,
+        "corrupt_metric": -1.0,
+        "method": "attribution_patching",
+        "zero_attribution_sites_with_patch_effect": [
+          {
+            "layer": 0,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 2.0
+          }
+        ],
+        "evaluation": "ranking",
+        "sites": 3,
+        "compiler_sites": 2,
+        "top_k": 2,
+        "precision": 0.75,
+        "recall": 0.75,
+        "roc_auc": 0.75,
+        "ranking": [
+          {
+            "layer": 0,
+            "role": "ffn_out",
+            "compiler_site": true,
+            "attribution_score": 2.0,
+            "patched_delta": 2.0,
+            "score": 2.0
+          },
+          {
+            "layer": 0,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 2.0,
+            "score": 0.0
+          },
+          {
+            "layer": 0,
+            "role": "head_out",
+            "head": 1,
+            "compiler_site": false,
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
+          }
+        ],
+        "trace_sha256": {
+          "clean": "c33c37fb3496f3432c1eb0f56631014de03e0817137fff737215fa4adda891f0",
+          "corrupt": "3d214b83238e4f17bd5994f876cbbf09e8aa37edf92c3b870037939b61a21906"
+        }
+      },
+      {
+        "program": "histogram_padded",
+        "clean": [
+          2,
+          0,
+          2,
+          1
+        ],
+        "corrupt": [
+          2,
+          0,
+          2,
+          2
+        ],
+        "clean_output": [
+          2,
+          1,
+          2,
+          1
+        ],
+        "corrupt_output": [
+          3,
+          1,
+          3,
+          3
+        ],
+        "target": 1,
+        "contrast": 3,
+        "output_position": 3,
+        "clean_metric": 1.0,
+        "corrupt_metric": -1.0,
+        "method": "activation_patching",
+        "evaluation": "ranking",
+        "sites": 3,
+        "compiler_sites": 2,
+        "top_k": 2,
+        "precision": 1.0,
+        "recall": 1.0,
+        "roc_auc": 1.0,
+        "ranking": [
+          {
+            "layer": 0,
+            "role": "head_out",
+            "head": 0,
+            "compiler_site": true,
+            "attribution_score": 0.0,
+            "patched_delta": 2.0,
+            "score": 2.0
+          },
+          {
+            "layer": 0,
+            "role": "ffn_out",
+            "compiler_site": true,
+            "attribution_score": 2.0,
+            "patched_delta": 2.0,
+            "score": 2.0
+          },
+          {
+            "layer": 0,
+            "role": "head_out",
+            "head": 1,
+            "compiler_site": false,
+            "attribution_score": 0.0,
+            "patched_delta": 0.0,
+            "score": 0.0
+          }
+        ],
+        "trace_sha256": {
+          "clean": "c33c37fb3496f3432c1eb0f56631014de03e0817137fff737215fa4adda891f0",
+          "corrupt": "3d214b83238e4f17bd5994f876cbbf09e8aa37edf92c3b870037939b61a21906"
         }
       }
     ],
