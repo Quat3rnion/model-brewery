@@ -312,6 +312,12 @@ impl InitialRelaySlots {
 }
 
 fn stage(cfg: &Config, action: &str, dest: &str, id: &str, job: Job) -> Wire<Reply> {
+    if job.kind == brewery_worker::hgn_edit::JOB {
+        ensure_wire(
+            action == "start" && job.inputs.len() == 1 && job.inputs[0].host == dest,
+            "private HGN edits require a same-host direct input",
+        )?;
+    }
     if action == "cleanup" {
         return cfg.rpc(dest, Rpc::Cleanup { id: id.into() });
     }

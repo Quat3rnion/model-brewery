@@ -292,6 +292,7 @@ fn hosted_agent_reuses_mcp_scratch_workflow_without_approval() {
             "`reference_id` and `reference_layer`",
             "`get_direction`",
             "`ablate_direction`",
+            "fit on its Library root",
             "`search_ablation`",
             "`create_direction_intervention`",
             "`run_heretic`",

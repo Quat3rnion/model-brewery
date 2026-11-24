@@ -647,7 +647,7 @@
       "post": {
         "operationId": "editScratch",
         "summary": "Apply one or more edits in a new scratch child",
-        "description": "Apply the operations in order. The parent scratch revision stays unchanged. An edit of an approved revision still makes an unapproved child.",
+        "description": "Apply the operations in order to a SafeTensors scratch revision. The parent stays unchanged. An edit of an approved revision still makes an unapproved child.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "x-brewery-max-body-bytes": 262144, "content": {"application/json": {"schema": {
           "type": "object", "additionalProperties": false, "required": ["operations"],
@@ -670,7 +670,7 @@
       "post": {
         "operationId": "ablateScratchDirection",
         "summary": "Ablate a fitted direction in a new scratch child",
-        "description": "Edit dense attention output and MLP down projections on the CPU. Use a pinned scratch parent and a version 2 behavior direction. The child is private and has a reversible delta. Embedding edits are not supported.",
+        "description": "Use a version 2 behavior direction. SafeTensors edits return a private scratch child with a reversible delta. A pinned standalone HGN Library parent or HGN scratch child queues a private CPU job on its source worker. For HGN, use plain, flat and alpha 1, and fit the direction on the Library root. The job edits dense and routed residual writers together without changing stores. Poll the job to obtain scratch_id. HGN publication and embedding edits are not supported.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {
           "type": "object", "additionalProperties": false,
@@ -687,8 +687,12 @@
           }
         }}}},
         "responses": {
-          "200": {"$ref": "#/components/responses/ScratchRow"},
+          "200": {"description": "Idempotent replay: the SafeTensors revision or the queued HGN job ID.", "content": {"application/json": {"schema": {"anyOf": [
+            {"$ref": "#/components/schemas/ScratchRevision"},
+            {"type": "object", "required": ["id"], "additionalProperties": false, "properties": {"id": {"$ref": "#/components/schemas/Id"}}}
+          ]}}}},
           "201": {"$ref": "#/components/responses/ScratchRow"},
+          "202": {"description": "The queued private HGN edit job.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
           "400": {"$ref": "#/components/responses/BadRequest"},
           "403": {"$ref": "#/components/responses/Forbidden"},
           "404": {"$ref": "#/components/responses/NotFound"},
@@ -2426,9 +2430,9 @@
       "ScratchDelta": {
         "type": "object", "required": ["schema", "parent_sha256", "revision_sha256", "changed_tensors", "changed_bytes", "delta_bytes", "delta_sha256"],
         "properties": {
-          "schema": {"const": "brewery.weight-delta.v1"}, "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "schema": {"enum": ["brewery.weight-delta.v1", "brewery.hgn-edit-summary.v1"]}, "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"},
           "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "changed_tensors": {"type": "integer", "minimum": 0},
-          "changed_bytes": {"type": "integer", "minimum": 0}, "delta_bytes": {"type": "integer", "minimum": 0},
+          "changed_bytes": {"type": "integer", "minimum": 0, "description": "For HGN, total payload bytes of changed tensors."}, "delta_bytes": {"type": "integer", "minimum": 0, "description": "Zero for HGN; no reversible delta is stored."},
           "delta_sha256": {"$ref": "#/components/schemas/ScratchHash"}
         }
       },
@@ -2478,9 +2482,15 @@
             "inputs": {"$ref": "#/components/schemas/ScratchMergeInputs"}
           }},
           "pruning": {"$ref": "#/components/schemas/DensePruning"},
-          "ablation": {"type": "object", "required": ["direction", "source_gguf_sha256", "first_layer", "last_layer", "kernel", "variant"], "properties": {
+          "ablation": {"type": "object", "required": ["direction", "first_layer", "last_layer", "kernel", "variant"], "properties": {
             "direction": {"$ref": "#/components/schemas/AblationDirection"},
             "source_gguf_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "hgn": {"type": "object", "required": ["job_id", "root_model", "root_sha256", "report"], "properties": {
+              "job_id": {"$ref": "#/components/schemas/Id"},
+              "root_model": {"$ref": "#/components/schemas/Id"},
+              "root_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+              "report": {"$ref": "#/components/schemas/HgnFeedback"}
+            }},
             "first_layer": {"$ref": "#/components/schemas/TraceLayer"},
             "last_layer": {"$ref": "#/components/schemas/TraceLayer"},
             "kernel": {"$ref": "#/components/schemas/AblationKernel"},
@@ -2492,7 +2502,7 @@
             "lanternfish_sha256": {"$ref": "#/components/schemas/ScratchHash"}
           }},
           "tensors": {"type": "array", "items": {"type": "object", "required": ["name", "shape", "dtype"], "properties": {
-            "name": {"type": "string"}, "shape": {"type": "array", "items": {"type": "integer"}}, "dtype": {"enum": ["F64", "F32", "F16", "BF16"]}
+            "name": {"type": "string"}, "shape": {"type": "array", "items": {"type": "integer"}}, "dtype": {"enum": ["F64", "F32", "F16", "BF16", "I4R", "HT3", "HT4", "Q4CP", "Q8G64"]}
           }}},
           "compiled_program": {
             "type": "object", "required": ["program", "config_sha256", "runner_sha256"],
@@ -2538,10 +2548,31 @@
           "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionConfig"}
         }
       },
+      "HgnFeedback": {
+        "type": "object", "required": ["schema", "encoder_sha256", "parent_sha256", "revision_sha256", "direction", "tensors"],
+        "properties": {
+          "schema": {"const": "brewery.hgn-feedback.v1"},
+          "encoder_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "direction": {"type": "array", "items": {"type": "number"}},
+          "tensors": {"type": "object", "additionalProperties": {
+            "type": "object", "required": ["store", "variant", "bytes", "shape", "iterations", "tolerance", "parent_mean_abs_component", "leftover_before", "leftover_after", "rel_error", "payload_sha256"],
+            "properties": {
+              "store": {"type": "integer"}, "variant": {"type": "integer"}, "bytes": {"type": "integer"}, "shape": {"type": "array", "items": {"type": "integer"}},
+              "iterations": {"type": "integer"}, "tolerance": {"type": "number"}, "parent_mean_abs_component": {"type": "number"},
+              "leftover_before": {"type": "number", "description": "Decoded projection fraction after the first encode."},
+              "leftover_after": {"type": "number", "description": "Decoded projection fraction in the final stored tensor."},
+              "rel_error": {"type": "number", "description": "Frobenius norm of the edit relative to its parent."},
+              "payload_sha256": {"$ref": "#/components/schemas/ScratchHash"}
+            }
+          }}
+        }
+      },
       "ScratchRevision": {
         "type": "object", "required": ["id", "kind", "state", "sha256", "qualification", "library_model_id", "provenance", "delta"],
         "properties": {
-          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"enum": ["scratch", "compiled_program"]},
+          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"enum": ["scratch", "scratch_hgn", "compiled_program"]},
           "state": {"enum": ["scratch", "publish_requested", "approved", "discarded"]},
           "sha256": {"$ref": "#/components/schemas/ScratchHash"}, "qualification": {"const": "not release-qualified"},
           "library_model_id": {"anyOf": [{"$ref": "#/components/schemas/Id"}, {"type": "null"}]},
@@ -2928,7 +2959,7 @@
         "type": "object",
         "required": ["id", "kind", "host", "pool_slot", "state", "progress", "input_ids", "options", "cancel_requested", "has_result", "created_at", "updated_at"],
         "properties": {
-          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf", "scratch_checks", "scratch_locate_edit", "weight_spectra", "search_ablation", "screen_ablation", "heretic", "heretic_reproduce"]}]},
+          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf", "scratch_checks", "scratch_locate_edit", "scratch_hgn_ablation", "weight_spectra", "search_ablation", "screen_ablation", "heretic", "heretic_reproduce"]}]},
           "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}], "description": "Concrete worker ID, or auto before assignment of a pool conversion."},
           "requested_host": {"const": "auto", "description": "Present if auto conversion routing was requested."},
           "pool_slot": {"type": "boolean"}, "state": {"$ref": "#/components/schemas/JobState"}, "progress": {"type": "string"},

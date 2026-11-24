@@ -560,3 +560,4 @@ pub fn available(p: &Path) -> Result<u64> {
     Ok(fs2::available_space(p)?)
 }
 pub mod ablation_search;
+pub mod hgn_edit;

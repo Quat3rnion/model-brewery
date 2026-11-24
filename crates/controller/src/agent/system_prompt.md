@@ -48,8 +48,11 @@ as a probe result, not as evidence of a change in generated behavior.
 For a native comparison, fit on the exact private baseline GGUF bytes
 registered as a Library GGUF.
 Use `ablate_direction` to test a fitted version 2 direction in a private
-scratch child. Use a direction from the same model in the same residual
-basis. Check the target behavior and side effects before a publish request.
+scratch child. For HGN, use the pinned Library or HGN scratch ID, a direction
+fit on its Library root, `plain`, `flat`, and alpha 1. Poll `get_job`, then use
+`get_scratch` to read native-store metrics. HGN does not support `apply_edit`
+or publication. For SafeTensors, check target behavior and side effects
+before a publish request.
 Use `search_ablation` for a bounded slop or sycophancy search on the exact
 parent GGUF. Read its receipt with `get_job`. Compare with the matched
 random control and report any effect that weight-edit checks did not confirm.

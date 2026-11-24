@@ -1911,6 +1911,51 @@ References: [Arditi et al. (2024), section 4.1](https://arxiv.org/abs/2406.11717
 [Lai (2025), Projected Abliteration](https://huggingface.co/blog/grimjim/projected-abliteration)
 and [Norm-Preserving Biprojected Abliteration](https://huggingface.co/blog/grimjim/norm-preserving-biprojected-abliteration).
 
+### Native HGN v2 scratch edits
+
+Use `ablate_direction` with the ID and SHA-256 of a standalone HGN v2 Library
+model on the approved source worker. Use `plain`, a `flat` kernel, and alpha 1.
+Fit a version 2 direction on the Library model. The job edits attention output,
+FFN down projections, and selected PLE value projections. It edits dense and
+routed writers together. It does not edit embeddings or MTP weights.
+
+Poll `get_job` and pass `result.scratch_id` to `get_scratch`. For a later edit,
+use the HGN scratch ID and its exact SHA-256. Continue to use a direction fit on
+its Library root. The child has no Library record or reversible delta.
+`apply_edit`, conversion to GGUF, and publication do not support HGN scratch.
+Discard removes access to the revision. Private worker files and cache entries
+remain on Frame; remove them only when they are no longer required for audit,
+resume, or an active job.
+
+The worker stores `hgn-feedback.json` with the child. `get_scratch` exposes the
+same report under `provenance.ablation.hgn.report`. It records the model hashes,
+direction, encoder hash, store, variant, payload hash and size, number of
+passes, the first and final decoded component fractions, and relative error.
+The tolerances are 0.05 for I4r, Q4Cp and Q8G64, and 0.08 for HT3 and HT4.
+BF16 uses one projection before rounding and measures any rounding residue.
+The job fails if any selected tensor misses its tolerance. Completed payloads
+are reused when the parent, layers, encoder, and direction match. Edit-aware
+rounding is not supported. This receipt does not replace an independent
+decoded-store audit or a CPU forward check.
+
+On the non-Hy4 Frame HGN worker, use the HGN trace worker's approved source
+roots and a private worker state directory. Set the dispatch capability
+`scratch_hgn_ablation` only for this worker. Add an `hgn_edit` object to the
+worker configuration with `host`, `grant_key_file`, and `build_admission`.
+Put a shared random 32-byte key in private, regular files owned by the controller
+and worker identities. Set `BREWERY_HGN_EDIT_KEY_FILE` on the controller to
+its copy. Keep both files out of all model roots. Do not put the key in a job
+request. The worker state directory must have mode 0700; leave the ordinary
+`admission` and Hy4 settings unset.
+
+Use an absolute path to an operator-owned build wrapper for `build_admission`.
+The worker calls it as `wrapper -- /path/to/brewery-engine`. The wrapper must
+hold the exclusive Frame build reservation from before source hashing until
+the engine exits. It must send queue messages to stderr and keep stdin and
+stdout for the engine. Do not nest a reservation. Coordinate the build window
+before you enable the capability or enqueue an edit. Keep the stock model and
+production units unchanged.
+
 ### Native ablation search
 
 Use `search_ablation` or `POST /api/scratch/{id}/search_ablation` on an

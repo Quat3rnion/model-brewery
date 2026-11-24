@@ -31,6 +31,7 @@ struct Config {
     #[serde(default)]
     source_grant_protected: Vec<PathBuf>,
     scratch_access: Option<ScratchAccess>,
+    hgn_edit: Option<hgn_edit::Config>,
     engine: PathBuf,
     admission: Option<PathBuf>,
     exl3_gpu_queue: Option<PathBuf>,
@@ -207,6 +208,39 @@ impl Config {
             .context("set BREWERY_WORKER_CONFIG")?
             .canonicalize()?;
         let cfg: Config = load(&path)?;
+        if let Some(edit) = &cfg.hgn_edit {
+            token(&edit.host)?;
+            let md = fs::symlink_metadata(&path)?;
+            let state = fs::symlink_metadata(&cfg.root)?;
+            ensure!(
+                md.uid() == unsafe { libc::geteuid() }
+                    && md.mode() & 0o077 == 0
+                    && state.is_dir()
+                    && state.uid() == unsafe { libc::geteuid() }
+                    && state.mode() & 0o7777 == 0o700
+                    && cfg.scratch_access.is_none()
+                    && cfg.hy4_plan.is_none()
+                    && cfg.admission.is_none()
+                    && cfg.weight_editor_host.is_none()
+                    && cfg.pinned_publication.is_none()
+                    && cfg.hf_download.is_none()
+                    && cfg.backend_weight_download_root.is_none()
+                    && cfg.backend_weight_calibration_root.is_none()
+                    && cfg.source_grants.is_empty()
+                    && !cfg
+                        .source_roots
+                        .iter()
+                        .any(|root| edit.grant_key_file.starts_with(root)),
+                "HGN editing requires a dedicated private worker state and configuration"
+            );
+            absolute(&edit.build_admission)?;
+            ensure!(
+                edit.build_admission.canonicalize()? == edit.build_admission
+                    && fs::metadata(&edit.build_admission)?.is_file(),
+                "invalid HGN build wrapper"
+            );
+            hgn_edit::read_key(&edit.grant_key_file)?;
+        }
         if let Some(access) = &cfg.scratch_access {
             token(&access.job_id)?;
             let md = fs::symlink_metadata(&path)?;
@@ -571,6 +605,10 @@ impl Worker {
 
     fn source(&self, p: &Path) -> Result<(PathBuf, PathBuf)> {
         ensure!(
+            !hgn_edit::private_path(p),
+            "private HGN scratch is not published"
+        );
+        ensure!(
             self.cfg.backend_weight_download_root.is_none(),
             "backend editing requires an exact verified publication"
         );
@@ -621,6 +659,53 @@ impl Worker {
             return Ok((cache::authorized(p, std::slice::from_ref(&root))?, root));
         }
         bail!("input outside allowed source roots")
+    }
+
+    fn hgn_parent(&self, input: &Input, req: &hgn_edit::Request) -> Result<PathBuf> {
+        let path = if let Some(producer) = &req.producer {
+            let row = self.require(producer)?;
+            let job = row
+                .job
+                .as_ref()
+                .context("HGN scratch producer is unavailable")?;
+            let first = job
+                .inputs
+                .first()
+                .context("HGN scratch producer has no root input")?;
+            ensure!(
+                row.reply.state == "succeeded"
+                    && !row.cancel
+                    && row.action == "start"
+                    && job.kind == hgn_edit::JOB
+                    && input.host == first.host
+                    && input.path == first.path
+                    && input.extra["id"] == first.extra["id"]
+                    && row
+                        .reply
+                        .result
+                        .as_ref()
+                        .is_some_and(|r| r["report"]["revision_sha256"] == req.parent_sha256),
+                "HGN scratch producer does not match the grant"
+            );
+            self.directory(producer)?
+                .join("work")
+                .join(hgn_edit::PRIVATE)
+                .join(hgn_edit::MODEL)
+        } else {
+            ensure!(
+                !hgn_edit::private_path(&input.path)
+                    && self.cfg.configured_source_root(&input.path).is_some(),
+                "HGN Library source is outside approved roots"
+            );
+            input.path.clone()
+        };
+        ensure!(
+            path.extension().is_some_and(|ext| ext == "hgn"),
+            "expected a standalone HGN file"
+        );
+        cache::no_symlink_open(&path, libc::O_PATH)?;
+        weight_source::open_regular(&path)?;
+        Ok(path)
     }
 
     fn scratch_pin(&self, id: &str, job: &Job, index: usize) -> Option<&str> {
@@ -877,7 +962,23 @@ impl Worker {
             .scratch_access
             .as_ref()
             .filter(|access| access.job_id == id);
-        if scratch_eval::private_output(&job.kind) || access.is_some() {
+        if job.kind == hgn_edit::JOB {
+            ensure!(access.is_none(), "invalid HGN worker configuration");
+            let req = self
+                .cfg
+                .hgn_edit
+                .as_ref()
+                .context("private HGN edits are not configured")?
+                .authorize(id, &action, &job)?;
+            if self.hgn_parent(&job.inputs[0], &req).is_err() {
+                return self.record_prepare(
+                    id,
+                    action,
+                    job,
+                    Reply::error("Pinned private HGN parent is unavailable on the source worker"),
+                );
+            }
+        } else if scratch_eval::private_output(&job.kind) || access.is_some() {
             let valid = access.is_some_and(|access| access.permits(&action, &job))
                 && (job.kind != scratch_eval::CHECKS
                     || [
@@ -1582,6 +1683,27 @@ impl Worker {
             .clone();
         ensure!(input.kind == original.kind, "resolved input kind changed");
         let job = r.job.as_ref().unwrap();
+        if job.kind == hgn_edit::JOB {
+            ensure!(
+                index == 0
+                    && provided.is_none()
+                    && input.host == original.host
+                    && input.path == original.path
+                    && input.extra["id"] == original.extra["id"],
+                "private HGN edits require an unchanged direct input"
+            );
+            let req = self
+                .cfg
+                .hgn_edit
+                .as_ref()
+                .context("private HGN edits are not configured")?
+                .authorize(id, &r.action, job)?;
+            input = original.clone();
+            input.path = self.hgn_parent(&input, &req)?;
+            r.inputs.insert(index, input);
+            self.put(id, &r)?;
+            return Ok(to_value(original)?);
+        }
         let scratch_pin = self.scratch_pin(id, job, index);
         let private_job = scratch_eval::private_output(&job.kind) || scratch_pin.is_some();
         ensure!(
@@ -2257,6 +2379,10 @@ impl Worker {
                 preview,
             } => {
                 let mut r = self.pending(&id)?;
+                ensure!(
+                    r.job.as_ref().is_none_or(|job| job.kind != hgn_edit::JOB),
+                    "private HGN edits do not accept staged inputs"
+                );
                 ensure!(
                     preview == (r.action == "preview_transfer") && r.action != "cleanup",
                     "plan action mismatch"
