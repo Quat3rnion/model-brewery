@@ -1,5 +1,59 @@
 use super::*;
 
+/// Replay the pinned engine's receipt through the controller's mock dispatcher.
+/// Run with BREWERY_HGN_DIRECTION_RECEIPT set to the output of hgn_direction_job.py.
+#[test]
+#[ignore = "requires the pinned HGN engine acceptance receipt"]
+fn hgn_direction_mcp_compares_real_engine_receipt() {
+    let path = std::env::var_os("BREWERY_HGN_DIRECTION_RECEIPT").expect("real HGN engine receipt");
+    let mut receipt: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let layer = receipt["fit"]["selected_layer"].as_u64().unwrap();
+    assert!(
+        receipt["fit"]["layers"][0]["held_out_cohens_d"]
+            .as_f64()
+            .unwrap()
+            > 1.0
+    );
+
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        r#"{"hosts":{"alpha":{"local":true,"capabilities":{"behavior_direction":true}}}}"#,
+    )
+    .unwrap();
+    app.launch();
+    let model = app.register("alpha", "hgn-v2", "/models/real-receipt-fixture.hgn");
+    // Remap only the Library ID, which this isolated controller owns.
+    receipt["model_id"] = json!(model);
+    fs::write(app.path("direction-result.json"), receipt.to_string()).unwrap();
+    let input = json!({"kind":"behavior_direction","input_ids":[model],"options":{
+        "behavior": receipt["behavior"], "model_sha256": receipt["model_sha256"],
+        "last_k": 3, "layers": [0, 1],
+    }});
+    let reference = app.enqueue(input.clone());
+    app.await_job(&reference, |job| job["state"] == "succeeded");
+    let id = app.enqueue(input);
+    app.await_job(&id, |job| job["state"] == "succeeded");
+    let compared = super::mcp::call(
+        &app,
+        "get_direction",
+        json!({"id":id,"version":2,"reference_id":reference,"reference_layer":layer}),
+    );
+    assert_eq!(compared["result"]["isError"], false, "{compared}");
+    let comparison = &compared["result"]["structuredContent"];
+    assert_eq!(comparison["direction"], receipt);
+    assert_eq!(comparison["reference"]["id"], reference);
+    assert_eq!(comparison["reference"]["layer"], layer);
+    for score in comparison["reference"]["cosine_by_layer"]
+        .as_array()
+        .unwrap()
+    {
+        assert!((score["cosine"].as_f64().unwrap() - 1.0).abs() < 1e-12);
+    }
+    println!("Real receipt SHA-256: {}", receipt["model_sha256"]);
+    println!("MCP comparison: {}", comparison["reference"]);
+}
+
 #[test]
 fn hgn_direction_mcp_queues_last_k_and_reads_version_two() {
     use brewery_worker::{behavior_direction::Behavior, trace};

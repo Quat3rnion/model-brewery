@@ -2,23 +2,85 @@
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
+from statistics import mean, stdev
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.normalizers import Replace, Sequence
+from tokenizers.pre_tokenizers import Whitespace
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from hgn_trace_fixture import fixture
+
+CONTRAST = "c844b9b32e5547473b0b30268d99dde456657a5c3d5f98d4e92bbeffd4ac7987"
 
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def exercise(engine, cache):
+def contrast_fixture(root, cache):
+    # The synthetic tokenizer maps each exact chat prompt to four known tokens.
+    # The last three include a class token and two shared template tokens.
+    prompts = cache / (CONTRAST + ".json")
+    assert digest(prompts) == CONTRAST
+    vocab = ("<unk>", "poslow", "poshigh", "neglow", "neghigh", "tailY", "tailX", "ignored")
+    tokenizer = Tokenizer(WordLevel({word: i for i, word in enumerate(vocab)}, unk_token="<unk>"))
+    tokenizer.pre_tokenizer = Whitespace()
+    counts = {"train": 0, "held_out": 0}
+    replacements = []
+    for pair in json.loads(prompts.read_bytes())["rows"]:
+        split = pair["split"]
+        size = ("low", "high")[counts[split] % 2]
+        counts[split] += 1
+        for label, cls in (("positive", "pos"), ("negative", "neg")):
+            turns = pair[label]
+            prompt = (f"<|im_start|>system\n{turns['system']}<|im_end|>\n"
+                      f"<|im_start|>user\n{turns['user']}<|im_end|>\n"
+                      "<|im_start|>assistant\n<think>\n\n</think>\n\n")
+            replacements.append(Replace(prompt, f"ignored {cls}{size} tailY tailX"))
+    assert counts == {"train": 12, "held_out": 8}
+    tokenizer.normalizer = Sequence(replacements)
+    fixture(root, tokenizer=tokenizer, embedding_rows=[
+        (0, -1), (2, 1), (4, 1), (-2, 1), (-4, 1), (0, 1), (1, 0), (1, -1),
+    ])
+
+
+def check_oracle(row):
+    # Fixture layers write zero. Each residual stream equals the embedding.
+    # With K=3 the positive/negative classes differ only at the first selected
+    # token. The stream sum is 4*[+/-x,1], followed by 4*[0,1] and 4*[1,0].
+    xs = (2, 4)
+    cos = [x / math.hypot(x, 1) for x in xs]
+    sin = [1 / math.hypot(x, 1) for x in xs]
+    pos = [(1 + c) / 3 for c in cos] * 4
+    neg = [(1 - c) / 3 for c in cos] * 4
+    margin = mean(pos) - mean(neg)
+    cohens_d = margin / math.hypot(stdev(pos), stdev(neg)) * math.sqrt(2)
+    expected_negative = [(1 - mean(cos)) / 3, (1 + mean(sin)) / 3] + [0] * 126
+    unit_error = max(abs(a - b) for a, b in zip(row["unit_vector"], [1] + [0] * 127, strict=True))
+    negative_error = max(abs(a - b) for a, b in zip(row["negative_mean"], expected_negative, strict=True))
+    assert unit_error < 1e-7 and negative_error < 1e-7
+    for key, expected in {
+        "norm": 2 * mean(cos) / 3,
+        "held_out_margin": margin,
+        "held_out_cohens_d": cohens_d,
+        "mean_residual_norm": 4 * (mean(math.hypot(x, 1) for x in xs) + 2) / 3,
+    }.items():
+        assert math.isclose(row[key], expected, rel_tol=1e-6), (key, row[key], expected)
+    return {"expected_cohens_d": cohens_d, "max_unit_error": unit_error,
+            "max_negative_mean_error": negative_error}
+
+
+def exercise(engine, cache, receipt):
     with TemporaryDirectory(prefix="hgn-direction-") as temporary:
         root = Path(temporary)
-        fixture(root)
+        contrast_fixture(root, cache)
         model = root / "model.hgn"
         sha = digest(model)
         assets = {name: {"path": str(root / leaf), "sha256": digest(root / leaf)}
@@ -51,12 +113,17 @@ def exercise(engine, cache):
         fit = result["fit"]
         assert (fit["train_pairs"], fit["held_out_pairs"]) == (12, 8)
         assert [row["layer"] for row in fit["layers"]] == [0, 1]
+        assert fit["selected_layer"] == 0, fit["selected_layer"]
         for row in fit["layers"]:
-            assert row["negative_mean"] == [0.0883883461356163] * 128
-            assert abs(row["mean_residual_norm"] - 45.254833995939045) < 1e-11
-            assert row["unit_vector"] is None and row["held_out_cohens_d"] is None
+            assert row["held_out_cohens_d"] > 1
+            assert math.isclose(math.hypot(*row["unit_vector"]), 1, abs_tol=1e-7)
+            oracle = check_oracle(row)
+        receipt.write_text(json.dumps(result, indent=2) + "\n")
         print(json.dumps({"runtime_sha256": result["runtime_sha256"], "model_sha256": sha,
                           "train_pairs": 12, "held_out_pairs": 8, "layers": [0, 1], "last_k": 3,
+                          "schema_version": result["schema_version"], "selected_layer": fit["selected_layer"],
+                          "held_out_cohens_d": fit["layers"][0]["held_out_cohens_d"],
+                          "unit_norm": math.hypot(*fit["layers"][0]["unit_vector"]), "oracle": oracle,
                           "width": 128, "mean_residual_norm": fit["layers"][0]["mean_residual_norm"],
                           "release_qualified": False}))
 
@@ -65,5 +132,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", type=Path, required=True)
     parser.add_argument("--cache", type=Path, required=True)
+    parser.add_argument("--receipt", type=Path, required=True)
     args = parser.parse_args()
-    exercise(args.engine.resolve(), args.cache.resolve())
+    exercise(args.engine.resolve(), args.cache.resolve(), args.receipt.resolve())
