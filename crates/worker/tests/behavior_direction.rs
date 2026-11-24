@@ -153,3 +153,47 @@ fn hgn_direction_sums_streams_then_normalizes_each_captured_position() {
     assert!(obs[0].activation[2..].iter().all(|&x| x == 0.));
     assert!(trace::direction_rows(dir.path(), &spec, &receipt, Role::LOut, false).is_err());
 }
+
+#[test]
+fn hgn_direction_accepts_published_pins_only_for_saved_reads() {
+    let digest = "a".repeat(64);
+    let request = Request::parse(&json!({
+        "behavior": "slop", "model_sha256": digest, "layers": [1], "last_k": 3,
+    }))
+    .unwrap();
+    let mut receipt = json!({
+        "kind":"behavior_direction", "schema_version":2, "release_qualified":false,
+        "model_id":"model", "model_sha256":digest, "behavior":"slop",
+        "position":null, "last_k":3, "contrast_sha256":request.behavior.contrast_sha256(),
+        "runtime":trace::HGN_RUNTIME, "runtime_sha256":trace::HGN_RUNTIME_SHA256.trim_end(),
+        "executable_sha256":digest,
+        "assets_sha256":{"sidecar":digest,"config":digest,"tokenizer":digest},
+        "fit":{"role":"l_out","train_pairs":12,"held_out_pairs":8,"selected_layer":1,
+            "layers":[{"layer":1,"norm":2.0,"unit_vector":[0.0,1.0],
+                "held_out_margin":0.25,"held_out_cohens_d":0.5,"mean_residual_norm":1.0}]}
+    });
+    request
+        .verify_result(&receipt, "model", &digest, "hgn-v2")
+        .unwrap();
+    for pin in [
+        "29c4699cfcf3170fdf5daeced397fc168f7488244ee8f92d24dc39613693b767", // H2
+        "e09a61b5ef47004dcb6d95b5de24e6666d46d7896f5cf1a32d777755a6e40b00", // H3
+        "8d4b6d5a685130b4603bbad5825f853c5d42b0275442541f4ea39fa327d8c0b3", // H5
+    ] {
+        receipt["runtime_sha256"] = json!(pin);
+        request
+            .verify_version(&receipt, "model", &digest, "hgn-v2", 2)
+            .unwrap_or_else(|err| panic!("cannot read saved pin {pin}: {err}"));
+        assert!(
+            request
+                .verify_result(&receipt, "model", &digest, "hgn-v2")
+                .is_err()
+        );
+    }
+    receipt["runtime_sha256"] = json!(digest);
+    assert!(
+        request
+            .verify_version(&receipt, "model", &digest, "hgn-v2", 2)
+            .is_err()
+    );
+}

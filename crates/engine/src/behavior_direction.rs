@@ -1,11 +1,12 @@
 use crate::{
-    Job, integrity,
+    integrity,
     progress::Progress,
-    trace::{Runtime, hgn},
+    trace::{hgn, Runtime},
+    Job,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use brewery_worker::{behavior_direction as direction, trace};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     env, fs,
     os::unix::fs::PermissionsExt,

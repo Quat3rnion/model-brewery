@@ -217,7 +217,10 @@ impl Server {
                     "Import a verified community Heretic v4 manifest using a matching pinned Library SafeTensors download. A Brewery journal is not a v4 manifest. Read get_job for the scratch child and use run_checks after conversion."
                 }
                 "run_checks" => {
-                    "Check the exact scratch child. Convert the parent and child with identical assets for measured checks. To score slop, sycophancy, length and KL, pass behavior_direction.prompt_sets with the verified holdout digests; add benign_refusal only for over-refusal. Poll get_job if queued and read get_checks."
+                    "Check the exact scratch child. For native HGN, pass id and sha256 without behavior_direction. The source worker audits the stored writers and compares CPU forward scores with the immediate parent. For SafeTensors, convert both revisions with identical GGUF assets. Use behavior_direction.prompt_sets to opt into held-out behavior scores on GGUF. Poll get_job if queued and read get_checks."
+                }
+                "get_checks" => {
+                    "Read the current check bundle. For HGN, hgn_stored lists decoded writer metrics and per-prompt CPU forward scores without generated text."
                 }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({

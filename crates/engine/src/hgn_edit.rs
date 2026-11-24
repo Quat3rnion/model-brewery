@@ -1,7 +1,7 @@
 use crate::Job;
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use brewery_worker::{hgn_edit as edit, weight_source::scratch::hgn_ablation};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     env,
     fs::DirBuilder,

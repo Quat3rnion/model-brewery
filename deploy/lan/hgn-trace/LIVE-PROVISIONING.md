@@ -1,4 +1,4 @@
-# Frame HGN trace live provisioning
+# Frame HGN live provisioning
 
 Operator handoff only. Do not run these steps on the live stack without a
 separate cutover approval. This change does not qualify a release.
@@ -21,8 +21,11 @@ separate cutover approval. This change does not qualify a release.
    alias. Explicitly disable `inspect`, `plan`, `convert`, `verify`,
    `compare`, `transfer`, `transfer_preview`, and `cache_cleanup`: these
    operations otherwise default to on. Enable `trace` only after the checks
-   below. Do not enable weight, direction, or circuit jobs on this release.
-   HGN `compute_direction` requires H2; `find_circuit` still requires GGUF.
+   below. Enable `behavior_direction` only after you install the reviewed
+   contrast cache on the worker and set `BREWERY_CONTRAST_CACHE` in its
+   `engine_env`. The HGN screen needs both capabilities and uses the
+   version 2 direction from the same Library checkpoint. Keep general
+   weight jobs disabled; `find_circuit` still requires GGUF.
    Set CPU and RAM bounds on both the controller and the worker. Use no
    quantization pool. Start with 16 CPU threads and at least 16 GiB of
    available RAM, subject to the Frame operator's admission limits.
@@ -35,6 +38,13 @@ the worker state directory. Set `BREWERY_HGN_TRACE_PYTHON`,
 `BREWERY_HGN_TRACE_PYTHON_SHA256`, `BREWERY_HGN_TRACE_ASSETS`, and
 `BREWERY_CPU_THREADS` in the new worker's `engine_env`. The worker must not
 have write access to the release files or permission to replace them.
+
+Record the embedded CPU runtime SHA-256
+`1ac8e30b17ccd7b96ff84f840c3c6d911cb2cbded57d6a5cfec86217c417aef7`
+from `tools/hgn_trace/runtime.sha256` in the release manifest. Use matching
+controller, dispatcher, worker, and engine builds. The runtime digest does
+not replace the interpreter or asset digests. Published version 2 direction
+receipts remain readable, but new fits must use the release runtime.
 
 The registry key is the verified checkpoint SHA-256. Each member has an
 absolute canonical file path and a lowercase SHA-256. For ThinkingCap, the
@@ -59,16 +69,30 @@ Register the `.hgn` checkpoint as `hgn-v2` on `frame-hgn-trace`. Use that
 Library ID in `start_trace`. Keep the existing record on `frame-hy4-plan`.
 Sending its ID with a different `host` does not move the source.
 
+## Optional private edits and checks
+
+Keep `scratch_hgn_ablation` disabled until the operator approves private edit
+storage, a signing key, and build admission. Follow [Native HGN v2 scratch
+edits](../../../OPERATOR.md#native-hgn-v2-scratch-edits). Use the same worker
+for the stock checkpoint and its private children. Set `hgn_edit.host` to
+the dispatch ID, `hgn_edit.grant_key_file` to the worker's private key file,
+and `hgn_edit.build_admission` to the approved exclusive CPU build wrapper.
+Set `BREWERY_HGN_EDIT_KEY_FILE` on the controller to its private copy of the
+same key. Do not put a key value in the release manifest. Keep `trace` enabled
+for `run_checks`: it uses the pinned CPU runtime for the paired forward.
+Do not register or publish native scratch files.
+
 ## Quiet window, verification and rollback
 
 - Coordinate with Frame operators. Keep this worker paused outside the
-  approved window. Hold Frame's exclusive `build` reservation from before
-  enqueue until the job is terminal and the worker is idle. The reservation
-  must cover source hashing and inference. Do not nest another reservation
-  inside the worker. A reservation timeout alone does not stop the detached
-  Brewery supervisor; request cancellation and confirm that it has stopped
-  before you release the reservation. Do not start a frame GPU job for
-  this check.
+  approved window. For trace, direction fitting, and screening, hold
+  Frame's exclusive `build` reservation from before enqueue until the job
+  is terminal and the worker is idle. The reservation must cover source
+  hashing and inference. For private edits and stored checks, let the
+  `build_admission` wrapper acquire the reservation. Do not hold an outer
+  reservation for those jobs. A reservation timeout alone does not stop the
+  detached Brewery supervisor; request cancellation and confirm that it
+  has stopped. Do not start a Frame GPU job for these checks.
 - Before cutover, run `qualification/hgn_trace_job.py` on a new isolated
   stack on Frame with the release's binaries, reviewed registry, and pinned
   interpreter. Check the model and asset digests, `hgn_cpu` receipt, four
@@ -80,6 +104,6 @@ Sending its ID with a different `host` does not move the source.
   procedure. Verify the alias, effective capability, and Library path before
   use. Do not alter the production Halogen service or another Frame worker.
 - To roll back, pause the new worker, wait for it to become idle, and remove
-  its trace capability through the normal release configuration procedure.
+  its HGN capabilities through the normal release configuration procedure.
   Preserve both Library records and the worker artifacts for audit. Only
   retire the new SSH key and worker after no process or job needs it.

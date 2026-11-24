@@ -662,7 +662,11 @@ impl Worker {
     }
 
     fn hgn_parent(&self, input: &Input, req: &hgn_edit::Request) -> Result<PathBuf> {
-        let path = if let Some(producer) = &req.producer {
+        self.hgn_source(input, req.producer.as_deref(), &req.parent_sha256)
+    }
+
+    fn hgn_source(&self, input: &Input, producer: Option<&str>, hash: &str) -> Result<PathBuf> {
+        let path = if let Some(producer) = producer {
             let row = self.require(producer)?;
             let job = row
                 .job
@@ -684,7 +688,7 @@ impl Worker {
                         .reply
                         .result
                         .as_ref()
-                        .is_some_and(|r| r["report"]["revision_sha256"] == req.parent_sha256),
+                        .is_some_and(|r| r["report"]["revision_sha256"] == hash),
                 "HGN scratch producer does not match the grant"
             );
             self.directory(producer)?
@@ -706,6 +710,13 @@ impl Worker {
         cache::no_symlink_open(&path, libc::O_PATH)?;
         weight_source::open_regular(&path)?;
         Ok(path)
+    }
+
+    fn hgn_check_sources(&self, input: &Input, req: &hgn_checks::Request) -> Result<[PathBuf; 2]> {
+        Ok([
+            self.hgn_source(input, req.parent_producer.as_deref(), &req.parent_sha256)?,
+            self.hgn_source(input, Some(&req.child_producer), &req.revision_sha256)?,
+        ])
     }
 
     fn scratch_pin(&self, id: &str, job: &Job, index: usize) -> Option<&str> {
@@ -976,6 +987,28 @@ impl Worker {
                     action,
                     job,
                     Reply::error("Pinned private HGN parent is unavailable on the source worker"),
+                );
+            }
+        } else if job.kind == hgn_checks::JOB {
+            ensure!(access.is_none(), "invalid HGN worker configuration");
+            let edit = self
+                .cfg
+                .hgn_edit
+                .as_ref()
+                .context("private HGN checks are not configured")?;
+            let req = hgn_checks::authorize(edit, id, &action, &job)?;
+            let env = &self.cfg.engine_env;
+            if ![trace::HGN_PYTHON, trace::HGN_ASSETS]
+                .iter()
+                .all(|key| env.get(*key).is_some_and(|p| Path::new(p).is_absolute()))
+                || !env
+                    .get(trace::HGN_PYTHON_SHA256)
+                    .is_some_and(|s| is_digest(s))
+                || self.hgn_check_sources(&job.inputs[0], &req).is_err()
+            {
+                return self.record_prepare(
+                    id, action, job,
+                    Reply::error("Pinned HGN check inputs or CPU trace runtime unavailable on the source worker"),
                 );
             }
         } else if scratch_eval::private_output(&job.kind) || access.is_some() {
@@ -1711,23 +1744,29 @@ impl Worker {
             .clone();
         ensure!(input.kind == original.kind, "resolved input kind changed");
         let job = r.job.as_ref().unwrap();
-        if job.kind == hgn_edit::JOB {
+        if matches!(job.kind.as_str(), hgn_edit::JOB | hgn_checks::JOB) {
             ensure!(
                 index == 0
                     && provided.is_none()
                     && input.host == original.host
                     && input.path == original.path
                     && input.extra["id"] == original.extra["id"],
-                "private HGN edits require an unchanged direct input"
+                "private HGN jobs require an unchanged direct input"
             );
-            let req = self
+            let config = self
                 .cfg
                 .hgn_edit
                 .as_ref()
-                .context("private HGN edits are not configured")?
-                .authorize(id, &r.action, job)?;
+                .context("private HGN jobs are not configured")?;
             input = original.clone();
-            input.path = self.hgn_parent(&input, &req)?;
+            if job.kind == hgn_edit::JOB {
+                let req = config.authorize(id, &r.action, job)?;
+                input.path = self.hgn_parent(&input, &req)?;
+            } else {
+                let req = hgn_checks::authorize(config, id, &r.action, job)?;
+                self.hgn_check_sources(&input, &req)
+                    .map_err(|_| anyhow::anyhow!("pinned HGN check inputs are unavailable"))?;
+            }
             r.inputs.insert(index, input);
             self.put(id, &r)?;
             return Ok(to_value(original)?);
@@ -2408,8 +2447,11 @@ impl Worker {
             } => {
                 let mut r = self.pending(&id)?;
                 ensure!(
-                    r.job.as_ref().is_none_or(|job| job.kind != hgn_edit::JOB),
-                    "private HGN edits do not accept staged inputs"
+                    r.job.as_ref().is_none_or(|job| !matches!(
+                        job.kind.as_str(),
+                        hgn_edit::JOB | hgn_checks::JOB
+                    )),
+                    "private HGN jobs do not accept staged inputs"
                 );
                 ensure!(
                     preview == (r.action == "preview_transfer") && r.action != "cleanup",

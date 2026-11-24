@@ -31,7 +31,11 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
    read its provenance. Select a method below
    and record the child ID and hash. For queued work, use `get_job` to read
    the terminal result before starting the next step.
-4. Use `convert_scratch_gguf` on the child with the same assets as the parent.
+4. For an HGN child, skip GGUF conversion. Call `run_checks` with the child
+   ID and exact hash. Read `hgn_stored` in `get_checks` for the decoded-store
+   audit and CPU forward scores. Require both checks. Report scores and flags,
+   not generated text. See [stored HGN checks](../../../OPERATOR.md#native-hgn-v2-scratch-edits).
+   For SafeTensors, use `convert_scratch_gguf` on the child with the same assets as the parent.
    Trace the child with the same prompts, positions, and capture settings.
 5. Use `run_checks`, wait for any check job, then read `get_checks`. Compare
    with `diff_tensors`, `diff_traces`, and `diff_behavior` as applicable. If

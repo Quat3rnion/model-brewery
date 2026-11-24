@@ -39,8 +39,8 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
     let contract: Value = serde_json::from_str(CONTRACT).unwrap();
     assert_eq!(contract["openapi"], "3.1.0");
     assert_eq!(
-        contract["paths"]["/api/scratch/{id}/ablate_direction"]["post"]["responses"]["202"]
-            ["content"]["application/json"]["schema"]["$ref"],
+        contract["paths"]["/api/scratch/{id}/ablate_direction"]["post"]["responses"]["202"]["content"]
+            ["application/json"]["schema"]["$ref"],
         "#/components/schemas/Job"
     );
     let schemas = &contract["components"]["schemas"];
@@ -295,6 +295,26 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         "#/components/schemas/BehaviorDirectionConfig"
     );
     let schemas = &contract["components"]["schemas"];
+    assert_eq!(
+        schemas["ScratchCheckBundle"]["properties"]["hgn_stored"]["$ref"],
+        "#/components/schemas/HgnStoredChecksReport",
+    );
+    assert_eq!(
+        schemas["Job"]["properties"]["kind"]["anyOf"][1]["enum"],
+        json!([
+            "scratch_gguf",
+            "scratch_checks",
+            "scratch_locate_edit",
+            "scratch_hgn_ablation",
+            "scratch_hgn_checks",
+            "weight_spectra",
+            "search_ablation",
+            "screen_ablation",
+            "screen_hgn_ablation",
+            "heretic",
+            "heretic_reproduce"
+        ])
+    );
     assert_eq!(
         schemas["BehaviorDirectionJob"]["properties"]["input_ids"]["x-brewery-input-kinds"],
         json!([["gguf", "hgn", "hgn-v2"]])

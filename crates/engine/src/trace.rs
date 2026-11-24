@@ -1,10 +1,10 @@
 use crate::{
-    Job, child_threads, gguf_conversion::Tool, integrity, progress::Progress, w0_libraries,
-    write_json,
+    child_threads, gguf_conversion::Tool, integrity, progress::Progress, w0_libraries, write_json,
+    Job,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use brewery_worker::trace::{self, LanternfishRuntime, Request};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,

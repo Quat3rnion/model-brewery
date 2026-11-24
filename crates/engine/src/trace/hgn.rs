@@ -1,12 +1,12 @@
 //! Stage the Brewery-owned HGN runtime and verify the model's companion assets.
 use crate::{child_threads, gguf_conversion::Tool, integrity, write_json};
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use brewery_worker::trace::{
     self, Capture, Export, HGN_ASSETS, HGN_PYTHON, HGN_PYTHON_SHA256, HGN_RUNTIME,
     HGN_RUNTIME_SHA256,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -17,6 +17,10 @@ use std::{
 };
 
 const SOURCES: &[(&str, &[u8])] = &[
+    (
+        "checks.py",
+        include_bytes!("../../../../tools/hgn_trace/checks.py"),
+    ),
     (
         "forward.py",
         include_bytes!("../../../../tools/hgn_trace/forward.py"),
@@ -211,6 +215,44 @@ impl Runtime {
         check()?;
         fs::remove_file(&spec)?;
         trace::verify(out, capture)
+    }
+
+    pub(crate) fn checks(
+        &self,
+        work: &Path,
+        parent: &Path,
+        child: &Path,
+    ) -> Result<[brewery_worker::hgn_checks::PromptScores; brewery_worker::hgn_checks::PROMPTS.len()]>
+    {
+        use brewery_worker::hgn_checks::PROMPTS;
+        let threads = child_threads(None)?.min(64);
+        let output = work.join("hgn-scores.json");
+        let mut command = self.command(work, threads);
+        command
+            .arg("--stored-checks")
+            .arg("--parent")
+            .arg(parent)
+            .arg("--child")
+            .arg(child)
+            .arg("--out")
+            .arg(&output)
+            .arg("--threads")
+            .arg(threads.to_string());
+        for prompt in PROMPTS {
+            command.arg(format!("--prompt={prompt}"));
+        }
+        for (_, pin, stamp) in &self.assets {
+            stamp.check(&pin.path)?;
+        }
+        self.python
+            .capture(&mut command, work)
+            .context("HGN stored CPU forward failed")?;
+        for (_, pin, stamp) in &self.assets {
+            stamp.check(&pin.path)?;
+        }
+        let scores = brewery_worker::decode_limited(fs::File::open(&output)?, 4096)?;
+        fs::remove_file(output)?;
+        Ok(scores)
     }
 
     pub(crate) fn receipt(&self) -> Value {

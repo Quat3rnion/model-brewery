@@ -29,12 +29,13 @@ fn hgn_ablation_queues_private_child_and_pinned_descendant_through_mcp() {
 
     let mut app = Fixture::new();
     fs::write(app.path("dispatch.json"), json!({"hosts":{
-        "beta":{"ssh":"beta","capabilities":{"behavior_direction":true,"scratch_hgn_ablation":true}},
+        "beta":{"ssh":"beta","capabilities":{"behavior_direction":true,"scratch_hgn_ablation":true,"trace":true}},
         "gamma":{"ssh":"gamma"},
     }}).to_string()).unwrap();
     let key = app.path("hgn-key");
     fs::write(&key, [42; 32]).unwrap();
     fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(app.path("hgn-runtime-sha256"), trace::HGN_RUNTIME_SHA256).unwrap();
     app.launch_with(&[(brewery_worker::hgn_edit::KEY_FILE, key)]);
     let hgn = app.register("beta", "hgn-v2", "/approved/stock.hgn");
     let hy4 = app.register("gamma", "hgn-v2", "/approved/stock.hgn");
@@ -60,13 +61,13 @@ fn hgn_ablation_queues_private_child_and_pinned_descendant_through_mcp() {
             "kernel":{"shape":"flat","width":1,"peak":0,"min_weight":0}
         })
     };
-    let mcp = |body| {
+    let call = |name: &str, body| {
         let (_, raw) = app.request(
             "POST",
             "/mcp",
             Some(
                 json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                    "name":"ablate_direction","arguments":body
+                    "name":name,"arguments":body
                 }}),
             ),
             "Accept: application/json, text/event-stream\r\n",
@@ -74,6 +75,7 @@ fn hgn_ablation_queues_private_child_and_pinned_descendant_through_mcp() {
         let raw: Value = serde_json::from_str(&raw).unwrap();
         raw["result"]["structuredContent"].clone()
     };
+    let mcp = |body| call("ablate_direction", body);
     assert_eq!(
         mcp(request(&hgn, &"0".repeat(64), "wrong-pin"))["status"],
         400
@@ -99,6 +101,31 @@ fn hgn_ablation_queues_private_child_and_pinned_descendant_through_mcp() {
         digest
     );
     let child_sha = row["sha256"].as_str().unwrap();
+    let check = app.json(
+        "POST",
+        &format!("{route}/checks"),
+        Some(json!({"sha256":child_sha})),
+        202,
+    );
+    assert_eq!(check["kind"], "scratch_hgn_checks");
+    assert_eq!(check["host"], "beta");
+    assert!(!check.to_string().contains("hgn_check_grant"));
+    let done = app.await_job(check["id"].as_str().unwrap(), |j| {
+        j["state"] == "succeeded" || j["state"] == "failed"
+    });
+    assert_eq!(done["state"], "succeeded", "{done}");
+    let bundle = app.json("GET", &format!("{route}/checks"), None, 200);
+    assert_eq!(bundle["integrity"]["status"], "passed");
+    assert_eq!(bundle["smoke"]["status"], "passed");
+    assert_eq!(bundle["behavior"]["status"], "not_run");
+    assert_eq!(bundle["qualification"], "not release-qualified");
+    assert_eq!(
+        bundle["hgn_stored"]["tensors"].as_object().unwrap().len(),
+        2
+    );
+    assert_eq!(bundle["hgn_stored"]["prompts"][0]["kl_parent_child"], 0.015);
+    assert!(!bundle.to_string().contains("/approved/"));
+    assert_eq!(call("get_checks", json!({"id":id})), bundle);
     app.json(
         "POST",
         &format!("{route}/publish-request"),
@@ -125,6 +152,99 @@ fn hgn_ablation_queues_private_child_and_pinned_descendant_through_mcp() {
         row["provenance"]["ablation"]["hgn"]["report"]["parent_sha256"],
         child_sha
     );
+    app.touch("hgn-audit-failed-control");
+    let check = call(
+        "run_checks",
+        json!({"id":descendant,"sha256":row["sha256"],"idempotency_key":"check-second"}),
+    );
+    assert_eq!(check["kind"], "scratch_hgn_checks", "{check}");
+    let done = app.await_job(check["id"].as_str().unwrap(), |j| {
+        j["state"] == "succeeded" || j["state"] == "failed"
+    });
+    assert_eq!(done["state"], "succeeded", "{done}");
+    let bundle = call("get_checks", json!({"id":descendant}));
+    assert_eq!(bundle["integrity"]["status"], "failed");
+    assert_eq!(bundle["smoke"]["status"], "passed");
+    assert_eq!(bundle["hgn_stored"]["parent_sha256"], child_sha);
+    app.touch("bad-hgn-check");
+    let check = call(
+        "run_checks",
+        json!({"id":descendant,"sha256":row["sha256"],"idempotency_key":"bad-check"}),
+    );
+    let done = app.await_job(check["id"].as_str().unwrap(), |j| {
+        j["state"] == "succeeded" || j["state"] == "failed"
+    });
+    assert_eq!(done["state"], "failed", "{done}");
+    let failed = call("get_checks", json!({"id":descendant}));
+    assert_eq!(failed["measured_job_id"], check["id"]);
+    assert_eq!(failed["integrity"]["status"], "failed");
+    assert!(failed.get("hgn_stored").is_none());
+    fs::remove_file(app.path("bad-hgn-check")).unwrap();
+    fs::remove_file(app.path("hgn-audit-failed-control")).unwrap();
+    for (group, reason) in [("dense", "dense"), ("routed", "routed expert")] {
+        fs::write(app.path("hgn-audit-empty-group"), group).unwrap();
+        let child = mcp(request(&hgn, &digest, &format!("edit-{group}")));
+        let child = child["id"].as_str().unwrap();
+        let done = app.await_job(child, |j| {
+            j["state"] == "succeeded" || j["state"] == "failed"
+        });
+        assert_eq!(done["state"], "succeeded", "{done}");
+        let rev = app.json("GET", &format!("/api/scratch/{child}"), None, 200);
+        let check = call(
+            "run_checks",
+            json!({"id":child, "sha256":rev["sha256"], "idempotency_key":format!("check-{group}")}),
+        );
+        assert_eq!(check["kind"], "scratch_hgn_checks", "{check}");
+        let done = app.await_job(check["id"].as_str().unwrap(), |j| {
+            j["state"] == "succeeded" || j["state"] == "failed"
+        });
+        assert_eq!(done["state"], "succeeded", "{done}");
+        let checks = call("get_checks", json!({"id":child}));
+        let name = if group == "dense" {
+            "layers.0.linear_attn.out_proj.weight"
+        } else {
+            "layers.0.mlp.experts.down_proj.weight"
+        };
+        assert_eq!(
+            checks["hgn_stored"]["tensors"][name]["status"],
+            "no_component"
+        );
+        assert_eq!(checks["integrity"]["status"], "failed", "{checks}");
+        assert!(
+            checks["integrity"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains(reason),
+            "{checks}"
+        );
+    }
+    fs::remove_file(app.path("hgn-audit-empty-group")).unwrap();
+    app.touch("hgn-audit-high-error");
+    let child = mcp(request(&hgn, &digest, "edit-high-error"));
+    let child = child["id"].as_str().unwrap();
+    let done = app.await_job(child, |j| {
+        j["state"] == "succeeded" || j["state"] == "failed"
+    });
+    assert_eq!(done["state"], "succeeded", "{done}");
+    let rev = app.json("GET", &format!("/api/scratch/{child}"), None, 200);
+    let check = call(
+        "run_checks",
+        json!({"id":child, "sha256":rev["sha256"], "idempotency_key":"check-high-error"}),
+    );
+    let done = app.await_job(check["id"].as_str().unwrap(), |j| {
+        j["state"] == "succeeded" || j["state"] == "failed"
+    });
+    assert_eq!(done["state"], "succeeded", "{done}");
+    let checks = call("get_checks", json!({"id":child}));
+    assert_eq!(checks["integrity"]["status"], "failed", "{checks}");
+    assert!(
+        checks["integrity"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("relative error"),
+        "{checks}"
+    );
+    fs::remove_file(app.path("hgn-audit-high-error")).unwrap();
     app.touch("bad-hgn-receipt");
     let bad = mcp(request(&hgn, &digest, "bad-receipt"));
     let bad_id = bad["id"].as_str().unwrap();

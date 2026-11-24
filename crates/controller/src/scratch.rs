@@ -41,6 +41,8 @@ mod checks;
 mod experts;
 #[path = "scratch_heretic.rs"]
 pub(crate) mod heretic;
+#[path = "scratch_hgn_checks.rs"]
+pub(crate) mod hgn_checks;
 #[path = "scratch_hgn_edit.rs"]
 pub(crate) mod hgn_edit;
 #[path = "scratch_jobs.rs"]
@@ -495,7 +497,9 @@ fn build_special(
                 return Err(ApiError::not_found("scratch revision"));
             }
             if row.is_hgn() {
-                return Err(conflict("use ablate_direction for native HGN scratch edits"));
+                return Err(conflict(
+                    "use ablate_direction for native HGN scratch edits",
+                ));
             }
             if row.is_compiled_program() {
                 return Err(conflict(
@@ -719,9 +723,9 @@ fn change(
         // Reject incomplete bundles before hashing the full model. Recheck the
         // current record after the hash in case a worker finished in between.
         checks::require_publishable(&row, new, acknowledgement.as_deref())?;
-            if row.is_compiled_program() {
+        if row.is_compiled_program() {
             program::integrity(&row, &root.join(&row.id)).map_err(|error| conflict(&error))?;
-            }
+        }
         let mut source =
             open_regular(&path).map_err(|_| conflict("scratch artifact is not available"))?;
         if scratch::file_sha256(&mut source).map_err(ApiError::storage)? != row.sha256 {

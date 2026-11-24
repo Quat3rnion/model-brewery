@@ -1,6 +1,8 @@
 //! Native-store projection for canonical HGN v2 checkpoints.
+mod audit;
 use super::{TensorInfo, file_sha256, open_regular};
 use anyhow::{Context, Result, ensure};
+pub use audit::audit;
 use bf16_to_hgn::{
     ENCODER_SHA256,
     codec::{EncodedBlock, Encoding, QuantMeta, decode_rows, encode_rows, payload_layout},

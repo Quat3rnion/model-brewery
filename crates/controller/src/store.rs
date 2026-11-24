@@ -160,7 +160,12 @@ impl Store {
              AND (EXISTS(SELECT 1 FROM json_each(j.body,'$.input_ids') WHERE value = ?1)
                   OR (json_extract(j.body,'$.kind') = ?4
                       AND json_extract(j.envelope,'$.options.parent') = ?1)))",
-            params![id, kind, brewery_worker::weight_spectra::JOB, brewery_worker::hgn_edit::JOB],
+            params![
+                id,
+                kind,
+                brewery_worker::weight_spectra::JOB,
+                brewery_worker::hgn_edit::JOB
+            ],
             |row| row.get(0),
         )?)
     }
@@ -995,6 +1000,13 @@ impl Store {
             } else if job.kind == brewery_worker::hgn_edit::JOB {
                 crate::scratch::hgn_edit::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
                     .map(Some)
+            } else if job.kind == brewery_worker::hgn_checks::JOB {
+                crate::scratch::hgn_checks::finish(
+                    self,
+                    job,
+                    result.as_ref().unwrap_or(&Value::Null),
+                )
+                .map(Some)
             } else if job.kind == brewery_worker::locate_edit::JOB {
                 crate::scratch::locate::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
                     .map(|(revision, safe_result, guard)| {
@@ -1197,6 +1209,9 @@ impl Store {
         } else {
             None
         };
+        if job.kind == brewery_worker::hgn_checks::JOB && job.state == State::Failed {
+            scratch = crate::scratch::hgn_checks::failed(self, job)?;
+        }
         let tx = self.conn.transaction()?;
         if let Some(row) = scratch {
             if scratch_guard.is_some() || job.kind == brewery_worker::hgn_edit::JOB {

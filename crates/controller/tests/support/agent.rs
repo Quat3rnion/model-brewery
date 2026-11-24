@@ -287,6 +287,7 @@ fn hosted_agent_reuses_mcp_scratch_workflow_without_approval() {
             "Model Brewery",
             "operator-only",
             "`run_checks`",
+            "decoded-store audit and paired CPU forward",
             "`compute_direction`",
             "`last_k`",
             "`reference_id` and `reference_layer`",

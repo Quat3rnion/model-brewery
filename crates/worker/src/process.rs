@@ -1,5 +1,6 @@
 use super::*;
 use std::{
+    io::Read,
     os::fd::{AsRawFd, FromRawFd},
     thread,
     time::{Duration, Instant},
@@ -317,7 +318,55 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     } else {
         None
     };
-    if scratch_job && hgn_request.is_none() {
+    let hgn_check = if job.kind == hgn_checks::JOB {
+        let config = w
+            .cfg
+            .hgn_edit
+            .as_ref()
+            .context("private HGN checks are not configured")?;
+        let original = w.require(id)?.job.context("HGN check job is missing")?;
+        let req = hgn_checks::authorize(config, id, "start", &original)?;
+        ensure!(
+            original.inputs[0].path == job.inputs[0].path,
+            "resolved HGN root changed"
+        );
+        let paths = w
+            .hgn_check_sources(&original.inputs[0], &req)
+            .map_err(|_| anyhow::anyhow!("pinned HGN check inputs are unavailable"))?;
+        let report_path = paths[1].with_file_name(hgn_edit::REPORT);
+        let mut bytes = Vec::new();
+        weight_source::open_regular(&report_path)?
+            .take(LIMIT + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 <= LIMIT,
+            "HGN feedback receipt exceeds its limit"
+        );
+        let stored: Value = serde_json::from_slice(&bytes)?;
+        let producer = w.require(&req.child_producer)?;
+        ensure!(
+            producer
+                .reply
+                .result
+                .as_ref()
+                .is_some_and(|r| r["report"] == stored)
+                && stored["parent_sha256"] == req.parent_sha256,
+            "HGN feedback receipt changed after the edit"
+        );
+        use sha2::{Digest, Sha256};
+        let options = hgn_checks::EngineOptions {
+            request: req,
+            feedback_sha256: format!("{:x}", Sha256::digest(bytes)),
+        };
+        Some((
+            options,
+            paths,
+            serde_json::from_value::<hgn_edit::Report>(stored)?,
+        ))
+    } else {
+        None
+    };
+    if scratch_job && hgn_request.is_none() && hgn_check.is_none() {
         let access = w
             .cfg
             .scratch_access
@@ -469,7 +518,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             "This edit requires GPU load permission and a GPU admission wrapper"
         );
     }
-    if hgn_request.is_some() {
+    if hgn_request.is_some() || hgn_check.is_some() {
         use std::os::unix::fs::DirBuilderExt;
         fs::DirBuilder::new().mode(0o700).create(&work)?;
     } else {
@@ -482,6 +531,18 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         engine_job = job.clone();
         engine_job.options = to_value(req)?;
         &engine_job
+    } else if let Some((options, paths, _)) = &hgn_check {
+        engine_job = job.clone();
+        engine_job.options = to_value(options)?;
+        engine_job.inputs = paths
+            .iter()
+            .map(|path| {
+                let mut input = job.inputs[0].clone();
+                input.path.clone_from(path);
+                input
+            })
+            .collect();
+        &engine_job
     } else {
         job
     };
@@ -492,7 +553,11 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         let r = w.require(id)?;
         ensure!(!r.cancel, "cancel requested");
     }
-    let mut command = if let Some(edit) = w.cfg.hgn_edit.as_ref().filter(|_| hgn_request.is_some())
+    let mut command = if let Some(edit) = w
+        .cfg
+        .hgn_edit
+        .as_ref()
+        .filter(|_| hgn_request.is_some() || hgn_check.is_some())
     {
         let mut command = Command::new(&edit.build_admission);
         command.args(["--"]).arg(&w.cfg.engine);
@@ -562,6 +627,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             .env(hgn_edit::CACHE, w.cfg.root.join(hgn_edit::CACHE_DIR))
             .env(hgn_edit::RESERVE, w.cfg.disk_reserve_bytes.to_string());
     } else if !hgn_trace
+        && hgn_check.is_none()
         && (scratch_job
             || gradient_backend.is_some()
             || matches!(
@@ -646,7 +712,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         if gpu_edit || gradient_backend.is_some_and(locate_edit::Backend::is_gpu) {
             command.env("PATH", "/usr/bin:/bin");
         }
-    } else if hgn_trace {
+    } else if hgn_trace || hgn_check.is_some() {
         command.env_clear().envs(
             [
                 trace::HGN_PYTHON,
@@ -657,6 +723,9 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             .into_iter()
             .filter_map(|key| w.cfg.engine_env.get(key).map(|value| (key, value))),
         );
+        if hgn_check.is_some() {
+            command.env("PATH", "/usr/bin:/bin");
+        }
     } else {
         command.envs(&w.cfg.engine_env);
     }
@@ -904,6 +973,15 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         ensure!(
             load::<Value>(&private.join(hgn_edit::REPORT))? == value["report"],
             "HGN edit report file does not match the engine receipt"
+        );
+        return Ok(value);
+    }
+    if let Some((options, _, feedback)) = hgn_check {
+        let report: hgn_checks::Report = serde_json::from_value(value.clone())?;
+        report.verify(&options.request, &feedback)?;
+        ensure!(
+            w.cfg.engine_env.get(trace::HGN_PYTHON_SHA256) == Some(&report.executable_sha256),
+            "HGN check Python pin does not match the worker"
         );
         return Ok(value);
     }

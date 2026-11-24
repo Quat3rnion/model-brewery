@@ -37,3 +37,28 @@ a large component so it could test feedback on a small matrix. Its relative
 error includes removal of that component; it is not the error of the
 quantizer alone. Neither test estimates the error or convergence of a full
 checkpoint. Results are not release-qualified.
+
+The same fixtures also write the single-pass RTN payload to a child HGN
+file. The independent decoded-store audit rejects the RTN tensor and passes
+the feedback tensor. It marks the zero-component companion `no_component`.
+The bundle needs a measurable drop in every edited group. The audit also
+rejects missing writers, payload digest changes, and disagreement with the
+feedback receipt.
+
+For the isolated dispatcher, worker and engine smoke, build the binaries
+under the exclusive desktop build reservation. Copy them to a private
+directory. Under the reservation, run the following with the pinned HGN
+trace venv:
+
+```sh
+"$HGN_PYTHON" -B qualification/hgn_stored_checks_job.py \
+  --bins "$BINS" --scratch "$SCRATCH" --evidence "$EVIDENCE"
+```
+
+This smoke uses only a tiny synthetic checkpoint. It checks an edit and a
+paired CPU forward pass. Both writer groups have a measurable parent
+component. In the shared expert, the projection removes one of 128 equal
+diagonal entries. The relative Frobenius error is `1/sqrt(128)`, or `0.088388`,
+below the audit bound of `0.10`. The error includes the intended projection,
+not only quantization error. The smoke rejects an invalid grant, a changed
+child, and a changed feedback file. It does not contact the controller or Frame.

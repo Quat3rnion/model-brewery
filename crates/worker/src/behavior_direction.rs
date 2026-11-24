@@ -169,10 +169,7 @@ impl Request {
                 })
                 && (current_runtime(result, kind)
                     || if hgn {
-                        hgn_runtime(
-                            result,
-                            "29c4699cfcf3170fdf5daeced397fc168f7488244ee8f92d24dc39613693b767",
-                        )
+                        ORIGINAL_HGN_PINS.iter().any(|pin| hgn_runtime(result, pin))
                     } else {
                         original_runtime(result)
                     })
@@ -194,6 +191,14 @@ impl Request {
         fit.verify(self, version)
     }
 }
+
+// These published version 2 receipts remain readable, but new fits must
+// use the integrated runtime.
+const ORIGINAL_HGN_PINS: &[&str] = &[
+    "29c4699cfcf3170fdf5daeced397fc168f7488244ee8f92d24dc39613693b767", // H2
+    "e09a61b5ef47004dcb6d95b5de24e6666d46d7896f5cf1a32d777755a6e40b00", // H3
+    "8d4b6d5a685130b4603bbad5825f853c5d42b0275442541f4ea39fa327d8c0b3", // H5
+];
 
 fn current_runtime(result: &Value, kind: &str) -> bool {
     if trace::is_hgn(kind) {

@@ -1,11 +1,11 @@
-use crate::{Job, integrity, progress::Progress, trace::hgn::Runtime};
-use anyhow::{Context, Result, ensure};
+use crate::{integrity, progress::Progress, trace::hgn::Runtime, Job};
+use anyhow::{ensure, Context, Result};
 use brewery_worker::{
     ablation_search::hgn::{self, Report, Request},
     behavior_direction::{self as directions, Behavior, Split},
     trace,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     env, fs,
     os::unix::fs::PermissionsExt,

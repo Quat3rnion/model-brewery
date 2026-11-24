@@ -12,10 +12,10 @@ mod infra_hosts;
 #[path = "support/interventions.rs"]
 mod interventions;
 
-#[path = "support/mcp.rs"]
-mod mcp;
 #[path = "support/hgn_ablation.rs"]
 mod hgn_ablation;
+#[path = "support/mcp.rs"]
+mod mcp;
 
 #[path = "support/crosscoder.rs"]
 mod crosscoder;

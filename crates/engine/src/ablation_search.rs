@@ -1,5 +1,5 @@
-use crate::{Job, integrity, progress::Progress, trace::Runtime, write_json};
-use anyhow::{Context, Result, ensure};
+use crate::{integrity, progress::Progress, trace::Runtime, write_json, Job};
+use anyhow::{ensure, Context, Result};
 use brewery_worker::{
     ablation_search::{self as search, Positions, Proposals, ScreenReport, ScreenRequest, Trial},
     behavior_direction::{self as direction, Behavior, Prompt, Split},
@@ -280,7 +280,11 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             probability(logits, id)
         } else {
             let [a, b] = [f64::from(logits[A]), f64::from(logits[B])];
-            if row.agree_a { a - b } else { b - a }
+            if row.agree_a {
+                a - b
+            } else {
+                b - a
+            }
         }
     };
     ensure!(

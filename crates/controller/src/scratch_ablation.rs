@@ -18,7 +18,7 @@ pub(super) struct Evidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) hgn: Option<super::hgn_edit::Evidence>,
     #[serde(flatten)]
-    settings: ablation::Settings,
+    pub(super) settings: ablation::Settings,
 }
 
 #[derive(Serialize, Deserialize)]
