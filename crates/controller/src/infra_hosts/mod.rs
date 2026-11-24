@@ -542,6 +542,8 @@ mod tests {
             backend_edit_formats: Default::default(),
             admin: None,
             evaluation_operator: None,
+            direction_operator: None,
+            direction_import_slot: tokio::sync::Semaphore::new(1),
             local_edit: dispatcher.local_edit.clone(),
             ssh_hosts: dispatcher.ssh_hosts.clone(),
             remote_edit: dispatcher.remote_edit.clone(),

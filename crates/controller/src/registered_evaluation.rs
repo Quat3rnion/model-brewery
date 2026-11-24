@@ -165,7 +165,7 @@ impl Spec {
             || !self.negative.valid()
             || ![self.sizes.tune, self.sizes.final_gate]
                 .iter()
-                .all(|n| (1..=32).contains(n))
+                .all(|n| (1..=512).contains(n))
             || !is_digest(&self.pins.tune)
             || !is_digest(&self.pins.final_gate)
             || self.pins.tune == self.pins.final_gate
@@ -226,6 +226,44 @@ pub fn router() -> Router<Arc<App>> {
         "/admin/evaluation-sets",
         post(register).layer(DefaultBodyLimit::max(96 * 1024)),
     )
+}
+
+/// Complete a direction job's `registered` option with the pinned tune digest
+/// from this controller's store. The caller submits only the set name; the
+/// final-gate digest is never reachable from a submitted request.
+pub(crate) fn resolve_registered_pin(
+    store: &crate::store::Store,
+    mut options: serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let Some(registered) = options.get("registered").cloned() else {
+        return Ok(options);
+    };
+    let name = registered
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let submitted = registered
+        .get("sha256")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let record = store
+        .evaluation_set(&name)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "unknown registered evaluation set".to_string())?;
+    let config = record.resolve(&Request {
+        name: name.clone(),
+        partition: Partition::Tune,
+    });
+    if !submitted.is_empty() && submitted != config.sha256 {
+        return Err("registered contrast digest does not match the stored set".into());
+    }
+    options.insert(
+        "registered".into(),
+        serde_json::json!({"name": name, "sha256": config.sha256}),
+    );
+    Ok(options)
 }
 
 async fn list(State(app): State<Arc<App>>) -> Result<Json<List>, ApiError> {

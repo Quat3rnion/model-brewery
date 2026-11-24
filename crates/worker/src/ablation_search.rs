@@ -1,6 +1,6 @@
 //! Bounded search receipts and deterministic proposal policy shared by engine and controller.
 use crate::{
-    behavior_direction::{Behavior, Fit},
+    behavior_direction::{Behavior, Fit, Registered},
     trace::Role,
     weight_source::scratch::ablation::{Kernel, Plan, Settings, Shape, Variant},
 };
@@ -26,7 +26,13 @@ pub struct ScreenRequest {
     pub model_sha256: String,
     pub direction_id: String,
     pub fit: Fit,
-    pub behavior: Behavior,
+    pub behavior: Option<Behavior>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registered: Option<Registered>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker_tokens: Option<Vec<usize>>,
     pub seed: u32,
     pub trial_budget: usize,
     pub max_children: usize,
@@ -57,7 +63,21 @@ impl ScreenRequest {
             crate::is_digest(&self.model_sha256)
                 && crate::is_digest(&self.confirmation_sha256)
                 && !self.direction_id.is_empty()
-                && matches!(self.behavior, Behavior::Slop | Behavior::Sycophancy)
+                && (self.behavior.is_some() != self.registered.is_some())
+                && self.behavior.as_ref().is_none_or(|b| {
+                    matches!(b, Behavior::Slop | Behavior::Sycophancy)
+                })
+                && (self.marker.is_some() == self.marker_tokens.is_some())
+                && (self.registered.is_some() == self.marker.is_some())
+                && self
+                    .marker
+                    .as_ref()
+                    .is_none_or(|m| !m.is_empty() && m.len() <= 128)
+                && self.marker_tokens.as_ref().is_none_or(|t| {
+                    (1..=16).contains(&t.len())
+                        && t.iter().all(|&i| i < 262144)
+                        && t.iter().collect::<std::collections::BTreeSet<_>>().len() == t.len()
+                })
                 && (MIN_TRIALS..=MAX_TRIALS).contains(&self.trial_budget)
                 && (1..=MAX_CHILDREN.min(self.trial_budget)).contains(&self.max_children)
                 && Self::valid_fit(&self.fit)
@@ -103,6 +123,37 @@ impl ScreenRequest {
                 .filter(|row| row.unit_vector.is_some())
                 .count()
                 >= 3
+    }
+
+    pub fn pin(&self) -> &str {
+        match (&self.behavior, &self.registered) {
+            (Some(behavior), None) => behavior.contrast_sha256(),
+            (None, Some(registered)) => registered.sha256.as_str(),
+            _ => "",
+        }
+    }
+
+    pub fn cache_var(&self) -> &'static str {
+        if self.registered.is_some() {
+            crate::scratch_eval::registered::CACHE
+        } else {
+            crate::behavior_direction::CACHE
+        }
+    }
+
+    pub fn load_pairs(&self, cache: &std::path::Path) -> Result<Vec<crate::behavior_direction::Pair>> {
+        match &self.registered {
+            Some(registered) => crate::behavior_direction::load_registered(
+                cache,
+                &registered.name,
+                &registered.sha256,
+            ),
+            None => crate::behavior_direction::load_pairs(
+                cache,
+                self.behavior.expect("parse checked the contrast source"),
+                self.pin(),
+            ),
+        }
     }
 
     pub fn plan(&self, candidate: Candidate, random: bool) -> Result<Plan> {
@@ -214,7 +265,9 @@ pub struct ScreenReport {
     pub direction_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_k_direction_id: Option<String>,
-    pub behavior: Behavior,
+    pub behavior: Option<Behavior>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registered: Option<Registered>,
     pub seed: u32,
     pub lanternfish_sha256: String,
     pub screen_sha256: String,
@@ -238,10 +291,14 @@ impl ScreenReport {
                 && self.last_k_direction_id.as_deref()
                     == req.last_k_variant.as_ref().map(|v| v.direction_id.as_str())
                 && self.behavior == req.behavior
+                && self.registered == req.registered
                 && self.seed == req.seed
                 && self.lanternfish_sha256 == SHA256
-                && self.screen_sha256 == req.behavior.contrast_sha256()
+                && self.screen_sha256 == req.pin()
                 && self.confirmation_sha256 == req.confirmation_sha256
+                && (req.registered.is_none()
+                    || (Some(self.marker.as_str()) == req.marker.as_deref()
+                        && req.marker_tokens.as_ref().is_some_and(|t| *t == self.marker_tokens)))
                 && self.prompts == req.fit.held_out_pairs
                 && self.parent_hits <= self.prompts
                 && !self.marker.is_empty()
@@ -354,6 +411,7 @@ pub struct Proposals {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn gguf_proposals_compare_last_k_and_bound_the_scale() {
@@ -378,7 +436,10 @@ mod tests {
             model_sha256: "a".repeat(64),
             direction_id: "last-user".into(),
             fit: fit([1.0, 0.0, 0.0]),
-            behavior: Behavior::Slop,
+            behavior: Some(Behavior::Slop),
+            registered: None,
+            marker: None,
+            marker_tokens: None,
             seed: 7,
             trial_budget: 4,
             max_children: 1,
@@ -432,6 +493,147 @@ mod tests {
         );
         request.alphas = Some(vec![4.01]);
         assert!(request.check().is_err());
+    }
+
+    #[test]
+    fn registered_screen_needs_a_configured_marker_and_alpha_above_one() {
+        let fit = Fit {
+            role: Role::LOut,
+            train_pairs: 3,
+            held_out_pairs: 2,
+            selected_layer: Some(0),
+            layers: (0..3)
+                .map(|layer| crate::behavior_direction::Layer {
+                    layer,
+                    norm: 1.0,
+                    unit_vector: Some(vec![1.0, 0.0, 0.0]),
+                    held_out_margin: Some(0.5),
+                    held_out_cohens_d: Some(1.5),
+                    mean_residual_norm: Some(1.0),
+                    negative_mean: Some(vec![0.0, 0.0, 1.0]),
+                })
+                .collect(),
+        };
+        let base = json!({
+            "model_sha256": "a".repeat(64),
+            "direction_id": "fit-1",
+            "fit": fit,
+            "registered": {"name": "garden", "sha256": "b".repeat(64)},
+            "seed": 7,
+            "trial_budget": 4,
+            "max_children": 1,
+            "confirmation_sha256": "c".repeat(64),
+            "alphas": [2.0, 3.0],
+            "marker": "I",
+            "marker_tokens": [40],
+        });
+        let request = ScreenRequest::parse(&base).unwrap();
+        assert!(request.behavior.is_none());
+        assert_eq!(request.registered.as_ref().unwrap().name, "garden");
+        assert_eq!(request.pin(), "b".repeat(64));
+        assert_eq!(request.cache_var(), crate::scratch_eval::registered::CACHE);
+        let mut no_marker = base.clone();
+        no_marker.as_object_mut().unwrap().remove("marker");
+        no_marker.as_object_mut().unwrap().remove("marker_tokens");
+        assert!(ScreenRequest::parse(&no_marker).is_err());
+        let mut both = base.clone();
+        both["behavior"] = json!("slop");
+        assert!(ScreenRequest::parse(&both).is_err());
+        let mut orphan_marker = base.clone();
+        orphan_marker.as_object_mut().unwrap().remove("registered");
+        orphan_marker["behavior"] = json!("slop");
+        assert!(ScreenRequest::parse(&orphan_marker).is_err());
+        // A plain alpha greater than one is valid; 4.01 exceeds the cap.
+        let mut alpha = base.clone();
+        alpha.as_object_mut().unwrap().remove("registered");
+        alpha.as_object_mut().unwrap().remove("marker");
+        alpha.as_object_mut().unwrap().remove("marker_tokens");
+        alpha["behavior"] = json!("slop");
+        assert!(ScreenRequest::parse(&alpha).is_ok());
+        let mut too_big = alpha.clone();
+        too_big["alphas"] = json!([4.01]);
+        assert!(ScreenRequest::parse(&too_big).is_err());
+
+    }
+
+    #[test]
+    fn registered_screen_report_matches_the_request_and_rejects_stray_contrasts() {
+        let fit = Fit {
+            role: Role::LOut,
+            train_pairs: 3,
+            held_out_pairs: 2,
+            selected_layer: Some(0),
+            layers: (0..3)
+                .map(|layer| crate::behavior_direction::Layer {
+                    layer,
+                    norm: 1.0,
+                    unit_vector: Some(vec![1.0, 0.0, 0.0]),
+                    held_out_margin: Some(0.5),
+                    held_out_cohens_d: Some(1.5),
+                    mean_residual_norm: Some(1.0),
+                    negative_mean: Some(vec![0.0, 0.0, 1.0]),
+                })
+                .collect(),
+        };
+        let request = ScreenRequest::parse(&json!({
+            "model_sha256": "a".repeat(64),
+            "direction_id": "fit-1",
+            "fit": fit.clone(),
+            "registered": {"name": "garden", "sha256": "b".repeat(64)},
+            "seed": 7,
+            "trial_budget": 3,
+            "max_children": 1,
+            "confirmation_sha256": "c".repeat(64),
+            "alphas": [2.0],
+            "marker": "I",
+            "marker_tokens": [40],
+        }))
+        .unwrap();
+        let mut proposals = Proposals::new(&request);
+        let mut trials: Vec<Trial> = Vec::new();
+        for _ in 0..request.trial_budget {
+            let candidate = proposals.next(&request, &trials).unwrap();
+            trials.push(Trial {
+                candidate,
+                reduction: 0.4 - 0.1 * trials.len() as f64,
+                random_reduction: 0.1,
+                kl: 0.01 * (trials.len() as f64 + 1.0),
+                random_kl: 0.01,
+                wins_over_random: 2,
+            });
+        }
+        let mut report = ScreenReport {
+            schema_version: 1,
+            model_sha256: "a".repeat(64),
+            direction_id: "fit-1".into(),
+            last_k_direction_id: None,
+            behavior: None,
+            registered: request.registered.clone(),
+            seed: 7,
+            lanternfish_sha256: SHA256.into(),
+            screen_sha256: "b".repeat(64),
+            confirmation_sha256: "c".repeat(64),
+            marker: "I".into(),
+            marker_tokens: vec![40],
+            parent_mean: 0.5,
+            parent_hits: 1,
+            prompts: 2,
+            trials,
+            pareto: Vec::new(),
+            selected: Vec::new(),
+        };
+        let (pareto, selected) = super::frontier(&report.trials, report.prompts, report.parent_hits, request.max_children);
+        report.pareto = pareto;
+        report.selected = selected;
+        report.verify(&request).unwrap();
+        report.registered = None;
+        assert!(report.verify(&request).is_err());
+        report.registered = request.registered.clone();
+        report.marker = "In".into();
+        assert!(report.verify(&request).is_err());
+        report.marker = "I".into();
+        report.screen_sha256 = "d".repeat(64);
+        assert!(report.verify(&request).is_err());
     }
 
     #[test]

@@ -5,9 +5,11 @@ use axum::{
     extract::{Path, Query, State},
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use brewery_worker::{behavior_direction as direction, trace};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 pub(crate) mod import;
@@ -15,6 +17,7 @@ pub(crate) mod import;
 pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/directions", get(list))
+        .route("/directions/export", get(export))
         .route("/directions/{id}/versions/{version}", get(get_version))
         .route("/admin/directions/import", post(import::upload))
 }
@@ -172,9 +175,86 @@ pub(crate) fn load(store: &Store, id: &str, version: u32) -> Result<Value, ApiEr
     Ok(result)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportQuery {
+    id: String,
+    layer: Option<usize>,
+}
+
+/// Export a stored fitted direction as the v2 operator-import bundle that
+/// `/admin/directions/import` consumes: model_id, manifest, and the base64 .npy.
+async fn export(
+    State(app): State<Arc<App>>,
+    Query(query): Query<ExportQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let store = app.store.lock().map_err(ApiError::storage)?;
+    let result = load(&store, &query.id, direction::VERSION)?;
+    if result["origin"] == "imported" {
+        return Err(ApiError::bad(
+            "only Brewery-fitted directions can be exported as a v2 bundle",
+        ));
+    }
+    let model_id = result["model_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let model_sha256 = result["model_sha256"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let rows = result["fit"]["layers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let row = if let Some(layer) = query.layer {
+        rows
+            .into_iter()
+            .find(|row| row["layer"] == layer)
+            .ok_or_else(|| ApiError::bad("direction has no such fitted layer"))?
+    } else {
+        let selected = result["fit"]["selected_layer"].clone();
+        rows.into_iter()
+            .find(|row| row["layer"] == selected)
+            .ok_or_else(|| ApiError::bad("direction has no selected layer"))?
+    };
+    let vector: Option<Vec<f32>> =
+        serde_json::from_value(row["unit_vector"].clone()).map_err(ApiError::storage)?;
+    let vector = vector.ok_or_else(|| ApiError::bad("direction layer has no direction"))?;
+    let layer = row["layer"].as_u64().unwrap_or(0) as usize;
+    let mut npy = Vec::with_capacity(12 + vector.len() * 4);
+    npy.extend_from_slice(b"\x93NUMPY\x01\x00");
+    let mut header = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({},), }}", vector.len());
+    header.push_str(&" ".repeat(64 - (11 + header.len()) % 64));
+    header.push('\n');
+    npy.extend_from_slice(&(header.len() as u16).to_le_bytes());
+    npy.extend_from_slice(header.as_bytes());
+    for value in &vector {
+        npy.extend_from_slice(&value.to_le_bytes());
+    }
+    let npy_sha256 = format!("{:x}", Sha256::digest(&npy));
+    let position = result["position"].as_i64().map(|v| v as i32);
+    let manifest = json!({
+        "layer": layer,
+        "position": position,
+        "model_sha256": model_sha256,
+        "npy_sha256": npy_sha256,
+        "provenance": format!("brewery:directions/{}:v{}", query.id, direction::VERSION),
+    });
+    Ok(Json(json!({
+        "id": query.id,
+        "version": direction::VERSION,
+        "model_id": model_id,
+        "manifest": manifest,
+        "npy_base64": STANDARD.encode(&npy),
+        "bytes": npy.len(),
+    })))
+}
+
 pub(crate) struct HgnLayer {
     pub sha256: String,
-    pub behavior: direction::Behavior,
+    pub behavior: Option<direction::Behavior>,
+    pub registered: Option<direction::Registered>,
     pub vector: Vec<f32>,
     pub assets: trace::hgn_projection::AssetPins,
     pub held_out_pairs: usize,
@@ -217,6 +297,10 @@ pub(crate) fn hgn_layer(
         sha256: sha.into(),
         behavior: serde_json::from_value(artifact["behavior"].clone())
             .map_err(ApiError::storage)?,
+        registered: serde_json::from_value(
+            artifact.get("registered").cloned().unwrap_or(Value::Null),
+        )
+        .map_err(ApiError::storage)?,
         vector,
         assets: serde_json::from_value(artifact["assets_sha256"].clone())
             .map_err(ApiError::storage)?,

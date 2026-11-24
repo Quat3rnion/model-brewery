@@ -37,6 +37,7 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("start_trace", "post", "/api/jobs"),
     ("compute_direction", "post", "/api/jobs"),
     ("list_directions", "get", "/api/directions"),
+    ("export_direction", "get", "/api/directions/export"),
     (
         "get_direction",
         "get",
@@ -195,10 +196,14 @@ impl Server {
                     "Compare pinned Library BF16 and quantized GGUFs on the same worker. Choose target_logit for logit drift or corpus_nll for mean next-token loss on all W4 held-out lines. Read the damage map after the job finishes. The job does not apply its recipe proposal."
                 }
                 "compute_direction" => {
-                    "Queue CPU behavior directions for one pinned Library Qwen2 GGUF or supported HGN v2 checkpoint. Use a reviewed contrast and optional last_k to fit the last K positions. HGN requires l_out. Poll with get_job. Read version 2 with get_direction."
+                    "Queue CPU behavior directions for one pinned Library Qwen2 GGUF or supported HGN v2 checkpoint. Use a reviewed contrast or one operator-registered evaluation set (registered name only; the controller pins the tune digest) and optional last_k to fit the last K positions. HGN requires l_out. Poll with get_job. Read version 2 with get_direction."
                 }
                 "get_direction" => {
                     "Read an immutable direction artifact, including operator provenance for imports. For cosine, give reference_id and reference_layer. Two fitted directions must use the same HGN checkpoint and behavior. If either is imported, both must be version 2 and use the same checkpoint hash. Imports have no measured separation scores."
+                }
+                "export_direction" => {
+                    schema["properties"]["id"]["description"] = json!("Fitted direction job ID to export.");
+                    "Export a stored Brewery-fitted direction as the v2 bundle (model_id, manifest, base64 float32 .npy) that the operator import route consumes. Read-only; imported directions cannot be exported."
                 }
                 "create_direction_intervention" => {
                     "Save trace rules from a Brewery-fitted direction version. Project out its activation component or subtract a scaled unit vector. Pass the saved ID and version to start_trace."
@@ -210,7 +215,7 @@ impl Server {
                     "Apply selected tensor operations to a private SafeTensors scratch child. For native HGN projection, use ablate_direction."
                 }
                 "search_ablation" => {
-                    "Screen reviewed slop or sycophancy fits on exact GGUF bytes, or also response_length on HGN. Set alphas in (0,4] and compare a last_k_direction_id with a single-position fit. GGUF needs disjoint confirmation pins and checks selected children. HGN accepts second_source_layer for rank two and returns scores and a Pareto front only. HGN response_length is a first-token continuation proxy, not generated length. Read the receipt with get_job."
+                    "Screen reviewed slop or sycophancy fits on exact GGUF bytes, or also response_length on HGN. Set alphas in (0,4] and compare a last_k_direction_id with a single-position fit. For a registered contrast pass registered with a first-token marker and optional marker_tokens; the direction must carry the same registered fit. GGUF needs disjoint confirmation pins and checks selected children. HGN accepts second_source_layer for rank two and returns scores and a Pareto front only. HGN response_length is a first-token continuation proxy, not generated length. Read the receipt with get_job."
                 }
                 "run_heretic" => {
                     "Queue an offline Heretic GPU job on the original Library SafeTensors parent, not its scratch copy. Read get_job for scratch_id and get_scratch for the journal. Convert the byte-identical baseline and imported child with the same assets, then call run_checks."

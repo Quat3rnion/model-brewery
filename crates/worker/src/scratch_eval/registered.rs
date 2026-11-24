@@ -43,7 +43,7 @@ impl Config {
         ensure!(
             name_valid(&self.name)
                 && crate::is_digest(&self.sha256)
-                && (1..=32).contains(&self.size_per_side),
+                && (1..=crate::behavior_direction::MAX_REGISTERED_ROWS).contains(&self.size_per_side),
             "invalid registered evaluation partition"
         );
         self.classifier.validate()
@@ -98,7 +98,7 @@ impl Classifier {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Report {
     schema: String,
@@ -110,7 +110,7 @@ pub struct Report {
     negative: Side,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Side {
     parent_rate: f64,
@@ -120,14 +120,14 @@ struct Side {
     hits: Vec<Pair>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Pair {
     parent: Hit,
     child: Hit,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Hit {
     counts: bool,
@@ -194,4 +194,130 @@ pub fn validate_report(report: Option<&Report>, config: Option<&Config>) -> Resu
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn config() -> Config {
+        Config {
+            name: "refusal".into(),
+            partition: Partition::Tune,
+            sha256: "b".repeat(64),
+            size_per_side: 2,
+            classifier: serde_json::from_value(json!({
+                "max_tokens": 96,
+                "classes": [
+                    {"name": "refusal", "kind": "counts", "prefixes": ["I cannot"]},
+                    {"name": "other", "kind": "excluded", "substrings": ["Sorry"]}
+                ]
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn report() -> Report {
+        let side = Side {
+            parent_rate: 0.5,
+            child_rate: 0.5,
+            parent_class_counts: BTreeMap::from([
+                ("refusal".to_string(), 1),
+                ("other".to_string(), 1),
+            ]),
+            child_class_counts: BTreeMap::from([
+                ("refusal".to_string(), 1),
+                ("other".to_string(), 1),
+            ]),
+            hits: vec![
+                Pair {
+                    parent: Hit {
+                        counts: true,
+                        class_name: Some("refusal".into()),
+                        prefix: Some("a".repeat(120)),
+                    },
+                    child: Hit {
+                        counts: true,
+                        class_name: Some("refusal".into()),
+                        prefix: Some("b".repeat(120)),
+                    },
+                },
+                Pair {
+                    parent: Hit {
+                        counts: false,
+                        class_name: Some("other".into()),
+                        prefix: None,
+                    },
+                    child: Hit {
+                        counts: false,
+                        class_name: Some("other".into()),
+                        prefix: None,
+                    },
+                },
+            ],
+        };
+        Report {
+            schema: SCHEMA.into(),
+            name: "refusal".into(),
+            partition: Partition::Tune,
+            sha256: "b".repeat(64),
+            max_tokens: 96,
+            positive: side.clone(),
+            negative: side,
+        }
+    }
+
+    #[test]
+    fn accepts_benign_registered_report() {
+        assert!(validate_report(Some(&report()), Some(&config())).is_ok());
+    }
+
+    #[test]
+    fn rejects_missing_side_of_the_pair() {
+        let cfg = config();
+        assert!(validate_report(Some(&report()), None).is_err());
+        assert!(validate_report(None, Some(&cfg)).is_err());
+    }
+
+    #[test]
+    fn rejects_final_gate_pin_mismatch_and_wrong_schema() {
+        let cfg = config();
+        let mut r = report();
+        r.partition = Partition::FinalGate;
+        assert!(validate_report(Some(&r), Some(&cfg)).is_err());
+        let mut r = report();
+        r.schema = "brewery.registered-marker-rate.v2".into();
+        assert!(validate_report(Some(&r), Some(&cfg)).is_err());
+    }
+
+    #[test]
+    fn rejects_excluded_class_hit_that_counts() {
+        let cfg = config();
+        let mut r = report();
+        r.positive.hits[1].parent.counts = true;
+        assert!(validate_report(Some(&r), Some(&cfg)).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_class_and_bad_prefix_width() {
+        let cfg = config();
+        let mut r = report();
+        r.positive.hits[0].parent.class_name = Some("missing".into());
+        assert!(validate_report(Some(&r), Some(&cfg)).is_err());
+        let mut r = report();
+        r.positive.hits[0].child.prefix = Some("b".repeat(119));
+        assert!(validate_report(Some(&r), Some(&cfg)).is_err());
+    }
+
+    #[test]
+    fn config_accepts_320_rows_and_bounds_size() {
+        let mut cfg = config();
+        cfg.size_per_side = 320;
+        assert!(cfg.validate().is_ok());
+        cfg.size_per_side = 0;
+        assert!(cfg.validate().is_err());
+        cfg.size_per_side = 513;
+        assert!(cfg.validate().is_err());
+    }
 }

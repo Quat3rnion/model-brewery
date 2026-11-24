@@ -908,6 +908,20 @@ fn prepare_job(app: &App, store: &Store, request: NewJob) -> Result<(Job, Envelo
         ),
         (None, prompt) => prompt.clone(),
     };
+    // A registered contrast arrives as a name only; the controller pins the
+    // tune digest from its own store before validation so callers cannot choose it.
+    let request = if request.kind == brewery_worker::behavior_direction::JOB
+        && request.options.get("registered").is_some()
+    {
+        let options = crate::registered_evaluation::resolve_registered_pin(
+            &store,
+            request.options.clone(),
+        )
+        .map_err(ApiError::bad)?;
+        request.with_options(options)
+    } else {
+        request
+    };
     let (job, mut envelope) = request.build(host, inputs, prompt).map_err(ApiError::bad)?;
     envelope.scratch_pins = scratch_pins;
     if job.kind == sensitivity::JOB {

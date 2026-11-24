@@ -2,7 +2,7 @@
 use crate::trace::{self, Role};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet, fs::OpenOptions, io::Read, os::unix::fs::OpenOptionsExt, path::Path,
@@ -13,8 +13,10 @@ pub const VERSION: u32 = 2;
 pub const CACHE: &str = "BREWERY_CONTRAST_CACHE";
 pub const CAP: u64 = 2 << 20;
 pub const MAX_LAST_K: usize = 16;
+pub const MAX_REGISTERED_ROWS: usize = 512;
 const FLOAT_CAP: usize = 65536;
 const SCHEMA: &str = "brewery.contrast-prompts.v1";
+const REGISTERED_SCHEMA: &str = "brewery.registered-contrast.v1";
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -36,10 +38,33 @@ impl Behavior {
     }
 }
 
-#[derive(Deserialize)]
+/// Reference to an operator-registered evaluation set used as a contrast source.
+/// Fitting only ever uses the tune partition; the final gate stays unreachable.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Registered {
+    pub name: String,
+    #[serde(default)]
+    pub sha256: String,
+}
+
+impl Registered {
+    pub fn check(&self) -> Result<()> {
+        ensure!(
+            crate::scratch_eval::registered::name_valid(&self.name)
+                && crate::is_digest(&self.sha256),
+            "invalid registered contrast reference"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    pub behavior: Behavior,
+    pub behavior: Option<Behavior>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registered: Option<Registered>,
     pub model_sha256: String,
     pub layers: Vec<usize>,
     #[serde(default = "l_out")]
@@ -56,19 +81,45 @@ impl Request {
     pub fn parse(value: &Value) -> Result<Self> {
         let r: Self = serde_json::from_value(value.clone()).context("invalid direction options")?;
         ensure!(
-            crate::is_digest(&r.model_sha256)
+            r.behavior.is_some() != r.registered.is_some()
+                && crate::is_digest(&r.model_sha256)
                 && valid_selection(&r.layers, r.role)
                 && *r.layers.last().unwrap() < 4096
                 && r.position.is_none_or(|p| p < 4096)
                 && r.last_k
                     .is_none_or(|k| (1..=MAX_LAST_K).contains(&k) && r.position.is_none()),
-            "invalid direction revision, layer selection or token position"
+            "invalid direction revision, contrast source, layer selection or token position"
         );
+        if let Some(registered) = &r.registered {
+            registered.check()?;
+        }
         Ok(r)
     }
 
+    pub fn pin(&self) -> &str {
+        match (&self.behavior, &self.registered) {
+            (Some(behavior), None) => behavior.contrast_sha256(),
+            (None, Some(registered)) => registered.sha256.as_str(),
+            _ => "",
+        }
+    }
+
+    pub fn cache_var(&self) -> &'static str {
+        if self.registered.is_some() {
+            crate::scratch_eval::registered::CACHE
+        } else {
+            CACHE
+        }
+    }
+
     pub fn load_pairs(&self, cache: &Path) -> Result<Vec<Pair>> {
-        load_pairs(cache, self.behavior, self.behavior.contrast_sha256())
+        match &self.registered {
+            Some(registered) => load_registered(cache, &registered.name, &registered.sha256),
+            None => {
+                let behavior = self.behavior.expect("parse checked the contrast source");
+                load_pairs(cache, behavior, behavior.contrast_sha256())
+            }
+        }
     }
 
     pub fn check_input_kind(&self, kind: &str) -> Result<()> {
@@ -160,7 +211,7 @@ impl Request {
                 && result["schema_version"] == version
                 && result["release_qualified"] == false
                 && result["behavior"] == serde_json::to_value(self.behavior)?
-                && result["contrast_sha256"] == self.behavior.contrast_sha256()
+                && result["contrast_sha256"] == self.pin()
                 && result["position"] == serde_json::to_value(self.position)?
                 && (if hgn && self.position.is_none() {
                     result["last_k"] == self.last_k.unwrap_or(1)
@@ -178,6 +229,13 @@ impl Request {
                 && (!hgn || version == VERSION),
             "direction result does not match the model, prompt or runtime pins"
         );
+        if let Some(registered) = &self.registered {
+            ensure!(
+                version == VERSION
+                    && result["registered"] == json!({"name":registered.name,"sha256":registered.sha256}),
+                "registered contrast fields do not match the request"
+            );
+        }
         if version == VERSION {
             ensure!(
                 result["fit"]["layers"]
@@ -233,7 +291,7 @@ fn original_runtime(result: &Value) -> bool {
         && result["executable_sha256"] == trace::PROJECTION_SHA256
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PromptSet {
     schema: String,
@@ -241,7 +299,7 @@ struct PromptSet {
     rows: Vec<Pair>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pair {
     pub id: String,
@@ -251,7 +309,7 @@ pub struct Pair {
     pub expected_agreement: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Prompt {
     system: String,
@@ -284,14 +342,14 @@ impl Prompt {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Split {
     Train,
     HeldOut,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Layer {
     pub layer: usize,
@@ -304,7 +362,7 @@ pub struct Layer {
     pub negative_mean: Option<Vec<f32>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Fit {
     pub role: Role,
@@ -316,10 +374,16 @@ pub struct Fit {
 
 impl Fit {
     fn verify(&self, request: &Request, version: u32) -> Result<()> {
+        let counts = if request.registered.is_some() {
+            self.train_pairs >= 1
+                && self.held_out_pairs >= 1
+                && self.train_pairs + self.held_out_pairs <= MAX_REGISTERED_ROWS
+        } else {
+            self.train_pairs == 12 && self.held_out_pairs == 8
+        };
         ensure!(
             self.role == request.role
-                && self.train_pairs == 12
-                && self.held_out_pairs == 8
+                && counts
                 && self
                     .layers
                     .iter()
@@ -576,4 +640,208 @@ pub fn compute(
         selected_layer: best.1,
         layers,
     })
+}
+
+/// Open the content-addressed partition file for a registered set and return
+/// its name and rows. Only the tune partition is accepted; a final-gate
+/// partition file never reaches fitting.
+pub fn load_registered_at(cache: &Path, pin: &str) -> Result<(String, Vec<Pair>)> {
+    use crate::scratch_eval::registered::Partition;
+    ensure!(crate::is_digest(pin), "invalid registered contrast pin");
+    let path = cache.join(format!("{pin}.json"));
+    let f = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+        .context("registered evaluation cache is missing the partition file")?;
+    ensure!(f.metadata()?.is_file(), "invalid partition file type");
+    let mut bytes = Vec::new();
+    f.take(CAP + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= CAP && format!("{:x}", Sha256::digest(&bytes)) == pin,
+        "registered cache size or SHA-256 mismatch"
+    );
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RegisteredFile {
+        schema: String,
+        name: String,
+        partition: Partition,
+        rows: Vec<Pair>,
+    }
+    let file: RegisteredFile =
+        serde_json::from_slice(&bytes).context("invalid registered contrast file")?;
+    ensure!(
+        file.schema == REGISTERED_SCHEMA && file.partition == Partition::Tune,
+        "registered contrast file must carry the tune partition"
+    );
+    ensure!(
+        crate::scratch_eval::registered::name_valid(&file.name),
+        "invalid registered set name"
+    );
+    let mut ids = std::collections::BTreeSet::new();
+    ensure!(
+        (1..=MAX_REGISTERED_ROWS).contains(&file.rows.len())
+            && file.rows.iter().all(|row| {
+                crate::is_digest(&row.id)
+                    && ids.insert(&row.id)
+                    && row.positive.valid()
+                    && row.negative.valid()
+            }),
+        "invalid registered contrast rows"
+    );
+    Ok((file.name, file.rows))
+}
+
+pub fn load_registered(cache: &Path, name: &str, pin: &str) -> Result<Vec<Pair>> {
+    let (found, rows) = load_registered_at(cache, pin)?;
+    ensure!(found == name, "registered set name does not match the pin");
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    const PIN: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn rows(n: usize) -> Vec<Pair> {
+        (0..n)
+            .map(|i| Pair {
+                id: format!("{:064x}", i + 1),
+                split: if i % 4 == 3 { Split::HeldOut } else { Split::Train },
+                positive: Prompt {
+                    system: "Follow the instruction.".into(),
+                    user: format!("Name plant {}.", i + 1),
+                },
+                negative: Prompt {
+                    system: "Follow the instruction.".into(),
+                    user: format!("Name color {}.", i + 1),
+                },
+                expected_agreement: None,
+            })
+            .collect()
+    }
+
+    fn write_registered_cache(dir: &Path, name: &str, partition: &str, rows: &[Pair]) -> String {
+        let body = json!({"schema": REGISTERED_SCHEMA, "name": name, "partition": partition, "rows": rows});
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let pin = format!("{:x}", Sha256::digest(&bytes));
+        fs::write(dir.join(format!("{pin}.json")), &bytes).unwrap();
+        pin
+    }
+
+    #[test]
+    fn parse_accepts_a_registered_contrast_without_a_builtin_behavior() {
+        let r = Request::parse(&json!({
+            "registered": {"name": "garden", "sha256": PIN},
+            "model_sha256": "a".repeat(64), "layers": [0, 6, 12],
+        }))
+        .unwrap();
+        assert!(r.behavior.is_none());
+        assert_eq!(r.registered.as_ref().unwrap().name, "garden");
+        assert_eq!(r.pin(), PIN);
+        assert_eq!(r.cache_var(), crate::scratch_eval::registered::CACHE);
+        assert!(Request::parse(&json!({
+            "behavior": "slop", "registered": {"name": "garden", "sha256": PIN},
+            "model_sha256": "a".repeat(64), "layers": [0],
+        }))
+        .is_err());
+        assert!(Request::parse(&json!({
+            "model_sha256": "a".repeat(64), "layers": [0],
+        }))
+        .is_err());
+        assert!(Request::parse(&json!({
+            "registered": {"name": "Garden"}, "model_sha256": "a".repeat(64), "layers": [0],
+        }))
+        .is_err());
+        assert!(Request::parse(&json!({
+            "registered": {"name": "garden", "sha256": "zz"},
+            "model_sha256": "a".repeat(64), "layers": [0],
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn registered_cache_loader_pins_content_tune_partition_and_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let pin = write_registered_cache(dir.path(), "garden", "tune", &rows(3));
+        assert_eq!(load_registered(dir.path(), "garden", &pin).unwrap().len(), 3);
+        assert!(load_registered(dir.path(), "other", &pin).is_err());
+        // 320 tune rows are accepted; a final_gate file never reaches fitting.
+        let big = write_registered_cache(dir.path(), "large", "tune", &rows(320));
+        assert_eq!(load_registered(dir.path(), "large", &big).unwrap().len(), 320);
+        let gate = write_registered_cache(dir.path(), "garden", "final_gate", &rows(2));
+        assert!(load_registered(dir.path(), "garden", &gate).is_err());
+        let too_many = write_registered_cache(dir.path(), "huge", "tune", &rows(513));
+        assert!(load_registered(dir.path(), "huge", &too_many).is_err());
+        let with_delim = write_registered_cache(
+            dir.path(),
+            "bad",
+            "tune",
+            &[Pair {
+                id: "c".repeat(64),
+                split: Split::Train,
+                positive: Prompt { system: "s".into(), user: "<|im_start|>".into() },
+                negative: Prompt { system: "s".into(), user: "u".into() },
+                expected_agreement: None,
+            }],
+        );
+        assert!(load_registered(dir.path(), "bad", &with_delim).is_err());
+        // An unknown file name must not load under a mismatched pin.
+        assert!(load_registered(dir.path(), "garden", &pin).is_ok());
+        assert!(pin != gate);
+    }
+
+    #[test]
+    fn verify_result_accepts_registered_fields_and_rejects_wrong_pins() {
+        let request = Request::parse(&json!({
+            "registered": {"name": "garden", "sha256": PIN},
+            "model_sha256": "a".repeat(64), "layers": [0, 6],
+        }))
+        .unwrap();
+        let mut result = json!({
+            "kind": JOB, "schema_version": VERSION, "release_qualified": false,
+            "model_id": "m", "model_sha256": "a".repeat(64), "position": null,
+            "last_k": 1, "contrast_sha256": PIN,
+            "registered": {"name": "garden", "sha256": PIN},
+            "runtime": trace::HGN_RUNTIME, "runtime_sha256": trace::HGN_RUNTIME_SHA256.trim_end(),
+            "executable_sha256": "d".repeat(64),
+            "assets_sha256": {"sidecar": "e".repeat(64), "config": "e".repeat(64), "tokenizer": "e".repeat(64)},
+            "fit": {"role": "l_out", "train_pairs": 3, "held_out_pairs": 2, "selected_layer": 0,
+                "layers": [
+                    {"layer": 0, "norm": 2.0, "unit_vector": [1.0, 0.0], "held_out_margin": 0.5,
+                     "held_out_cohens_d": 2.0, "mean_residual_norm": 1.0},
+                    {"layer": 6, "norm": 0.0, "unit_vector": null, "held_out_margin": null,
+                     "held_out_cohens_d": null, "mean_residual_norm": 1.0},
+                ]},
+        });
+        request
+            .verify_version(&result, "m", "a".repeat(64).as_str(), "hgn-v2", VERSION)
+            .unwrap();
+        result["contrast_sha256"] = json!("f".repeat(64));
+        assert!(request
+            .verify_version(&result, "m", "a".repeat(64).as_str(), "hgn-v2", VERSION)
+            .is_err());
+        result["contrast_sha256"] = json!(PIN);
+        result["registered"] = json!({"name": "other", "sha256": PIN});
+        assert!(request
+            .verify_version(&result, "m", "a".repeat(64).as_str(), "hgn-v2", VERSION)
+            .is_err());
+    }
+
+    #[test]
+    fn builtin_requests_still_verify_with_their_pinned_digests() {
+        for behavior in [Behavior::Slop, Behavior::Sycophancy, Behavior::ResponseLength] {
+            let request = Request::parse(&json!({
+                "behavior": serde_json::to_value(behavior).unwrap(),
+                "model_sha256": "a".repeat(64), "layers": [0],
+            }))
+            .unwrap();
+            assert_eq!(request.behavior, Some(behavior));
+            assert!(request.registered.is_none());
+            assert!(!request.pin().is_empty());
+        }
+    }
 }

@@ -65,6 +65,23 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         schemas["HgnScreenResult"]["properties"]["configurations"]["maxItems"],
         32
     );
+    assert_eq!(
+        schemas["AblationSearchRequest"]["properties"]["registered"]["$ref"],
+        "#/components/schemas/RegisteredContrast"
+    );
+    assert!(schemas["AblationSearchRequest"]["properties"]["marker"].is_object());
+    assert!(schemas["AblationSearchRequest"]["properties"]["marker_tokens"].is_object());
+    assert_eq!(
+        schemas["BehaviorDirectionOptions"]["properties"]["registered"]["$ref"],
+        "#/components/schemas/RegisteredContrast"
+    );
+    assert_eq!(
+        schemas["BehaviorDirectionOptions"]["required"],
+        json!(["model_sha256", "layers"])
+    );
+    assert_eq!(schemas["RegisteredContrast"]["required"], json!(["name"]));
+    assert_eq!(schemas["RegisteredContrast"]["additionalProperties"], false);
+    assert_eq!(schemas["DirectionV2Export"]["properties"]["version"]["const"], 2);
     let operations = contract["paths"]
         .as_object()
         .unwrap()
@@ -91,6 +108,7 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("get", "/api/state", "getState"),
         ("get", "/api/evaluation-sets", "listEvaluationSets"),
         ("get", "/api/directions", "listDirections"),
+        ("get", "/api/directions/export", "exportDirection"),
         ("post", "/api/admin/directions/import", "importDirection"),
         (
             "post",

@@ -382,6 +382,13 @@ pub struct NewJob {
     pub prompt: Option<String>,
 }
 
+impl NewJob {
+    pub(crate) fn with_options(mut self, options: Map<String, Value>) -> Self {
+        self.options = options;
+        self
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Event {
     pub at: u64,

@@ -1,4 +1,7 @@
 use super::*;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use brewery_worker::trace;
+use sha2::{Digest, Sha256};
 
 #[test]
 fn registered_evaluation_requires_operator_and_lists_only_metadata() {
@@ -11,6 +14,14 @@ fn registered_evaluation_requires_operator_and_lists_only_metadata() {
     )
     .unwrap();
     fs::set_permissions(&credentials, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts": {
+            "alpha":{"local":true,"capabilities":{"trace":true,"behavior_direction":true}}
+        }})
+        .to_string(),
+    )
+    .unwrap();
     app.launch_with(&[("BREWERY_EVALUATION_OPERATOR_FILE", credentials)]);
     let source = |name: &str| {
         json!({
@@ -71,6 +82,78 @@ fn registered_evaluation_requires_operator_and_lists_only_metadata() {
         listed
     );
     assert_eq!(mcp("register_evaluation_set")["error"]["message"], "unknown tool");
+    let model = app.register("alpha", "gguf", "/models/contrast.gguf");
+    let sha = "a".repeat(64);
+    let submit = |options: Value| {
+        app.request(
+            "POST",
+            "/api/jobs",
+            Some(json!({"kind":"behavior_direction","input_ids":[model],"options":options})),
+            "",
+        )
+    };
+    // The final-gate pin and unknown sets are refused before anything is queued.
+    let (status, body) = submit(json!({
+        "registered":{"name":"garden","sha256":"c".repeat(64)},
+        "model_sha256":sha,"layers":[0,1]
+    }));
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = submit(json!({
+        "registered":{"name":"missing"},"model_sha256":sha,"layers":[0,1]
+    }));
+    assert_eq!(status, 400, "{body}");
+    // The mock worker echoes the stored result; the controller must have
+    // completed the registered pin from its own store, not from the client.
+    fs::write(
+        app.path("direction-result.json"),
+        json!({
+            "kind":"behavior_direction","schema_version":2,"release_qualified":false,
+            "model_id":model,"model_sha256":sha,"behavior":null,
+            "registered":{"name":"garden","sha256":"b".repeat(64)},
+            "contrast_sha256":"b".repeat(64),"position":null,
+            "lanternfish_commit":trace::COMMIT,"executable_sha256":trace::SHA256,
+            "fit":{"role":"l_out","train_pairs":3,"held_out_pairs":1,"selected_layer":1,
+                 "layers":[{"layer":0,"norm":2.0,"unit_vector":[0.6,0.8],
+                            "held_out_margin":0.2,"held_out_cohens_d":0.4,"mean_residual_norm":1.0},
+                           {"layer":1,"norm":2.0,"unit_vector":[0.0,1.0],
+                            "held_out_margin":0.25,"held_out_cohens_d":0.5,"mean_residual_norm":1.0}]}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let dir = app.enqueue(json!({"kind":"behavior_direction","input_ids":[model],"options":{
+        "registered":{"name":"garden"},"model_sha256":sha,"layers":[0,1]
+    }}));
+    let job = app.await_job(&dir, |job| job["state"] == "succeeded");
+    assert_eq!(
+        job["options"]["registered"],
+        json!({"name":"garden","sha256":"b".repeat(64)})
+    );
+    // The stored direction exports as the v2 bundle the import route consumes.
+    let export = app.json("GET", &format!("/api/directions/export?id={dir}"), None, 200);
+    assert_eq!(export["id"], dir);
+    assert_eq!(export["version"], 2);
+    assert_eq!(export["model_id"], model);
+    assert_eq!(export["manifest"]["model_sha256"], sha);
+    assert_eq!(export["manifest"]["layer"], 1);
+    let npy = STANDARD.decode(export["npy_base64"].as_str().unwrap()).unwrap();
+    assert_eq!(npy.len(), export["bytes"].as_u64().unwrap() as usize);
+    assert!(npy.starts_with(b"\x93NUMPY\x01\x00"));
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&npy)),
+        export["manifest"]["npy_sha256"].as_str().unwrap()
+    );
+    assert!(
+        export["manifest"].get("provenance").is_some()
+            && export["manifest"]["provenance"]
+                .as_str()
+                .unwrap()
+                .starts_with("brewery:directions/")
+    );
+    assert_eq!(
+        app.json("GET", "/api/directions/export?id=00000000-0000-0000-0000-000000000000", None, 404)["error"],
+        "direction not found"
+    );
     let (status, body) = app.request(
         "POST",
         "/api/scratch/00000000-0000-0000-0000-000000000000/search_ablation",

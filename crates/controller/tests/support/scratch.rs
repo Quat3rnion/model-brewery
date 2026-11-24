@@ -1316,6 +1316,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "diff_traces",
             "discard_scratch",
             "export_control_vector",
+            "export_direction",
             "find_circuit",
             "get_checks",
             "get_direction",
@@ -1414,9 +1415,10 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             assert_eq!(options["last_k"]["minimum"], 1);
             assert_eq!(options["last_k"]["maximum"], 16);
             assert_eq!(
-                options["behavior"]["enum"],
+                options["behavior"]["anyOf"][0]["enum"],
                 json!(["slop", "sycophancy", "response_length"])
             );
+            assert!(options["registered"].is_object());
         }
         if tool["name"] == "create_direction_intervention" {
             assert_eq!(schema["properties"]["direction_rules"]["maxItems"], 8);

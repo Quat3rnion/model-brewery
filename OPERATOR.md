@@ -1935,6 +1935,19 @@ References: [Arditi et al. (2024), section 4.1](https://arxiv.org/abs/2406.11717
 [Lai (2025), Projected Abliteration](https://huggingface.co/blog/grimjim/projected-abliteration)
 and [Norm-Preserving Biprojected Abliteration](https://huggingface.co/blog/grimjim/norm-preserving-biprojected-abliteration).
 
+### Export a fitted direction as a v2 bundle
+
+`GET /api/directions/export?id=<direction-id>` (or the `export_direction` MCP
+tool) returns a JSON bundle for a stored Brewery-fitted direction: `model_id`,
+a v2 `manifest` with `layer`, `position`, `model_sha256`, `npy_sha256` and
+`provenance`, plus `npy_base64` and `bytes`. Add `layer=<n>` to export one
+fitted layer; omit it to export the selected layer. Imported artifacts return
+`400`: only Brewery-fitted directions export. Decode `npy_base64` to a `.npy`
+file, take `model_id` and `manifest` from the bundle, then send the multipart
+upload below with operator credentials. The import side re-verifies the model
+hash, hidden width and layer count. This moves a fitted direction between
+controllers; it does not re-fit, score, or screen the vector.
+
 ### Import an external direction
 
 Only an operator can import a direction. On the controller, set
@@ -2643,7 +2656,7 @@ and `token` in the JSON file. Use a lower-case operator ID and a random
    an HTTPS URL with a full 40-digit commit in the path, the byte size, SHA-256,
    license, format, top-level prompt field and literal system message. The
    optional filter selects rows by a field and exact value. Use strings for
-   CSV filters. Give the `tune` and `final_gate` sizes per side, from 1 to 32.
+   CSV filters. Give the `tune` and `final_gate` sizes per side, from 1 to 512.
 3. On the worker, run
    `python3 tools/registered_evaluation.py spec.json sources eval-cache > register.json`.
    The builder does not use the network. It checks the source sizes and hashes,
@@ -2661,11 +2674,15 @@ and `token` in the JSON file. Use a lower-case operator ID and a random
    The older `--behavior-v1` runner pin above does not support marker checks.
 
 Call `list_evaluation_sets` or `GET /api/evaluation-sets` to read set names
-and sizes. For a GGUF pair, add
+and sizes. Pass `"registered":{"name":"<set-name>"}` (name only) to
+`compute_direction` or `search_ablation` to fit or screen with that set on
+the tune partition. The controller fills the digest from its own store, so
+the `final_gate` digest never reaches a fitting request. A registered
+`search_ablation` also takes the configured first-token `marker` and optional
+`marker_tokens`. For a GGUF pair, add
 `"registered_marker":{"name":"<set-name>","partition":"tune"}` to `run_checks`.
-Use `final_gate` only once you select the candidate. Fitting and ablation
-search cannot load either partition. Compiled-program and HGN checks do not
-accept this option.
+Use `final_gate` only once you select the candidate. Compiled-program and HGN
+checks do not accept this option.
 
 The first class whose case-insensitive prefix or substring matches wins. Put
 exclusion classes before classes that count when they could both match. The

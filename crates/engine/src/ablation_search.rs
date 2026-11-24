@@ -164,10 +164,17 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             && input.sha256.as_ref() == Some(&req.model_sha256),
         "invalid screen GGUF input"
     );
-    let cache = PathBuf::from(env::var_os(direction::CACHE).context("missing contrast cache")?);
+    let cache = PathBuf::from(
+        env::var_os(req.cache_var()).context("missing contrast cache for this contrast source")?,
+    );
     ensure!(cache.is_absolute(), "contrast cache must be absolute");
-    let pairs = direction::load_pairs(&cache, req.behavior, req.behavior.contrast_sha256())?;
-    let confirm = direction::load_pairs(&cache, req.behavior, &req.confirmation_sha256)?;
+    let pairs = req.load_pairs(&cache)?;
+    // A registered set keeps the fit partition and its confirmation hash in one
+    // content-addressed file; only built-in contrasts load a second pinned file.
+    let confirm: Vec<_> = match &req.registered {
+        Some(_) => pairs.clone(),
+        None => direction::load_pairs(&cache, req.behavior.expect("checked by parse"), &req.confirmation_sha256)?,
+    };
     let confirmation: Vec<_> = confirm
         .iter()
         .filter(|p| p.split == Split::HeldOut)
@@ -178,23 +185,25 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             .join(" ")
             .to_lowercase()
     };
-    let used: std::collections::BTreeSet<_> = pairs
-        .iter()
-        .map(|p| normalized(p.positive.user()))
-        .collect();
-    let unique: std::collections::BTreeSet<_> = confirmation
-        .iter()
-        .map(|p| normalized(p.positive.user()))
-        .collect();
-    ensure!(
-        confirmation.len() == 32
-            && unique.len() == 32
-            && used.is_disjoint(&unique)
-            && !confirmation
-                .iter()
-                .any(|p| pairs.iter().any(|other| other.id == p.id)),
-        "provide 32 unique confirmation prompts disjoint from fit and screen prompts"
-    );
+    if let None = &req.registered {
+        let used: std::collections::BTreeSet<_> = pairs
+            .iter()
+            .map(|p| normalized(p.positive.user()))
+            .collect();
+        let unique: std::collections::BTreeSet<_> = confirmation
+            .iter()
+            .map(|p| normalized(p.positive.user()))
+            .collect();
+        ensure!(
+            confirmation.len() == 32
+                && unique.len() == 32
+                && used.is_disjoint(&unique)
+                && !confirmation
+                    .iter()
+                    .any(|p| pairs.iter().any(|other| other.id == p.id)),
+            "provide 32 unique confirmation prompts disjoint from fit and screen prompts"
+        );
+    }
     let ids = integrity::check_inputs(&job.inputs, progress)?;
     let model = &ids[0];
     ensure!(
@@ -228,7 +237,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         .collect::<Result<_>>()?;
     baseline.finish();
     let parent_split = pairs.iter().filter(|p| p.split == Split::Train);
-    let (marker, marker_tokens, slop_token) = if req.behavior == Behavior::Slop {
+    let (marker, marker_tokens, slop_token) = if req.behavior.is_some_and(|b| b == Behavior::Slop) {
         let mut effect = [0.0_f64; OPENERS.len()];
         for (i, pair) in parent_split.enumerate() {
             let pos = trace.baseline(&pair.positive, false)?;
@@ -274,6 +283,13 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             vec![A, B],
             None,
         )
+    };
+    let (marker, marker_tokens) = match (&req.registered, &req.marker) {
+        (Some(_), Some(text)) => (
+            text.clone(),
+            req.marker_tokens.clone().unwrap_or_else(|| marker_tokens.clone()),
+        ),
+        _ => (marker, marker_tokens),
     };
     let measure = |row: &Row, logits: &[f32]| {
         if let Some((id, _)) = slop_token {
@@ -341,9 +357,10 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         direction_id: req.direction_id.clone(),
         last_k_direction_id: req.last_k_variant.as_ref().map(|v| v.direction_id.clone()),
         behavior: req.behavior,
+        registered: req.registered.clone(),
         seed: req.seed,
         lanternfish_sha256: search::SHA256.into(),
-        screen_sha256: req.behavior.contrast_sha256().into(),
+        screen_sha256: req.pin().into(),
         confirmation_sha256: req.confirmation_sha256.clone(),
         marker,
         marker_tokens,

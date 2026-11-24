@@ -87,7 +87,7 @@ fn cache_checks_payload_digest_and_job_rejects_unapproved_behaviors() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path()
-            .join(format!("{}.json", request.behavior.contrast_sha256())),
+            .join(format!("{}.json", request.behavior.unwrap().contrast_sha256())),
         b"not JSON",
     )
     .unwrap();
@@ -164,7 +164,7 @@ fn hgn_direction_accepts_published_pins_only_for_saved_reads() {
     let mut receipt = json!({
         "kind":"behavior_direction", "schema_version":2, "release_qualified":false,
         "model_id":"model", "model_sha256":digest, "behavior":"slop",
-        "position":null, "last_k":3, "contrast_sha256":request.behavior.contrast_sha256(),
+        "position":null, "last_k":3, "contrast_sha256":request.behavior.unwrap().contrast_sha256(),
         "runtime":trace::HGN_RUNTIME, "runtime_sha256":trace::HGN_RUNTIME_SHA256.trim_end(),
         "executable_sha256":digest,
         "assets_sha256":{"sidecar":digest,"config":digest,"tokenizer":digest},

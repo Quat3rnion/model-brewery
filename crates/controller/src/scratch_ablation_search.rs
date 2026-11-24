@@ -10,7 +10,7 @@ use axum::{
 };
 use brewery_worker::{
     ablation_search::{self as search, ScreenReport, ScreenRequest},
-    behavior_direction::{self as directions, Behavior},
+    behavior_direction::{self as directions, Behavior, Registered},
     scratch_eval::{
         BehaviorConfig,
         paired::{PairedOutcome, discordant, holm_adjust, mcnemar_exact_p, wilson95},
@@ -34,6 +34,12 @@ pub(crate) struct Request {
     max_children: usize,
     disk_budget_bytes: u64,
     behavior_direction: BehaviorConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    registered: Option<Registered>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    marker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    marker_tokens: Option<Vec<usize>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     alphas: Option<Vec<f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,6 +56,12 @@ pub(crate) struct HgnRequest {
     first_layer: Option<usize>,
     last_layer: Option<usize>,
     targets: Vec<brewery_worker::trace::hgn_projection::Target>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    registered: Option<Registered>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    marker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    marker_tokens: Option<Vec<usize>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     alphas: Option<Vec<f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,6 +91,8 @@ pub(super) async fn submit(
     req.behavior_direction
         .validate()
         .map_err(|e| ApiError::bad(e.to_string()))?;
+    check_contrast_fields(req.registered.as_ref(), req.marker.as_deref(), req.marker_tokens.as_ref())
+        .map_err(|e| e.to_string()).map_err(ApiError::bad)?;
     if !brewery_worker::is_digest(&req.sha256)
         || !(search::MIN_TRIALS..=search::MAX_TRIALS).contains(&req.trial_budget)
         || !(1..=search::MAX_CHILDREN.min(req.trial_budget)).contains(&req.max_children)
@@ -141,6 +155,8 @@ fn submit_hgn(app: &App, id: String, headers: HeaderMap, req: HgnRequest) -> Res
     if !brewery_worker::is_digest(&req.sha256) {
         return Err(ApiError::bad("invalid HGN checkpoint SHA-256"));
     }
+    check_contrast_fields(req.registered.as_ref(), req.marker.as_deref(), req.marker_tokens.as_ref())
+        .map_err(|e| e.to_string()).map_err(ApiError::bad)?;
     let store = app.store.lock().map_err(ApiError::storage)?;
     if let Some(response) = replay(&store, key.as_ref())? {
         return Ok(response);
@@ -173,6 +189,7 @@ fn submit_hgn(app: &App, id: String, headers: HeaderMap, req: HgnRequest) -> Res
         if variant.sha256 != dir.sha256
             || variant.assets != dir.assets
             || variant.behavior != dir.behavior
+            || variant.registered != dir.registered
             || variant.held_out_pairs != dir.held_out_pairs
         {
             return Err(ApiError::bad(
@@ -189,13 +206,16 @@ fn submit_hgn(app: &App, id: String, headers: HeaderMap, req: HgnRequest) -> Res
         None
     };
     let options = json!(search::hgn::Request {
-        model_sha256: dir.sha256,
+        model_sha256: dir.sha256.clone(),
         direction_id: req.direction_id.clone(),
         source_layer: req.source_layer,
         first_layer: req.first_layer,
         last_layer: req.last_layer,
         targets: req.targets.clone(),
         behavior: dir.behavior,
+        registered: dir.registered.clone(),
+        marker: req.marker.clone(),
+        marker_tokens: req.marker_tokens.clone(),
         seed: req.seed,
         vector: dir.vector,
         last_k: dir.last_k,
@@ -238,12 +258,23 @@ fn screen_request(store: &Store, req: &Request, row: &Revision) -> Result<Screen
     {
         return Err(ApiError::bad("fit the directions at the last user token"));
     }
-    let behavior = serde_json::from_value::<Behavior>(artifact["behavior"].clone())
+    let behavior = serde_json::from_value::<Option<Behavior>>(artifact["behavior"].clone())
         .map_err(ApiError::storage)?;
+    let registered = serde_json::from_value::<Option<Registered>>(
+        artifact.get("registered").cloned().unwrap_or(Value::Null),
+    )
+    .map_err(ApiError::storage)?;
+    if req.marker.is_some() && registered.is_none() {
+        return Err(ApiError::bad(
+            "a configured marker requires a fitted registered direction",
+        ));
+    }
+    let (marker, marker_tokens) = (req.marker.clone(), req.marker_tokens.clone());
     let name = match behavior {
-        Behavior::Slop => "slop",
-        Behavior::Sycophancy => "sycophancy",
-        _ => return Err(ApiError::bad("search supports slop and sycophancy only")),
+        Some(Behavior::Slop) => "slop",
+        Some(Behavior::Sycophancy) => "sycophancy",
+        Some(_) => return Err(ApiError::bad("search supports slop and sycophancy only")),
+        None => "",
     };
     let last_k_variant = if let Some(id) = &req.last_k_direction_id {
         let variant = crate::directions::load(store, id, directions::VERSION)?;
@@ -270,15 +301,34 @@ fn screen_request(store: &Store, req: &Request, row: &Revision) -> Result<Screen
         direction_id: req.direction_id.clone(),
         fit: serde_json::from_value(artifact["fit"].clone()).map_err(ApiError::storage)?,
         behavior,
+        registered: registered.clone(),
+        marker,
+        marker_tokens,
         seed: req.seed,
         trial_budget: req.trial_budget,
         max_children: req.max_children,
-        confirmation_sha256: req.behavior_direction.prompt_sets[name].clone(),
+        confirmation_sha256: match &registered {
+            Some(r) => r.sha256.clone(),
+            None => req.behavior_direction.prompt_sets[name].clone(),
+        },
         alphas: req.alphas.clone(),
         last_k_variant,
     };
     screen.check().map_err(|e| ApiError::bad(e.to_string()))?;
     Ok(screen)
+}
+
+/// A registered contrast needs a configured first-token marker; a built-in
+/// contrast must not carry registered or marker fields.
+fn check_contrast_fields(
+    registered: Option<&Registered>,
+    marker: Option<&str>,
+    marker_tokens: Option<&Vec<usize>>,
+) -> std::result::Result<(), String> {
+    if registered.is_none() && (marker.is_some() || marker_tokens.is_some()) {
+        return Err("a configured marker requires a registered contrast".into());
+    }
+    Ok(())
 }
 
 fn child_disk(store: &Store, row: &Revision) -> Result<(u64, u64)> {
@@ -657,7 +707,12 @@ async fn run_child(
         behavior_direction: Some(serde_json::from_value(serde_json::to_value(
             &request.behavior_direction,
         )?)?),
-        registered_marker: None,
+        registered_marker: request.registered.clone().map(|r| {
+            brewery_worker::scratch_eval::registered::Request {
+                name: r.name,
+                partition: brewery_worker::scratch_eval::registered::Partition::Tune,
+            }
+        }),
     };
     let c_key = format!("{}-{trial}-checks", parent.id);
     let app_copy = app.clone();
@@ -680,8 +735,11 @@ async fn run_child(
         )?
     };
     let behavior = match report.behavior {
-        Behavior::Slop => "slop",
-        _ => "sycophancy",
+        Some(Behavior::Slop) => "slop",
+        Some(_) => "sycophancy",
+        // A registered contrast has no built-in behavior name; its paired
+        // outcomes are reported under the configured first-token marker.
+        None => "marker",
     };
     let measured = &bundle["behavior_direction"];
     let pairs: Vec<PairedOutcome> =

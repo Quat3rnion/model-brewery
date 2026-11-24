@@ -27,9 +27,11 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         input.sha256.as_deref() == Some(request.model_sha256.as_str()),
         "direction needs the resolved model revision"
     );
-    let cache =
-        PathBuf::from(env::var_os(direction::CACHE).context("direction cache is not configured")?);
-    ensure!(cache.is_absolute(), "direction cache path must be absolute");
+    let cache = PathBuf::from(
+        env::var_os(request.cache_var())
+            .context("contrast cache is not configured for this contrast source")?,
+    );
+    ensure!(cache.is_absolute(), "contrast cache path must be absolute");
     let pairs = request.load_pairs(&cache)?;
     let splits: Vec<_> = pairs.iter().map(|p| p.split).collect();
     let [model] = integrity::check_inputs(&job.inputs, progress)?
@@ -124,8 +126,8 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let fields = json!({
         "kind":direction::JOB, "schema_version":direction::VERSION, "release_qualified":false,
         "model_id":model_id, "model_sha256":model.sha256, "position":request.position,
-        "behavior":request.behavior, "contrast_sha256":request.behavior.contrast_sha256(),
-        "fit":fit,
+        "behavior":request.behavior, "contrast_sha256":request.pin(),
+        "registered":request.registered, "fit":fit,
     });
     result
         .as_object_mut()

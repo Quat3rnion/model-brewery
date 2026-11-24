@@ -2,7 +2,7 @@ use crate::{integrity, progress::Progress, trace::hgn::Runtime, Job};
 use anyhow::{ensure, Context, Result};
 use brewery_worker::{
     ablation_search::hgn::{self, Report, Request},
-    behavior_direction::{self as directions, Behavior, Split},
+    behavior_direction::{Behavior, Split},
     trace,
 };
 use serde_json::{json, Value};
@@ -23,10 +23,11 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             && input.sha256.as_ref() == Some(&req.model_sha256),
         "invalid HGN screen input"
     );
-    let cache = PathBuf::from(env::var_os(directions::CACHE).context("missing contrast cache")?);
+    let cache = PathBuf::from(
+        env::var_os(req.cache_var()).context("missing contrast cache for this contrast source")?,
+    );
     ensure!(cache.is_absolute(), "contrast cache must be absolute");
-    let contrast_sha256 = req.behavior.contrast_sha256();
-    let pairs = directions::load_pairs(&cache, req.behavior, contrast_sha256)?;
+    let pairs = req.load_pairs(&cache)?;
     let prompts = |split| {
         pairs.iter().filter(|p| p.split == split).map(|p| json!({
         "positive":p.positive.hgn_chat_prefix(), "negative":p.negative.hgn_chat_prefix(),
@@ -56,7 +57,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     );
     let spec = json!({
         "behavior":req.behavior, "held_out":held_out,
-        "train": if req.behavior == Behavior::Slop { prompts(Split::Train) } else { vec![] },
+        "train": if req.behavior.as_ref().is_some_and(|b| *b == Behavior::Slop) { prompts(Split::Train) } else { vec![] },
         "trials":req.trial_specs()?,
     });
     let mut phase = progress.start("screen_hgn_marker", "items", Some(1));
@@ -78,6 +79,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         second_source_layer: req.second_source_layer,
         configurations: req.configurations()?,
         behavior: req.behavior,
+        registered: req.registered.clone(),
         seed: req.seed,
         runtime: trace::HGN_RUNTIME.into(),
         runtime_sha256: trace::HGN_RUNTIME_SHA256.trim_end().into(),
@@ -86,7 +88,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             .context("missing HGN Python pin")?
             .into(),
         assets_sha256: req.assets_sha256.clone(),
-        contrast_sha256: contrast_sha256.into(),
+        contrast_sha256: req.pin().into(),
         scores,
         pareto,
         selected,
