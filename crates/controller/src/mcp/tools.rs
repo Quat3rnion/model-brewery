@@ -193,10 +193,10 @@ impl Server {
                     "Compare pinned Library BF16 and quantized GGUFs on the same worker. Choose target_logit for logit drift or corpus_nll for mean next-token loss on all W4 held-out lines. Read the damage map after the job finishes. The job does not apply its recipe proposal."
                 }
                 "compute_direction" => {
-                    "Queue CPU behavior directions for one pinned Library GGUF and an approved contrast set. Poll with get_job. Read version 2 with get_direction."
+                    "Queue CPU behavior directions for one pinned Library Qwen2 GGUF or supported HGN v2 checkpoint and a reviewed contrast set. On HGN, use l_out and optional last_k. Poll with get_job. Read version 2 with get_direction."
                 }
                 "get_direction" => {
-                    "Read an immutable direction artifact. Version 2 reports held-out Cohen's d and mean residual norm. Version 1 is only for older jobs."
+                    "Read an immutable direction artifact. Version 2 reports held-out Cohen's d and mean residual norm. For HGN, give reference_id and reference_layer to compare with a verified direction from the same checkpoint and behavior."
                 }
                 "create_direction_intervention" => {
                     "Save trace rules from a verified direction version. Project out its activation component or subtract a scaled unit vector. Pass the saved ID and version to start_trace."

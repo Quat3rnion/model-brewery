@@ -40,8 +40,10 @@ Attach atlas observations to `plan_experts` as evidence for the same source
 digest. They do not replace independent calibration and held-out REAP data.
 
 Use `compute_direction` to measure slop, sycophancy, or response-length
-directions on a pinned Qwen2 GGUF. Use `get_direction` to read version 2 by
-job ID. Specify a layer for a smaller response. Report Cohen's d
+directions on a pinned Qwen2 GGUF or supported HGN v2. For HGN, use `l_out`
+and set `last_k` to average final template positions. Use `get_direction`
+to read version 2 by job ID. Specify a layer for a smaller response. For HGN
+cosine, supply `reference_id` and `reference_layer`. Report Cohen's d
 as a probe result, not as evidence of a change in generated behavior.
 For a native comparison, fit on the exact private baseline GGUF bytes
 registered as a Library GGUF.

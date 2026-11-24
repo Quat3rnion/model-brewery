@@ -288,6 +288,8 @@ fn hosted_agent_reuses_mcp_scratch_workflow_without_approval() {
             "operator-only",
             "`run_checks`",
             "`compute_direction`",
+            "`last_k`",
+            "`reference_id` and `reference_layer`",
             "`get_direction`",
             "`ablate_direction`",
             "`search_ablation`",
