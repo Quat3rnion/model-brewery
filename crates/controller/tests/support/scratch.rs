@@ -1325,6 +1325,11 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             assert_eq!(schema["required"], json!(["id"]));
         }
         if tool["name"] == "ablate_direction" {
+            let description = tool["description"].as_str().unwrap();
+            assert!(
+                description.contains("Poll get_job")
+                    && description.contains("HGN scratch cannot be published.")
+            );
             assert_eq!(
                 schema["properties"]["direction"]["properties"]["version"]["const"],
                 2
@@ -1332,6 +1337,15 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             assert_eq!(
                 schema["properties"]["variant"]["enum"],
                 json!(["plain", "projected", "norm_preserving"])
+            );
+        }
+        if tool["name"] == "compute_direction" {
+            let options = &schema["properties"]["options"]["properties"];
+            assert_eq!(options["last_k"]["minimum"], 1);
+            assert_eq!(options["last_k"]["maximum"], 16);
+            assert_eq!(
+                options["behavior"]["enum"],
+                json!(["slop", "sycophancy", "response_length"])
             );
         }
         if tool["name"] == "create_direction_intervention" {
@@ -1345,6 +1359,12 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             );
         }
         if tool["name"] == "run_checks" {
+            assert!(
+                tool["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("For native HGN")
+            );
             let behavior = &schema["properties"]["behavior_direction"];
             assert_eq!(behavior["required"], json!(["prompt_sets"]));
             assert_eq!(
@@ -1363,6 +1383,9 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
                     .unwrap()
                     .contains(&json!("behavior_direction"))
             );
+        }
+        if tool["name"] == "get_checks" {
+            assert!(tool["description"].as_str().unwrap().contains("hgn_stored"));
         }
         if matches!(
             tool["name"].as_str(),

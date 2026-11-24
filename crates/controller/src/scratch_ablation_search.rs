@@ -1,4 +1,4 @@
-//! Coordinate a private CPU screen, then run the existing scratch edit and check jobs.
+//! Submit an HGN forward screen or coordinate the GGUF screen and scratch checks.
 use super::*;
 use crate::{
     domain::{Job, State as JobState},
@@ -36,13 +36,35 @@ pub(crate) struct Request {
     behavior_direction: BehaviorConfig,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HgnRequest {
+    sha256: String,
+    direction_id: String,
+    source_layer: usize,
+    seed: u32,
+    first_layer: Option<usize>,
+    last_layer: Option<usize>,
+    targets: Vec<brewery_worker::trace::hgn_projection::Target>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(crate) enum SubmissionRequest {
+    Gguf(Request),
+    Hgn(HgnRequest),
+}
+
 pub(super) async fn submit(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    payload: Payload<Request>,
+    payload: Payload<SubmissionRequest>,
 ) -> Result<Response> {
-    let req = read(payload)?;
+    let req = match read(payload)? {
+        SubmissionRequest::Gguf(req) => req,
+        SubmissionRequest::Hgn(req) => return submit_hgn(&app, id, headers, req),
+    };
     let (_, key) = read_submission(&headers, SCOPE, Ok(Json((&id, &req))))?;
     req.behavior_direction
         .validate()
@@ -98,6 +120,54 @@ pub(super) async fn submit(
         0,
     )?;
     let (job, envelope) = jobs::private_job(search::JOB, vec![gguf, assets], json!(req));
+    let tx = store.submission_transaction().map_err(ApiError::storage)?;
+    Store::enqueue(&tx, &job, &envelope, key.as_ref()).map_err(ApiError::storage)?;
+    tx.commit().map_err(ApiError::storage)?;
+    Ok((StatusCode::ACCEPTED, Json(job)).into_response())
+}
+
+fn submit_hgn(app: &App, id: String, headers: HeaderMap, req: HgnRequest) -> Result<Response> {
+    let (_, key) = read_submission(&headers, "hgn-ablation-screen", Ok(Json((&id, &req))))?;
+    if !brewery_worker::is_digest(&req.sha256) {
+        return Err(ApiError::bad("invalid HGN checkpoint SHA-256"));
+    }
+    let store = app.store.lock().map_err(ApiError::storage)?;
+    if let Some(response) = replay(&store, key.as_ref())? {
+        return Ok(response);
+    }
+    let model = store
+        .model(&id)
+        .map_err(ApiError::storage)?
+        .filter(|model| brewery_worker::trace::is_hgn(&model.kind))
+        .ok_or_else(|| ApiError::not_found("Library HGN checkpoint"))?;
+    let dir = crate::directions::hgn_layer(&store, &model, &req.direction_id, req.source_layer)?;
+    if dir.sha256 != req.sha256 {
+        return Err(ApiError::bad(
+            "HGN direction does not match the requested checkpoint hash",
+        ));
+    }
+    let options = json!(search::hgn::Request {
+        model_sha256: dir.sha256,
+        direction_id: req.direction_id.clone(),
+        source_layer: req.source_layer,
+        first_layer: req.first_layer,
+        last_layer: req.last_layer,
+        targets: req.targets.clone(),
+        behavior: dir.behavior,
+        seed: req.seed,
+        vector: dir.vector,
+        assets_sha256: dir.assets,
+        held_out_pairs: dir.held_out_pairs,
+    });
+    search::hgn::Request::parse(&options).map_err(|e| ApiError::bad(e.to_string()))?;
+    let (mut job, envelope) = jobs::private_job(search::hgn::JOB, vec![model], options);
+    job.options = json!(req).as_object().unwrap().clone();
+    let hosts = app.effective_hosts().map_err(ApiError::storage)?;
+    if crate::domain::candidates(&job, &envelope, &hosts).is_empty() {
+        return Err(conflict(
+            "HGN screening needs trace and behavior_direction on the non-Hy4 Library worker",
+        ));
+    }
     let tx = store.submission_transaction().map_err(ApiError::storage)?;
     Store::enqueue(&tx, &job, &envelope, key.as_ref()).map_err(ApiError::storage)?;
     tx.commit().map_err(ApiError::storage)?;

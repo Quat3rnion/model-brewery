@@ -41,6 +41,10 @@ mod checks;
 mod experts;
 #[path = "scratch_heretic.rs"]
 pub(crate) mod heretic;
+#[path = "scratch_hgn_checks.rs"]
+pub(crate) mod hgn_checks;
+#[path = "scratch_hgn_edit.rs"]
+pub(crate) mod hgn_edit;
 #[path = "scratch_jobs.rs"]
 pub(crate) mod jobs;
 #[path = "scratch_locate.rs"]
@@ -99,6 +103,10 @@ impl Revision {
 
     pub(crate) fn is_compiled_program(&self) -> bool {
         self.provenance.compiled_program.is_some()
+    }
+
+    pub(crate) fn is_hgn(&self) -> bool {
+        self.kind == hgn_edit::KIND
     }
 }
 
@@ -488,6 +496,11 @@ fn build_special(
             if row.state == RevisionState::Discarded {
                 return Err(ApiError::not_found("scratch revision"));
             }
+            if row.is_hgn() {
+                return Err(conflict(
+                    "use ablate_direction for native HGN scratch edits",
+                ));
+            }
             if row.is_compiled_program() {
                 return Err(conflict(
                     "compiled program revisions do not support scratch edits",
@@ -696,6 +709,9 @@ fn change(
         (row, store.scratch_root().to_owned())
     };
     let old = row.state;
+    if row.is_hgn() && new != Discarded {
+        return Err(conflict("HGN scratch publication is not supported"));
+    }
     match (old, new) {
         (Scratch, PublishRequested)
         | (PublishRequested, Approved)

@@ -58,12 +58,27 @@ const scratchRev = (id, parent, state, method, at, extra = {}) => ({
   provenance: prov(id, parent, method, at, method === 'direct' ? [{ op: 'add', tensor: 'blk.3.ffn_down.weight', origin: [0, 0], shape: [1, 2], values: [0.01, -0.02] }] : []),
   delta: { schema: 'brewery.weight-delta.v1', parent_sha256: SHA_P, revision_sha256: SHA, changed_tensors: method === 'copy' ? 0 : 1, changed_bytes: 4, delta_bytes: 128, delta_sha256: SHA }, ...extra,
 });
-const ROOT = uuid(20), CHILD = uuid(21), LATER = uuid(22);
+const ROOT = uuid(20), CHILD = uuid(21), LATER = uuid(22), HGN = uuid(23);
 const baseList = [
   scratchRev(ROOT, uuid(9), 'scratch', 'copy', T0),
   scratchRev(CHILD, ROOT, 'publish_requested', 'direct', T0 + 10, {
     check_bundle: { ...bundle(SHA), measured_job_id: uuid(42), token_loss: { sha256: SHA } },
     gguf: { sha256: SHA_P, revision_sha256: SHA, converter_version: 'fixture', bytes: 128, job_id: uuid(41) },
+  }),
+  scratchRev(HGN, 'm1', 'scratch', 'ablate_direction', T0 + 11, {
+    kind: 'scratch_hgn',
+    check_bundle: {
+      ...bundle(SHA), behavior: { status: 'not_run', reason: 'HGN behavior checks do not apply' },
+      hgn_stored: {
+        seed: 26842,
+        tensors: { 'layers.0.mlp.experts.down_proj.weight': {
+          leftover: .02, max_expert_leftover: .032, control_shifts: [.01, .005, 0, .002, .012],
+          rel_error: .003, status: 'passed',
+        } },
+        prompts: [{ tokens: 4, kl_parent_child: .015, top1_agrees: true,
+                    mean_abs_logit_delta: .03, max_abs_logit_delta: .1, parent_top1_logit_delta: -.07 }],
+      },
+    },
   }),
 ];
 const tensorDiff = { schema_version: 1, qualification: 'not release-qualified', a: ROOT, b: CHILD, a_sha256: SHA_P, b_sha256: SHA, tensors: [{ name: 'blk.3.ffn_down.weight', shape: [896, 4864], dtype: 'BF16', changed_elements: 2, bounds: { start: [0, 0], end: [1, 2] }, l2: 0.0223, linf: 0.02, relative_frobenius: 0.000013, low_rank: { sample_shape: [1, 2], singular_values: [0.0223], sample_rank: 1 } }] };
@@ -246,7 +261,21 @@ try {
       await loss.getByText('-10.8% of net gain', { exact: true }).waitFor();
     });
 
+    await step('HGN stored-file checks', async () => {
+      await page.evaluate((id) => (location.hash = `#/edits?rev=${id}`), HGN);
+      const detail = main.getByRole('region', { name: /Revision/ });
+      await detail.getByText('Decoded-store audit: Passed', { exact: true }).waitFor();
+      await detail.getByText('CPU forward: Passed', { exact: true }).waitFor();
+      await detail.getByText('Decoded writers (1)', { exact: true }).click();
+      await detail.getByText(/worst expert 3\.2% left/).waitFor();
+      await detail.getByText('CPU forward scores (1)', { exact: true }).click();
+      await detail.getByText(/KL \(parent to child\) 0\.015/).waitFor();
+      await detail.getByText(/top-1 agrees/).waitFor();
+      await shot('hgn-stored');
+    });
+
     await step('publish approval', async () => {
+      await page.evaluate((id) => (location.hash = `#/edits?rev=${id}`), CHILD);
       const detail = main.getByRole('region', { name: /Revision/ });
       await detail.getByRole('button', { name: 'Approve publication…' }).click();
       const dialog = page.getByRole('dialog', { name: 'Approve publication' });

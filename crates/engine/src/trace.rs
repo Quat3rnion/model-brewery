@@ -1,10 +1,10 @@
 use crate::{
-    Job, child_threads, gguf_conversion::Tool, integrity, progress::Progress, w0_libraries,
-    write_json,
+    child_threads, gguf_conversion::Tool, integrity, progress::Progress, w0_libraries, write_json,
+    Job,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use brewery_worker::trace::{self, LanternfishRuntime, Request};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -147,16 +147,17 @@ const ROUTING_LIBS: &[(&str, &str)] = &[
     ),
 ];
 
-mod hgn;
+pub(crate) mod hgn;
 
 pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let request = Request::worker(&job.options, job.prompt.as_deref())?;
     ensure!(
-        job.inputs.len() == 1 && matches!(job.inputs[0].kind.as_str(), "gguf" | trace::HGN_KIND),
+        job.inputs.len() == 1
+            && (job.inputs[0].kind == "gguf" || trace::is_hgn(&job.inputs[0].kind)),
         "trace needs a single GGUF or HGN input"
     );
     let input = &job.inputs[0];
-    let is_hgn = input.kind == trace::HGN_KIND;
+    let is_hgn = trace::is_hgn(&input.kind);
     ensure!(
         !is_hgn || request.interventions.is_empty(),
         "HGN traces do not support interventions"
@@ -226,23 +227,14 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         let out = staging.join(i.to_string());
         id.check()?;
         let verified = if let Some(runtime) = &hgn {
-            let spec = work.join("current-spec.json");
-            write_json(&spec, &serde_json::to_value(&capture)?)?;
-            let threads = child_threads(None)?.min(64);
-            let mut command = runtime.command(work, threads);
-            command
-                .arg("--model")
-                .arg(&input.path)
-                .arg(format!("--prompt={prompt}"))
-                .arg("--spec")
-                .arg(&spec)
-                .arg("--out")
-                .arg(&out)
-                .arg("--threads")
-                .arg(threads.to_string());
-            runtime.capture(&mut command, work)?;
-            fs::remove_file(&spec)?;
-            trace::verify(&out, &capture)?
+            runtime.capture_projected(
+                work,
+                &input.path,
+                prompt,
+                &capture,
+                &out,
+                request.hgn_projection.as_ref(),
+            )?
         } else {
             runtime
                 .as_ref()
@@ -257,6 +249,9 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         };
         id.check()?;
         trace::verify_interventions(&out, &verified, &request.interventions)?;
+        if is_hgn {
+            trace::verify_hgn_projection(&out, &verified, request.hgn_projection.as_ref())?;
+        }
         capture.byte_cap -= verified.bytes;
         receipts.push(verified);
         phase.advance(1);

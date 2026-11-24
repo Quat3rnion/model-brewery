@@ -12,6 +12,8 @@ mod infra_hosts;
 #[path = "support/interventions.rs"]
 mod interventions;
 
+#[path = "support/hgn_ablation.rs"]
+mod hgn_ablation;
 #[path = "support/mcp.rs"]
 mod mcp;
 

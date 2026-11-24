@@ -31,6 +31,7 @@ pub fn private_output(kind: &str) -> bool {
         kind,
         GGUF | CHECKS | crate::locate_edit::JOB | crate::ablation_search::SCREEN
     ) || crate::heretic::job(kind)
+        || matches!(kind, crate::hgn_edit::JOB | crate::hgn_checks::JOB)
 }
 
 pub fn granted(input: &crate::Input) -> bool {

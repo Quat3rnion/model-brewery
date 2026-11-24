@@ -647,7 +647,7 @@
       "post": {
         "operationId": "editScratch",
         "summary": "Apply one or more edits in a new scratch child",
-        "description": "Apply the operations in order. The parent scratch revision stays unchanged. An edit of an approved revision still makes an unapproved child.",
+        "description": "Apply the operations in order to a SafeTensors scratch revision. The parent stays unchanged. An edit of an approved revision still makes an unapproved child.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "x-brewery-max-body-bytes": 262144, "content": {"application/json": {"schema": {
           "type": "object", "additionalProperties": false, "required": ["operations"],
@@ -670,7 +670,7 @@
       "post": {
         "operationId": "ablateScratchDirection",
         "summary": "Ablate a fitted direction in a new scratch child",
-        "description": "Edit dense attention output and MLP down projections on the CPU. Use a pinned scratch parent and a version 2 behavior direction. The child is private and has a reversible delta. Embedding edits are not supported.",
+        "description": "Use a version 2 behavior direction. SafeTensors edits return a private scratch child with a reversible delta. A pinned standalone HGN Library parent or HGN scratch child queues a private CPU job on its source worker. For HGN, use plain, flat and alpha 1, and fit the direction on the Library root. The job edits dense and routed residual writers together without changing stores. Poll the job to obtain scratch_id. HGN publication and embedding edits are not supported.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {
           "type": "object", "additionalProperties": false,
@@ -687,8 +687,12 @@
           }
         }}}},
         "responses": {
-          "200": {"$ref": "#/components/responses/ScratchRow"},
+          "200": {"description": "Idempotent replay: the SafeTensors revision or the queued HGN job ID.", "content": {"application/json": {"schema": {"anyOf": [
+            {"$ref": "#/components/schemas/ScratchRevision"},
+            {"type": "object", "required": ["id"], "additionalProperties": false, "properties": {"id": {"$ref": "#/components/schemas/Id"}}}
+          ]}}}},
           "201": {"$ref": "#/components/responses/ScratchRow"},
+          "202": {"description": "The queued private HGN edit job.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
           "400": {"$ref": "#/components/responses/BadRequest"},
           "403": {"$ref": "#/components/responses/Forbidden"},
           "404": {"$ref": "#/components/responses/NotFound"},
@@ -702,7 +706,7 @@
       "post": {
         "operationId": "searchAblation",
         "summary": "Queue a bounded native ablation search",
-        "description": "Screen fitted slop or sycophancy directions on held-out prompts against matched random controls. Run A2 and W4 on selected Pareto scratch children. Read the receipt with GET /api/jobs/{id}. No child is published or approved.",
+        "description": "Use a scratch revision ID for GGUF search, or a Library HGN v2 ID for a forward-only screen. Score reviewed held-out prompts against matched random directions. GGUF runs checks on selected Pareto scratch children. HGN scores slop, sycophancy, or the first-token continuation proxy on paired behavior and control prompts. HGN does not create scratch children or store completions. Read the receipt with GET /api/jobs/{id}.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AblationSearchRequest"}}}},
         "responses": {
@@ -894,7 +898,7 @@
       "post": {
         "operationId": "runScratchChecks",
         "summary": "Check a scratch revision and save the results",
-        "description": "Checks the exact child and immediate parent SafeTensors files. With private GGUF files, the local worker loads both models, generates text and measures behavior on fixed datasets. Poll the returned job ID. Set behavior_direction to also score held-out chat prompts from the verified worker cache. An opt-in request requires both GGUF files and passing integrity checks. Without opt-in, if either GGUF is missing or integrity fails, the controller saves an integrity-only bundle. For a compiled program, checks pinned weights and config and runs all valid inputs on the local CPU runtime. Language-model behavior checks do not apply. Do not send measured values or job references.",
+        "description": "For native HGN, the source worker checks the stored child and immediate parent. It audits the decoded writers and compares full-vocabulary CPU forward scores on fixed prompts. Send the child SHA-256 without behavior_direction. For SafeTensors, the controller verifies both files. With private GGUF files, the local worker measures behavior. Set behavior_direction to also score verified held-out chat prompts; this requires both GGUF files and passing integrity checks. Without opt-in, if either GGUF is missing or integrity fails, the controller saves an integrity-only bundle. For a compiled program, the local CPU runtime checks pinned inputs and runs all valid cases. Poll the returned job ID. Do not send measured values or job references.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {
           "type": "object", "additionalProperties": false, "required": ["sha256"], "properties": {
@@ -1114,13 +1118,22 @@
         "summary": "Read an immutable behavior direction artifact",
         "parameters": [
           {"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/InterventionVersion"},
-          {"in":"query","name":"layer","schema":{"$ref":"#/components/schemas/TraceLayer"},"description":"Return one layer. Omit to return all layers."}
+          {"in":"query","name":"layer","schema":{"$ref":"#/components/schemas/TraceLayer"},"description":"Return one layer. Omit to return all layers."},
+          {"in":"query","name":"reference_id","schema":{"$ref":"#/components/schemas/Id"},"description":"Compare with a verified version 2 HGN direction from the same checkpoint and behavior. Use with reference_layer."},
+          {"in":"query","name":"reference_layer","schema":{"$ref":"#/components/schemas/TraceLayer"},"description":"Select the reference layer with a fitted vector. Use with reference_id."}
         ],
         "responses": {
           "200": {"description": "The requested immutable version. New direction jobs write version 2; old jobs keep version 1. The artifact ID is the direction job ID.",
             "content": {"application/json": {"schema": {"type":"object","required":["id","version","direction"],"properties":{
-              "id":{"$ref":"#/components/schemas/Id"},"version":{"enum":[1,2]},"direction":{"$ref":"#/components/schemas/BehaviorDirectionResult"}
+               "id":{"$ref":"#/components/schemas/Id"},"version":{"enum":[1,2]},"direction":{"$ref":"#/components/schemas/BehaviorDirectionResult"},
+               "reference":{"type":"object","required":["id","version","layer","cosine_by_layer"],"properties":{
+                 "id":{"$ref":"#/components/schemas/Id"},"version":{"const":2},"layer":{"$ref":"#/components/schemas/TraceLayer"},
+                 "cosine_by_layer":{"type":"array","items":{"type":"object","required":["layer","cosine"],"properties":{
+                   "layer":{"$ref":"#/components/schemas/TraceLayer"},"cosine":{"type":["number","null"],"minimum":-1,"maximum":1}
+                 }}}
+               }}
             }}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
           "404": {"$ref": "#/components/responses/NotFound"},
           "500": {"$ref": "#/components/responses/StorageError"}
         }
@@ -2417,9 +2430,9 @@
       "ScratchDelta": {
         "type": "object", "required": ["schema", "parent_sha256", "revision_sha256", "changed_tensors", "changed_bytes", "delta_bytes", "delta_sha256"],
         "properties": {
-          "schema": {"const": "brewery.weight-delta.v1"}, "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "schema": {"enum": ["brewery.weight-delta.v1", "brewery.hgn-edit-summary.v1"]}, "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"},
           "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"}, "changed_tensors": {"type": "integer", "minimum": 0},
-          "changed_bytes": {"type": "integer", "minimum": 0}, "delta_bytes": {"type": "integer", "minimum": 0},
+          "changed_bytes": {"type": "integer", "minimum": 0, "description": "For HGN, total payload bytes of changed tensors."}, "delta_bytes": {"type": "integer", "minimum": 0, "description": "Zero for HGN; no reversible delta is stored."},
           "delta_sha256": {"$ref": "#/components/schemas/ScratchHash"}
         }
       },
@@ -2469,9 +2482,15 @@
             "inputs": {"$ref": "#/components/schemas/ScratchMergeInputs"}
           }},
           "pruning": {"$ref": "#/components/schemas/DensePruning"},
-          "ablation": {"type": "object", "required": ["direction", "source_gguf_sha256", "first_layer", "last_layer", "kernel", "variant"], "properties": {
+          "ablation": {"type": "object", "required": ["direction", "first_layer", "last_layer", "kernel", "variant"], "properties": {
             "direction": {"$ref": "#/components/schemas/AblationDirection"},
             "source_gguf_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "hgn": {"type": "object", "required": ["job_id", "root_model", "root_sha256", "report"], "properties": {
+              "job_id": {"$ref": "#/components/schemas/Id"},
+              "root_model": {"$ref": "#/components/schemas/Id"},
+              "root_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+              "report": {"$ref": "#/components/schemas/HgnFeedback"}
+            }},
             "first_layer": {"$ref": "#/components/schemas/TraceLayer"},
             "last_layer": {"$ref": "#/components/schemas/TraceLayer"},
             "kernel": {"$ref": "#/components/schemas/AblationKernel"},
@@ -2483,7 +2502,7 @@
             "lanternfish_sha256": {"$ref": "#/components/schemas/ScratchHash"}
           }},
           "tensors": {"type": "array", "items": {"type": "object", "required": ["name", "shape", "dtype"], "properties": {
-            "name": {"type": "string"}, "shape": {"type": "array", "items": {"type": "integer"}}, "dtype": {"enum": ["F64", "F32", "F16", "BF16"]}
+            "name": {"type": "string"}, "shape": {"type": "array", "items": {"type": "integer"}}, "dtype": {"enum": ["F64", "F32", "F16", "BF16", "I4R", "HT3", "HT4", "Q4CP", "Q8G64"]}
           }}},
           "compiled_program": {
             "type": "object", "required": ["program", "config_sha256", "runner_sha256"],
@@ -2517,7 +2536,14 @@
       "AblationVariant": {"enum": ["plain", "projected", "norm_preserving"]},
       "AblationSearchRequest": {
         "type": "object", "additionalProperties": false,
-        "required": ["sha256", "direction_id", "assets_id", "seed", "trial_budget", "max_children", "disk_budget_bytes", "behavior_direction"],
+        "required": ["sha256", "direction_id", "seed"],
+        "oneOf": [
+          {"required":["assets_id","trial_budget","max_children","disk_budget_bytes","behavior_direction"],
+           "not":{"anyOf":[{"required":["targets"]},{"required":["source_layer"]},{"required":["first_layer"]},{"required":["last_layer"]}]}},
+          {"required":["targets","source_layer"],
+           "dependentRequired":{"first_layer":["last_layer"],"last_layer":["first_layer"]},
+           "not":{"anyOf":[{"required":["assets_id"]},{"required":["trial_budget"]},{"required":["max_children"]},{"required":["disk_budget_bytes"]},{"required":["behavior_direction"]}]}}
+        ],
         "properties": {
           "sha256": {"$ref": "#/components/schemas/ScratchHash"},
           "direction_id": {"type": "string", "minLength": 1},
@@ -2526,13 +2552,40 @@
           "trial_budget": {"type": "integer", "minimum": 3, "maximum": 32},
           "max_children": {"type": "integer", "minimum": 1, "maximum": 3},
           "disk_budget_bytes": {"type": "integer", "minimum": 67108864, "maximum": 68719476736},
-          "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionConfig"}
+          "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionConfig"},
+          "source_layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "first_layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "last_layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "targets":{"type":"array","minItems":1,"maxItems":4,"uniqueItems":true,
+            "description":"HGN only. Screen each target in the given order. Omit both layer endpoints to screen all layers.",
+            "items":{"$ref":"#/components/schemas/HgnProjectionTarget"}}
+        }
+      },
+      "HgnFeedback": {
+        "type": "object", "required": ["schema", "encoder_sha256", "parent_sha256", "revision_sha256", "direction", "tensors"],
+        "properties": {
+          "schema": {"const": "brewery.hgn-feedback.v1"},
+          "encoder_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "parent_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "revision_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+          "direction": {"type": "array", "items": {"type": "number"}},
+          "tensors": {"type": "object", "additionalProperties": {
+            "type": "object", "required": ["store", "variant", "bytes", "shape", "iterations", "tolerance", "parent_mean_abs_component", "leftover_before", "leftover_after", "rel_error", "payload_sha256"],
+            "properties": {
+              "store": {"type": "integer"}, "variant": {"type": "integer"}, "bytes": {"type": "integer"}, "shape": {"type": "array", "items": {"type": "integer"}},
+              "iterations": {"type": "integer"}, "tolerance": {"type": "number"}, "parent_mean_abs_component": {"type": "number"},
+              "leftover_before": {"type": "number", "description": "Decoded projection fraction after the first encode."},
+              "leftover_after": {"type": "number", "description": "Decoded projection fraction in the final stored tensor."},
+              "rel_error": {"type": "number", "description": "Frobenius norm of the edit relative to its parent."},
+              "payload_sha256": {"$ref": "#/components/schemas/ScratchHash"}
+            }
+          }}
         }
       },
       "ScratchRevision": {
         "type": "object", "required": ["id", "kind", "state", "sha256", "qualification", "library_model_id", "provenance", "delta"],
         "properties": {
-          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"enum": ["scratch", "compiled_program"]},
+          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"enum": ["scratch", "scratch_hgn", "compiled_program"]},
           "state": {"enum": ["scratch", "publish_requested", "approved", "discarded"]},
           "sha256": {"$ref": "#/components/schemas/ScratchHash"}, "qualification": {"const": "not release-qualified"},
           "library_model_id": {"anyOf": [{"$ref": "#/components/schemas/Id"}, {"type": "null"}]},
@@ -2719,6 +2772,7 @@
           "smoke": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "behavior": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionReport"},
+          "hgn_stored": {"$ref": "#/components/schemas/HgnStoredChecksReport"},
           "program_correctness": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "program_cases": {"type": "integer", "minimum": 0, "maximum": 340},
           "offline_report": {"$ref": "#/components/schemas/ScratchOfflineReport"},
@@ -2732,6 +2786,60 @@
               "kind": {"enum": ["evaluate", "baseline", "benchmark"]}, "verified_revision": {"const": false}
             }
           }}
+        }
+      },
+      "HgnStoredChecksReport": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema", "parent_sha256", "revision_sha256", "root_sha256", "seed", "tensors", "prompts", "runtime", "runtime_sha256", "executable_sha256", "assets_sha256"],
+        "properties": {
+          "schema": {"const": "brewery.hgn-stored-checks.v1"},
+          "parent_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "revision_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "root_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "seed": {"const": 26842},
+          "runtime": {"const": "hgn_cpu"},
+          "runtime_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "executable_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "assets_sha256": {
+            "type": "object", "additionalProperties": false,
+            "required": ["sidecar", "config", "tokenizer"],
+            "properties": {
+              "sidecar": {"$ref": "#/components/schemas/Sha256"},
+              "config": {"$ref": "#/components/schemas/Sha256"},
+              "tokenizer": {"$ref": "#/components/schemas/Sha256"}
+            }
+          },
+          "tensors": {
+            "type": "object", "minProperties": 1, "maxProperties": 256,
+            "additionalProperties": {
+              "type": "object", "additionalProperties": false,
+              "required": ["leftover", "parent_mean_abs_component", "rel_error", "control_shifts", "status"],
+              "properties": {
+                "leftover": {"type": "number", "minimum": 0, "description": "Fraction of the parent direction component left in storage."},
+                "max_expert_leftover": {"type": "number", "minimum": 0, "description": "Largest retained fraction among the experts in a routed writer."},
+                "parent_mean_abs_component": {"type": "number", "minimum": 0},
+                "rel_error": {"type": "number", "minimum": 0, "description": "Relative Frobenius error against the parent. The audit requires at most 0.10."},
+                "control_shifts": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"type": "number", "minimum": 0}},
+                "status": {"enum": ["passed", "failed", "no_component"], "description": "no_component means the parent mean absolute component is below 1e-6 and the tensor cannot demonstrate a drop. For passed, at most 10% of the component remains for the writer and its experts, relative error is at most 0.10, and each control shifts by at most 5%."}
+              }
+            }
+          },
+          "prompts": {
+            "type": "array", "minItems": 2, "maxItems": 2,
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["tokens", "kl_parent_child", "top1_agrees", "mean_abs_logit_delta", "max_abs_logit_delta", "parent_top1_logit_delta"],
+              "properties": {
+                "tokens": {"type": "integer", "minimum": 1, "maximum": 512},
+                "kl_parent_child": {"type": "number", "minimum": 0},
+                "top1_agrees": {"type": "boolean"},
+                "mean_abs_logit_delta": {"type": "number", "minimum": 0},
+                "max_abs_logit_delta": {"type": "number", "minimum": 0},
+                "parent_top1_logit_delta": {"type": "number"}
+              }
+            }
+          }
         }
       },
       "DiscoveryDocument": {
@@ -2919,7 +3027,7 @@
         "type": "object",
         "required": ["id", "kind", "host", "pool_slot", "state", "progress", "input_ids", "options", "cancel_requested", "has_result", "created_at", "updated_at"],
         "properties": {
-          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf", "scratch_checks", "scratch_locate_edit", "weight_spectra", "search_ablation", "screen_ablation", "heretic", "heretic_reproduce"]}]},
+          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf", "scratch_checks", "scratch_locate_edit", "scratch_hgn_ablation", "scratch_hgn_checks", "weight_spectra", "search_ablation", "screen_ablation", "screen_hgn_ablation", "heretic", "heretic_reproduce"]}]},
           "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}], "description": "Concrete worker ID, or auto before assignment of a pool conversion."},
           "requested_host": {"const": "auto", "description": "Present if auto conversion routing was requested."},
           "pool_slot": {"type": "boolean"}, "state": {"$ref": "#/components/schemas/JobState"}, "progress": {"type": "string"},
@@ -3078,12 +3186,12 @@
         }
       },
       "TraceJob": {
-        "description":"Run a CPU trace of a Library GGUF or Qwen3.8 Flash Next v2 HGN checkpoint, or a scratch revision with private GGUF, on its own opted-in worker. Supply exactly one of prompt, prompt_id, or options.prompts. HGN uses at most 512 raw prompt tokens and does not support interventions or SAE. There is no generation.",
+        "description":"Run a CPU trace of a Library GGUF or Qwen3.8 Flash Next v2 HGN checkpoint, or a scratch revision with private GGUF, on its own opted-in worker. Supply exactly one of prompt, prompt_id, or options.prompts. HGN uses at most 2048 raw prompt tokens and supports hgn_projection but not other interventions or SAE. There is no generation.",
         "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"}],
         "required":["input_ids","options"],
         "properties":{
           "kind":{"const":"trace"},
-          "input_ids":{"description":"The Library GGUF or HGN ID, or the scratch revision ID.","minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf","hgn"]]},
+          "input_ids":{"description":"The Library GGUF or HGN checkpoint ID, or the scratch revision ID.","minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf","hgn","hgn-v2"]]},
           "prompt":{"maxLength":16384,"x-brewery-max-utf8-bytes":16384},
           "options":{"$ref":"#/components/schemas/TraceOptions"}
         },
@@ -3242,16 +3350,17 @@
           "model_sha256":{"$ref":"#/components/schemas/Sha256"},
           "layers":{"type":"array","description":"Layers in increasing order.","minItems":1,"maxItems":64,"uniqueItems":true,"items":{"$ref":"#/components/schemas/TraceLayer"}},
           "role":{"$ref":"#/components/schemas/DirectionRole"},
-          "position":{"anyOf":[{"$ref":"#/components/schemas/TracePosition"},{"type":"null"}],"description":"Zero-based position including special tokens. Omit or use null for the last user instruction token."}
+          "position":{"anyOf":[{"$ref":"#/components/schemas/TracePosition"},{"type":"null"}],"description":"Explicit zero-based token index including special tokens. Without position, GGUF uses the last user token and HGN uses the last part of the chat template."},
+          "last_k":{"type":"integer","minimum":1,"maximum":16,"description":"HGN only. Average the last K template positions. Defaults to 1 when position is not set. Do not use with an explicit position."}
         }
       },
       "BehaviorDirectionJob": {
-        "description":"Fit per-layer behavior directions from an approved contrast set. Run on one opted-in CPU worker with the Library Qwen2 GGUF.",
+        "description":"Fit per-layer directions from a reviewed contrast set. Use a Library Qwen2 GGUF or supported HGN v2 checkpoint on its CPU worker. HGN supports l_out only.",
         "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"},{"$ref":"#/components/schemas/NoPrompt"}],
         "required":["input_ids","options"],
         "properties":{
           "kind":{"const":"behavior_direction"},
-          "input_ids":{"minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
+          "input_ids":{"minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf","hgn","hgn-v2"]]},
           "options":{"$ref":"#/components/schemas/BehaviorDirectionOptions"}
         }
       },
@@ -3267,7 +3376,22 @@
           "intervention_artifact":{"$ref":"#/components/schemas/InterventionRef"},
           "activation_patches":{"type":"array","maxItems":8,"items":{"$ref":"#/components/schemas/ActivationPatch"}},
           "sae":{"$ref":"#/components/schemas/SaeSelection"},
-          "feature_steering":{"$ref":"#/components/schemas/FeatureSteering"}
+          "feature_steering":{"$ref":"#/components/schemas/FeatureSteering"},
+          "hgn_projection":{"$ref":"#/components/schemas/HgnTraceProjection"}
+        }
+      },
+      "HgnProjectionTarget": {"enum":["residual","dense","experts","all"]},
+      "HgnTraceProjection": {
+        "type":"object","additionalProperties":false,
+        "description":"Project a version 2 direction from the same HGN checkpoint. Use both layer endpoints for an inclusive interval, or omit both for all layers. Do not combine with other interventions or SAE.",
+        "required":["direction_id","source_layer","target"],
+        "dependentRequired":{"first_layer":["last_layer"],"last_layer":["first_layer"]},
+        "properties":{
+          "direction_id":{"$ref":"#/components/schemas/Id"},
+          "source_layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "target":{"$ref":"#/components/schemas/HgnProjectionTarget"},
+          "first_layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "last_layer":{"$ref":"#/components/schemas/TraceLayer"}
         }
       },
       "SaeMetadata": {
@@ -3438,6 +3562,10 @@
           "runtime_sha256":{"$ref":"#/components/schemas/Sha256"},"spec":{"$ref":"#/components/schemas/TraceCapture"},
           "tokens":{"type":"array","items":{"type":"object","required":["position","token_id"],"properties":{"position":{"$ref":"#/components/schemas/TracePosition"},"token_id":{"type":"integer"}}}},
           "tensor_count":{"type":"integer"},"missing_count":{"type":"integer"},"intervention_count":{"type":"integer"},
+          "hgn_projection":{"type":"object","additionalProperties":false,
+            "required":["target","first_layer","last_layer"],
+            "properties":{"target":{"$ref":"#/components/schemas/HgnProjectionTarget"},
+              "first_layer":{"$ref":"#/components/schemas/TraceLayer"},"last_layer":{"$ref":"#/components/schemas/TraceLayer"}}},
           "logit_lens_count":{"type":"integer"},"model_logits_count":{"type":"integer"}
         }
       },
@@ -4542,16 +4670,43 @@
           {"$ref": "#/components/schemas/QuantizationDamageArtifact"},
           {"$ref": "#/components/schemas/BehaviorDirectionResult"},
           {"$ref": "#/components/schemas/AblationSearchResult"},
+          {"$ref": "#/components/schemas/HgnScreenResult"},
           {"type": "object", "not": {"anyOf": [
             {"$ref": "#/components/schemas/CompareResult"}, {"$ref": "#/components/schemas/ConversionResult"},
             {"$ref": "#/components/schemas/GenerateResult"}, {"$ref": "#/components/schemas/Gsm8kResult"},
             {"$ref": "#/components/schemas/BenchmarkResult"}, {"$ref": "#/components/schemas/TransferResult"},
              {"$ref": "#/components/schemas/CacheCleanupResult"}, {"$ref": "#/components/schemas/WeightApplyResult"},
-             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace", "weight_spectra", "quantization_damage"]}}}
+             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace", "weight_spectra", "quantization_damage", "screen_hgn_ablation"]}}}
           ]}}
         ]
       },
       "ByteCount": {"type": "integer", "minimum": 0},
+      "HgnScreenResult": {
+        "type":"object",
+        "required":["kind","schema_version","release_qualified","model_sha256","direction_id","targets","scores","pareto","selected"],
+        "properties":{
+          "kind":{"const":"screen_hgn_ablation"},"schema_version":{"const":1},"release_qualified":{"const":false},
+          "model_sha256":{"$ref":"#/components/schemas/Sha256"},"direction_id":{"$ref":"#/components/schemas/Id"},
+          "contrast_sha256":{"$ref":"#/components/schemas/Sha256"},"runtime":{"const":"hgn_cpu"},
+          "targets":{"type":"array","minItems":1,"maxItems":4,"items":{"$ref":"#/components/schemas/HgnProjectionTarget"}},
+          "scores":{"type":"object","required":["marker","marker_tokens","prompts","parent_hits","parent_mean","control_mean","trials"],
+            "properties":{
+              "marker":{"type":"string"},"marker_tokens":{"type":"array","items":{"type":"integer","minimum":0}},
+              "prompts":{"type":"integer","minimum":1,"maximum":8},"parent_hits":{"type":"integer","minimum":0,"maximum":8},
+              "parent_mean":{"type":"number"},"control_mean":{"type":"number"},
+              "trials":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"object","additionalProperties":false,
+                "required":["reduction","random_reduction","control_shift","random_control_shift","kl","random_kl","wins_over_random"],
+                "properties":{
+                  "reduction":{"type":"number"},"random_reduction":{"type":"number"},
+                  "control_shift":{"type":"number","minimum":0},"random_control_shift":{"type":"number","minimum":0},
+                  "kl":{"type":"number","minimum":0},"random_kl":{"type":"number","minimum":0},
+                  "wins_over_random":{"type":"integer","minimum":0,"maximum":8}
+                }}}
+            }},
+          "pareto":{"type":"array","items":{"type":"integer","minimum":0,"maximum":3}},
+          "selected":{"type":"array","items":{"type":"integer","minimum":0,"maximum":3}}
+        }
+      },
       "AblationSearchResult": {
         "type": "object",
         "required": ["schema_version", "kind", "release_qualified", "backend", "screen", "children", "finding"],
@@ -4587,14 +4742,17 @@
         }
       },
       "BehaviorDirectionResult": {
-        "type":"object","required":["kind","schema_version","release_qualified","model_id","model_sha256","position","behavior","contrast_sha256","lanternfish_commit","executable_sha256","fit"],
+        "type":"object","required":["kind","schema_version","release_qualified","model_id","model_sha256","position","behavior","contrast_sha256","executable_sha256","fit"],
+        "oneOf":[{"required":["lanternfish_commit"]},{"required":["runtime","runtime_sha256","assets_sha256"],"properties":{"schema_version":{"const":2}}}],
         "if":{"properties":{"schema_version":{"const":2}}},
         "then":{"properties":{"fit":{"properties":{"layers":{"items":{"required":["held_out_cohens_d","mean_residual_norm"]}}}}}},
         "properties":{
           "kind":{"const":"behavior_direction"},"schema_version":{"enum":[1,2]},"release_qualified":{"const":false},
           "model_id":{"$ref":"#/components/schemas/Id"},"model_sha256":{"$ref":"#/components/schemas/Sha256"},
-          "position":{"type":["integer","null"]},"behavior":{"$ref":"#/components/schemas/DirectionBehavior"},
+          "position":{"type":["integer","null"]},"last_k":{"type":"integer","minimum":1,"maximum":16},"behavior":{"$ref":"#/components/schemas/DirectionBehavior"},
           "contrast_sha256":{"$ref":"#/components/schemas/Sha256"},"lanternfish_commit":{"type":"string"},
+          "runtime":{"const":"hgn_cpu"},"runtime_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "assets_sha256":{"type":"object","required":["sidecar","config","tokenizer"],"additionalProperties":{"$ref":"#/components/schemas/Sha256"}},
           "executable_sha256":{"$ref":"#/components/schemas/Sha256"},
           "fit":{"type":"object","required":["role","train_pairs","held_out_pairs","selected_layer","layers"],"properties":{
             "role":{"$ref":"#/components/schemas/DirectionRole"},"train_pairs":{"const":12},"held_out_pairs":{"const":8},
@@ -4603,7 +4761,7 @@
                 "layer":{"$ref":"#/components/schemas/TraceLayer"},"norm":{"type":"number","minimum":0},
                 "unit_vector":{"type":["array","null"],"items":{"type":"number"}},"held_out_margin":{"type":["number","null"]},
                 "held_out_cohens_d":{"type":["number","null"],"description":"Raw margin divided by the pooled within-class sample standard deviation of held-out projections. Null if undefined."},
-                "mean_residual_norm":{"type":"number","minimum":0,"description":"Mean L2 norm of l_out over both classes of held-out prompts, at the captured token."},
+                "mean_residual_norm":{"type":"number","minimum":0,"description":"Mean L2 norm of l_out over both held-out classes and all captured positions, after stream sum but before normalization on HGN."},
                 "negative_mean":{"type":"array","minItems":1,"maxItems":16384,"items":{"type":"number"},"description":"Mean negative-class activation over training prompts. Required for projected ablation; older artifacts omit it."}
               }}}
           }}

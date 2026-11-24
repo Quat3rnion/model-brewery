@@ -31,7 +31,11 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
    read its provenance. Select a method below
    and record the child ID and hash. For queued work, use `get_job` to read
    the terminal result before starting the next step.
-4. Use `convert_scratch_gguf` on the child with the same assets as the parent.
+4. For an HGN child, skip GGUF conversion. Call `run_checks` with the child
+   ID and exact hash. Read `hgn_stored` in `get_checks` for the decoded-store
+   audit and CPU forward scores. Require both checks. Report scores and flags,
+   not generated text. See [stored HGN checks](../../../OPERATOR.md#native-hgn-v2-scratch-edits).
+   For SafeTensors, use `convert_scratch_gguf` on the child with the same assets as the parent.
    Trace the child with the same prompts, positions, and capture settings.
 5. Use `run_checks`, wait for any check job, then read `get_checks`. Compare
    with `diff_tensors`, `diff_traces`, and `diff_behavior` as applicable. If
@@ -64,7 +68,7 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
 
 | Goal | Method |
 | --- | --- |
-| Change known weights | `apply_edit` for slices, low-rank updates, or projection removal. See [Scratch weight revisions](../../../OPERATOR.md#scratch-weight-revisions). |
+| Change known weights | `apply_edit` for SafeTensors slices, low-rank updates, or projection removal. See [Scratch weight revisions](../../../OPERATOR.md#scratch-weight-revisions). |
 | Measure Fisher sensitivity | Use `tensor_sensitivity` with one pinned GGUF, the W4 held-out corpus SHA-256, and a small tensor or layer selection. Read `get_job` and record the revision, corpus, backend, and observation count. This job does not edit weights. See [Tensor sensitivity](../../../OPERATOR.md#tensor-sensitivity). |
 | Find activation circuits | Use `find_circuit` with one pinned Library or private scratch GGUF, equal-length clean and corrupt prompts, and a small site selection. Read `get_job`. Cite `/api/jobs/{id}/circuit` and distinguish signed attribution from measured patch deltas. Report Pearson `r` and Spearman `rho` only for the patched sites. See [Activation attribution](../../../OPERATOR.md#activation-attribution). |
 | Map quantization damage | Use `quantization_damage_map` with two pinned GGUFs from the same revision. Select `target_logit` for logit drift and measured swaps or `corpus_nll` for mean next-token loss over all W4 held-out lines. Read `read_quantization_damage`. Report the recipe as a proposal, not an applied edit. See [Quantization damage map](../../../OPERATOR.md#quantization-damage-map). |
@@ -77,9 +81,9 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
 | Change activations only | Use `start_trace` with [trace interventions](../../../OPERATOR.md#trace-interventions). Reuse [versioned rules](../../../OPERATOR.md#library-intervention-artifacts) with `list_interventions` and `get_intervention`, or save them with `create_intervention` and `new_intervention_version`. Use `read_feature_trace` to inspect [SAE features](../../../OPERATOR.md#sparse-autoencoders-saes) or `steer_feature` to apply an SAE direction. Compare to an unmodified trace; there is no weight revision to publish. |
 | Compare learned features across revisions | Use `crosscoder_diff` with a saved ID. To build an artifact, use the offline [crosscoder procedure](../../../OPERATOR.md#crosscoder-model-diff) with unmodified paired traces and separate train and holdout prompts. Check reconstruction for both revisions before interpreting unique or changed features. |
 | Remove a behavior direction during inference | Use `get_direction`, then `create_direction_intervention` with `project_out` and the target rows. Pass the saved version to `start_trace` and compare the result with `diff_traces`. Use `subtract` to export a fixed scaled direction. `export_control_vector` cannot export projection. |
-| Measure a behavior direction | Use `compute_direction` with a pinned Library Qwen2 GGUF, behavior, and increasing layer numbers. Read version 2 with `get_direction`. Report held-out Cohen's d, not a change in generated behavior. See [Behavior directions](../../../OPERATOR.md#behavior-directions). |
-| Ablate a fitted direction | Use `ablate_direction` with a pinned scratch parent and a version 2 direction. Convert the private child and compare behavior and locality against its parent. See [Native directional ablation](../../../OPERATOR.md#native-directional-ablation). |
-| Search ablation settings | Use `search_ablation` when a slop or sycophancy direction is fitted on the exact parent GGUF. Set the trial, child, and disk limits. Read `get_job` for the matched control, Pareto front, and paired checks. A screen effect is not a weight-edit result. See [Native ablation search](../../../OPERATOR.md#native-ablation-search). |
+| Measure a behavior direction | Use `compute_direction` with a pinned Library Qwen2 GGUF or supported HGN v2, a reviewed behavior, and increasing layer numbers. On HGN, use `l_out` and optionally `last_k`. Read version 2 with `get_direction`; pass `reference_id` and `reference_layer` for HGN cosine. Report held-out Cohen's d as a probe score. See [Behavior directions](../../../OPERATOR.md#behavior-directions). |
+| Ablate a fitted direction | Use `ablate_direction` with the parent hash and a version 2 direction. For HGN, start from a Library or HGN scratch ID. Fit on the Library root and use `plain`, `flat`, and alpha 1. Poll `get_job` and read native-store metrics in `get_scratch`. HGN stays private. Convert a SafeTensors child to private GGUF before comparing behavior. See [Native directional ablation](../../../OPERATOR.md#native-directional-ablation). |
+| Search ablation settings | Use `search_ablation` with a direction fitted on the exact checkpoint. For GGUF, set the trial, child, and disk limits. For Library HGN v2, use the version 2 direction ID, source layer, seed, and projection targets. Read `get_job` for the paired control, matched random-direction scores, and Pareto front. HGN makes no scratch children and stores no completions. Its response-length marker is a first-token continuation proxy. See [Native ablation search](../../../OPERATOR.md#native-ablation-search). |
 | Run or reproduce a Heretic edit | Use `run_heretic` with a standalone Library SafeTensors ID and an offline operator profile. Use `reproduce_heretic` only with a v4 manifest and a verified matching Hugging Face download. Use a byte-identical scratch copy for the parent's private GGUF, then convert and check the child with the same assets. See [Heretic jobs](../../../OPERATOR.md#heretic-jobs). |
 | Build a standalone program | Use `compile_program` for a supported named program and `run_program` for examples. Run checks and read `program_correctness` and `program_cases`. Failure blocks publication. Acknowledge the bundle before requesting publication. The GGUF, trace, and weight diff steps do not apply. See [Compiled programs](../../../OPERATOR.md#compiled-programs). |
 | Read scores on a known circuit | Call `interp_benchmark` with no arguments. Distinguish linear attribution from exact activation patching. Recall-only rows have no negative sites and cannot measure false positives. These scores do not qualify a release. See [Compiled-program benchmark](../../../OPERATOR.md#compiled-program-benchmark). |
@@ -108,10 +112,13 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
   for expired trace data. Check [CPU trace
   caps and retention](../../../OPERATOR.md#cpu-trace-jobs) and the MCP byte
   limits before submitting or reading a large capture.
-- For a supported Library `hgn` checkpoint, use `start_trace` on its own
-  worker. Use at most 512 raw prompt tokens. `l_out` contains all four
-  streams; `final_norm` is available only at the last layer. Use GGUF
-  for interventions and SAE.
+- For a supported Library `hgn` or `hgn-v2` checkpoint, use `start_trace`
+  with the ID on its non-Hy4 trace worker. Use at most 2048 raw prompt tokens.
+  `l_out` contains all four
+  streams; `final_norm` is available only at the last layer. Use
+  `options.hgn_projection` with a version 2 direction ID, source layer, and
+  `residual`, `dense`, `experts`, or `all`. Omit both layer endpoints for all
+  layers. Other interventions and SAE require GGUF.
 - Set an idempotency key before a write. Use the same key and arguments for a
   retry. Where the job schema supports it, use `allow_duplicate: true` and a
   new key only for a deliberate repeat.

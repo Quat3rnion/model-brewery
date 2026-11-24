@@ -177,7 +177,7 @@ impl Server {
             let mut schema = route.schema.clone();
             let description = match name {
                 "start_trace" => {
-                    "Queue a CPU trace. Enter one Library GGUF or Qwen3.8 Flash Next v2 HGN ID, or one scratch revision ID with private GGUF in input_ids. HGN is limited to 512 tokens and does not support interventions. Poll its ID with get_job."
+                    "Queue a CPU trace. Enter one Library GGUF or Qwen3.8 Flash Next v2 HGN ID (hgn or hgn-v2 on a non-Hy4 trace worker), or one scratch revision ID with private GGUF in input_ids. HGN accepts up to 2048 tokens and supports options.hgn_projection from a version 2 direction. Poll with get_job."
                 }
                 "steer_feature" => {
                     schema["properties"]["options"]["required"] = json!(["feature_steering"]);
@@ -193,19 +193,22 @@ impl Server {
                     "Compare pinned Library BF16 and quantized GGUFs on the same worker. Choose target_logit for logit drift or corpus_nll for mean next-token loss on all W4 held-out lines. Read the damage map after the job finishes. The job does not apply its recipe proposal."
                 }
                 "compute_direction" => {
-                    "Queue CPU behavior directions for one pinned Library GGUF and an approved contrast set. Poll with get_job. Read version 2 with get_direction."
+                    "Queue CPU behavior directions for one pinned Library Qwen2 GGUF or supported HGN v2 checkpoint and a reviewed contrast set. On HGN, use l_out and optional last_k. Poll with get_job. Read version 2 with get_direction."
                 }
                 "get_direction" => {
-                    "Read an immutable direction artifact. Version 2 reports held-out Cohen's d and mean residual norm. Version 1 is only for older jobs."
+                    "Read an immutable direction artifact. Version 2 reports held-out Cohen's d and mean residual norm. For HGN, give reference_id and reference_layer to compare with a verified direction from the same checkpoint and behavior."
                 }
                 "create_direction_intervention" => {
                     "Save trace rules from a verified direction version. Project out its activation component or subtract a scaled unit vector. Pass the saved ID and version to start_trace."
                 }
                 "ablate_direction" => {
-                    "Apply one fitted direction to a private scratch child. Use the exact parent revision and a version 2 direction. Convert the child with convert_scratch_gguf and score it with run_checks."
+                    "Apply a version 2 direction to the exact parent hash. For SafeTensors, convert the private child to GGUF before checks. For HGN, use a pinned Library or scratch ID, a direction fit on its Library root, plain variant, flat kernel, and alpha 1. Poll get_job for scratch_id and get_scratch for native-store metrics. HGN scratch cannot be published."
+                }
+                "apply_edit" => {
+                    "Apply selected tensor operations to a private SafeTensors scratch child. For native HGN projection, use ablate_direction."
                 }
                 "search_ablation" => {
-                    "Fit the direction on the exact private parent GGUF before searching. Use disjoint confirmation pins in behavior_direction.prompt_sets. Read get_job for the fitted and matched random screen results, then get_checks for the selected children."
+                    "For GGUF, fit on the exact private scratch GGUF, use disjoint confirmation pins, and check selected children. For HGN, enter the exact Library checkpoint ID and SHA-256, a version 2 direction ID and source_layer, seed, targets, and optional inclusive first_layer and last_layer. HGN returns scores and a Pareto front only; response_length is a first-token continuation proxy, not generated length. Read the receipt with get_job."
                 }
                 "run_heretic" => {
                     "Queue an offline Heretic GPU job on the original Library SafeTensors parent, not its scratch copy. Read get_job for scratch_id and get_scratch for the journal. Convert the byte-identical baseline and imported child with the same assets, then call run_checks."
@@ -214,7 +217,10 @@ impl Server {
                     "Import a verified community Heretic v4 manifest using a matching pinned Library SafeTensors download. A Brewery journal is not a v4 manifest. Read get_job for the scratch child and use run_checks after conversion."
                 }
                 "run_checks" => {
-                    "Check the exact scratch child. Convert the parent and child with identical assets for measured checks. To score slop, sycophancy, length and KL, pass behavior_direction.prompt_sets with the verified holdout digests; add benign_refusal only for over-refusal. Poll get_job if queued and read get_checks."
+                    "Check the exact scratch child. For native HGN, pass id and sha256 without behavior_direction. The source worker audits the stored writers and compares CPU forward scores with the immediate parent. For SafeTensors, convert both revisions with identical GGUF assets. Use behavior_direction.prompt_sets to opt into held-out behavior scores on GGUF. Poll get_job if queued and read get_checks."
+                }
+                "get_checks" => {
+                    "Read the current check bundle. For HGN, hgn_stored lists decoded writer metrics and per-prompt CPU forward scores without generated text."
                 }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({

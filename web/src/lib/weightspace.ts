@@ -316,6 +316,25 @@ export function lensGrid(rows: { layer: number; position: number; top: TopLogit[
 // ---- Scratch revisions ----
 
 export type CheckStatus = { status: 'passed' } | { status: 'failed' | 'not_run' | 'reported'; reason: string };
+export interface HgnStoredChecks {
+  seed: number;
+  tensors: Record<string, {
+    status: 'passed' | 'failed' | 'no_component';
+    leftover: number;
+    max_expert_leftover?: number;
+    parent_mean_abs_component: number;
+    rel_error: number;
+    control_shifts: number[];
+  }>;
+  prompts: {
+    tokens: number;
+    kl_parent_child: number;
+    top1_agrees: boolean;
+    mean_abs_logit_delta: number;
+    max_abs_logit_delta: number;
+    parent_top1_logit_delta: number;
+  }[];
+}
 export interface CheckBundle {
   token_loss?: { sha256: string };
   id: string;
@@ -327,6 +346,7 @@ export interface CheckBundle {
   smoke: CheckStatus | { status: string; reason?: string };
   behavior: CheckStatus | { status: string; reason?: string };
   behavior_direction?: import('./abliteration').BehaviorDirectionReport;
+  hgn_stored?: HgnStoredChecks;
   program_correctness?: CheckStatus;
   program_cases?: number;
   offline_report?: unknown;
@@ -414,7 +434,7 @@ const CHECK_STATUS: Record<string, { label: string; tone: Tone }> = {
   reported: { label: 'Reported', tone: 'info' },
 };
 
-export function checkRows(b: CheckBundle | undefined | null) {
+export function checkRows(b: CheckBundle | undefined | null, nativeHgn = !!b?.hgn_stored) {
   if (!b) return [];
   const names = b.program_correctness
     ? [...CHECK_NAMES, ['program_correctness', 'Program correctness'] as const]
@@ -422,7 +442,10 @@ export function checkRows(b: CheckBundle | undefined | null) {
   return names.map(([k, name]) => {
     const c = (b[k] ?? {}) as { status?: string; reason?: string };
     const s = CHECK_STATUS[c.status ?? ''] ?? { label: c.status ?? 'Unknown', tone: 'warn' as Tone };
-    return { name: k === 'smoke' && b.program_correctness ? 'Load and run' : name, status: c.status ?? 'unknown', label: s.label, tone: s.tone, reason: c.reason ?? '' };
+    const label = nativeHgn && k === 'integrity' ? 'Decoded-store audit'
+      : k === 'smoke' && nativeHgn ? 'CPU forward'
+        : k === 'smoke' && b.program_correctness ? 'Load and run' : name;
+    return { name: label, status: c.status ?? 'unknown', label: s.label, tone: s.tone, reason: c.reason ?? '' };
   });
 }
 

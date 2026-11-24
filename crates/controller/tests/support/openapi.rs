@@ -38,6 +38,20 @@ fn discovery_serves_json_under_the_loopback_guard() {
 fn contract_covers_the_controller_operations_and_resolves_local_refs() {
     let contract: Value = serde_json::from_str(CONTRACT).unwrap();
     assert_eq!(contract["openapi"], "3.1.0");
+    assert_eq!(
+        contract["paths"]["/api/scratch/{id}/ablate_direction"]["post"]["responses"]["202"]["content"]
+            ["application/json"]["schema"]["$ref"],
+        "#/components/schemas/Job"
+    );
+    let schemas = &contract["components"]["schemas"];
+    assert_eq!(
+        schemas["AblationSearchRequest"]["oneOf"][1]["required"],
+        json!(["targets", "source_layer"])
+    );
+    assert_eq!(
+        schemas["TraceOptions"]["properties"]["hgn_projection"]["$ref"],
+        "#/components/schemas/HgnTraceProjection"
+    );
     let operations = contract["paths"]
         .as_object()
         .unwrap()
@@ -280,6 +294,32 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         check["properties"]["behavior_direction"]["$ref"],
         "#/components/schemas/BehaviorDirectionConfig"
     );
+    let schemas = &contract["components"]["schemas"];
+    assert_eq!(
+        schemas["ScratchCheckBundle"]["properties"]["hgn_stored"]["$ref"],
+        "#/components/schemas/HgnStoredChecksReport",
+    );
+    assert_eq!(
+        schemas["Job"]["properties"]["kind"]["anyOf"][1]["enum"],
+        json!([
+            "scratch_gguf",
+            "scratch_checks",
+            "scratch_locate_edit",
+            "scratch_hgn_ablation",
+            "scratch_hgn_checks",
+            "weight_spectra",
+            "search_ablation",
+            "screen_ablation",
+            "screen_hgn_ablation",
+            "heretic",
+            "heretic_reproduce"
+        ])
+    );
+    assert_eq!(
+        schemas["BehaviorDirectionJob"]["properties"]["input_ids"]["x-brewery-input-kinds"],
+        json!([["gguf", "hgn", "hgn-v2"]])
+    );
+    assert!(schemas["BehaviorDirectionResult"]["properties"]["runtime_sha256"].is_object());
     let ids: BTreeSet<_> = operations.iter().map(|entry| entry.2).collect();
     assert_eq!(ids.len(), operations.len());
     walk_refs(&contract, &contract);

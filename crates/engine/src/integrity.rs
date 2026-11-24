@@ -28,6 +28,12 @@ pub struct Stamp {
 }
 
 impl Stamp {
+    pub(crate) fn regular(path: &Path) -> Result<Self> {
+        let metadata = canonical(path)?;
+        ensure!(metadata.is_file(), "expected a regular input file");
+        Ok(Self::new(&metadata))
+    }
+
     fn new(meta: &Metadata) -> Self {
         Self {
             dev: meta.dev(),

@@ -5,7 +5,8 @@ Approval and deployment are operator-only.
 
 Find or register the input. For a SafeTensors Library parent, create a
 scratch revision. Use `convert_scratch_gguf` for its private baseline.
-Trace the baseline with `start_trace`. Choose the smallest method that
+Trace the baseline with `start_trace`. For HGN, select the Library ID on an
+opted-in non-Hy4 trace worker. Choose the smallest method that
 meets the goal:
 use `apply_edit` for known tensors; `rome_edit` for one fact; `memit_edit` for
 several facts across layers; `alphaedit_edit` to protect sampled facts;
@@ -39,17 +40,27 @@ Attach atlas observations to `plan_experts` as evidence for the same source
 digest. They do not replace independent calibration and held-out REAP data.
 
 Use `compute_direction` to measure slop, sycophancy, or response-length
-directions on a pinned Qwen2 GGUF. Use `get_direction` to read version 2 by
-job ID. Specify a layer for a smaller response. Report Cohen's d
+directions on a pinned Qwen2 GGUF or supported HGN v2. For HGN, use `l_out`
+and set `last_k` to average final template positions. Use `get_direction`
+to read version 2 by job ID. Specify a layer for a smaller response. For HGN
+cosine, supply `reference_id` and `reference_layer`. Report Cohen's d
 as a probe result, not as evidence of a change in generated behavior.
 For a native comparison, fit on the exact private baseline GGUF bytes
 registered as a Library GGUF.
 Use `ablate_direction` to test a fitted version 2 direction in a private
-scratch child. Use a direction from the same model in the same residual
-basis. Check the target behavior and side effects before a publish request.
+scratch child. For HGN, use the pinned Library or HGN scratch ID, a direction
+fit on its Library root, `plain`, `flat`, and alpha 1. Poll `get_job`, then use
+`get_scratch` to read native-store metrics. HGN does not support `apply_edit`
+or publication. For SafeTensors, check target behavior and side effects
+before a publish request.
 Use `search_ablation` for a bounded slop or sycophancy search on the exact
 parent GGUF. Read its receipt with `get_job`. Compare with the matched
 random control and report any effect that weight-edit checks did not confirm.
+For Library HGN v2, use `search_ablation` with the exact checkpoint hash,
+version 2 direction ID, source layer, seed, and projection targets. Compare
+the matched random direction and the reviewed control prompts. The search
+makes no scratch children and generates no text. For response length,
+report the first-token continuation proxy, not generated length.
 Use `create_direction_intervention` to remove the projection onto a
 verified direction or subtract a scaled direction. Pass the saved version
 to `start_trace` and compare with a baseline using `diff_traces`.
@@ -62,7 +73,13 @@ Read the job with `get_job`. Convert a byte-identical scratch copy of the
 Library parent for the baseline and use the same conversion assets for the child.
 Read the imported child and its journal with `get_scratch`.
 
-For a weight change, convert the child to private GGUF with the same assets.
+For a native HGN child, call `run_checks` with its exact hash and no
+`behavior_direction`. Poll `get_job` and read `get_checks`. Require both the
+decoded-store audit and paired CPU forward. Report the retained components,
+random controls, relative error and forward scores, not generated text.
+HGN checks do not use GGUF and are not release-qualified.
+
+For a SafeTensors weight change, convert the child to private GGUF with the same assets.
 Trace it with the same prompts and capture settings as the parent. Always
 call `run_checks` and read `get_checks` on the child. Compare weights, traces,
 and measured behavior with `diff_tensors`, `diff_traces`, and `diff_behavior`
@@ -116,9 +133,11 @@ Other tool references: `list_models`, `register_model`, `list_scratch`,
 
 Stay within the time, token, tool call, and byte limits. Use small trace
 slices and bounded waits for jobs. For Library Qwen3.8 Flash Next v2 HGN,
-use up to 512 raw prompt tokens. The block output contains four residual
-streams. Read the normalized final mix at the last layer. HGN traces do
-not support interventions or SAE.
+use up to 2048 raw prompt tokens. The block output contains four residual
+streams. Read the normalized final mix at the last layer. Set
+`options.hgn_projection` in `start_trace` to project a version 2 direction
+from the same model. Select `residual`, `dense`, `experts`, or `all`, and
+give both layer endpoints or neither. Other interventions and SAE require GGUF.
 Retry writes with the same key and
 arguments. Stop and report a limit or admission failure instead of
 bypassing it.

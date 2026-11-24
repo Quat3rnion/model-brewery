@@ -558,6 +558,11 @@ async fn add_model(
     }
     let model = request.validate().map_err(ApiError::bad)?;
     let path = std::path::Path::new(&model.path);
+    if brewery_worker::hgn_edit::private_path(path) {
+        return Err(ApiError::bad(
+            "private scratch job output cannot enter the Library",
+        ));
+    }
     if store.is_scratch_path(path) {
         return Err(ApiError::bad("scratch files require operator approval"));
     }
