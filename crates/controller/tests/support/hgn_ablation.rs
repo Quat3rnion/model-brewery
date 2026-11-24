@@ -101,6 +101,18 @@ fn hgn_ablation_queues_private_child_and_pinned_descendant_through_mcp() {
         digest
     );
     let child_sha = row["sha256"].as_str().unwrap();
+    let rejected = app.json(
+        "POST",
+        &format!("{route}/checks"),
+        Some(json!({"sha256":child_sha,"registered_marker":{"name":"garden","partition":"final_gate"}})),
+        400,
+    );
+    assert!(
+        rejected["error"]
+            .as_str()
+            .unwrap()
+            .contains("HGN generation belongs to H6")
+    );
     let check = app.json(
         "POST",
         &format!("{route}/checks"),

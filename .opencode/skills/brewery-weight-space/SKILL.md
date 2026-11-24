@@ -51,6 +51,13 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
    measure harmful-set compliance. Get operator approval before you publish
    these research results.
    See [Behavior direction checks](../../../OPERATOR.md#behavior-direction-checks).
+   For private GGUF, call `list_evaluation_sets`. Pass
+   `registered_marker: {"name":"<set-name>","partition":"tune"}` to `run_checks`.
+   Reserve `final_gate` for the final check after you fix the candidate.
+   Neither partition is available to direction fitting or ablation search.
+   In `get_checks`, report marker rates, per-class counts and flags for both
+   sides. Do not repeat reply prefixes.
+   See [Registered evaluation sets](../../../OPERATOR.md#registered-evaluation-sets).
 6. Use `add_evidence` to select numeric paths in the finished artifacts and
    record a verdict with your reasoning. Use `get_finding` to verify the
    saved version. Use `list_findings` to find earlier findings. Use

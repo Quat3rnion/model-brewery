@@ -39,6 +39,8 @@ mod weights;
 
 #[path = "support/settings.rs"]
 mod settings;
+#[path = "support/registered_evaluation.rs"]
+mod registered_evaluation;
 use std::{
     fs,
     io::{Read, Write},

@@ -278,6 +278,7 @@ impl Lanes {
                 scratch_eval::RUNNER_LIB_DIR,
                 scratch_eval::CACHE,
                 scratch_eval::CONTRAST_CACHE,
+                scratch_eval::registered::CACHE,
                 brewery_worker::heretic::RUNTIME,
                 trace::EXECUTABLE,
                 trace::LIB_DIR,

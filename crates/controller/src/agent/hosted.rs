@@ -29,14 +29,17 @@ fn system_prompt_uses_catalog_tools_and_reserves_approval_for_operator() {
         "behavior_direction",
         "dense",
         "experts",
+        "final_gate",
         "flat",
         "l_out",
         "last_k",
         "options.hgn_projection",
         "plain",
+        "registered_marker",
         "reference_id",
         "reference_layer",
         "residual",
+        "tune",
     ]);
     let parts: Vec<_> = SYSTEM.split('`').collect();
     assert_eq!(parts.len() % 2, 1, "unpaired backtick in system prompt");

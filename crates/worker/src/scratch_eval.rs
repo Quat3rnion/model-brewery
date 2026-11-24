@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub mod paired;
+pub mod registered;
 
 pub const GGUF: &str = "scratch_gguf";
 pub const CHECKS: &str = "scratch_checks";
@@ -82,16 +83,20 @@ impl BehaviorConfig {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Options {
-    behavior_direction: Option<BehaviorConfig>,
+pub struct Options {
+    pub behavior_direction: Option<BehaviorConfig>,
+    pub registered_marker: Option<registered::Config>,
 }
 
-pub fn check_options(options: &Value) -> Result<Option<BehaviorConfig>> {
+pub fn check_options(options: &Value) -> Result<Options> {
     let options: Options = serde_json::from_value(options.clone())?;
     if let Some(config) = &options.behavior_direction {
         config.validate()?;
     }
-    Ok(options.behavior_direction)
+    if let Some(config) = &options.registered_marker {
+        config.validate()?;
+    }
+    Ok(options)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -234,9 +239,15 @@ mod behavior_tests {
     fn validates_opt_in_against_pins_and_changes_only_allowed_settings() {
         let pins = json!({"slop":"a".repeat(64), "response_length":"b".repeat(64),
                           "sycophancy":"c".repeat(64)});
-        assert!(check_options(&json!({})).unwrap().is_none());
+        assert!(
+            check_options(&json!({}))
+                .unwrap()
+                .behavior_direction
+                .is_none()
+        );
         let config = check_options(&json!({"behavior_direction":{"prompt_sets":pins}}))
             .unwrap()
+            .behavior_direction
             .unwrap();
         assert!(
             check_options(&json!({"behavior_direction": {
@@ -279,6 +290,7 @@ mod behavior_tests {
         unchecked["config"]["prompt_sets"]["benign_refusal"] = json!(BENIGN_REFUSAL_SHA256);
         let benign_config = check_options(&json!({"behavior_direction":unchecked["config"]}))
             .unwrap()
+            .behavior_direction
             .unwrap();
         unchecked["counts"]["benign_refusal"] = json!(16);
         unchecked["metrics"]
@@ -329,7 +341,7 @@ pub fn check_report(
     report: &Value,
     inputs: [&str; 4],
     runner_sha: &str,
-    config: Option<&BehaviorConfig>,
+    options: &Options,
 ) -> Result<()> {
     let fixtures: Value =
         serde_json::from_str(include_str!("../../eval/data/edit-checks/manifest.json"))?;
@@ -351,5 +363,14 @@ pub fn check_report(
             && report.get("artifact").is_none(),
         "scratch checks report does not match verified inputs or protocol"
     );
-    check_behavior(report.get("behavior_direction"), config)
+    check_behavior(
+        report.get("behavior_direction"),
+        options.behavior_direction.as_ref(),
+    )?;
+    let marker = report
+        .get("registered_marker")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?;
+    registered::validate_report(marker.as_ref(), options.registered_marker.as_ref())
 }

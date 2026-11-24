@@ -26,6 +26,7 @@ mod mcp;
 mod model_availability;
 mod profiles;
 mod remote_edit;
+mod registered_evaluation;
 mod routing_atlas;
 mod sae;
 mod scratch;
@@ -65,6 +66,7 @@ struct App {
     backend_calibration: Option<PathBuf>,
     backend_edit_formats: std::collections::BTreeSet<String>,
     pub admin: Option<admin::Admin>,
+    evaluation_operator: Option<registered_evaluation::Operator>,
     local_edit: Arc<local_edit::Lanes>,
     ssh_hosts: Arc<infra_hosts::Registry>,
     remote_edit: Arc<remote_edit::Installer>,
@@ -173,6 +175,7 @@ async fn main() -> Result<(), Error> {
             .map(|lane| lane.edit_formats.clone())
             .unwrap_or_default(),
         admin,
+        evaluation_operator: registered_evaluation::Operator::from_env()?,
         local_edit,
         ssh_hosts,
         remote_edit,

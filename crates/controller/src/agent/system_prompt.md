@@ -74,7 +74,7 @@ Library parent for the baseline and use the same conversion assets for the child
 Read the imported child and its journal with `get_scratch`.
 
 For a native HGN child, call `run_checks` with its exact hash and no
-`behavior_direction`. Poll `get_job` and read `get_checks`. Require both the
+`behavior_direction` or `registered_marker`. Poll `get_job` and read `get_checks`. Require both the
 decoded-store audit and paired CPU forward. Report the retained components,
 random controls, relative error and forward scores, not generated text.
 HGN checks do not use GGUF and are not release-qualified.
@@ -95,6 +95,12 @@ Do not infer harmful-set refusal rates from synthetic fixtures.
 The optional benign refusal rate measures over-refusal on reviewed benign
 prompts, not compliance with harmful requests. Report the flags and rates
 only. This check does not produce a refusal direction.
+For private GGUF, call `list_evaluation_sets` to find operator-registered
+sets. Pass the set name and one partition in `registered_marker` to
+`run_checks`. Use `tune` for preliminary checks. Reserve `final_gate` for
+the final check after you fix the candidate. Do not use either partition
+in `compute_direction` or `search_ablation`. Report both sides' marker
+rates and per-class counts from `get_checks`. Do not repeat reply prefixes.
 On Qwen2.5-0.5B-Instruct the tested native directions carried only a small
 part of the sycophancy signal. A3 and A5 found no significant paired flips.
 Stock slop was too rare to measure a reliable reduction. Heretic noslop

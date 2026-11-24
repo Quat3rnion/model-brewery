@@ -702,6 +702,14 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 )
                 .chain(["BREWERY_CPU_THREADS"])
                 .chain(
+                    (job.kind == scratch_eval::CHECKS
+                        && job
+                            .options
+                            .get("registered_marker")
+                            .is_some_and(|v| !v.is_null()))
+                    .then_some(scratch_eval::registered::CACHE),
+                )
+                .chain(
                     gradient_backend
                         .into_iter()
                         .flat_map(|b| b.visibility_vars().iter().copied()),
@@ -727,7 +735,11 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             command.env("PATH", "/usr/bin:/bin");
         }
     } else {
-        command.envs(&w.cfg.engine_env);
+        command
+            .env_remove(scratch_eval::registered::CACHE)
+            .envs(w.cfg.engine_env.iter().filter(|(key, _)| {
+                key.as_str() != scratch_eval::registered::CACHE
+            }));
     }
     command
         .current_dir(&work)
@@ -1042,8 +1054,8 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             .engine_env
             .get(scratch_eval::RUNNER_SHA)
             .context("scratch checks runner pin is missing")?;
-        let behavior = scratch_eval::check_options(&job.options)?;
-        scratch_eval::check_report(&value, hashes, runner, behavior.as_ref())?;
+        let options = scratch_eval::check_options(&job.options)?;
+        scratch_eval::check_report(&value, hashes, runner, &options)?;
         return Ok(value);
     }
     if job.kind == locate_edit::JOB {

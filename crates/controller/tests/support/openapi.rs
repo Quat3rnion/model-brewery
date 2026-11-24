@@ -76,6 +76,12 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("post", "/api/findings/{id}/evidence", "addFindingEvidence"),
         ("post", "/api/findings/{id}/replay", "replayFinding"),
         ("get", "/api/state", "getState"),
+        ("get", "/api/evaluation-sets", "listEvaluationSets"),
+        (
+            "post",
+            "/api/admin/evaluation-sets",
+            "registerEvaluationSet",
+        ),
         ("get", "/api/events", "streamEvents"),
         ("get", "/api/settings/agent-provider", "getAgentProvider"),
         ("put", "/api/settings/agent-provider", "putAgentProvider"),
