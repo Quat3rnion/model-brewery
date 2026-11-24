@@ -898,7 +898,7 @@
       "post": {
         "operationId": "runScratchChecks",
         "summary": "Check a scratch revision and save the results",
-        "description": "Checks the exact child and immediate parent SafeTensors files. With private GGUF files, the local worker loads both models, generates text and measures behavior on fixed datasets. Poll the returned job ID. Set behavior_direction to also score held-out chat prompts from the verified worker cache. An opt-in request requires both GGUF files and passing integrity checks. Without opt-in, if either GGUF is missing or integrity fails, the controller saves an integrity-only bundle. For a compiled program, checks pinned weights and config and runs all valid inputs on the local CPU runtime. Language-model behavior checks do not apply. Do not send measured values or job references.",
+        "description": "For native HGN, the source worker checks the stored child and immediate parent. It audits the decoded writers and compares full-vocabulary CPU forward scores on fixed prompts. Send the child SHA-256 without behavior_direction. For SafeTensors, the controller verifies both files. With private GGUF files, the local worker measures behavior. Set behavior_direction to also score verified held-out chat prompts; this requires both GGUF files and passing integrity checks. Without opt-in, if either GGUF is missing or integrity fails, the controller saves an integrity-only bundle. For a compiled program, the local CPU runtime checks pinned inputs and runs all valid cases. Poll the returned job ID. Do not send measured values or job references.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {
           "type": "object", "additionalProperties": false, "required": ["sha256"], "properties": {
@@ -2759,6 +2759,7 @@
           "smoke": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "behavior": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionReport"},
+          "hgn_stored": {"$ref": "#/components/schemas/HgnStoredChecksReport"},
           "program_correctness": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "program_cases": {"type": "integer", "minimum": 0, "maximum": 340},
           "offline_report": {"$ref": "#/components/schemas/ScratchOfflineReport"},
@@ -2772,6 +2773,60 @@
               "kind": {"enum": ["evaluate", "baseline", "benchmark"]}, "verified_revision": {"const": false}
             }
           }}
+        }
+      },
+      "HgnStoredChecksReport": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema", "parent_sha256", "revision_sha256", "root_sha256", "seed", "tensors", "prompts", "runtime", "runtime_sha256", "executable_sha256", "assets_sha256"],
+        "properties": {
+          "schema": {"const": "brewery.hgn-stored-checks.v1"},
+          "parent_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "revision_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "root_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "seed": {"const": 26842},
+          "runtime": {"const": "hgn_cpu"},
+          "runtime_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "executable_sha256": {"$ref": "#/components/schemas/Sha256"},
+          "assets_sha256": {
+            "type": "object", "additionalProperties": false,
+            "required": ["sidecar", "config", "tokenizer"],
+            "properties": {
+              "sidecar": {"$ref": "#/components/schemas/Sha256"},
+              "config": {"$ref": "#/components/schemas/Sha256"},
+              "tokenizer": {"$ref": "#/components/schemas/Sha256"}
+            }
+          },
+          "tensors": {
+            "type": "object", "minProperties": 1, "maxProperties": 256,
+            "additionalProperties": {
+              "type": "object", "additionalProperties": false,
+              "required": ["leftover", "parent_mean_abs_component", "rel_error", "control_shifts", "passed"],
+              "properties": {
+                "leftover": {"type": "number", "minimum": 0, "description": "Fraction of the parent direction component left in storage."},
+                "max_expert_leftover": {"type": "number", "minimum": 0, "description": "Largest retained fraction among the experts in a routed writer."},
+                "parent_mean_abs_component": {"type": "number", "minimum": 0},
+                "rel_error": {"type": "number", "minimum": 0},
+                "control_shifts": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"type": "number", "minimum": 0}},
+                "passed": {"type": "boolean", "description": "At most 10% of the component remains for each writer and expert, and each control shifts by at most 5%."}
+              }
+            }
+          },
+          "prompts": {
+            "type": "array", "minItems": 2, "maxItems": 2,
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["tokens", "kl_parent_child", "top1_agrees", "mean_abs_logit_delta", "max_abs_logit_delta", "parent_top1_logit_delta"],
+              "properties": {
+                "tokens": {"type": "integer", "minimum": 1, "maximum": 512},
+                "kl_parent_child": {"type": "number", "minimum": 0},
+                "top1_agrees": {"type": "boolean"},
+                "mean_abs_logit_delta": {"type": "number", "minimum": 0},
+                "max_abs_logit_delta": {"type": "number", "minimum": 0},
+                "parent_top1_logit_delta": {"type": "number"}
+              }
+            }
+          }
         }
       },
       "DiscoveryDocument": {
@@ -2959,7 +3014,7 @@
         "type": "object",
         "required": ["id", "kind", "host", "pool_slot", "state", "progress", "input_ids", "options", "cancel_requested", "has_result", "created_at", "updated_at"],
         "properties": {
-          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf", "scratch_checks", "scratch_locate_edit", "scratch_hgn_ablation", "weight_spectra", "search_ablation", "screen_ablation", "heretic", "heretic_reproduce"]}]},
+          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf", "scratch_checks", "scratch_locate_edit", "scratch_hgn_ablation", "scratch_hgn_checks", "weight_spectra", "search_ablation", "screen_ablation", "heretic", "heretic_reproduce"]}]},
           "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}], "description": "Concrete worker ID, or auto before assignment of a pool conversion."},
           "requested_host": {"const": "auto", "description": "Present if auto conversion routing was requested."},
           "pool_slot": {"type": "boolean"}, "state": {"$ref": "#/components/schemas/JobState"}, "progress": {"type": "string"},

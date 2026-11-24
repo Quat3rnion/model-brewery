@@ -1356,6 +1356,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             );
         }
         if tool["name"] == "run_checks" {
+            assert!(tool["description"].as_str().unwrap().contains("For native HGN"));
             let behavior = &schema["properties"]["behavior_direction"];
             assert_eq!(behavior["required"], json!(["prompt_sets"]));
             assert_eq!(
@@ -1374,6 +1375,9 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
                     .unwrap()
                     .contains(&json!("behavior_direction"))
             );
+        }
+        if tool["name"] == "get_checks" {
+            assert!(tool["description"].as_str().unwrap().contains("hgn_stored"));
         }
         if matches!(
             tool["name"].as_str(),

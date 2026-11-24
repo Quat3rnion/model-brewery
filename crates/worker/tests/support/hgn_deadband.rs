@@ -345,6 +345,96 @@ fn case(enc: Encoding) {
     )
     .unwrap_or_else(|e| panic!("{enc:?}: {e:#}"));
     let metric = &report.tensors[name];
+    let checks = brewery_worker::hgn_checks::audit(
+        &parent,
+        &child,
+        &pin,
+        &report.revision_sha256,
+        0..=0,
+        &report,
+    )
+    .unwrap();
+    assert!(checks.values().all(|row| row.passed));
+    let rtn_child = fixture.path().join("rtn.hgn");
+    let mut target = before.clone();
+    let c = component(&before, &axis);
+    for (row, r) in target.chunks_exact_mut(COLS).zip(&axis) {
+        for (v, p) in row.iter_mut().zip(&c) {
+            *v = (f64::from(*v) - r * p) as f32;
+        }
+    }
+    let once = encode_rows(enc, &target, rows, COLS, &meta).unwrap();
+    let mut data = std::fs::read(&child).unwrap();
+    let mut rtn: hgn_ablation::Report =
+        serde_json::from_value(serde_json::to_value(&report).unwrap()).unwrap();
+    let reader = Reader::open(&child).unwrap();
+    let entry = reader.layout.entries[0].clone();
+    let start = entry.offset as usize;
+    let end = start + entry.size as usize;
+    for (offset, bytes) in [
+        (layout.codes_offset, &once.codes),
+        (layout.scales_offset, &once.scales),
+    ] {
+        let at = start + offset as usize;
+        data[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+    let checksum = data[start..end].chunks(4).fold(0u32, |sum, chunk| {
+        let mut word = [0; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        sum ^ u32::from_le_bytes(word)
+    });
+    let checksum_at = bf16_to_hgn::container::HEADER_SIZE as usize + 152;
+    data[checksum_at..checksum_at + 4].copy_from_slice(&checksum.to_le_bytes());
+    std::fs::write(&rtn_child, data).unwrap();
+    let rtn_pin = file_sha256(&mut File::open(&rtn_child).unwrap()).unwrap();
+    rtn.revision_sha256.clone_from(&rtn_pin);
+    let rtn_metric = rtn.tensors.get_mut(name).unwrap();
+    rtn_metric.payload_sha256 = Reader::open(&rtn_child)
+        .unwrap()
+        .fingerprint(0)
+        .unwrap()
+        .sha256;
+    // Let the audit see the actual retained component; the reconstructed
+    // receipt cannot make a deadband pass even with the correct file hash.
+    rtn_metric.leftover_after = baseline;
+    let decoded = decode_rows(enc, &once, rows, COLS, &meta).unwrap();
+    rtn_metric.rel_error = (decoded
+        .iter()
+        .zip(&before)
+        .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2))
+        .sum::<f64>()
+        / before.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>())
+    .sqrt();
+    let checks =
+        brewery_worker::hgn_checks::audit(&parent, &rtn_child, &pin, &rtn_pin, 0..=0, &rtn)
+            .unwrap();
+    assert!(!checks[name].passed && checks[name].leftover > 0.9);
+    if enc == Encoding::Q4Cp {
+        let audit = |feedback: &hgn_ablation::Report| {
+            brewery_worker::hgn_checks::audit(&parent, &rtn_child, &pin, &rtn_pin, 0..=0, feedback)
+        };
+        rtn.tensors.get_mut(name).unwrap().leftover_after = metric.leftover_after;
+        assert!(
+            audit(&rtn)
+                .unwrap_err()
+                .to_string()
+                .contains("disagrees with feedback")
+        );
+        rtn.tensors.get_mut(name).unwrap().payload_sha256 = "0".repeat(64);
+        assert!(
+            audit(&rtn)
+                .unwrap_err()
+                .to_string()
+                .contains("tensor digest")
+        );
+        rtn.tensors.remove(other);
+        assert!(
+            audit(&rtn)
+                .unwrap_err()
+                .to_string()
+                .contains("does not cover")
+        );
+    }
     let mut stored = Reader::open(&child).unwrap();
     let after = decode_rows(
         enc,

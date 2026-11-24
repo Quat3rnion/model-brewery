@@ -287,6 +287,16 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
     );
     let schemas = &contract["components"]["schemas"];
     assert_eq!(
+        schemas["ScratchCheckBundle"]["properties"]["hgn_stored"]["$ref"],
+        "#/components/schemas/HgnStoredChecksReport",
+    );
+    assert!(
+        schemas["Job"]["properties"]["kind"]["anyOf"][1]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("scratch_hgn_checks"))
+    );
+    assert_eq!(
         schemas["BehaviorDirectionJob"]["properties"]["input_ids"]["x-brewery-input-kinds"],
         json!([["gguf", "hgn", "hgn-v2"]])
     );

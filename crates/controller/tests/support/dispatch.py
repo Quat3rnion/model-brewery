@@ -277,6 +277,39 @@ else:
                                         predicted_nll_increase=1, measured_recovery=None)])
     if envelope["kind"] == "behavior_direction" and (root / "direction-result.json").exists():
         result = json.loads((root / "direction-result.json").read_text())
+    if envelope["kind"] == "scratch_hgn_checks":
+        import base64
+        import hmac
+        assert list(envelope["options"]) == ["hgn_check_grant"]
+        data, sig = envelope["options"]["hgn_check_grant"].split(".")
+        payload = base64.urlsafe_b64decode(data + "===")
+        assert hmac.compare_digest(base64.urlsafe_b64decode(sig + "==="), hmac.digest(
+            (root / "hgn-key").read_bytes(), b"brewery.hgn-checks.v1\0" + payload, "sha256"))
+        claim = json.loads(payload)
+        source, = envelope["inputs"]
+        assert (claim["job_id"], claim["host"], claim["input_id"], claim["path"], claim["kind"]) == (
+            job_id, host, source["id"], source["path"], source["kind"])
+        req = claim["request"]
+        feedback = json.loads((root / f"{req['child_producer']}.json").read_text())["result"]["report"]
+        # The test driver copies this dispatcher out of the source tree.
+        runtime_pin = (root / "hgn-runtime-sha256").read_text().strip()
+        failed_control = (root / "hgn-audit-failed-control").exists()
+        result = dict(schema="brewery.hgn-stored-checks.v1", seed=26842,
+                      runtime="hgn_cpu", runtime_sha256=runtime_pin, executable_sha256="a"*64,
+                      assets_sha256=dict(sidecar="a"*64, config="a"*64, tokenizer="a"*64),
+                      **{k:req[k] for k in ("parent_sha256","revision_sha256","root_sha256")},
+                      tensors={name:dict(leftover=row["leftover_after"], rel_error=row["rel_error"],
+                                         parent_mean_abs_component=row["parent_mean_abs_component"],
+                                         control_shifts=[.06 if failed_control else .01]*5,
+                                         passed=not failed_control,
+                                         **({"max_expert_leftover": row["leftover_after"]}
+                                            if len(row["shape"]) == 3 else {}))
+                               for name,row in feedback["tensors"].items()},
+                      prompts=[dict(tokens=4, kl_parent_child=.015, top1_agrees=True,
+                                    mean_abs_logit_delta=.03, max_abs_logit_delta=.1,
+                                    parent_top1_logit_delta=-.07)]*2)
+        if (root / "bad-hgn-check").exists():
+            result["tensors"].pop(next(iter(result["tensors"])))
     if envelope["kind"] == "scratch_hgn_ablation":
         import base64
         import hmac

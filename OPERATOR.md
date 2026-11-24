@@ -1938,9 +1938,24 @@ are reused when the parent, layers, encoder, and direction match. Edit-aware
 rounding is not supported. This receipt does not replace an independent
 decoded-store audit or a CPU forward check.
 
+Run both stored-file checks with `run_checks` or `POST /api/scratch/{id}/checks`.
+Send the child SHA-256 without `behavior_direction`. Poll the job, then read
+`get_checks` or the Edits view. In `hgn_stored`, the audit measures each
+dense and routed writer from the parent and child files. It requires at most
+10% of the parent direction component to remain in each writer and routed
+expert. It permits at most 5% change in the mean absolute component along
+each of five random directions (seed 26842). It reports relative Frobenius
+error against the parent. Missing writers, hash mismatches or disagreement
+with the stored feedback fail the check. The CPU runtime uses the root model's
+pinned assets for both files. It reads the last prompt position for each of
+two fixed prompts and reports full-vocabulary KL(parent || child), top-1
+agreement and logit deltas. It does not generate text. Scores are not behavior
+gates and are not release-qualified.
+
 On the non-Hy4 Frame HGN worker, use the HGN trace worker's approved source
 roots and a private worker state directory. Set the dispatch capability
-`scratch_hgn_ablation` only for this worker. Add an `hgn_edit` object to the
+`scratch_hgn_ablation` only for this worker. Enable `trace` with the approved
+HGN CPU runtime to run stored-file checks. Add an `hgn_edit` object to the
 worker configuration with `host`, `grant_key_file`, and `build_admission`.
 Put a shared random 32-byte key in private, regular files owned by the controller
 and worker identities. Set `BREWERY_HGN_EDIT_KEY_FILE` on the controller to

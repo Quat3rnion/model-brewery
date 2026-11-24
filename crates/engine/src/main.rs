@@ -9,6 +9,7 @@ mod gguf;
 mod gguf_conversion;
 mod heretic;
 mod hf_download;
+mod hgn_checks;
 mod hgn_recipe;
 mod integrity;
 mod native_progress;
@@ -408,6 +409,7 @@ fn run() -> Result<i32> {
         brewery_worker::damage::JOB => damage::run(&job, &cwd, &progress)?,
         brewery_worker::ablation_search::SCREEN => ablation_search::run(&job, &cwd, &progress)?,
         brewery_worker::hgn_edit::JOB => hgn_edit::run(&job, &cwd)?,
+        brewery_worker::hgn_checks::JOB => hgn_checks::run(&job, &cwd)?,
         brewery_worker::behavior_direction::JOB => behavior_direction::run(&job, &cwd, &progress)?,
         brewery_worker::scratch_eval::CHECKS => scratch_checks::run(&job, &cwd, &progress)?,
         brewery_worker::locate_edit::JOB => scratch_locate::run(&job, &cwd, &progress)?,

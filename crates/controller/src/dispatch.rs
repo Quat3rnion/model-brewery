@@ -62,6 +62,9 @@ impl Dispatcher {
                 if job.kind == brewery_worker::hgn_edit::JOB {
                     return crate::scratch::hgn_edit::wire(job, envelope);
                 }
+                if job.kind == brewery_worker::hgn_checks::JOB {
+                    return crate::scratch::hgn_checks::wire(job, envelope);
+                }
                 if job.dispatch_resources.is_empty() && !job.scratch_job {
                     Ok(serde_json::to_vec(envelope)?)
                 } else {

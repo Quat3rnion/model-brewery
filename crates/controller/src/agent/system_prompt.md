@@ -68,7 +68,13 @@ Read the job with `get_job`. Convert a byte-identical scratch copy of the
 Library parent for the baseline and use the same conversion assets for the child.
 Read the imported child and its journal with `get_scratch`.
 
-For a weight change, convert the child to private GGUF with the same assets.
+For a native HGN child, call `run_checks` with its exact hash and no
+`behavior_direction`. Poll `get_job` and read `get_checks`. Require both the
+decoded-store audit and paired CPU forward. Report the retained components,
+random controls, relative error and forward scores, not generated text.
+HGN checks do not use GGUF and are not release-qualified.
+
+For a SafeTensors weight change, convert the child to private GGUF with the same assets.
 Trace it with the same prompts and capture settings as the parent. Always
 call `run_checks` and read `get_checks` on the child. Compare weights, traces,
 and measured behavior with `diff_tensors`, `diff_traces`, and `diff_behavior`

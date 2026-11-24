@@ -202,15 +202,34 @@ pub fn grant(id: &str, input: &Input, request: Request, key: &[u8; 32]) -> Resul
         kind: input.kind.clone(),
         request,
     };
-    let json = serde_json::to_vec(&claim)?;
+    sign(b"brewery.hgn-edit.v1\0", &claim, key)
+}
+
+pub(crate) fn sign(domain: &[u8], claim: &impl Serialize, key: &[u8; 32]) -> Result<String> {
+    let json = serde_json::to_vec(claim)?;
     let mut mac = Hmac::<Sha256>::new_from_slice(key)?;
-    mac.update(b"brewery.hgn-edit.v1\0");
+    mac.update(domain);
     mac.update(&json);
     Ok(format!(
         "{}.{}",
         URL_SAFE_NO_PAD.encode(&json),
         URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
     ))
+}
+
+pub(crate) fn verify_grant<T: serde::de::DeserializeOwned>(
+    domain: &[u8],
+    token: &str,
+    key: &Path,
+) -> Result<T> {
+    let (bytes, sig) = token.split_once('.').context("invalid HGN grant")?;
+    let json = URL_SAFE_NO_PAD.decode(bytes)?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(&read_key(key)?)?;
+    mac.update(domain);
+    mac.update(&json);
+    mac.verify_slice(&URL_SAFE_NO_PAD.decode(sig)?)
+        .map_err(|_| anyhow::anyhow!("invalid controller HGN grant"))?;
+    Ok(serde_json::from_slice(&json)?)
 }
 
 impl Config {
@@ -237,14 +256,7 @@ impl Config {
             job.options.as_object().is_some_and(|v| v.len() == 1),
             "unexpected HGN options"
         );
-        let (bytes, sig) = token.split_once('.').context("invalid HGN edit grant")?;
-        let json = URL_SAFE_NO_PAD.decode(bytes)?;
-        let mut mac = Hmac::<Sha256>::new_from_slice(&read_key(&self.grant_key_file)?)?;
-        mac.update(b"brewery.hgn-edit.v1\0");
-        mac.update(&json);
-        mac.verify_slice(&URL_SAFE_NO_PAD.decode(sig)?)
-            .map_err(|_| anyhow::anyhow!("invalid controller HGN edit grant"))?;
-        let claim: Claim = serde_json::from_slice(&json)?;
+        let claim: Claim = verify_grant(b"brewery.hgn-edit.v1\0", token, &self.grant_key_file)?;
         ensure!(
             claim.job_id == id
                 && claim.host == input.host

@@ -41,6 +41,8 @@ mod checks;
 mod experts;
 #[path = "scratch_heretic.rs"]
 pub(crate) mod heretic;
+#[path = "scratch_hgn_checks.rs"]
+pub(crate) mod hgn_checks;
 #[path = "scratch_hgn_edit.rs"]
 pub(crate) mod hgn_edit;
 #[path = "scratch_jobs.rs"]

@@ -51,6 +51,8 @@ pub(super) struct Bundle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     behavior_direction: Option<BehaviorReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    hgn_stored: Option<brewery_worker::hgn_checks::Report>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     program_correctness: Option<Check>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     program_cases: Option<usize>,
@@ -256,13 +258,18 @@ pub(super) fn check(
             return Ok(response);
         }
         let row = visible(&store, &id)?;
-        if row.is_hgn() {
-            return Err(conflict("native HGN scratch checks are not yet supported"));
-        }
         if row.state != RevisionState::Scratch || row.sha256 != request.sha256 {
             return Err(conflict(
                 "run checks for the current hash of an unrequested scratch revision",
             ));
+        }
+        if row.is_hgn() {
+            if request.behavior_direction.is_some() {
+                return Err(ApiError::bad(
+                    "HGN stored checks do not accept behavior_direction",
+                ));
+            }
+            return hgn_checks::submit(app, &store, &row, key);
         }
         admit(app, &row.provenance.worker)?;
         let root = store.scratch_root();
@@ -460,6 +467,7 @@ fn bundle(
         smoke: measured_status(),
         behavior: measured_status(),
         behavior_direction: None,
+        hgn_stored: None,
         program_correctness: None,
         program_cases: None,
         offline_report: None,
@@ -469,6 +477,41 @@ fn bundle(
         job_refs: Vec::new(),
         acknowledged_at_ms: None,
     }
+}
+
+pub(super) fn hgn_bundle(
+    row: &Revision,
+    id: String,
+    report: brewery_worker::hgn_checks::Report,
+) -> Bundle {
+    let failure =
+        report.tensors.values().any(|r| !r.passed).then(|| {
+            "decoded HGN writer did not meet the component or random control bound".into()
+        });
+    let mut bundle = bundle(row, failure, None);
+    bundle.smoke = Check::Passed;
+    bundle.behavior = Check::NotRun {
+        reason: "HGN behavior gates are not part of the stored-file checks".into(),
+    };
+    bundle.hgn_stored = Some(report);
+    bundle.measured_job_id = Some(id);
+    bundle
+}
+
+pub(super) fn hgn_failed_bundle(row: &Revision, id: String) -> Bundle {
+    let mut bundle = bundle(
+        row,
+        Some("stored HGN checks did not finish with a verified report; see the worker job".into()),
+        None,
+    );
+    bundle.smoke = Check::NotRun {
+        reason: "no verified CPU forward scores".into(),
+    };
+    bundle.behavior = Check::NotRun {
+        reason: "HGN behavior gates are not part of the stored-file checks".into(),
+    };
+    bundle.measured_job_id = Some(id);
+    bundle
 }
 
 pub(super) fn program_bundle(

@@ -13,9 +13,9 @@ pub(super) const KIND: &str = "scratch_hgn";
 #[derive(Deserialize, Serialize)]
 pub(super) struct Evidence {
     pub(super) job_id: String,
-    root_model: String,
-    root_sha256: String,
-    report: native::Report,
+    pub(super) root_model: String,
+    pub(super) root_sha256: String,
+    pub(super) report: native::Report,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -39,13 +39,17 @@ pub(super) fn is_parent(app: &App, id: &str) -> Result<bool> {
             .is_some_and(|m| native::is_hgn(&m.kind)))
 }
 
-fn key() -> anyhow::Result<[u8; 32]> {
+pub(super) fn key() -> anyhow::Result<[u8; 32]> {
     let path = std::env::var_os(native::KEY_FILE)
         .ok_or_else(|| anyhow::anyhow!("private HGN edit signer is not configured"))?;
     native::read_key(&PathBuf::from(path))
 }
 
-fn source(store: &Store, parent: &str, expected: &str) -> Result<(Model, Option<String>, String)> {
+pub(super) fn source(
+    store: &Store,
+    parent: &str,
+    expected: &str,
+) -> Result<(Model, Option<String>, String)> {
     let (root, producer, root_sha, worker) =
         if let Some(row) = store.scratch(parent).map_err(ApiError::storage)? {
             if !row.is_hgn() || row.state != RevisionState::Scratch || row.sha256 != expected {

@@ -169,7 +169,7 @@
 
 {#snippet node(n: LineageNode)}
   {@const st = SCRATCH_STATE[n.rev.state] ?? { label: n.rev.state, tone: 'muted' as const }}
-  {@const checks = checkRows(n.rev.check_bundle)}
+  {@const checks = checkRows(n.rev.check_bundle, n.rev.kind === 'scratch_hgn')}
   <li>
     <a class="node" href="#/edits?rev={encodeURIComponent(n.rev.id)}" aria-current={n.rev.id === selectedId ? 'true' : undefined}>
       <span class="line1">
@@ -236,7 +236,8 @@
         {@const p = selected.provenance}
         {@const program = p.compiled_program}
         {@const conversion = newestFirst(jobs.filter((j) => j.kind === 'scratch_gguf' && j.input_ids[0] === selectedId))[0]}
-        {@const workerChecks = newestFirst(jobs.filter((j) => j.kind === 'scratch_checks' && j.input_ids[3] === selectedId))[0]}
+        {@const workerChecks = newestFirst(jobs.filter((j) => (j.kind === 'scratch_checks' && j.input_ids[3] === selectedId)
+          || (j.kind === 'scratch_hgn_checks' && j.input_ids[1] === selectedId)))[0]}
         <header>
           <h2 id="ed-rev-h">Revision <span class="mono">{selected.id.slice(0, 8)}</span></h2>
           <div class="row"><Badge tone={st.tone} label={st.label} /><Badge tone="warn" label="Not release-qualified" /></div>
@@ -284,6 +285,8 @@
             <h3>Checks</h3>
             {#if program}
               <p class="small muted">GGUF does not support this program.</p>
+            {:else if selected.kind === 'scratch_hgn'}
+              <p class="small muted">These checks read the stored HGN files on the source worker.</p>
             {:else if selected.gguf}
               <p class="small">Private GGUF: Ready <span class="mono xs muted" title={selected.gguf.sha256}>{shortHash(selected.gguf.sha256)}</span> · <JobLink id={selected.gguf.job_id} label="Conversion job" /></p>
             {:else if conversion}
@@ -299,7 +302,7 @@
             {:else}
               {@const b = selected.check_bundle}
               <ul class="checklist">
-                {#each checkRows(b) as c (c.name)}
+                {#each checkRows(b, selected.kind === 'scratch_hgn') as c (c.name)}
                   <li><Badge tone={c.tone} label="{c.name}: {c.label}" />{#if c.reason}<span class="xs muted">{c.reason}</span>{/if}</li>
                 {/each}
               </ul>
@@ -317,6 +320,36 @@
               {/if}
               {#if b.behavior_direction && b.revision_sha256 === selected.sha256}
                 <BehaviorChecks report={b.behavior_direction} />
+              {/if}
+              {#if b.hgn_stored && b.revision_sha256 === selected.sha256}
+                {@const stored = b.hgn_stored}
+                <details class="small">
+                  <summary>Decoded writers ({Object.keys(stored.tensors).length})</summary>
+                  <p class="xs muted">Limits: 10% component left and 5% shift for each random control. Seed: {stored.seed}.</p>
+                  <ul class="ops">
+                    {#each Object.entries(stored.tensors) as [name, t] (name)}
+                      <li>
+                        <span class="mono">{name}</span>: {t.passed ? 'Passed' : 'Failed'};
+                        {fmt(100 * t.leftover)}% left; relative error {fmt(t.rel_error)};
+                        {#if t.max_expert_leftover !== undefined}worst expert {fmt(100 * t.max_expert_leftover)}% left;{/if}
+                        controls {t.control_shifts.map((v) => `${fmt(100 * v)}%`).join(', ')}.
+                      </li>
+                    {/each}
+                  </ul>
+                </details>
+                <details class="small">
+                  <summary>CPU forward scores ({stored.prompts.length})</summary>
+                  <ol class="ops">
+                    {#each stored.prompts as prompt, i (i)}
+                      <li>
+                        {prompt.tokens} tokens; KL (parent to child) {fmt(prompt.kl_parent_child)};
+                        top-1 {prompt.top1_agrees ? 'agrees' : 'differs'};
+                        mean and max absolute logit delta {fmt(prompt.mean_abs_logit_delta)} and {fmt(prompt.max_abs_logit_delta)};
+                        parent top-1 logit delta {fmt(prompt.parent_top1_logit_delta)}.
+                      </li>
+                    {/each}
+                  </ol>
+                </details>
               {/if}
             {/if}
           </div>

@@ -280,6 +280,13 @@ describe('checks and approval', () => {
     expect(other.reason).toBe('The check bundle is for a different hash.');
   });
 
+  it('labels HGN stored-file checks without implying generation', () => {
+    const hgn = { ...bundle, hgn_stored: { seed: 26842, tensors: {}, prompts: [] } };
+    expect(checkRows(hgn).map(({ name }) => name)).toEqual([
+      'Decoded-store audit', 'CPU forward', 'Behavior',
+    ]);
+  });
+
   it('shows program correctness for a compiled root', () => {
     const compiled = { ...bundle, program_correctness: { status: 'passed' as const } };
     expect(checkRows(compiled).map(({ name, label }) => [name, label])).toEqual([
