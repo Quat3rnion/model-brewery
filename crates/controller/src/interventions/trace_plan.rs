@@ -39,6 +39,18 @@ struct HgnProjection {
     target: trace::hgn_projection::Target,
     first_layer: Option<usize>,
     last_layer: Option<usize>,
+    second_source_layer: Option<usize>,
+    alpha: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GgufProjection {
+    direction_id: String,
+    source_layer: usize,
+    layer: usize,
+    positions: BTreeSet<usize>,
+    alpha: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -70,6 +82,7 @@ impl TracePlan {
         let sae: Option<crate::sae::Selection> = take(options, "sae")?;
         let steering: Option<crate::sae::Steering> = take(options, "feature_steering")?;
         let hgn_projection: Option<HgnProjection> = take(options, "hgn_projection")?;
+        let gguf_projection: Option<GgufProjection> = take(options, "gguf_projection")?;
         let request = trace::Request::controller(
             &Value::Object(options.clone()),
             envelope.prompt.as_deref(),
@@ -77,6 +90,66 @@ impl TracePlan {
         )
         .map_err(|e| ApiError::bad(e.to_string()))?;
         let model = &envelope.inputs[0];
+        if let Some(p) = gguf_projection {
+            if model.kind != "gguf"
+                || hgn_projection.is_some()
+                || saved.is_some()
+                || !patches.is_empty()
+                || sae.is_some()
+                || steering.is_some()
+                || !request.interventions.is_empty()
+            {
+                return Err(ApiError::bad(
+                    "gguf_projection requires one GGUF and no other interventions or SAE",
+                ));
+            }
+            let artifact = crate::directions::artifact(
+                store,
+                &p.direction_id,
+                brewery_worker::behavior_direction::VERSION,
+                Some(p.source_layer),
+            )?;
+            let sha = artifact["model_sha256"]
+                .as_str()
+                .expect("verified direction");
+            let scratch = envelope.scratch_pins.get(&model.path);
+            if artifact.get("lanternfish_commit").is_none()
+                || artifact["fit"]["role"] != "l_out"
+                || (scratch.is_none() && artifact["model_id"] != model.id)
+                || scratch
+                    .or(model.sha256.as_ref())
+                    .is_some_and(|pin| pin != sha)
+            {
+                return Err(ApiError::bad(
+                    "fit the version 2 l_out direction on the exact GGUF",
+                ));
+            }
+            let layer: brewery_worker::behavior_direction::Layer =
+                serde_json::from_value(artifact["fit"]["layers"][0].clone())
+                    .map_err(ApiError::storage)?;
+            let resolved = trace::gguf_projection::Projection {
+                direction_id: p.direction_id,
+                source_layer: p.source_layer,
+                layer: p.layer,
+                positions: p.positions,
+                alpha: p.alpha.unwrap_or(1.0),
+                last_k: artifact["last_k"]
+                    .as_u64()
+                    .map(|k| k as usize)
+                    .or_else(|| artifact["position"].is_null().then_some(1)),
+                vector: layer
+                    .unit_vector
+                    .ok_or_else(|| ApiError::bad("source layer has no direction"))?,
+            };
+            options.insert("gguf_projection".into(), json!(resolved));
+            trace::Request::controller(
+                &Value::Object(options.clone()),
+                envelope.prompt.as_deref(),
+                policy,
+            )
+            .map_err(|e| ApiError::bad(e.to_string()))?;
+            options.insert("expected_model_sha256".into(), json!(sha));
+        }
         if trace::is_hgn(&model.kind)
             && (saved.is_some()
                 || !patches.is_empty()
@@ -95,11 +168,24 @@ impl TracePlan {
                 ));
             }
             let dir = crate::directions::hgn_layer(store, model, &p.direction_id, p.source_layer)?;
+            if p.second_source_layer == Some(p.source_layer) {
+                return Err(ApiError::bad(
+                    "second_source_layer must differ from source_layer",
+                ));
+            }
+            let second_vector = p
+                .second_source_layer
+                .map(|layer| crate::directions::hgn_layer(store, model, &p.direction_id, layer))
+                .transpose()?
+                .map(|d| d.vector);
             let resolved = trace::hgn_projection::Projection {
                 target: p.target,
                 first_layer: p.first_layer,
                 last_layer: p.last_layer,
                 vector: dir.vector,
+                second_vector,
+                alpha: p.alpha,
+                last_k: dir.last_k,
                 assets_sha256: dir.assets,
             };
             options.insert("hgn_projection".into(), json!(resolved));

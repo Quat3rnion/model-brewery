@@ -199,14 +199,14 @@ impl Runtime {
             .arg(out)
             .arg("--threads")
             .arg(threads.to_string());
+        let projection_path = work.join("projection.json");
         if let Some(projection) = projection {
             ensure!(
                 self.receipt()["assets_sha256"] == serde_json::to_value(&projection.assets_sha256)?,
                 "HGN direction companion pins differ from this checkpoint's runtime assets"
             );
-            let path = work.join("projection.json");
-            write_json(&path, &projection.runtime_spec())?;
-            command.arg("--projection").arg(path);
+            write_json(&projection_path, &projection.runtime_spec())?;
+            command.arg("--projection").arg(&projection_path);
         }
         check()?;
         self.python
@@ -214,6 +214,9 @@ impl Runtime {
             .context("HGN CPU trace failed")?;
         check()?;
         fs::remove_file(&spec)?;
+        if projection.is_some() {
+            fs::remove_file(&projection_path)?;
+        }
         trace::verify(out, capture)
     }
 

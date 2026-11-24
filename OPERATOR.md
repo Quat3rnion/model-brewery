@@ -392,8 +392,23 @@ and verifies the checkpoint and its companion asset hashes. Select `residual`
 to project all four streams, `dense` for the embedding and dense writers,
 `experts` for routed expert output, or `all` for both writer groups. Use
 inclusive `first_layer` and `last_layer`, or omit both to project all layers.
+Set `second_source_layer` to use an independent vector from another layer of
+the same artifact. The runtime orthogonalizes it against the first vector.
+The trace manifest records the signed cosine before orthogonalization.
 Capture `l_out`, `final_norm`, or logits. Do not combine this option with
 GGUF interventions or SAE. This operation does not change model weights.
+
+For GGUF, set `options.gguf_projection` with a version 2 `l_out` direction
+ID, `source_layer`, target `layer`, and one to 128 token `positions`. Use
+the A5 executable and shared A4 library pins listed under
+[GGUF search](#gguf-search). The pinned GGUF runtime supports rank one
+only. Do not combine `gguf_projection` with other interventions or SAE.
+
+Both selectors accept optional `alpha` in (0,4]. The default is 1, which
+removes the fitted component. At 2 the component changes sign and keeps
+its magnitude. Select a fit made with `last_k` to use a direction averaged
+over more than one position. Only the reviewed direction behaviors are
+supported: slop, sycophancy, and response length.
 
 ### HGN CPU setup
 
@@ -749,12 +764,12 @@ generate text.
 
 On GGUF, the default role is `l_out`. You can select `attn_out` or `ffn_out`.
 The worker captures the prefix through the last user token and fits at that
-token by default. On HGN, use `l_out` and select at most 25 layers for a
-2560-wide model. The worker adds the assistant header with thinking disabled.
-Set `last_k` to 1 to 16 to use that many final template tokens. If you do not
-specify `last_k`, the job uses one token. For an explicit zero-based token
-index below 512, set `position` instead. The HGN runtime accepts up to 2048
-prompt tokens. At each position, it sums the four streams over their shared hidden
+token by default. Set `last_k` to 1 to 16 to average that many positions.
+On HGN, use `l_out` and select at most 25 layers for a 2560-wide model. The
+last K positions include the assistant header with thinking disabled.
+For an explicit zero-based token index, set `position` instead. HGN requires
+an explicit index below 512 and accepts up to 2048 prompt tokens. At each
+position, it sums the four streams over their shared hidden
 coordinates. The worker L2-normalizes that sum and averages the positions.
 `mean_residual_norm` uses the norm before normalization.
 
@@ -1993,6 +2008,16 @@ endpoints for an inclusive range, or omit them to test every layer. Use a
 non-Hy4 source worker with `trace`, `behavior_direction`, the pinned HGN CPU
 runtime, and the contrast cache. The screen has a four-hour runtime limit.
 
+Set `alphas` to one to four distinct values in (0,4]. The default is
+`[1,2]`. To screen rank two, set `second_source_layer` to an independent
+direction from the same fit. To compare fit positions, pass
+`last_k_direction_id` from the same reviewed contrast and checkpoint.
+Use a single default position in the primary fit and `last_k` of 2 to 16
+in the second fit. The screen tests each fit, alpha, and target combination.
+`configurations` lists the settings in score order and includes the rank
+and signed cosine before orthogonalization. The random control uses the
+same rank and alpha as its paired fit.
+
 The HGN screen compares the positive and negative sides of the reviewed
 held-out pairs. It reports the stock marker, matched random-direction
 scores, control-set shifts, KL, and the Pareto front. For `response_length`,
@@ -2008,6 +2033,11 @@ version 2 `l_out` direction at the last user token on a Library GGUF
 with the exact same SHA-256.
 Fit at least three nonzero layers. Include intermediate target layers
 for the norm-preserving variant. Only slop and sycophancy are supported.
+To include a last-K fit, set `last_k_direction_id` to a matching direction
+artifact with at least three nonzero layers. The screen alternates between
+the single-position and last-K fits. Set `alphas` to opt in to a custom
+grid in (0,4]. Allow at least one trial per fit and scale combination.
+The GGUF proposal policy keeps its previous grid by default.
 
 Supply `sha256`, `direction_id`, `assets_id`, a 32-bit `seed`,
 `trial_budget` (3 to 32), `max_children` (1 to 3, at most the trial

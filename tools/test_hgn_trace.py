@@ -88,20 +88,26 @@ class TraceTest(unittest.TestCase):
             # The fixture has energy only in its first two coordinates.
             orthogonal_control = [0, 0] + [rng.gauss(0, 1) for _ in range(126)]
 
-            def capture(name, target=None, direction=vector, layer_range=(1, 1)):
+            def capture(name, target=None, direction=vector, layer_range=(1, 1), **settings):
                 out = path / name
                 args = [sys.executable, str(ROOT / "trace.py"), "--model", str(path / "model.hgn"),
                         "--sidecar", str(path / "sidecar.hgn"), "--config", str(path / "config.json"),
                         "--tokenizer", str(path / "tokenizer.json"), "--spec", str(path / "spec.json"),
                         "--out", str(out), "--prompt", "a", "--threads", "1"]
                 if target:
-                    rule = {"target": target, "vector": direction}
+                    rule = {"target": target, "vector": direction, **settings}
                     if layer_range is not None:
                         rule.update(zip(("first_layer", "last_layer"), layer_range))
                     (path / "projection.json").write_text(json.dumps(rule))
                     args.extend(["--projection", str(path / "projection.json")])
                 subprocess.run(args, check=True)
                 manifest = json.loads((out / "manifest.json").read_text())
+                if "second_vector" in settings:
+                    self.assertEqual(manifest["hgn_projection"]["rank"], 2)
+                if "alpha" in settings:
+                    self.assertEqual(manifest["hgn_projection"]["alpha"], settings["alpha"])
+                if name == "rank-two":
+                    self.assertAlmostEqual(manifest["hgn_projection"]["direction_cosine"], 2 ** -0.5)
                 return [struct.unpack("<512f", (out / row["file"]).read_bytes())
                         for row in manifest["tensors"]]
 
@@ -112,10 +118,18 @@ class TraceTest(unittest.TestCase):
             both = capture("all", "all")
             control = capture("control", "all", orthogonal_control)
             every_layer = capture("residual-all", "residual", layer_range=None)
+            rank_two = capture("rank-two", "residual", second_vector=[1, 1] + [0] * 126)
+            overshoot = capture("overshoot", "residual", alpha=2)
+            rank_two_control = capture("rank-two-control", "residual", orthogonal_control,
+                                       second_vector=[0, 0] + [rng.gauss(0, 1) for _ in range(126)])
             for stream in range(4):
                 i = stream * 128
                 self.assertEqual([residual[0][i], dense[0][i], experts[0][i], both[0][i]], [1] * 4)
                 self.assertEqual(residual[1][i], 0)
+                self.assertEqual(rank_two[1][i:i + 2], (0, 0))
+                self.assertEqual(overshoot[1][i], -before[1][i])
+                self.assertLess(max(abs(x - y) for x, y in
+                                    zip(rank_two_control[1][i:i + 128], before[1][i:i + 128])), 1e-6)
                 self.assertEqual(every_layer[0][i], 0)
                 self.assertEqual(every_layer[1][i], 0)
                 self.assertGreater(before[1][i], dense[1][i])

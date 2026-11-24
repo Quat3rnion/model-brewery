@@ -57,7 +57,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let spec = json!({
         "behavior":req.behavior, "held_out":held_out,
         "train": if req.behavior == Behavior::Slop { prompts(Split::Train) } else { vec![] },
-        "trials":req.trial_specs(),
+        "trials":req.trial_specs()?,
     });
     let mut phase = progress.start("screen_hgn_marker", "items", Some(1));
     model.check()?;
@@ -75,6 +75,8 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         first_layer: req.first_layer,
         last_layer: req.last_layer,
         targets: req.targets.clone(),
+        second_source_layer: req.second_source_layer,
+        configurations: req.configurations()?,
         behavior: req.behavior,
         seed: req.seed,
         runtime: trace::HGN_RUNTIME.into(),

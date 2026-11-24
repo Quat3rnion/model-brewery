@@ -91,25 +91,37 @@ fn mcp_screens_and_traces_a_verified_hgn_direction_without_edits() {
     let model = app.register("alpha", "hgn-v2", "/models/screen.hgn");
     let other = app.register("alpha", "hgn-v2", "/models/other.hgn");
     let sha = "a".repeat(64);
-    let receipt = json!({
+    let mut receipt = json!({
         "kind":"behavior_direction","schema_version":2,"release_qualified":false,
         "model_id":model,"model_sha256":sha,"behavior":"response_length","position":null,"last_k":3,
         "contrast_sha256":Behavior::ResponseLength.contrast_sha256(),
-        "runtime":trace::HGN_RUNTIME, "runtime_sha256":trace::HGN_RUNTIME_SHA256.trim_end(),
+        "runtime":trace::HGN_RUNTIME, "runtime_sha256":"1ac8e30b17ccd7b96ff84f840c3c6d911cb2cbded57d6a5cfec86217c417aef7",
         "executable_sha256":sha,"assets_sha256":{"sidecar":sha,"config":sha,"tokenizer":sha},
         "fit":{"role":"l_out","train_pairs":12,"held_out_pairs":8,"selected_layer":1,
-             "layers":[{"layer":1,"norm":2.0,"unit_vector":[0.0,1.0],
+             "layers":[{"layer":0,"norm":2.0,"unit_vector":[0.6,0.8],
+                        "held_out_margin":0.2,"held_out_cohens_d":0.4,"mean_residual_norm":1.0},
+                       {"layer":1,"norm":2.0,"unit_vector":[0.0,1.0],
                         "held_out_margin":0.25,"held_out_cohens_d":0.5,"mean_residual_norm":1.0}]}
     });
     fs::write(app.path("direction-result.json"), receipt.to_string()).unwrap();
     let dir = app.enqueue(
         json!({"kind":"behavior_direction","input_ids":[model],"options":{
-            "behavior":"response_length","model_sha256":sha,"layers":[1],"last_k":3
+            "behavior":"response_length","model_sha256":sha,"layers":[0,1],"last_k":3
         }}),
     );
     app.await_job(&dir, |job| job["state"] == "succeeded");
-    let args = json!({"id":model,"idempotency_key":"hgn-screen","sha256":sha,"direction_id":dir,"source_layer":1,
-        "seed":7,"targets":["residual","dense","experts","all"],"first_layer":0,"last_layer":1});
+    receipt["last_k"] = json!(1);
+    receipt["runtime_sha256"] = json!(trace::HGN_RUNTIME_SHA256.trim_end());
+    fs::write(app.path("direction-result.json"), receipt.to_string()).unwrap();
+    let primary = app.enqueue(
+        json!({"kind":"behavior_direction","input_ids":[model],"options":{
+                "behavior":"response_length","model_sha256":sha,"layers":[0,1]
+        }}),
+    );
+    app.await_job(&primary, |job| job["state"] == "succeeded");
+    let args = json!({"id":model,"idempotency_key":"hgn-screen","sha256":sha,"direction_id":primary,"source_layer":1,
+        "seed":7,"targets":["residual","dense","experts","all"],"first_layer":0,"last_layer":1,
+        "alphas":[1,2],"second_source_layer":0,"last_k_direction_id":dir});
     let mut invalid = args.clone();
     invalid["id"] = json!(other);
     let wrong = call(&app, "search_ablation", invalid);
@@ -117,6 +129,22 @@ fn mcp_screens_and_traces_a_verified_hgn_direction_without_edits() {
         wrong["result"]["structuredContent"]["status"], 400,
         "{wrong}"
     );
+    for (field, value) in [
+        ("alphas", json!([4.01])),
+        ("second_source_layer", json!(1)),
+        ("contrast_set_id", json!("unreviewed")),
+    ] {
+        let mut invalid = args.clone();
+        invalid.as_object_mut().unwrap().remove("id");
+        invalid.as_object_mut().unwrap().remove("idempotency_key");
+        invalid[field] = value;
+        app.json(
+            "POST",
+            &format!("/api/scratch/{model}/search_ablation"),
+            Some(invalid),
+            if field == "contrast_set_id" { 422 } else { 400 },
+        );
+    }
     let reply = call(&app, "search_ablation", args);
     assert_eq!(reply["result"]["isError"], false, "{reply}");
     let screen_id = reply["result"]["structuredContent"]["id"].as_str().unwrap();
@@ -128,6 +156,8 @@ fn mcp_screens_and_traces_a_verified_hgn_direction_without_edits() {
         json!(["residual", "dense", "experts", "all"])
     );
     assert_eq!(wire["options"]["vector"], json!([0.0, 1.0]));
+    assert_eq!(wire["options"]["second_vector"], json!([0.6_f32, 0.8_f32]));
+    assert_eq!(wire["options"]["last_k_variant"]["last_k"], 3);
     assert!(job["options"].get("vector").is_none());
     assert!(
         app.json("GET", "/api/scratch", None, 200)
@@ -139,7 +169,7 @@ fn mcp_screens_and_traces_a_verified_hgn_direction_without_edits() {
     let trace_args = json!({"idempotency_key":"hgn-edit-trace","input_ids":[model],"prompt":"one two","options":{
         "layers":[0,1],"roles":["l_out"],"positions":[0],"top_k":0,
         "hgn_projection":{"direction_id":dir,"source_layer":1,"target":"experts",
-            "first_layer":1,"last_layer":1}
+            "first_layer":1,"last_layer":1,"alpha":2,"second_source_layer":0}
     }});
     let reply = call(&app, "start_trace", trace_args);
     assert_eq!(reply["result"]["isError"], false, "{reply}");
@@ -148,8 +178,59 @@ fn mcp_screens_and_traces_a_verified_hgn_direction_without_edits() {
     let options = &job["result"]["envelope"]["options"];
     assert_eq!(options["hgn_projection"]["target"], "experts");
     assert_eq!(options["hgn_projection"]["vector"], json!([0.0, 1.0]));
+    assert_eq!(
+        options["hgn_projection"]["second_vector"],
+        json!([0.6_f32, 0.8_f32])
+    );
+    assert_eq!(options["hgn_projection"]["alpha"], 2.0);
     assert_eq!(options["expected_model_sha256"], sha);
     assert!(job["options"]["hgn_projection"].get("vector").is_none());
+}
+
+#[test]
+fn mcp_traces_a_verified_gguf_last_k_direction_with_scale() {
+    use brewery_worker::{behavior_direction::Behavior, trace};
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts": {
+            "alpha":{"local":true,"capabilities":{"trace":true,"behavior_direction":true}}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let model = app.register("alpha", "gguf", "/models/screen.gguf");
+    let sha = "a".repeat(64);
+    fs::write(app.path("direction-result.json"), json!({
+        "kind":"behavior_direction","schema_version":2,"release_qualified":false,
+        "model_id":model,"model_sha256":sha,"behavior":"slop","position":null,"last_k":3,
+        "contrast_sha256":Behavior::Slop.contrast_sha256(),
+        "lanternfish_commit":trace::COMMIT,"executable_sha256":trace::SHA256,
+        "fit":{"role":"l_out","train_pairs":12,"held_out_pairs":8,"selected_layer":1,
+            "layers":[{"layer":1,"norm":2.0,"unit_vector":[0.0,1.0],
+                       "held_out_margin":0.25,"held_out_cohens_d":0.5,"mean_residual_norm":1.0}]}
+    }).to_string()).unwrap();
+    let dir = app.enqueue(
+        json!({"kind":"behavior_direction","input_ids":[model],"options":{
+            "behavior":"slop","model_sha256":sha,"layers":[1],"last_k":3
+        }}),
+    );
+    app.await_job(&dir, |job| job["state"] == "succeeded");
+    let args = json!({"idempotency_key":"gguf-scaled-trace","input_ids":[model],"prompt":"one two","options":{
+        "layers":[1],"roles":["l_out"],"positions":[0],"top_k":0,
+        "gguf_projection":{"direction_id":dir,"source_layer":1,"layer":1,"positions":[0],"alpha":2}
+    }});
+    let reply = call(&app, "start_trace", args);
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let trace_id = reply["result"]["structuredContent"]["id"].as_str().unwrap();
+    let job = app.await_job(trace_id, |job| job["state"] == "succeeded");
+    let options = &job["result"]["envelope"]["options"];
+    assert_eq!(options["gguf_projection"]["vector"], json!([0.0, 1.0]));
+    assert_eq!(options["gguf_projection"]["alpha"], 2.0);
+    assert_eq!(options["gguf_projection"]["last_k"], 3);
+    assert_eq!(options["expected_model_sha256"], sha);
+    assert!(job["options"]["gguf_projection"].get("vector").is_none());
 }
 
 #[test]

@@ -2571,7 +2571,7 @@
         "required": ["sha256", "direction_id", "seed"],
         "oneOf": [
           {"required":["assets_id","trial_budget","max_children","disk_budget_bytes","behavior_direction"],
-           "not":{"anyOf":[{"required":["targets"]},{"required":["source_layer"]},{"required":["first_layer"]},{"required":["last_layer"]}]}},
+           "not":{"anyOf":[{"required":["targets"]},{"required":["source_layer"]},{"required":["first_layer"]},{"required":["last_layer"]},{"required":["second_source_layer"]}]}},
           {"required":["targets","source_layer"],
            "dependentRequired":{"first_layer":["last_layer"],"last_layer":["first_layer"]},
            "not":{"anyOf":[{"required":["assets_id"]},{"required":["trial_budget"]},{"required":["max_children"]},{"required":["disk_budget_bytes"]},{"required":["behavior_direction"]}]}}
@@ -2585,7 +2585,11 @@
           "max_children": {"type": "integer", "minimum": 1, "maximum": 3},
           "disk_budget_bytes": {"type": "integer", "minimum": 67108864, "maximum": 68719476736},
           "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionConfig"},
+          "alphas":{"type":"array","minItems":1,"maxItems":4,"uniqueItems":true,
+            "items":{"$ref":"#/components/schemas/ProjectionAlpha"},"description":"HGN tests every scale; default [1,2]. GGUF tests each specified fit and scale combination at least once; trial_budget must cover them."},
+          "last_k_direction_id":{"$ref":"#/components/schemas/Id","description":"Optional matching fit with last_k between 2 and 16. The primary fit must use the single default position."},
           "source_layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "second_source_layer":{"$ref":"#/components/schemas/TraceLayer","description":"HGN only. Orthogonalize the distinct second source layer against the first and project both directions out."},
           "first_layer":{"$ref":"#/components/schemas/TraceLayer"},
           "last_layer":{"$ref":"#/components/schemas/TraceLayer"},
           "targets":{"type":"array","minItems":1,"maxItems":4,"uniqueItems":true,
@@ -3310,7 +3314,7 @@
         }
       },
       "TraceJob": {
-        "description":"Run a CPU trace of a Library GGUF or Qwen3.8 Flash Next v2 HGN checkpoint, or a scratch revision with private GGUF, on its own opted-in worker. Supply exactly one of prompt, prompt_id, or options.prompts. HGN uses at most 2048 raw prompt tokens and supports hgn_projection but not other interventions or SAE. There is no generation.",
+        "description":"Run a CPU trace of a Library GGUF or Qwen3.8 Flash Next v2 HGN checkpoint, or a scratch revision with private GGUF, on its own opted-in worker. Supply exactly one of prompt, prompt_id, or options.prompts. Use gguf_projection with the A5 pin for scaled rank-one projection. HGN uses at most 2048 raw prompt tokens and supports hgn_projection with rank one or two, but not other interventions or SAE. There is no generation.",
         "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"}],
         "required":["input_ids","options"],
         "properties":{
@@ -3475,7 +3479,7 @@
           "layers":{"type":"array","description":"Layers in increasing order.","minItems":1,"maxItems":64,"uniqueItems":true,"items":{"$ref":"#/components/schemas/TraceLayer"}},
           "role":{"$ref":"#/components/schemas/DirectionRole"},
           "position":{"anyOf":[{"$ref":"#/components/schemas/TracePosition"},{"type":"null"}],"description":"Explicit zero-based token index including special tokens. Without position, GGUF uses the last user token and HGN uses the last part of the chat template."},
-          "last_k":{"type":"integer","minimum":1,"maximum":16,"description":"HGN only. Average the last K template positions. Defaults to 1 when position is not set. Do not use with an explicit position."}
+          "last_k":{"type":"integer","minimum":1,"maximum":16,"description":"Average the last K positions up to the GGUF last user token or the HGN template end. Defaults to 1 when position is not set. Do not use with an explicit position."}
         }
       },
       "BehaviorDirectionJob": {
@@ -3501,10 +3505,24 @@
           "activation_patches":{"type":"array","maxItems":8,"items":{"$ref":"#/components/schemas/ActivationPatch"}},
           "sae":{"$ref":"#/components/schemas/SaeSelection"},
           "feature_steering":{"$ref":"#/components/schemas/FeatureSteering"},
-          "hgn_projection":{"$ref":"#/components/schemas/HgnTraceProjection"}
+          "hgn_projection":{"$ref":"#/components/schemas/HgnTraceProjection"},
+          "gguf_projection":{"$ref":"#/components/schemas/GgufTraceProjection"}
         }
       },
       "HgnProjectionTarget": {"enum":["residual","dense","experts","all"]},
+      "ProjectionAlpha": {"type":"number","exclusiveMinimum":0,"maximum":4,"description":"1 removes the projected component. Above 1 reverses its sign."},
+      "GgufTraceProjection": {
+        "type":"object","additionalProperties":false,
+        "description":"Use the pinned A5 runtime to project one verified version 2 direction from the exact GGUF. Do not combine with other interventions or SAE.",
+        "required":["direction_id","source_layer","layer","positions"],
+        "properties":{
+          "direction_id":{"$ref":"#/components/schemas/Id"},
+          "source_layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "positions":{"type":"array","minItems":1,"maxItems":128,"uniqueItems":true,"items":{"$ref":"#/components/schemas/TracePosition"}},
+          "alpha":{"$ref":"#/components/schemas/ProjectionAlpha","default":1}
+        }
+      },
       "HgnTraceProjection": {
         "type":"object","additionalProperties":false,
         "description":"Project a version 2 direction from the same HGN checkpoint. Use both layer endpoints for an inclusive interval, or omit both for all layers. Do not combine with other interventions or SAE.",
@@ -3513,6 +3531,8 @@
         "properties":{
           "direction_id":{"$ref":"#/components/schemas/Id"},
           "source_layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "second_source_layer":{"$ref":"#/components/schemas/TraceLayer","description":"Second layer in the same fit. It must differ from source_layer and supply an independent direction."},
+          "alpha":{"$ref":"#/components/schemas/ProjectionAlpha","default":1},
           "target":{"$ref":"#/components/schemas/HgnProjectionTarget"},
           "first_layer":{"$ref":"#/components/schemas/TraceLayer"},
           "last_layer":{"$ref":"#/components/schemas/TraceLayer"}
@@ -3688,8 +3708,12 @@
           "tensor_count":{"type":"integer"},"missing_count":{"type":"integer"},"intervention_count":{"type":"integer"},
           "hgn_projection":{"type":"object","additionalProperties":false,
             "required":["target","first_layer","last_layer"],
+            "dependentRequired":{"rank":["direction_cosine"],"direction_cosine":["rank"]},
             "properties":{"target":{"$ref":"#/components/schemas/HgnProjectionTarget"},
-              "first_layer":{"$ref":"#/components/schemas/TraceLayer"},"last_layer":{"$ref":"#/components/schemas/TraceLayer"}}},
+              "first_layer":{"$ref":"#/components/schemas/TraceLayer"},"last_layer":{"$ref":"#/components/schemas/TraceLayer"},
+              "alpha":{"$ref":"#/components/schemas/ProjectionAlpha"},
+              "last_k":{"type":"integer","minimum":1,"maximum":16},"rank":{"const":2},
+              "direction_cosine":{"type":"number","minimum":-1,"maximum":1}}},
           "logit_lens_count":{"type":"integer"},"model_logits_count":{"type":"integer"}
         }
       },
@@ -4813,12 +4837,25 @@
           "model_sha256":{"$ref":"#/components/schemas/Sha256"},"direction_id":{"$ref":"#/components/schemas/Id"},
           "contrast_sha256":{"$ref":"#/components/schemas/Sha256"},"runtime":{"const":"hgn_cpu"},
           "targets":{"type":"array","minItems":1,"maxItems":4,"items":{"$ref":"#/components/schemas/HgnProjectionTarget"}},
+          "second_source_layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "configurations":{"type":"array","minItems":1,"maxItems":32,
+            "description":"Configurations in score order. The signed cosine is from the original directions before orthogonalization.",
+            "items":{"type":"object","additionalProperties":false,"required":["target","direction_id","last_k","alpha","rank","direction_cosine"],
+              "properties":{
+                "target":{"$ref":"#/components/schemas/HgnProjectionTarget"},
+                "direction_id":{"$ref":"#/components/schemas/Id"},
+                "last_k":{"type":["integer","null"],"minimum":1,"maximum":16},
+                "alpha":{"$ref":"#/components/schemas/ProjectionAlpha"},
+                "rank":{"enum":[1,2]},
+                "direction_cosine":{"type":["number","null"],"minimum":-1,"maximum":1}
+              }
+            }},
           "scores":{"type":"object","required":["marker","marker_tokens","prompts","parent_hits","parent_mean","control_mean","trials"],
             "properties":{
               "marker":{"type":"string"},"marker_tokens":{"type":"array","items":{"type":"integer","minimum":0}},
               "prompts":{"type":"integer","minimum":1,"maximum":8},"parent_hits":{"type":"integer","minimum":0,"maximum":8},
               "parent_mean":{"type":"number"},"control_mean":{"type":"number"},
-              "trials":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"object","additionalProperties":false,
+              "trials":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","additionalProperties":false,
                 "required":["reduction","random_reduction","control_shift","random_control_shift","kl","random_kl","wins_over_random"],
                 "properties":{
                   "reduction":{"type":"number"},"random_reduction":{"type":"number"},
@@ -4827,8 +4864,8 @@
                   "wins_over_random":{"type":"integer","minimum":0,"maximum":8}
                 }}}
             }},
-          "pareto":{"type":"array","items":{"type":"integer","minimum":0,"maximum":3}},
-          "selected":{"type":"array","items":{"type":"integer","minimum":0,"maximum":3}}
+          "pareto":{"type":"array","items":{"type":"integer","minimum":0,"maximum":31}},
+          "selected":{"type":"array","items":{"type":"integer","minimum":0,"maximum":31}}
         }
       },
       "AblationSearchResult": {
@@ -4897,6 +4934,15 @@
         "properties":{
           "kind":{"const":"trace"},"schema_version":{"const":1},"model_id":{"$ref":"#/components/schemas/Id"},
           "model_sha256":{"$ref":"#/components/schemas/Sha256"},"lanternfish_commit":{"type":"string"},
+          "gguf_projection":{"type":"object","additionalProperties":false,
+            "required":["direction_id","source_layer","layer","positions","alpha","last_k","rank"],
+            "properties":{
+              "direction_id":{"$ref":"#/components/schemas/Id"},"source_layer":{"$ref":"#/components/schemas/TraceLayer"},
+              "layer":{"$ref":"#/components/schemas/TraceLayer"},
+              "positions":{"type":"array","minItems":1,"maxItems":128,"items":{"$ref":"#/components/schemas/TracePosition"}},
+              "alpha":{"$ref":"#/components/schemas/ProjectionAlpha"},
+              "last_k":{"type":["integer","null"],"minimum":1,"maximum":16},"rank":{"const":1}
+            }},
           "runtime":{"const":"hgn_cpu"},"runtime_sha256":{"$ref":"#/components/schemas/Sha256"},
           "assets_sha256":{"type":"object","required":["sidecar","config","tokenizer"],"additionalProperties":{"$ref":"#/components/schemas/Sha256"}},
           "executable_sha256":{"$ref":"#/components/schemas/Sha256"},"bytes":{"$ref":"#/components/schemas/ByteCount"},

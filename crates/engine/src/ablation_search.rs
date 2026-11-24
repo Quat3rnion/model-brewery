@@ -339,6 +339,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         schema_version: 1,
         model_sha256: req.model_sha256.clone(),
         direction_id: req.direction_id.clone(),
+        last_k_direction_id: req.last_k_variant.as_ref().map(|v| v.direction_id.clone()),
         behavior: req.behavior,
         seed: req.seed,
         lanternfish_sha256: search::SHA256.into(),

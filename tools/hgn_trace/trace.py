@@ -145,7 +145,7 @@ class Forward:
 def screen(args, tokenizer, config):
     raw = json.loads(args.spec.read_text())
     if (raw.keys() != {"behavior", "train", "held_out", "trials"}
-            or not 1 <= len(raw["held_out"]) <= 8 or not 1 <= len(raw["trials"]) <= 8
+            or not 1 <= len(raw["held_out"]) <= 8 or not 1 <= len(raw["trials"]) <= 32
             or len(raw["train"]) > 12 or not 2 <= config.vocab_size <= 262144):
         raise ValueError("invalid HGN screen inventory")
     held, train, behavior = raw["held_out"], raw["train"], raw["behavior"]
@@ -213,17 +213,24 @@ def screen(args, tokenizer, config):
                "trials": []}
     probabilities = stock.exp()
 
-    def run_trial(settings, vector):
-        projection = Projection(dict(settings, vector=vector), config)
+    def run_trial(settings, vector, second):
+        projection = Projection(dict(settings, vector=vector, **second), config)
         logp = forward.screen_logits(tokens, projection)
         mark = measure(logp)
         kl = (probabilities * (stock - logp)).sum(-1).mean().clamp_min(0)
         return mark, float(kl)
 
     for trial in raw["trials"]:
-        settings = {k: v for k, v in trial.items() if k not in {"vector", "random"}}
-        fit, kl = run_trial(settings, trial["vector"])
-        random, random_kl = run_trial(settings, trial["random"])
+        if trial.keys() - {"target", "first_layer", "last_layer", "alpha",
+                           "vector", "random", "second_vector", "second_random"}:
+            raise ValueError("invalid HGN screen trial fields")
+        settings = {k: trial[k] for k in ("target", "first_layer", "last_layer", "alpha") if k in trial}
+        if ("second_vector" in trial) != ("second_random" in trial):
+            raise ValueError("HGN random control rank differs from fit")
+        fit, kl = run_trial(settings, trial["vector"],
+                            {"second_vector": trial["second_vector"]} if "second_vector" in trial else {})
+        random, random_kl = run_trial(settings, trial["random"],
+                                      {"second_vector": trial["second_random"]} if "second_random" in trial else {})
         receipt["trials"].append({
             "reduction": float((base[:n] - fit[:n]).mean()),
             "random_reduction": float((base[:n] - random[:n]).mean()),
@@ -259,7 +266,8 @@ def run(args):
     tokens = tokenizer.encode(args.prompt, add_special_tokens=False).ids
     if not 1 <= len(tokens) <= MAX_TOKENS:
         raise ValueError(f"expected 1 to {MAX_TOKENS} prompt tokens")
-    projection = Projection(json.loads(args.projection.read_text()), config) if args.projection else None
+    raw_projection = json.loads(args.projection.read_text()) if args.projection else None
+    projection = Projection(raw_projection, config) if args.projection else None
     spec = capture_spec(json.loads(args.spec.read_text()), config.num_hidden_layers, len(tokens), config.vocab_size)
     selected, roles, positions, k, cap = (spec[n] for n in ("layers", "roles", "positions", "top_k", "byte_cap"))
     last = config.num_hidden_layers - 1
@@ -303,6 +311,12 @@ def run(args):
             raise ValueError("projection requires a forward capture")
         m["hgn_projection"] = {"target": projection.target, "first_layer": projection.first,
                                "last_layer": projection.last}
+        if "alpha" in raw_projection:
+            m["hgn_projection"]["alpha"] = projection.alpha
+        if projection.last_k is not None:
+            m["hgn_projection"]["last_k"] = projection.last_k
+        if projection.second is not None:
+            m["hgn_projection"].update(rank=2, direction_cosine=projection.cosine)
         consumed = payload_bytes + len(encode(m))
     for layer, hidden in (forward.layers(tokens, projection) if forward else ()):
         if layer not in selected and layer != last:

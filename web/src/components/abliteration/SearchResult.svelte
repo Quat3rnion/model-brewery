@@ -49,9 +49,12 @@
           <th scope="col">Wins</th><th scope="col">Screen result</th></tr></thead>
         <tbody>
           {#each screen.trials as t, i}
+            {@const config = result.hgn?.configurations?.[i]}
             <tr><th scope="row">{i}</th>
-              <td>{#if result.hgn}{result.hgn.targets[i]}, {result.hgn.layerRange}{:else if t.candidate}L{t.candidate.source_layer} to L{t.candidate.first_layer}–{t.candidate.last_layer},
-                {t.candidate.variant.replaceAll('_', ' ')}, α {t.candidate.alpha}{:else}Not reported{/if}</td>
+              <td>{#if result.hgn}{config?.target ?? result.hgn.targets[i]}, {result.hgn.layerRange}{#if config},
+                α {config.alpha}, rank {config.rank}{#if config.last_k}, last {config.last_k}{/if}{#if config.direction_cosine != null},
+                original cosine {score(config.direction_cosine)}{/if}{/if}{:else if t.candidate}L{t.candidate.source_layer} to L{t.candidate.first_layer}–{t.candidate.last_layer},
+                {t.candidate.variant.replaceAll('_', ' ')}, α {t.candidate.alpha}{#if t.candidate.last_k}, last {t.candidate.last_k}{/if}{:else}Not reported{/if}</td>
               <td>{score(t.reduction)}</td><td>{score(t.kl)}</td><td>{score(t.random_reduction)}</td>
               <td>{score(t.random_kl)}</td>
               {#if result.hgn}

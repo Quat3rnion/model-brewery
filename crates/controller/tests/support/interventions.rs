@@ -66,12 +66,9 @@ fn hgn_direction_mcp_queues_last_k_and_reads_version_two() {
     .unwrap();
     app.launch();
     let model = app.register("alpha", "hgn-v2", "/models/tiny.hgn");
-    let gguf = app.register("alpha", "gguf", "/models/tiny.gguf");
     let digest = "a".repeat(64);
     let options = json!({"layers":[1],"behavior":"slop","model_sha256":digest,"last_k":3});
-    let mut invalid = json!({"kind":"behavior_direction","input_ids":[gguf],"options":options});
-    app.json("POST", "/api/jobs", Some(invalid.clone()), 400);
-    invalid["input_ids"] = json!([model]);
+    let mut invalid = json!({"kind":"behavior_direction","input_ids":[model],"options":options});
     invalid["options"]["position"] = json!(0);
     app.json("POST", "/api/jobs", Some(invalid.clone()), 400);
     invalid["options"]["position"] = Value::Null;

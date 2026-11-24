@@ -1359,6 +1359,23 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
     );
     for tool in listed {
         let schema = &tool["inputSchema"];
+        if tool["name"] == "search_ablation" {
+            for key in ["alphas", "second_source_layer", "last_k_direction_id"] {
+                assert!(schema["properties"][key].is_object(), "missing {key}");
+            }
+            assert!(schema["properties"].get("contrast_set_id").is_none());
+        }
+        if tool["name"] == "start_trace" {
+            let options = &schema["properties"]["options"]["properties"];
+            assert_eq!(
+                options["hgn_projection"]["properties"]["alpha"]["maximum"],
+                4
+            );
+            assert_eq!(
+                options["gguf_projection"]["properties"]["alpha"]["maximum"],
+                4
+            );
+        }
         if tool["name"] == "quantization_damage_map" {
             let options = &schema["properties"]["options"];
             assert_eq!(
