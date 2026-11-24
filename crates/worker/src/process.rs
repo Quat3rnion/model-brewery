@@ -514,7 +514,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     } else {
         Command::new(&w.cfg.engine)
     };
-    let hgn_trace = job.kind == trace::JOB && job.inputs[0].kind == trace::HGN_KIND;
+    let hgn_trace = job.kind == trace::JOB && trace::is_hgn(&job.inputs[0].kind);
     if !hgn_trace
         && (scratch_job
             || gradient_backend.is_some()
@@ -906,7 +906,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     }
     if job.kind == trace::JOB {
         let request = trace::Request::worker(&job.options, job.prompt.as_deref())?;
-        let runtime_matches = if job.inputs[0].kind == trace::HGN_KIND {
+        let runtime_matches = if trace::is_hgn(&job.inputs[0].kind) {
             let python_pin = w
                 .cfg
                 .engine_env

@@ -1123,7 +1123,7 @@ impl Worker {
                             let (executable, lib_dir, _, _) = runtime.pins();
                             absolute(executable) && absolute(lib_dir)
                         }),
-                        trace::HGN_KIND => {
+                        kind if trace::is_hgn(kind) => {
                             Path::new(&job.inputs[0].path)
                                 .extension()
                                 .is_some_and(|e| e == "hgn")

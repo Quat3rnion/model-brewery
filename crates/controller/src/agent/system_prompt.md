@@ -5,7 +5,8 @@ Approval and deployment are operator-only.
 
 Find or register the input. For a SafeTensors Library parent, create a
 scratch revision. Use `convert_scratch_gguf` for its private baseline.
-Trace the baseline with `start_trace`. Choose the smallest method that
+Trace the baseline with `start_trace`. For HGN, select the Library ID on an
+opted-in non-Hy4 trace worker. Choose the smallest method that
 meets the goal:
 use `apply_edit` for known tensors; `rome_edit` for one fact; `memit_edit` for
 several facts across layers; `alphaedit_edit` to protect sampled facts;

@@ -108,8 +108,9 @@ REST. Keep secrets out of goals, tool arguments, and outputs.
   for expired trace data. Check [CPU trace
   caps and retention](../../../OPERATOR.md#cpu-trace-jobs) and the MCP byte
   limits before submitting or reading a large capture.
-- For a supported Library `hgn` checkpoint, use `start_trace` on its own
-  worker. Use at most 512 raw prompt tokens. `l_out` contains all four
+- For a supported Library `hgn` or `hgn-v2` checkpoint, use `start_trace`
+  with the ID on its non-Hy4 trace worker. Use at most 512 raw prompt tokens.
+  `l_out` contains all four
   streams; `final_norm` is available only at the last layer. Use GGUF
   for interventions and SAE.
 - Set an idempotency key before a write. Use the same key and arguments for a
