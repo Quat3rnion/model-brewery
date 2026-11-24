@@ -602,6 +602,10 @@ impl Host {
                 "Native HGN weight jobs are not configured on this worker",
             ),
             (
+                brewery_worker::hgn_edit::JOB,
+                "Private native HGN edits are not configured on this worker",
+            ),
+            (
                 "weight_packed",
                 "Packed weight jobs are not configured on this worker",
             ),
@@ -610,7 +614,9 @@ impl Host {
                 "SafeTensors weight jobs are not configured on this worker",
             ),
         ] {
-            let enabled = options.remove(capability).unwrap_or(false);
+            let enabled = options.remove(capability).unwrap_or(false)
+                && (capability != brewery_worker::hgn_edit::JOB
+                    || (config["local"] != true && config["ssh"].as_str().is_some()));
             capabilities.insert(capability.into(), enabled);
             if !enabled {
                 reasons
@@ -1083,6 +1089,20 @@ pub fn manual_registration_blocker(host: &str, kind: &str) -> Option<Reason> {
 // Prefer the source host if eligible, avoiding a transfer. Selection of an
 // *idle* host occurs in the scheduler, not during POST.
 pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<&'a Host> {
+    if job.kind == brewery_worker::hgn_edit::JOB {
+        return hosts.iter().filter(|host| {
+            job.scratch_job
+                && host.id == job.host
+                && !host.scheduling_paused
+                && !host.local_edit
+                && host.remote_editor.is_none()
+                && !host.quantization_pool
+                && host.capabilities.get(brewery_worker::hgn_edit::JOB) == Some(&true)
+                && envelope.inputs.len() == 1
+                && envelope.inputs[0].host == host.id
+                && brewery_worker::hgn_edit::is_hgn(&envelope.inputs[0].kind)
+        }).collect();
+    }
     if job.scratch_job || job.kind == brewery_worker::weight_spectra::JOB {
         return hosts
             .iter()

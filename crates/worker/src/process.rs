@@ -301,7 +301,23 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         scratch_job || w.cfg.scratch_access.is_none(),
         "scratch worker config is scoped to one job"
     );
-    if scratch_job {
+    let hgn_request = if job.kind == hgn_edit::JOB {
+        let edit = w
+            .cfg
+            .hgn_edit
+            .as_ref()
+            .context("private HGN edits are not configured")?;
+        let original = w.require(id)?.job.context("HGN edit job is missing")?;
+        let req = edit.authorize(id, "start", &original)?;
+        ensure!(
+            w.hgn_parent(&original.inputs[0], &req)? == job.inputs[0].path,
+            "resolved HGN parent does not match the grant"
+        );
+        Some(req)
+    } else {
+        None
+    };
+    if scratch_job && hgn_request.is_none() {
         let access = w
             .cfg
             .scratch_access
@@ -449,9 +465,22 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             "This edit requires GPU load permission and a GPU admission wrapper"
         );
     }
-    fs::create_dir(&work)?;
+    if hgn_request.is_some() {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(&work)?;
+    } else {
+        fs::create_dir(&work)?;
+    }
     *created_work = true;
     let jobfile = base.join("engine-input.json");
+    let mut engine_job;
+    let job = if let Some(req) = &hgn_request {
+        engine_job = job.clone();
+        engine_job.options = to_value(req)?;
+        &engine_job
+    } else {
+        job
+    };
     atomic(&jobfile, job)?;
     let output = base.join("engine-output.json");
     let stderr = base.join("engine-stderr.log");
@@ -459,7 +488,12 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         let r = w.require(id)?;
         ensure!(!r.cancel, "cancel requested");
     }
-    let mut command = if job.kind == exl3_layer::JOB {
+    let mut command = if let Some(edit) = w.cfg.hgn_edit.as_ref().filter(|_| hgn_request.is_some())
+    {
+        let mut command = Command::new(&edit.build_admission);
+        command.args(["--"]).arg(&w.cfg.engine);
+        command
+    } else if job.kind == exl3_layer::JOB {
         let spec = exl3_layer::Spec::parse(&job.options)?;
         if spec.backend == exl3_layer::Backend::Cpu {
             Command::new(&w.cfg.engine)
@@ -515,7 +549,13 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         Command::new(&w.cfg.engine)
     };
     let hgn_trace = job.kind == trace::JOB && job.inputs[0].kind == trace::HGN_KIND;
-    if !hgn_trace
+    if hgn_request.is_some() {
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env(hgn_edit::CACHE, w.cfg.root.join("hgn-edit-cache"))
+            .env(hgn_edit::RESERVE, w.cfg.disk_reserve_bytes.to_string());
+    } else if !hgn_trace
         && (scratch_job
             || gradient_backend.is_some()
             || matches!(job.kind.as_str(), trace::JOB | behavior_direction::JOB))
@@ -824,6 +864,21 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         value.is_object(),
         "Engine output is not a JSON object; check private engine-output.json"
     );
+    if let Some(req) = hgn_request {
+        ensure!(
+            value["kind"] == hgn_edit::JOB && value.as_object().is_some_and(|o| o.len() == 2),
+            "invalid HGN edit result"
+        );
+        let report: hgn_edit::Report = serde_json::from_value(value["report"].clone())?;
+        req.verify(&report)?;
+        let private = work.join(hgn_edit::PRIVATE);
+        weight_source::open_regular(&private.join(hgn_edit::MODEL))?;
+        ensure!(
+            load::<Value>(&private.join(hgn_edit::REPORT))? == value["report"],
+            "HGN edit report file does not match the engine receipt"
+        );
+        return Ok(value);
+    }
     if job.kind == behavior_direction::JOB {
         behavior_direction::Request::parse(&job.options)?.verify_result(
             &value,

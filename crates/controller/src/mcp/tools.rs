@@ -202,7 +202,10 @@ impl Server {
                     "Save trace rules from a verified direction version. Project out its activation component or subtract a scaled unit vector. Pass the saved ID and version to start_trace."
                 }
                 "ablate_direction" => {
-                    "Apply one fitted direction to a private scratch child. Use the exact parent revision and a version 2 direction. Convert the child with convert_scratch_gguf and score it with run_checks."
+                    "Apply a version 2 direction to the exact parent hash. For SafeTensors, convert the private child to GGUF before checks. For HGN, use a pinned Library or scratch ID, a direction fit on its Library root, plain variant, flat kernel, and alpha 1. Poll get_job for scratch_id and get_scratch for native-store metrics. HGN scratch cannot be published."
+                }
+                "apply_edit" => {
+                    "Apply selected tensor operations to a private SafeTensors scratch child. For native HGN projection, use ablate_direction."
                 }
                 "search_ablation" => {
                     "Fit the direction on the exact private parent GGUF before searching. Use disjoint confirmation pins in behavior_direction.prompt_sets. Read get_job for the fitted and matched random screen results, then get_checks for the selected children."

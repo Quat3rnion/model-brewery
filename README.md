@@ -18,7 +18,7 @@ Model Brewery is a work in progress. [Issues](https://github.com/Quat3rnion/mode
 
 ## Weight-space programming
 
-Agents and operators can read, change and test model weights. All changes go to scratch revisions. A scratch revision is a private child copy of a SafeTensors model with a reversible delta and a provenance record. The source model does not change. Only an operator can approve a scratch revision for the Library, in the workbench. Results are not release-qualified.
+Agents and operators can read, change and test model weights. Weight-space edits make private scratch children. SafeTensors children have a reversible delta and a provenance record. Only an operator can approve them for the Library. HGN children have a native-store report and cannot enter the Library. The source model does not change. Results are not release-qualified.
 
 - **Trace.** Capture activations, model logits and a logit lens per layer for GGUF or Qwen3.8 Flash Next v2 HGN. GGUF also supports attention capture and private scratch revisions. The worker uses a pinned CPU runtime. For GGUF, the worker runs Lanternfish as a headless command-line program that is pinned by SHA-256. It does not start a Lanternfish server or use the Lanternfish UI. See [CPU trace jobs](OPERATOR.md#cpu-trace-jobs).
 - **MoE routing atlas.** Read expert load, entropy, co-activation and token clusters for Qwen2MoE and Qwen3MoE. Compare paired expert ablations without changing weights. See [MoE routing atlas](OPERATOR.md#moe-routing-atlas).
@@ -27,6 +27,7 @@ Agents and operators can read, change and test model weights. All changes go to 
 - **Search ablation settings.** Screen a fitted direction against a matched random control before making scratch children. See [Native ablation search](OPERATOR.md#native-ablation-search).
 - **Run pinned Heretic offline.** Use the local GPU queue to make a private SafeTensors scratch child or reproduce a verified community manifest. See [Heretic jobs](OPERATOR.md#heretic-jobs).
 - **Review abliteration results.** Inspect direction pins, native screens with matched controls, paired child checks, and Heretic trial journals. See [Abliteration workflow through MCP](OPERATOR.md#abliteration-workflow-through-mcp).
+- **Edit native HGN v2 weights.** Queue a private CPU edit on the source worker. The edit keeps the store, variant, and payload size of each dense and routed writer. See [Native HGN v2 scratch edits](OPERATOR.md#native-hgn-v2-scratch-edits).
 - **Steer and patch.** Add, replace, scale or remove activations during a trace, or copy activations from an earlier trace. Save versioned Library interventions that project out or subtract a verified direction. Export fixed steering vectors, not projections, as llama.cpp control vectors. See [Trace interventions](OPERATOR.md#trace-interventions).
 - **Edit weights.** Set or add values in a tensor slice, apply a rank-one update, or orthogonalize a weight against a direction. See [Scratch weight revisions](OPERATOR.md#scratch-weight-revisions).
 - **Edit facts.** Use ROME, MEMIT or AlphaEdit on dense Llama and Qwen2 models, on the CPU or with a pinned CUDA or ROCm runtime. See [Locate and edit a fact](OPERATOR.md#locate-and-edit-a-fact).

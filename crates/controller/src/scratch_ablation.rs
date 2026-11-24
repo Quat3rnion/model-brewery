@@ -13,7 +13,10 @@ pub(super) struct Source {
 #[derive(Serialize, Deserialize)]
 pub(super) struct Evidence {
     direction: Source,
-    source_gguf_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_gguf_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) hgn: Option<super::hgn_edit::Evidence>,
     #[serde(flatten)]
     settings: ablation::Settings,
 }
@@ -41,16 +44,44 @@ pub(super) async fn model(
     Path(id): Path<String>,
     headers: HeaderMap,
     payload: Payload<Request>,
-) -> Mutation {
-    mutate(
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    let req = read(payload)?;
+    if super::hgn_edit::is_parent(&app, &id)? {
+        return super::hgn_edit::submit(&app, id, req, &headers);
+    }
+    Ok(mutate(
         app,
         headers,
         "scratch-ablate-direction",
         Some(id),
-        read(payload)?,
+        req,
         |app, target, req, key| apply(app, request_id(target)?, req, key),
     )
-    .await
+    .await?
+    .into_response())
+}
+
+impl Request {
+    pub(super) fn settings(&self) -> ablation::Settings {
+        ablation::Settings {
+            first_layer: self.first_layer,
+            last_layer: self.last_layer,
+            kernel: self.kernel,
+            variant: self.variant,
+            alpha: self.alpha,
+        }
+    }
+
+    pub(super) fn evidence(self, hgn: super::hgn_edit::Evidence) -> Evidence {
+        let settings = self.settings();
+        Evidence {
+            direction: self.direction,
+            source_gguf_sha256: None,
+            hgn: Some(hgn),
+            settings,
+        }
+    }
 }
 
 pub(super) fn apply(app: &App, id: String, req: Request, key: Option<&Submission<'_>>) -> Mutation {
@@ -78,13 +109,7 @@ pub(super) fn apply(app: &App, id: String, req: Request, key: Option<&Submission
         .unit_vector
         .as_deref()
         .ok_or_else(|| ApiError::bad("the source layer has no nonzero fitted direction"))?;
-    let settings = ablation::Settings {
-        first_layer: req.first_layer,
-        last_layer: req.last_layer,
-        kernel: req.kernel,
-        variant: req.variant,
-        alpha: req.alpha,
-    };
+    let settings = req.settings();
     let plan = ablation::Plan::new(&settings, direction, layer.negative_mean.as_deref(), |at| {
         fit.layers
             .iter()
@@ -95,10 +120,13 @@ pub(super) fn apply(app: &App, id: String, req: Request, key: Option<&Submission
     .map_err(|e| ApiError::bad(e.to_string()))?;
     let evidence = Evidence {
         direction: req.direction,
-        source_gguf_sha256: result["model_sha256"]
-            .as_str()
-            .ok_or_else(|| ApiError::storage("Direction source pin is missing"))?
-            .to_owned(),
+        source_gguf_sha256: Some(
+            result["model_sha256"]
+                .as_str()
+                .ok_or_else(|| ApiError::storage("Direction source pin is missing"))?
+                .to_owned(),
+        ),
+        hgn: None,
         settings,
     };
     build_special(

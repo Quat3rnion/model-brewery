@@ -122,6 +122,9 @@ pub(crate) fn input(store: &Store, row: &Revision, name: &str, kind: &str) -> Mo
 
 pub(crate) fn trace_input(store: &Store, id: &str) -> Result<(Model, String)> {
     let row = visible(store, id)?;
+    if row.is_hgn() {
+        return Err(conflict("native HGN scratch cannot be converted to GGUF"));
+    }
     let gguf = row
         .gguf
         .as_ref()

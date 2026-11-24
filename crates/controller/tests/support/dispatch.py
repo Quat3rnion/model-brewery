@@ -277,6 +277,37 @@ else:
                                         predicted_nll_increase=1, measured_recovery=None)])
     if envelope["kind"] == "behavior_direction" and (root / "direction-result.json").exists():
         result = json.loads((root / "direction-result.json").read_text())
+    if envelope["kind"] == "scratch_hgn_ablation":
+        import base64
+        import hmac
+        import math
+        assert list(envelope["options"]) == ["hgn_edit_grant"]
+        data, sig = envelope["options"]["hgn_edit_grant"].split(".")
+        payload = base64.urlsafe_b64decode(data + "===")
+        assert hmac.compare_digest(base64.urlsafe_b64decode(sig + "==="), hmac.digest(
+            (root / "hgn-key").read_bytes(), b"brewery.hgn-edit.v1\0" + payload, "sha256"))
+        claim = json.loads(payload)
+        source, = envelope["inputs"]
+        assert (claim["job_id"], claim["host"], claim["input_id"], claim["path"], claim["kind"]) == (
+            job_id, host, source["id"], source["path"], source["kind"])
+        req = claim["request"]
+        if req["producer"]:
+            assert req["parent_sha256"] == json.loads((root / f"{req['producer']}.json").read_text())[
+                "result"]["report"]["revision_sha256"]
+        norm = math.sqrt(sum(x * x for x in req["direction"]))
+        layer = req["first_layer"]
+        tensor = dict(store=0, variant=0, bytes=8, shape=[2, 2], iterations=1, tolerance=.01,
+                      parent_mean_abs_component=1., leftover_before=0., leftover_after=0.,
+                      rel_error=.1, payload_sha256="c"*64)
+        result = dict(kind="scratch_hgn_ablation", report=dict(
+            schema="brewery.hgn-feedback.v1",
+            encoder_sha256="e686f78a79315addc20b312235b835108fced8474844832fb50b882a7f7458ff",
+            parent_sha256=req["parent_sha256"], revision_sha256=hashlib.sha256(job_id.encode()).hexdigest(),
+            direction=[x / norm for x in req["direction"]],
+            tensors={f"layers.{layer}.linear_attn.out_proj.weight": tensor,
+                     f"layers.{layer}.mlp.experts.down_proj.weight": dict(tensor, shape=[1,2,2])}))
+        if (root / "bad-hgn-receipt").exists():
+            result["report"]["parent_sha256"] = "d" * 64
     if action == "start" and envelope["kind"] == "hf_download":
         assert envelope["inputs"] == [] and "prompt" not in envelope
         options = envelope["options"]

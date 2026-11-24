@@ -120,6 +120,61 @@ fi
 }
 
 #[test]
+fn hgn_edit_grant_is_bound_to_job_host_path_and_parent() {
+    use brewery_worker::hgn_edit as edit;
+    let t = Rig::new();
+    let key = t.root.join("hgn-key");
+    fs::write(&key, [42; 32]).unwrap();
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    let wrap = t.root.join("build-wrapper");
+    fs::write(&wrap, "#!/bin/sh\nshift\nexec \"$@\"\n").unwrap();
+    fs::set_permissions(&wrap, fs::Permissions::from_mode(0o700)).unwrap();
+    let root = t.root.join("b");
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut cfg: Value = serde_json::from_slice(&fs::read(&t.b).unwrap()).unwrap();
+    cfg["hgn_edit"] = json!({"host":"b","grant_key_file":key,"build_admission":wrap});
+    fs::write(&t.b, cfg.to_string()).unwrap();
+    fs::set_permissions(&t.b, fs::Permissions::from_mode(0o600)).unwrap();
+    let path = t.src.join("source.hgn");
+    fs::write(&path, b"fixture source").unwrap();
+    let source = json!({"id":"model","host":"b","kind":"hgn-v2","path":path});
+    let native = edit::Request {
+        parent_sha256: "a".repeat(64),
+        producer: None,
+        first_layer: 0,
+        last_layer: 0,
+        direction: vec![1.,0.],
+    };
+    let input = serde_json::from_value(source.clone()).unwrap();
+    let grant = edit::grant("native-edit", &input, native.clone(), &[42;32]).unwrap();
+    let prepare = |id: &str, action: &str, source: &Value, grant: &str| {
+        let job = json!({"kind":edit::JOB,"inputs":[source],"options":{(edit::GRANT):grant}});
+        t.rpc_raw(&serde_json::to_value(Rpc::Prepare {
+            id: id.into(),
+            action: action.into(),
+            job: serde_json::from_value(job).unwrap(),
+        }).unwrap())
+    };
+    assert!(prepare("other-id", "start", &source, &grant)["error"].is_string());
+    assert!(prepare("native-edit", "transfer", &source, &grant)["error"].is_string());
+    assert!(prepare("native-edit", "start", &source, "tampered")["error"].is_string());
+    let mut substitute = source.clone();
+    substitute["path"] = json!(t.src.join("other.hgn"));
+    assert!(prepare("native-edit", "start", &substitute, &grant)["error"].is_string());
+    assert_eq!(prepare("native-edit", "start", &source, &grant)["ok"]["state"], "queued");
+    let resolve = |input| serde_json::to_value(Rpc::Resolve {
+        id:"native-edit".into(), index:0, input, bundle:None,
+    }).unwrap();
+    assert!(t.rpc_raw(&resolve(serde_json::from_value(substitute).unwrap()))["error"].is_string());
+    assert_eq!(t.rpc_raw(&resolve(input))["ok"], source);
+    let mut bad_producer = native;
+    bad_producer.producer = Some("native-edit".into());
+    let grant = edit::grant("descendant", &serde_json::from_value(source.clone()).unwrap(), bad_producer, &[42;32]).unwrap();
+    assert!(prepare("descendant", "start", &source, &grant)["error"].is_string());
+}
+
+#[test]
 fn scratch_grant_is_job_scoped_exact_and_verified_before_use() {
     let t = Rig::new();
     let private = t.root.join("private");
