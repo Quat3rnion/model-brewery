@@ -694,7 +694,7 @@ impl Host {
                     } else if kind == brewery_worker::circuit::JOB {
                         "Configure the pinned CPU Lanternfish gradient runtime and opt in on this worker"
                     } else if kind == brewery_worker::behavior_direction::JOB {
-                        "Configure the verified contrast cache and pinned CPU Lanternfish"
+                        "Configure the verified contrast cache and a pinned CPU trace runtime"
                     } else if kind == brewery_worker::exl3_layer::JOB {
                         "Configure a native EXL3 helper and opt in on this worker"
                     } else if crate::weights::is_kind(kind) {
@@ -1271,9 +1271,13 @@ impl NewJob {
                         && matches!(main, "gguf" | brewery_worker::trace::HGN_KIND)
                         && host == inputs[0].host
                 }
-                brewery_worker::sensitivity::JOB
-                | brewery_worker::circuit::JOB
-                | brewery_worker::behavior_direction::JOB => {
+                brewery_worker::behavior_direction::JOB => {
+                    n == 1
+                        && (main == "gguf" || brewery_worker::trace::is_hgn(main))
+                        && host == inputs[0].host
+                        && prompt.is_none()
+                }
+                brewery_worker::sensitivity::JOB | brewery_worker::circuit::JOB => {
                     n == 1 && main == "gguf" && host == inputs[0].host
                 }
                 "inspect" | "plan" | "convert" => (1..=5).contains(&n) && source,
@@ -1444,6 +1448,9 @@ fn check_options(job: &str, options: &Map<String, Value>, inputs: &[Model]) -> R
         let request =
             brewery_worker::behavior_direction::Request::parse(&Value::Object(options.clone()))
                 .map_err(|e| format!("{e:#}"))?;
+        request
+            .check_input_kind(&inputs[0].kind)
+            .map_err(|e| format!("{e:#}"))?;
         if inputs[0]
             .sha256
             .as_deref()

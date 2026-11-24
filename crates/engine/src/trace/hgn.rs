@@ -1,8 +1,9 @@
 //! Stage the Brewery-owned HGN runtime and verify the model's companion assets.
-use crate::{gguf_conversion::Tool, integrity};
+use crate::{child_threads, gguf_conversion::Tool, integrity, write_json};
 use anyhow::{Context, Result, ensure};
 use brewery_worker::trace::{
-    HGN_ASSETS, HGN_PYTHON, HGN_PYTHON_SHA256, HGN_RUNTIME, HGN_RUNTIME_SHA256,
+    self, Capture, Export, HGN_ASSETS, HGN_PYTHON, HGN_PYTHON_SHA256, HGN_RUNTIME,
+    HGN_RUNTIME_SHA256,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -68,14 +69,14 @@ struct Assets {
     tokenizer: Pin,
 }
 
-pub(super) struct Runtime {
+pub(crate) struct Runtime {
     python: Tool,
     entry: PathBuf,
     assets: Vec<(&'static str, Pin, integrity::Stamp)>,
 }
 
 impl Runtime {
-    pub(super) fn stage(work: &Path, model_sha: &str) -> Result<Self> {
+    pub(crate) fn stage(work: &Path, model_sha: &str) -> Result<Self> {
         let configured =
             PathBuf::from(env::var_os(HGN_PYTHON).context("HGN trace Python is not configured")?);
         ensure!(configured.is_absolute(), "{HGN_PYTHON} must be absolute");
@@ -141,7 +142,7 @@ impl Runtime {
         })
     }
 
-    pub(super) fn command(&self, work: &Path, threads: usize) -> Command {
+    fn command(&self, work: &Path, threads: usize) -> Command {
         let mut cmd = self.python.command(work, threads);
         cmd.env("OPENBLAS_NUM_THREADS", "1")
             .env("TOKENIZERS_PARALLELISM", "false")
@@ -153,21 +154,44 @@ impl Runtime {
         cmd
     }
 
-    pub(super) fn capture(&self, cmd: &mut Command, work: &Path) -> Result<()> {
+    pub(crate) fn capture(
+        &self,
+        work: &Path,
+        model: &Path,
+        prompt: &str,
+        capture: &Capture,
+        out: &Path,
+    ) -> Result<Export> {
         let check = || {
             for (_, pin, stamp) in &self.assets {
                 stamp.check(&pin.path)?;
             }
             Ok::<_, anyhow::Error>(())
         };
+        let spec = work.join("current-spec.json");
+        write_json(&spec, &serde_json::to_value(capture)?)?;
+        let threads = child_threads(None)?.min(64);
+        let mut command = self.command(work, threads);
+        command
+            .arg("--model")
+            .arg(model)
+            .arg(format!("--prompt={prompt}"))
+            .arg("--spec")
+            .arg(&spec)
+            .arg("--out")
+            .arg(out)
+            .arg("--threads")
+            .arg(threads.to_string());
         check()?;
         self.python
-            .capture(cmd, work)
+            .capture(&mut command, work)
             .context("HGN CPU trace failed")?;
-        check()
+        check()?;
+        fs::remove_file(&spec)?;
+        trace::verify(out, capture)
     }
 
-    pub(super) fn receipt(&self) -> Value {
+    pub(crate) fn receipt(&self) -> Value {
         let assets: BTreeMap<_, _> = self
             .assets
             .iter()

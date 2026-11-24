@@ -1063,27 +1063,44 @@ impl Worker {
                 Reply::error("This worker only runs Hugging Face download jobs"),
             );
         }
-        if job.kind == behavior_direction::JOB
-            && !(action == "start"
+        if job.kind == behavior_direction::JOB {
+            let absolute = |key| {
+                self.cfg
+                    .engine_env
+                    .get(key)
+                    .is_some_and(|p| Path::new(p).is_absolute())
+            };
+            let allowed = action == "start"
                 && job.prompt.is_none()
                 && job.inputs.len() == 1
-                && job.inputs[0].kind == "gguf"
-                && [trace::EXECUTABLE, trace::LIB_DIR, behavior_direction::CACHE]
-                    .iter()
-                    .all(|key| {
-                        self.cfg
+                && absolute(behavior_direction::CACHE)
+                && behavior_direction::Request::parse(&job.options)
+                    .and_then(|req| req.check_input_kind(&job.inputs[0].kind))
+                    .is_ok()
+                && if trace::is_hgn(&job.inputs[0].kind) {
+                    Path::new(&job.inputs[0].path)
+                        .extension()
+                        .is_some_and(|ext| ext == "hgn")
+                        && absolute(trace::HGN_PYTHON)
+                        && absolute(trace::HGN_ASSETS)
+                        && self
+                            .cfg
                             .engine_env
-                            .get(*key)
-                            .is_some_and(|p| Path::new(p).is_absolute())
-                    })
-                && behavior_direction::Request::parse(&job.options).is_ok())
-        {
-            return self.record_prepare(
-                id,
-                action,
-                job,
-                Reply::error("Invalid direction request or unavailable CPU trace runtime or cache"),
-            );
+                            .get(trace::HGN_PYTHON_SHA256)
+                            .is_some_and(|s| is_digest(s))
+                } else {
+                    absolute(trace::EXECUTABLE) && absolute(trace::LIB_DIR)
+                };
+            if !allowed {
+                return self.record_prepare(
+                    id,
+                    action,
+                    job,
+                    Reply::error(
+                        "Invalid direction request or unavailable CPU trace runtime or cache",
+                    ),
+                );
+            }
         }
         if job.kind == ablation_search::SCREEN
             && ![

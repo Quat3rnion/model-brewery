@@ -406,6 +406,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     } else {
         None
     };
+    let hgn_direction = job.kind == behavior_direction::JOB && trace::is_hgn(&job.inputs[0].kind);
     if job.kind == behavior_direction::JOB {
         resources::disk_check(
             &w.cfg.root,
@@ -554,6 +555,12 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             ],
             circuit::JOB => &[sensitivity::PIN, sensitivity::MANIFEST_SHA],
             kind if heretic::job(kind) => &[heretic::RUNTIME],
+            behavior_direction::JOB if hgn_direction => &[
+                trace::HGN_PYTHON,
+                trace::HGN_PYTHON_SHA256,
+                trace::HGN_ASSETS,
+                behavior_direction::CACHE,
+            ],
             behavior_direction::JOB => {
                 &[trace::EXECUTABLE, trace::LIB_DIR, behavior_direction::CACHE]
             }
@@ -825,10 +832,22 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         "Engine output is not a JSON object; check private engine-output.json"
     );
     if job.kind == behavior_direction::JOB {
+        if hgn_direction {
+            let configured_pin = w
+                .cfg
+                .engine_env
+                .get(trace::HGN_PYTHON_SHA256)
+                .map(String::as_str);
+            ensure!(
+                configured_pin.is_some() && value["executable_sha256"].as_str() == configured_pin,
+                "HGN direction Python pin does not match the worker"
+            );
+        }
         behavior_direction::Request::parse(&job.options)?.verify_result(
             &value,
             job.inputs[0].extra["id"].as_str().unwrap_or_default(),
             job.inputs[0].extra["sha256"].as_str().unwrap_or_default(),
+            &job.inputs[0].kind,
         )?;
         return Ok(value);
     }

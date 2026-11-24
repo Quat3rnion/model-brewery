@@ -1,8 +1,9 @@
 use brewery_worker::{
     behavior_direction::{self as direction, Observation, Request, Split},
-    trace::Role,
+    trace::{self, Role},
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::fs;
 
 #[test]
@@ -100,4 +101,55 @@ fn cache_checks_payload_digest_and_job_rejects_unapproved_behaviors() {
     );
     options["behavior"] = json!("unreviewed");
     assert!(Request::parse(&options).is_err());
+}
+
+#[test]
+fn hgn_direction_sums_streams_then_normalizes_each_captured_position() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = trace::direction_capture(&[3], Role::LOut, [1, 2]);
+    let rows = [
+        // The first coordinate cancels. The stream sum is [0, 2, 0, ...].
+        (1, [4., 1., -4., 1., 0., 0., 0., 0.]),
+        // The stream sum is [3, 4, 0, ...].
+        (2, [1., 1., 2., 2., 0., 1., 0., 0.]),
+    ];
+    let tensors: Vec<_> = rows
+        .into_iter()
+        .map(|(position, row)| {
+            let mut full = vec![0.0_f32; 4 * 2560];
+            for (stream, pair) in row.chunks_exact(2).enumerate() {
+                full[stream * 2560..][..2].copy_from_slice(pair);
+            }
+            let bytes: Vec<_> = full.into_iter().flat_map(f32::to_le_bytes).collect();
+            let name = format!("tensor-00000{position}.f32");
+            fs::write(dir.path().join(&name), &bytes).unwrap();
+            json!({
+                "layer": 3, "role": "l_out", "position": position, "node": "l_out-3",
+                "file": name, "shape": [4, 2560], "dtype": "f32_le",
+                "bytes": bytes.len(), "sha256": format!("{:x}", Sha256::digest(&bytes)),
+            })
+        })
+        .collect();
+    fs::write(
+        dir.path().join("manifest.json"),
+        serde_json::to_vec(&json!({
+            "schema_version": 1, "kind": "trace", "spec": spec,
+            "model": {"arch": "qwen4_exp_text", "hidden": 2560, "l_out_axes": ["stream","hidden"]},
+            "tokens": [{"position": 0, "token_id": 9}, {"position": 1, "token_id": 7},
+                       {"position": 2, "token_id": 3}],
+            "tensors": tensors, "missing": [], "interventions": [], "model_logits": [], "logit_lens": [],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let receipt = trace::verify(dir.path(), &spec).unwrap();
+    let (tokens, obs) =
+        trace::direction_rows(dir.path(), &spec, &receipt, Role::LOut, true).unwrap();
+    assert_eq!(tokens, [9, 7, 3]);
+    assert_eq!(obs.len(), 1);
+    assert_eq!(obs[0].residual_norm, 3.5);
+    assert_eq!(obs[0].activation.len(), 2560);
+    assert_eq!(obs[0].activation[..2], [0.3, 0.9]);
+    assert!(obs[0].activation[2..].iter().all(|&x| x == 0.));
+    assert!(trace::direction_rows(dir.path(), &spec, &receipt, Role::LOut, false).is_err());
 }

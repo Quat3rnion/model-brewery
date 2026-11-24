@@ -40,6 +40,10 @@ pub const RESPONSE_CAP: usize = 4 << 20;
 const MAX_POSITIONS: usize = 4096;
 const MAX_RETAIN: usize = 64;
 
+pub fn is_hgn(kind: &str) -> bool {
+    matches!(kind, "hgn" | "hgn-v2")
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Policy {
@@ -734,11 +738,15 @@ pub fn direction_probe() -> Capture {
     }
 }
 
-pub fn direction_capture(layers: &[usize], role: Role, position: usize) -> Capture {
+pub fn direction_capture(
+    layers: &[usize],
+    role: Role,
+    positions: impl IntoIterator<Item = usize>,
+) -> Capture {
     Capture {
         layers: layers.iter().copied().collect(),
         roles: BTreeSet::from([role, Role::LOut]),
-        positions: BTreeSet::from([position]),
+        positions: positions.into_iter().collect(),
         top_k: 0,
         byte_cap: HARD_BYTE_CAP,
         all_logits: false,
@@ -812,32 +820,39 @@ pub fn direction_rows(
     spec: &Capture,
     verified: &Export,
     role: Role,
+    hgn: bool,
 ) -> Result<(Vec<i32>, Vec<crate::behavior_direction::Observation>)> {
     use crate::behavior_direction::{Observation, residual_norm};
     let (m, check) = manifest(dir, spec.byte_cap)?;
     ensure!(
         check.manifest_sha256 == verified.manifest_sha256
-            && m.model["arch"] == "qwen2"
+            && if hgn {
+                m.model["arch"] == "qwen4_exp_text"
+                    && m.model["l_out_axes"] == json!(["stream", "hidden"])
+                    && role == Role::LOut
+            } else {
+                m.model["arch"] == "qwen2" && spec.positions.len() == 1
+            }
             && m.interventions.is_empty()
             && m.missing.is_empty(),
-        "direction needs complete, unedited Qwen2 trace rows"
+        "direction needs complete, unedited trace rows of the selected runtime"
     );
     let width = m.model["hidden"]
         .as_u64()
-        .context("missing Qwen2 hidden width")?;
-    let mut tensors: std::collections::BTreeMap<_, _> = m
-        .tensors
-        .into_iter()
-        .map(|t| ((t.key.layer, t.key.role), t))
-        .collect();
-    let mut read = |layer, role| -> Result<Vec<f32>> {
+        .filter(|width| (1..=16384).contains(width))
+        .context("invalid direction hidden width")?;
+    let shape = if hgn { vec![4, width] } else { vec![width] };
+    let mut tensors: std::collections::BTreeMap<_, _> =
+        m.tensors.into_iter().map(|t| (t.key, t)).collect();
+    let mut read = |layer, role, position| -> Result<Vec<f32>> {
         let t = tensors
-            .remove(&(layer, role))
+            .remove(&Key {
+                layer,
+                role,
+                position,
+            })
             .context("missing direction tensor")?;
-        ensure!(
-            t.shape == [width] && (1..=16384).contains(&width),
-            "invalid direction tensor shape"
-        );
+        ensure!(t.shape == shape, "invalid direction tensor shape");
         let data = read_file(&dir.join(t.file), t.bytes)?;
         ensure!(
             data.len() as u64 == t.bytes && format!("{:x}", Sha256::digest(&data)) == t.sha256,
@@ -852,13 +867,43 @@ pub fn direction_rows(
         .layers
         .iter()
         .map(|&layer| {
-            let activation = read(layer, role)?;
+            if hgn {
+                let mut aggregate = vec![0.0_f64; width as usize];
+                let mut total_norm = 0.0;
+                for &position in &spec.positions {
+                    let values = read(layer, role, position)?;
+                    let mut summed = vec![0.0_f64; width as usize];
+                    for stream in values.chunks_exact(width as usize) {
+                        for (sum, &x) in summed.iter_mut().zip(stream) {
+                            *sum += f64::from(x);
+                        }
+                    }
+                    let norm = summed.iter().map(|x| x.powi(2)).sum::<f64>().sqrt();
+                    ensure!(norm.is_finite(), "non-finite HGN direction residual");
+                    total_norm += norm;
+                    if norm > 0.0 {
+                        for (mean, sum) in aggregate.iter_mut().zip(summed) {
+                            *mean += sum / norm;
+                        }
+                    }
+                }
+                let count = spec.positions.len() as f64;
+                return Ok(Observation {
+                    activation: aggregate.into_iter().map(|x| (x / count) as f32).collect(),
+                    residual_norm: total_norm / count,
+                });
+            }
+            let position = *spec
+                .positions
+                .first()
+                .context("missing direction position")?;
+            let activation = read(layer, role, position)?;
             if role == Role::LOut {
                 Ok(Observation::residual(activation))
             } else {
                 Ok(Observation {
                     activation,
-                    residual_norm: residual_norm(&read(layer, Role::LOut)?),
+                    residual_norm: residual_norm(&read(layer, Role::LOut, position)?),
                 })
             }
         })

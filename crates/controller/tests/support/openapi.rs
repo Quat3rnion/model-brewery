@@ -280,6 +280,12 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         check["properties"]["behavior_direction"]["$ref"],
         "#/components/schemas/BehaviorDirectionConfig"
     );
+    let schemas = &contract["components"]["schemas"];
+    assert_eq!(
+        schemas["BehaviorDirectionJob"]["properties"]["input_ids"]["x-brewery-input-kinds"],
+        json!([["gguf", "hgn", "hgn-v2"]])
+    );
+    assert!(schemas["BehaviorDirectionResult"]["properties"]["runtime_sha256"].is_object());
     let ids: BTreeSet<_> = operations.iter().map(|entry| entry.2).collect();
     assert_eq!(ids.len(), operations.len());
     walk_refs(&contract, &contract);

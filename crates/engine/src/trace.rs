@@ -147,7 +147,7 @@ const ROUTING_LIBS: &[(&str, &str)] = &[
     ),
 ];
 
-mod hgn;
+pub(crate) mod hgn;
 
 pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let request = Request::worker(&job.options, job.prompt.as_deref())?;
@@ -226,23 +226,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         let out = staging.join(i.to_string());
         id.check()?;
         let verified = if let Some(runtime) = &hgn {
-            let spec = work.join("current-spec.json");
-            write_json(&spec, &serde_json::to_value(&capture)?)?;
-            let threads = child_threads(None)?.min(64);
-            let mut command = runtime.command(work, threads);
-            command
-                .arg("--model")
-                .arg(&input.path)
-                .arg(format!("--prompt={prompt}"))
-                .arg("--spec")
-                .arg(&spec)
-                .arg("--out")
-                .arg(&out)
-                .arg("--threads")
-                .arg(threads.to_string());
-            runtime.capture(&mut command, work)?;
-            fs::remove_file(&spec)?;
-            trace::verify(&out, &capture)?
+            runtime.capture(work, &input.path, prompt, &capture, &out)?
         } else {
             runtime
                 .as_ref()
