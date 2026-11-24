@@ -31,6 +31,18 @@ pub struct ScreenRequest {
     pub trial_budget: usize,
     pub max_children: usize,
     pub confirmation_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alphas: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_k_variant: Option<FitVariant>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FitVariant {
+    pub direction_id: String,
+    pub last_k: usize,
+    pub fit: Fit,
 }
 
 impl ScreenRequest {
@@ -48,29 +60,60 @@ impl ScreenRequest {
                 && matches!(self.behavior, Behavior::Slop | Behavior::Sycophancy)
                 && (MIN_TRIALS..=MAX_TRIALS).contains(&self.trial_budget)
                 && (1..=MAX_CHILDREN.min(self.trial_budget)).contains(&self.max_children)
-                && self.fit.role == Role::LOut
-                && (3..=32).contains(&self.fit.layers.len())
-                && self
-                    .fit
-                    .layers
-                    .windows(2)
-                    .all(|pair| pair[0].layer < pair[1].layer)
-                && self.fit.layers.last().unwrap().layer < 4096
-                && self
-                    .fit
-                    .layers
-                    .iter()
-                    .filter(|row| row.unit_vector.is_some())
-                    .count()
-                    >= 3,
+                && Self::valid_fit(&self.fit)
+                && self.last_k_variant.as_ref().is_none_or(|v| {
+                    !v.direction_id.is_empty()
+                        && v.direction_id != self.direction_id
+                        && (2..=crate::behavior_direction::MAX_LAST_K).contains(&v.last_k)
+                        && Self::valid_fit(&v.fit)
+                        && v.fit.train_pairs == self.fit.train_pairs
+                        && v.fit.held_out_pairs == self.fit.held_out_pairs
+                }),
             "invalid screen fit, behavior, pins or trial limits"
         );
+        if let Some(alphas) = &self.alphas {
+            ensure!(
+                (1..=4).contains(&alphas.len())
+                    && alphas
+                        .iter()
+                        .enumerate()
+                        .all(|(i, a)| !alphas[..i].contains(a))
+                    && alphas.len() * (1 + usize::from(self.last_k_variant.is_some()))
+                        <= self.trial_budget,
+                "invalid GGUF screen alpha grid"
+            );
+            for &alpha in alphas {
+                crate::trace::hgn_projection::check_alpha(alpha)?;
+            }
+        }
         Ok(())
     }
 
+    fn valid_fit(fit: &Fit) -> bool {
+        fit.role == Role::LOut
+            && (3..=32).contains(&fit.layers.len())
+            && fit
+                .layers
+                .windows(2)
+                .all(|pair| pair[0].layer < pair[1].layer)
+            && fit.layers.last().unwrap().layer < 4096
+            && fit
+                .layers
+                .iter()
+                .filter(|row| row.unit_vector.is_some())
+                .count()
+                >= 3
+    }
+
     pub fn plan(&self, candidate: Candidate, random: bool) -> Result<Plan> {
-        let fitted = self
-            .fit
+        let fit = if candidate.last_k.is_some() {
+            let variant = self.last_k_variant.as_ref().context("missing last-K fit")?;
+            ensure!(candidate.last_k == Some(variant.last_k), "wrong last-K fit");
+            &variant.fit
+        } else {
+            &self.fit
+        };
+        let fitted = fit
             .layers
             .iter()
             .find(|r| r.layer == candidate.source_layer)
@@ -94,8 +137,7 @@ impl ScreenRequest {
             vector,
             fitted.negative_mean.as_deref(),
             |layer| {
-                self.fit
-                    .layers
+                fit.layers
                     .iter()
                     .find(|r| r.layer == layer)?
                     .negative_mean
@@ -124,6 +166,8 @@ pub struct Candidate {
     pub variant: Variant,
     pub alpha: f64,
     pub positions: Positions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_k: Option<usize>,
 }
 
 impl Candidate {
@@ -168,6 +212,8 @@ pub struct ScreenReport {
     pub schema_version: u32,
     pub model_sha256: String,
     pub direction_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_k_direction_id: Option<String>,
     pub behavior: Behavior,
     pub seed: u32,
     pub lanternfish_sha256: String,
@@ -189,6 +235,8 @@ impl ScreenReport {
             self.schema_version == 1
                 && self.model_sha256 == req.model_sha256
                 && self.direction_id == req.direction_id
+                && self.last_k_direction_id.as_deref()
+                    == req.last_k_variant.as_ref().map(|v| v.direction_id.as_str())
                 && self.behavior == req.behavior
                 && self.seed == req.seed
                 && self.lanternfish_sha256 == SHA256
@@ -300,11 +348,91 @@ fn control_vector(target: &[f32], seed: u64) -> Vec<f32> {
 pub struct Proposals {
     rng: Rng,
     layers: Vec<usize>,
+    last_k_layers: Vec<usize>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gguf_proposals_compare_last_k_and_bound_the_scale() {
+        let fit = |direction: [f32; 3]| Fit {
+            role: Role::LOut,
+            train_pairs: 12,
+            held_out_pairs: 8,
+            selected_layer: Some(0),
+            layers: (0..3)
+                .map(|layer| crate::behavior_direction::Layer {
+                    layer,
+                    norm: 1.0,
+                    unit_vector: Some(direction.to_vec()),
+                    held_out_margin: Some(0.25),
+                    held_out_cohens_d: Some(1.0),
+                    mean_residual_norm: Some(1.0),
+                    negative_mean: Some(vec![0.0, 0.0, 1.0]),
+                })
+                .collect(),
+        };
+        let mut request = ScreenRequest {
+            model_sha256: "a".repeat(64),
+            direction_id: "last-user".into(),
+            fit: fit([1.0, 0.0, 0.0]),
+            behavior: Behavior::Slop,
+            seed: 7,
+            trial_budget: 4,
+            max_children: 1,
+            confirmation_sha256: "b".repeat(64),
+            alphas: Some(vec![1.0, 4.0]),
+            last_k_variant: Some(FitVariant {
+                direction_id: "last-three".into(),
+                last_k: 3,
+                fit: fit([0.0, 1.0, 0.0]),
+            }),
+        };
+        request.check().unwrap();
+        let mut proposals = Proposals::new(&request);
+        let mut trials = Vec::new();
+        for _ in 0..4 {
+            let candidate = proposals.next(&request, &trials).unwrap();
+            let trace_rules = |random| {
+                serde_json::to_value(
+                    request
+                        .plan(candidate, random)
+                        .unwrap()
+                        .trace_rules([0].into())
+                        .unwrap(),
+                )
+                .unwrap()
+            };
+            let (fitted, random) = (trace_rules(false), trace_rules(true));
+            assert_eq!(fitted[0]["scale"], random[0]["scale"]);
+            assert_eq!(
+                fitted[0]["vector"],
+                if candidate.last_k.is_some() {
+                    serde_json::json!([0.0, 1.0, 0.0])
+                } else {
+                    serde_json::json!([1.0, 0.0, 0.0])
+                }
+            );
+            trials.push(Trial {
+                candidate,
+                reduction: 0.0,
+                random_reduction: 0.0,
+                kl: 0.0,
+                random_kl: 0.0,
+                wins_over_random: 0,
+            });
+        }
+        assert_eq!(trials[0].candidate.last_k, None);
+        assert_eq!(trials[1].candidate.last_k, Some(3));
+        assert_eq!(
+            trials.iter().map(|t| t.candidate.alpha).collect::<Vec<_>>(),
+            vec![1.0, 1.0, 4.0, 4.0]
+        );
+        request.alphas = Some(vec![4.01]);
+        assert!(request.check().is_err());
+    }
 
     #[test]
     fn frontier_keeps_cost_tradeoff_and_only_admits_effects_beyond_control() {
@@ -317,6 +445,7 @@ mod tests {
             variant: Variant::Plain,
             alpha: 1.0,
             positions: Positions::UserLast,
+            last_k: None,
         };
         let trial = |reduction, random_reduction, kl, wins_over_random| Trial {
             candidate,
@@ -340,21 +469,38 @@ mod tests {
 
 impl Proposals {
     pub fn new(req: &ScreenRequest) -> Self {
-        Self {
-            rng: Rng(u64::from(req.seed)),
-            layers: req
-                .fit
-                .layers
+        let layers = |fit: &Fit| {
+            fit.layers
                 .iter()
                 .filter(|r| r.unit_vector.is_some())
                 .map(|r| r.layer)
-                .collect(),
+                .collect()
+        };
+        Self {
+            rng: Rng(u64::from(req.seed)),
+            layers: layers(&req.fit),
+            last_k_layers: req
+                .last_k_variant
+                .as_ref()
+                .map(|v| layers(&v.fit))
+                .unwrap_or_default(),
         }
     }
 
     pub fn next(&mut self, req: &ScreenRequest, history: &[Trial]) -> Result<Candidate> {
-        let n = self.layers.len();
         let ordinal = history.len();
+        let fit_count = 1 + usize::from(req.last_k_variant.is_some());
+        let last_k = req
+            .last_k_variant
+            .as_ref()
+            .filter(|_| ordinal % 2 == 1)
+            .map(|v| v.last_k);
+        let layers = if last_k.is_some() {
+            &self.last_k_layers
+        } else {
+            &self.layers
+        };
+        let n = layers.len();
         let mut best = None;
         for _ in 0..96 {
             let source = if ordinal < 3 {
@@ -371,15 +517,21 @@ impl Proposals {
             let idx = self.rng.pick(3);
             let variant = [Variant::Plain, Variant::Projected, Variant::NormPreserving]
                 [if ordinal < 3 { ordinal } else { idx }];
-            let peak_layer = self.layers[peak];
+            let peak_layer = layers[peak];
             let candidate = Candidate {
-                source_layer: self.layers[source],
+                source_layer: layers[source],
                 peak: peak_layer,
                 first_layer: peak_layer.saturating_sub(radius),
-                last_layer: (peak_layer + radius).min(self.layers[n - 1]),
+                last_layer: (peak_layer + radius).min(layers[n - 1]),
                 width: [1, 2, 4][self.rng.pick(3)],
                 variant,
-                alpha: if ordinal < 3 {
+                alpha: if let Some(grid) = &req.alphas {
+                    grid[if ordinal / fit_count < grid.len() {
+                        ordinal / fit_count
+                    } else {
+                        self.rng.pick(grid.len())
+                    }]
+                } else if ordinal < 3 {
                     [1.0, 1.5, 0.5][ordinal]
                 } else {
                     [0.5, 1.0, 1.5, 2.0][self.rng.pick(4)]
@@ -393,6 +545,7 @@ impl Proposals {
                 } else {
                     self.rng.pick(3)
                 }],
+                last_k,
             };
             if history.iter().any(|t| t.candidate == candidate)
                 || req.plan(candidate, false).is_err()
@@ -417,6 +570,7 @@ impl Proposals {
                     + (d.alpha - candidate.alpha).abs()
                     + f64::from(d.variant != candidate.variant)
                     + f64::from(d.positions != candidate.positions)
+                    + f64::from(d.last_k != candidate.last_k)
                     + f64::from(d.width.abs_diff(candidate.width)) / 4.0;
                 let w = (-distance).exp();
                 (sum + w * (t.reduction - lambda * t.kl), mass + w)

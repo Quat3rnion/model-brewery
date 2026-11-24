@@ -76,6 +76,11 @@ impl Test {
         if root.join("catalog.json").exists() {
             command.env("BREWERY_ADMIN_CATALOG", root.join("catalog.json"));
         }
+        if root.join("evaluation-operator.json").exists() {
+            command.env("BREWERY_EVALUATION_OPERATOR_FILE", root.join("evaluation-operator.json"));
+        } else {
+            command.env_remove("BREWERY_EVALUATION_OPERATOR_FILE");
+        }
         for name in ["DISPATCH", "WORKER", "ENGINE", "HELPER", "TUNER"] {
             command.env(
                 format!("BREWERY_LOCAL_EDIT_{name}"),

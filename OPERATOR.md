@@ -392,8 +392,23 @@ and verifies the checkpoint and its companion asset hashes. Select `residual`
 to project all four streams, `dense` for the embedding and dense writers,
 `experts` for routed expert output, or `all` for both writer groups. Use
 inclusive `first_layer` and `last_layer`, or omit both to project all layers.
+Set `second_source_layer` to use an independent vector from another layer of
+the same artifact. The runtime orthogonalizes it against the first vector.
+The trace manifest records the signed cosine before orthogonalization.
 Capture `l_out`, `final_norm`, or logits. Do not combine this option with
 GGUF interventions or SAE. This operation does not change model weights.
+
+For GGUF, set `options.gguf_projection` with a version 2 `l_out` direction
+ID, `source_layer`, target `layer`, and one to 128 token `positions`. Use
+the A5 executable and shared A4 library pins listed under
+[GGUF search](#gguf-search). The pinned GGUF runtime supports rank one
+only. Do not combine `gguf_projection` with other interventions or SAE.
+
+Both selectors accept optional `alpha` in (0,4]. The default is 1, which
+removes the fitted component. At 2 the component changes sign and keeps
+its magnitude. Select a fit made with `last_k` to use a direction averaged
+over more than one position. Only the reviewed direction behaviors are
+supported: slop, sycophancy, and response length.
 
 ### HGN CPU setup
 
@@ -749,12 +764,12 @@ generate text.
 
 On GGUF, the default role is `l_out`. You can select `attn_out` or `ffn_out`.
 The worker captures the prefix through the last user token and fits at that
-token by default. On HGN, use `l_out` and select at most 25 layers for a
-2560-wide model. The worker adds the assistant header with thinking disabled.
-Set `last_k` to 1 to 16 to use that many final template tokens. If you do not
-specify `last_k`, the job uses one token. For an explicit zero-based token
-index below 512, set `position` instead. The HGN runtime accepts up to 2048
-prompt tokens. At each position, it sums the four streams over their shared hidden
+token by default. Set `last_k` to 1 to 16 to average that many positions.
+On HGN, use `l_out` and select at most 25 layers for a 2560-wide model. The
+last K positions include the assistant header with thinking disabled.
+For an explicit zero-based token index, set `position` instead. HGN requires
+an explicit index below 512 and accepts up to 2048 prompt tokens. At each
+position, it sums the four streams over their shared hidden
 coordinates. The worker L2-normalizes that sum and averages the positions.
 `mean_residual_norm` uses the norm before normalization.
 
@@ -1993,6 +2008,16 @@ endpoints for an inclusive range, or omit them to test every layer. Use a
 non-Hy4 source worker with `trace`, `behavior_direction`, the pinned HGN CPU
 runtime, and the contrast cache. The screen has a four-hour runtime limit.
 
+Set `alphas` to one to four distinct values in (0,4]. The default is
+`[1,2]`. To screen rank two, set `second_source_layer` to an independent
+direction from the same fit. To compare fit positions, pass
+`last_k_direction_id` from the same reviewed contrast and checkpoint.
+Use a single default position in the primary fit and `last_k` of 2 to 16
+in the second fit. The screen tests each fit, alpha, and target combination.
+`configurations` lists the settings in score order and includes the rank
+and signed cosine before orthogonalization. The random control uses the
+same rank and alpha as its paired fit.
+
 The HGN screen compares the positive and negative sides of the reviewed
 held-out pairs. It reports the stock marker, matched random-direction
 scores, control-set shifts, KL, and the Pareto front. For `response_length`,
@@ -2008,6 +2033,11 @@ version 2 `l_out` direction at the last user token on a Library GGUF
 with the exact same SHA-256.
 Fit at least three nonzero layers. Include intermediate target layers
 for the norm-preserving variant. Only slop and sycophancy are supported.
+To include a last-K fit, set `last_k_direction_id` to a matching direction
+artifact with at least three nonzero layers. The screen alternates between
+the single-position and last-K fits. Set `alphas` to opt in to a custom
+grid in (0,4]. Allow at least one trial per fit and scale combination.
+The GGUF proposal policy keeps its previous grid by default.
 
 Supply `sha256`, `direction_id`, `assets_id`, a 32-bit `seed`,
 `trial_budget` (3 to 32), `max_children` (1 to 3, at most the trial
@@ -2532,6 +2562,55 @@ pinned dataset files in a local cache. Set these keys in the worker's
 Before you install these settings, run `sha256sum -c SHA256SUMS` in the pin
 directory. The worker does not download data during a check. Restart the
 controller after a change to the local worker's runtime configuration.
+
+### Registered evaluation sets
+
+Use `POST /api/admin/evaluation-sets` to register an immutable set. This
+operation is not available through MCP. Set `BREWERY_EVALUATION_OPERATOR_FILE`
+to a private file owned by the controller account (mode 600). Put `operator`
+and `token` in the JSON file. Use a lower-case operator ID and a random
+64-digit lower-case hex token. Restart the controller. Send the token in the
+`Authorization: Bearer` header. Do not put the token in a saved prompt.
+
+1. Review both sources and their licenses. Save each exact file as
+   `<sha256>.<format>` in a private source directory. Do not put this directory
+   under a shared model root or in `BREWERY_CONTRAST_CACHE`.
+2. Prepare a spec with `name`, `positive`, `negative`, `sizes`, and
+   `classifier`, as in the [API contract](api/openapi.json). Give each source
+   an HTTPS URL with a full 40-digit commit in the path, the byte size, SHA-256,
+   license, format, top-level prompt field and literal system message. The
+   optional filter selects rows by a field and exact value. Use strings for
+   CSV filters. Give the `tune` and `final_gate` sizes per side, from 1 to 32.
+3. On the worker, run
+   `python3 tools/registered_evaluation.py spec.json sources eval-cache > register.json`.
+   The builder does not use the network. It checks the source sizes and hashes,
+   groups prompts by case-folded text with normalized spaces, and removes
+   groups that occur on both sides. It sorts the groups by hash and assigns
+   disjoint rows to the two partitions. It writes one digest-named file per
+   partition and adds their pins to the registration body. Send that body to
+   the admin route. The controller records the configured operator and time.
+   To change a source, classifier, or split, register a new name.
+4. Put the cache at an absolute path in the worker's
+   `BREWERY_REGISTERED_EVALUATION_CACHE`. Keep it separate from the contrast
+   cache. Use the current `scratch_checks.py` and its adjacent
+   `registered_evaluation.py`. Build the current CPU runner and set its SHA-256
+   as in [Scratch behavior checks](crates/eval/README.md#scratch-behavior-checks).
+   The older `--behavior-v1` runner pin above does not support marker checks.
+
+Call `list_evaluation_sets` or `GET /api/evaluation-sets` to read set names
+and sizes. For a GGUF pair, add
+`"registered_marker":{"name":"<set-name>","partition":"tune"}` to `run_checks`.
+Use `final_gate` only once you select the candidate. Fitting and ablation
+search cannot load either partition. Compiled-program and HGN checks do not
+accept this option.
+
+The first class whose case-insensitive prefix or substring matches wins. Put
+exclusion classes before classes that count when they could both match. The
+worker generates at most `max_tokens` per reply (1 to 128). In the check
+bundle, `registered_marker` gives parent and child rates, per-class counts
+and flags for each side. It saves no full replies. Only replies longer than
+120 characters can have a 120-character prefix. The existing `benign_refusal`
+check does not change. Registered marker scores are not release-qualified.
 
 ### Heretic jobs
 

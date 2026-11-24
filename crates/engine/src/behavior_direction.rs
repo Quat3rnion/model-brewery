@@ -114,14 +114,13 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     })?;
     phase.finish();
     let mut result = if let Some(hgn) = &hgn {
-        let mut value = hgn.receipt();
-        if request.position.is_none() {
-            value["last_k"] = json!(request.last_k.unwrap_or(1));
-        }
-        value
+        hgn.receipt()
     } else {
         json!({"lanternfish_commit":trace::COMMIT, "executable_sha256":trace::SHA256})
     };
+    if request.position.is_none() && (is_hgn || request.last_k.is_some()) {
+        result["last_k"] = json!(request.last_k.unwrap_or(1));
+    }
     let fields = json!({
         "kind":direction::JOB, "schema_version":direction::VERSION, "release_qualified":false,
         "model_id":model_id, "model_sha256":model.sha256, "position":request.position,

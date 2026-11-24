@@ -7,6 +7,7 @@ use brewery_worker::{is_digest, scratch_eval};
 use serde_json::Value;
 use std::{
     env, fs,
+    io::Read,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
@@ -33,7 +34,7 @@ fn run_with_libraries(
     progress: &Progress,
     libraries: &[(&str, &str)],
 ) -> Result<Value> {
-    let behavior = scratch_eval::check_options(&job.options)?;
+    let options = scratch_eval::check_options(&job.options)?;
     ensure!(
         job.prompt.is_none()
             && job
@@ -97,12 +98,43 @@ fn run_with_libraries(
         .arg("--threads")
         .arg(threads.to_string());
     child_budget(&mut cmd, threads);
-    if let Some(config) = &behavior {
+    if let Some(config) = &options.behavior_direction {
         let path = configured(scratch_eval::CONTRAST_CACHE)?;
         ensure!(path.is_dir(), "invalid contrast cache directory");
         cmd.arg("--contrast-cache")
             .arg(path)
             .arg("--behavior-config")
+            .arg(serde_json::to_string(config)?);
+    }
+    if let Some(config) = &options.registered_marker {
+        let cache = configured(scratch_eval::registered::CACHE)?;
+        ensure!(
+            cache.is_dir(),
+            "invalid registered evaluation cache directory"
+        );
+        let name = format!("{}.json", config.sha256);
+        let artifact = cache.join(&name);
+        let meta = integrity::canonical(&artifact)?;
+        let max = scratch_eval::registered::MAX_BYTES;
+        ensure!(
+            meta.is_file() && meta.len() <= max,
+            "invalid evaluation partition file"
+        );
+        // Stage only the selected partition. The helper never gets the source cache path.
+        let staged = private.path().join("registered");
+        fs::create_dir(&staged)?;
+        let mut bytes = Vec::new();
+        fs::File::open(artifact)?
+            .take(max + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 <= max,
+            "evaluation partition file exceeds size limit"
+        );
+        fs::write(staged.join(name), bytes)?;
+        cmd.arg("--registered-evaluation-cache")
+            .arg(staged)
+            .arg("--registered-marker-config")
             .arg(serde_json::to_string(config)?);
     }
     for (flag, input) in [
@@ -128,7 +160,7 @@ fn run_with_libraries(
         &report,
         std::array::from_fn(|i| ids[i].sha256.as_str()),
         &runner.sha,
-        behavior.as_ref(),
+        &options,
     )?;
     Ok(report)
 }

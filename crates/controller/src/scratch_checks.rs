@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::response::{IntoResponse, Response};
 use brewery_worker::{
-    scratch_eval::{self, BehaviorConfig, BehaviorMetric as Metric, BehaviorReport},
+    scratch_eval::{self, BehaviorConfig, BehaviorMetric as Metric, BehaviorReport, registered},
     weight_source::{Header, LIMIT as HEADER_LIMIT},
 };
 use serde_json::{Value, json};
@@ -50,6 +50,8 @@ pub(super) struct Bundle {
     behavior: Check,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     behavior_direction: Option<BehaviorReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    registered_marker: Option<registered::Report>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hgn_stored: Option<brewery_worker::hgn_checks::Report>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,6 +109,8 @@ pub(super) struct Run {
     pub(super) sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) behavior_direction: Option<BehaviorConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) registered_marker: Option<registered::Request>,
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
@@ -148,6 +152,8 @@ struct OfflineReport {
     child_generation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     behavior_direction: Option<BehaviorReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    registered_marker: Option<registered::Report>,
 }
 
 impl OfflineReport {
@@ -246,7 +252,7 @@ pub(super) fn check(
     request: Run,
     key: Option<&Submission<'_>>,
 ) -> Result<Response> {
-    let (row, directory, parent) = {
+    let (row, directory, parent, marker) = {
         let store = app.store.lock().map_err(ApiError::storage)?;
         if let Some(key) = key
             && let Replay::Matched(ref id) = store.replay(key).map_err(ApiError::storage)?
@@ -264,6 +270,11 @@ pub(super) fn check(
             ));
         }
         if row.is_hgn() {
+            if request.registered_marker.is_some() {
+                return Err(ApiError::bad(
+                    "registered marker checks require GGUF; HGN generation belongs to H6",
+                ));
+            }
             if request.behavior_direction.is_some() {
                 return Err(ApiError::bad(
                     "HGN stored checks do not accept behavior_direction",
@@ -274,7 +285,7 @@ pub(super) fn check(
         admit(app, &row.provenance.worker)?;
         let root = store.scratch_root();
         if row.is_compiled_program() {
-            if request.behavior_direction.is_some() {
+            if request.behavior_direction.is_some() || request.registered_marker.is_some() {
                 return Err(ApiError::bad("behavior checks require a language model"));
             }
             let directory = root.join(&id);
@@ -296,7 +307,21 @@ pub(super) fn check(
         } else {
             None
         };
-        (row, root.join(&id), parent)
+        let marker = request
+            .registered_marker
+            .as_ref()
+            .map(|marker| {
+                if !registered::name_valid(&marker.name) {
+                    return Err(ApiError::bad("invalid evaluation set name"));
+                }
+                Ok(store
+                    .evaluation_set(&marker.name)
+                    .map_err(ApiError::storage)?
+                    .ok_or_else(|| ApiError::not_found("evaluation set"))?
+                    .resolve(marker))
+            })
+            .transpose()?;
+        (row, root.join(&id), parent, marker)
     };
     let integrity = match &parent {
         Some(parent) => integrity(
@@ -315,12 +340,17 @@ pub(super) fn check(
         return Err(conflict("checks are already running for this revision"));
     }
     if let (Ok(()), Some(parent)) = (&integrity, parent)
-        && let Some((job, envelope)) =
-            plan(&store, &row, parent, request.behavior_direction.as_ref())?
+        && let Some((job, envelope)) = plan(
+            &store,
+            &row,
+            parent,
+            request.behavior_direction.as_ref(),
+            marker.as_ref(),
+        )?
     {
         return jobs::enqueue(app, &mut store, job, envelope, key, StatusCode::ACCEPTED);
     }
-    if request.behavior_direction.is_some() {
+    if request.behavior_direction.is_some() || marker.is_some() {
         return Err(conflict(integrity.err().as_deref().unwrap_or(NO_GGUF)));
     }
     let failure = integrity.err();
@@ -337,6 +367,7 @@ fn plan(
     row: &Revision,
     parent: Model,
     behavior: Option<&BehaviorConfig>,
+    marker: Option<&registered::Config>,
 ) -> Result<Option<(Job, Envelope)>> {
     if row.gguf.is_none() {
         return Ok(None);
@@ -380,11 +411,26 @@ fn plan(
         (parent.path.clone(), row.provenance.parent_sha256.clone()),
         (child.path.clone(), row.sha256.clone()),
     ]);
-    let (job, mut envelope) = jobs::private_job(
+    let mut options = serde_json::Map::new();
+    if let Some(config) = behavior {
+        options.insert("behavior_direction".into(), json!(config));
+    }
+    if let Some(config) = marker {
+        options.insert("registered_marker".into(), json!(config));
+    }
+    let (mut job, mut envelope) = jobs::private_job(
         jobs::CHECK,
         vec![parent_gguf, child_gguf, parent, child],
-        behavior.map_or_else(|| json!({}), |config| json!({"behavior_direction":config})),
+        Value::Object(options),
     );
+    if let Some(config) = marker {
+        job.options.insert(
+            "registered_marker".into(),
+            json!({
+                "name":config.name, "partition":config.partition
+            }),
+        );
+    }
     envelope.scratch_pins = pins;
     Ok(Some((job, envelope)))
 }
@@ -416,15 +462,18 @@ pub(super) fn finish(
             return Err("worker behavior result does not match the pinned inputs".into());
         }
     }
-    let config = scratch_eval::check_options(&json!(envelope.options))?;
+    let options = scratch_eval::check_options(&json!(envelope.options))?;
     let behavior = measured.behavior_direction.take();
-    scratch_eval::validate_behavior(behavior.as_ref(), config.as_ref())?;
+    scratch_eval::validate_behavior(behavior.as_ref(), options.behavior_direction.as_ref())?;
+    let marker = measured.registered_marker.take();
+    registered::validate_report(marker.as_ref(), options.registered_marker.as_ref())?;
     let perplexity = measured.metrics.iter().find(|m| m.name == "perplexity");
     let (parent, child) = perplexity
         .map(|m| (m.parent, m.child))
         .ok_or("missing perplexity result")?;
     let mut bundle = bundle(&row, None, Some((job.id.clone(), measured)));
     bundle.behavior_direction = behavior;
+    bundle.registered_marker = marker;
     if let Some(tokens) = tokens {
         bundle.token_loss = Some(scratch_token_loss::store(
             directory, &tokens, parent, child,
@@ -467,6 +516,7 @@ fn bundle(
         smoke: measured_status(),
         behavior: measured_status(),
         behavior_direction: None,
+        registered_marker: None,
         hgn_stored: None,
         program_correctness: None,
         program_cases: None,

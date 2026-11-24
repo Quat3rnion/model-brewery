@@ -34,6 +34,10 @@ pub(crate) struct Request {
     max_children: usize,
     disk_budget_bytes: u64,
     behavior_direction: BehaviorConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alphas: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_k_direction_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -46,6 +50,12 @@ pub(crate) struct HgnRequest {
     first_layer: Option<usize>,
     last_layer: Option<usize>,
     targets: Vec<brewery_worker::trace::hgn_projection::Target>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alphas: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    second_source_layer: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_k_direction_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -146,6 +156,38 @@ fn submit_hgn(app: &App, id: String, headers: HeaderMap, req: HgnRequest) -> Res
             "HGN direction does not match the requested checkpoint hash",
         ));
     }
+    if req.second_source_layer == Some(req.source_layer) {
+        return Err(ApiError::bad(
+            "second_source_layer must differ from source_layer",
+        ));
+    }
+    let second = |id: &str| -> Result<Option<Vec<f32>>> {
+        Ok(req
+            .second_source_layer
+            .map(|layer| crate::directions::hgn_layer(&store, &model, id, layer))
+            .transpose()?
+            .map(|d| d.vector))
+    };
+    let last_k_variant = if let Some(id) = &req.last_k_direction_id {
+        let variant = crate::directions::hgn_layer(&store, &model, id, req.source_layer)?;
+        if variant.sha256 != dir.sha256
+            || variant.assets != dir.assets
+            || variant.behavior != dir.behavior
+            || variant.held_out_pairs != dir.held_out_pairs
+        {
+            return Err(ApiError::bad(
+                "last-K fit must match the checkpoint, assets, and reviewed contrast",
+            ));
+        }
+        Some(search::hgn::Variant {
+            direction_id: id.clone(),
+            last_k: variant.last_k.unwrap_or(0),
+            vector: variant.vector,
+            second_vector: second(id)?,
+        })
+    } else {
+        None
+    };
     let options = json!(search::hgn::Request {
         model_sha256: dir.sha256,
         direction_id: req.direction_id.clone(),
@@ -156,6 +198,11 @@ fn submit_hgn(app: &App, id: String, headers: HeaderMap, req: HgnRequest) -> Res
         behavior: dir.behavior,
         seed: req.seed,
         vector: dir.vector,
+        last_k: dir.last_k,
+        alphas: Some(req.alphas.clone().unwrap_or_else(|| vec![1.0, 2.0])),
+        second_source_layer: req.second_source_layer,
+        second_vector: second(&req.direction_id)?,
+        last_k_variant,
         assets_sha256: dir.assets,
         held_out_pairs: dir.held_out_pairs,
     });
@@ -185,7 +232,10 @@ fn screen_request(store: &Store, req: &Request, row: &Revision) -> Result<Screen
             "fit the direction on the same GGUF bytes as the private parent",
         ));
     }
-    if !artifact["position"].is_null() {
+    if !artifact["position"].is_null()
+        || artifact["last_k"].as_u64().unwrap_or(1) != 1
+        || artifact.get("lanternfish_commit").is_none()
+    {
         return Err(ApiError::bad("fit the directions at the last user token"));
     }
     let behavior = serde_json::from_value::<Behavior>(artifact["behavior"].clone())
@@ -194,6 +244,26 @@ fn screen_request(store: &Store, req: &Request, row: &Revision) -> Result<Screen
         Behavior::Slop => "slop",
         Behavior::Sycophancy => "sycophancy",
         _ => return Err(ApiError::bad("search supports slop and sycophancy only")),
+    };
+    let last_k_variant = if let Some(id) = &req.last_k_direction_id {
+        let variant = crate::directions::load(store, id, directions::VERSION)?;
+        if variant.get("lanternfish_commit").is_none()
+            || variant["model_sha256"] != artifact["model_sha256"]
+            || variant["behavior"] != artifact["behavior"]
+            || !variant["position"].is_null()
+            || variant["last_k"].as_u64().unwrap_or(1) < 2
+        {
+            return Err(ApiError::bad(
+                "last-K fit must use the same GGUF bytes and reviewed contrast",
+            ));
+        }
+        Some(search::FitVariant {
+            direction_id: id.clone(),
+            last_k: variant["last_k"].as_u64().expect("verified last-K fit") as usize,
+            fit: serde_json::from_value(variant["fit"].clone()).map_err(ApiError::storage)?,
+        })
+    } else {
+        None
     };
     let screen = ScreenRequest {
         model_sha256: gguf.sha256.clone(),
@@ -204,6 +274,8 @@ fn screen_request(store: &Store, req: &Request, row: &Revision) -> Result<Screen
         trial_budget: req.trial_budget,
         max_children: req.max_children,
         confirmation_sha256: req.behavior_direction.prompt_sets[name].clone(),
+        alphas: req.alphas.clone(),
+        last_k_variant,
     };
     screen.check().map_err(|e| ApiError::bad(e.to_string()))?;
     Ok(screen)
@@ -491,7 +563,15 @@ fn edit_request(request: &Request, report: &ScreenReport, trial: usize) -> ablat
     ablation::Request {
         sha256: request.sha256.clone(),
         direction: ablation::Source {
-            id: request.direction_id.clone(),
+            id: if candidate.last_k.is_some() {
+                request
+                    .last_k_direction_id
+                    .as_ref()
+                    .expect("validated last-K trial")
+                    .clone()
+            } else {
+                request.direction_id.clone()
+            },
             version: directions::VERSION,
             layer: candidate.source_layer,
         },
@@ -577,6 +657,7 @@ async fn run_child(
         behavior_direction: Some(serde_json::from_value(serde_json::to_value(
             &request.behavior_direction,
         )?)?),
+        registered_marker: None,
     };
     let c_key = format!("{}-{trial}-checks", parent.id);
     let app_copy = app.clone();

@@ -40,8 +40,8 @@ Attach atlas observations to `plan_experts` as evidence for the same source
 digest. They do not replace independent calibration and held-out REAP data.
 
 Use `compute_direction` to measure slop, sycophancy, or response-length
-directions on a pinned Qwen2 GGUF or supported HGN v2. For HGN, use `l_out`
-and set `last_k` to average final template positions. Use `get_direction`
+directions on a pinned Qwen2 GGUF or supported HGN v2. Use `last_k` to
+average the last K positions. HGN requires `l_out`. Use `get_direction`
 to read version 2 by job ID. Specify a layer for a smaller response. For HGN
 cosine, supply `reference_id` and `reference_layer`. Report Cohen's d
 as a probe result, not as evidence of a change in generated behavior.
@@ -61,10 +61,17 @@ version 2 direction ID, source layer, seed, and projection targets. Compare
 the matched random direction and the reviewed control prompts. The search
 makes no scratch children and generates no text. For response length,
 report the first-token continuation proxy, not generated length.
+For either screen, use `alphas` in (0,4] and compare a single-position fit
+with an optional `last_k_direction_id` from the same reviewed contrast.
+On HGN, use `second_source_layer` for an independent second direction and
+report the cosine before orthogonalization. Use only the reviewed slop,
+sycophancy, and response-length contrasts. GGUF screens do not support
+response length or rank two.
 Use `create_direction_intervention` to remove the projection onto a
 verified direction or subtract a scaled direction. Pass the saved version
 to `start_trace` and compare with a baseline using `diff_traces`.
 `export_control_vector` can export subtraction, not projection.
+Use `options.gguf_projection` with the A5 pin for a scaled single direction.
 
 Use `run_heretic` only for a Library SafeTensors parent with an installed
 offline profile and a local GPU queue. Use `reproduce_heretic` only with a
@@ -74,7 +81,7 @@ Library parent for the baseline and use the same conversion assets for the child
 Read the imported child and its journal with `get_scratch`.
 
 For a native HGN child, call `run_checks` with its exact hash and no
-`behavior_direction`. Poll `get_job` and read `get_checks`. Require both the
+`behavior_direction` or `registered_marker`. Poll `get_job` and read `get_checks`. Require both the
 decoded-store audit and paired CPU forward. Report the retained components,
 random controls, relative error and forward scores, not generated text.
 HGN checks do not use GGUF and are not release-qualified.
@@ -95,6 +102,12 @@ Do not infer harmful-set refusal rates from synthetic fixtures.
 The optional benign refusal rate measures over-refusal on reviewed benign
 prompts, not compliance with harmful requests. Report the flags and rates
 only. This check does not produce a refusal direction.
+For private GGUF, call `list_evaluation_sets` to find operator-registered
+sets. Pass the set name and one partition in `registered_marker` to
+`run_checks`. Use `tune` for preliminary checks. Reserve `final_gate` for
+the final check after you fix the candidate. Do not use either partition
+in `compute_direction` or `search_ablation`. Report both sides' marker
+rates and per-class counts from `get_checks`. Do not repeat reply prefixes.
 On Qwen2.5-0.5B-Instruct the tested native directions carried only a small
 part of the sycophancy signal. A3 and A5 found no significant paired flips.
 Stock slop was too rare to measure a reliable reduction. Heretic noslop

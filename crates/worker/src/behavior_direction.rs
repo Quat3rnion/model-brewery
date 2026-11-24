@@ -73,7 +73,7 @@ impl Request {
 
     pub fn check_input_kind(&self, kind: &str) -> Result<()> {
         match kind {
-            "gguf" => ensure!(self.last_k.is_none(), "last_k requires HGN"),
+            "gguf" => (),
             kind if trace::is_hgn(kind) => ensure!(
                 self.role == Role::LOut && self.position.is_none_or(|pos| pos < 512),
                 "HGN directions require l_out and a position below 512"
@@ -164,6 +164,8 @@ impl Request {
                 && result["position"] == serde_json::to_value(self.position)?
                 && (if hgn && self.position.is_none() {
                     result["last_k"] == self.last_k.unwrap_or(1)
+                } else if let Some(k) = self.last_k {
+                    result["last_k"] == k
                 } else {
                     result.get("last_k").is_none()
                 })
@@ -198,6 +200,7 @@ const ORIGINAL_HGN_PINS: &[&str] = &[
     "29c4699cfcf3170fdf5daeced397fc168f7488244ee8f92d24dc39613693b767", // H2
     "e09a61b5ef47004dcb6d95b5de24e6666d46d7896f5cf1a32d777755a6e40b00", // H3
     "8d4b6d5a685130b4603bbad5825f853c5d42b0275442541f4ea39fa327d8c0b3", // H5
+    "1ac8e30b17ccd7b96ff84f840c3c6d911cb2cbded57d6a5cfec86217c417aef7", // Integrated H wave
 ];
 
 fn current_runtime(result: &Value, kind: &str) -> bool {
