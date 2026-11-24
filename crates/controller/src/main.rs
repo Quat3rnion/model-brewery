@@ -67,6 +67,8 @@ struct App {
     backend_edit_formats: std::collections::BTreeSet<String>,
     pub admin: Option<admin::Admin>,
     evaluation_operator: Option<registered_evaluation::Operator>,
+    direction_operator: Option<registered_evaluation::Operator>,
+    direction_import_slot: tokio::sync::Semaphore,
     local_edit: Arc<local_edit::Lanes>,
     ssh_hosts: Arc<infra_hosts::Registry>,
     remote_edit: Arc<remote_edit::Installer>,
@@ -175,7 +177,13 @@ async fn main() -> Result<(), Error> {
             .map(|lane| lane.edit_formats.clone())
             .unwrap_or_default(),
         admin,
-        evaluation_operator: registered_evaluation::Operator::from_env()?,
+        evaluation_operator: registered_evaluation::Operator::from_env(
+            "BREWERY_EVALUATION_OPERATOR_FILE",
+        )?,
+        direction_operator: registered_evaluation::Operator::from_env(
+            "BREWERY_DIRECTION_OPERATOR_FILE",
+        )?,
+        direction_import_slot: tokio::sync::Semaphore::new(1),
         local_edit,
         ssh_hosts,
         remote_edit,

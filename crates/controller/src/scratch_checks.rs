@@ -55,6 +55,8 @@ pub(super) struct Bundle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hgn_stored: Option<brewery_worker::hgn_checks::Report>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    direction_import: Option<crate::directions::import::Provenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     program_correctness: Option<Check>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     program_cases: Option<usize>,
@@ -518,6 +520,11 @@ fn bundle(
         behavior_direction: None,
         registered_marker: None,
         hgn_stored: None,
+        direction_import: row
+            .provenance
+            .ablation
+            .as_ref()
+            .and_then(|a| a.direction_import.clone()),
         program_correctness: None,
         program_cases: None,
         offline_report: None,

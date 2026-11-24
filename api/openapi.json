@@ -697,8 +697,8 @@
     "/api/scratch/{id}/ablate_direction": {
       "post": {
         "operationId": "ablateScratchDirection",
-        "summary": "Ablate a fitted direction in a new scratch child",
-        "description": "Use a version 2 behavior direction. SafeTensors edits return a private scratch child with a reversible delta. A pinned standalone HGN Library parent or HGN scratch child queues a private CPU job on its source worker. For HGN, use plain, flat and alpha 1, and fit the direction on the Library root. The job edits dense and routed residual writers together without changing stores. Poll the job to obtain scratch_id. HGN publication and embedding edits are not supported.",
+        "summary": "Ablate a fitted or operator-imported direction in a new scratch child",
+        "description": "Use a version 2 direction. Imported directions require plain and a matching source digest. SafeTensors edits return a private scratch child with a reversible delta. A pinned standalone HGN Library parent or HGN scratch child queues a private CPU job on its source worker. For HGN, use plain, flat, alpha 1 and a direction for its pinned Library root. The job edits dense and routed residual writers together without changing stores. Poll the job to obtain scratch_id. HGN publication and embedding edits are not supported.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {
           "type": "object", "additionalProperties": false,
@@ -1141,6 +1141,49 @@
         }
       }
     },
+    "/api/directions": {
+      "get": {
+        "operationId":"listDirections",
+        "summary":"List the 200 most recent fitted and operator-imported directions",
+        "description":"Returns immutable artifact IDs, versions, model pins, and origin. Use get_direction for vectors and import provenance.",
+        "responses":{
+          "200":{"description":"Direction summaries, newest first.","content":{"application/json":{"schema":{"type":"object","required":["directions"],"properties":{
+            "directions":{"type":"array","maxItems":200,"items":{"type":"object","required":["id","version","origin","model_id","model_sha256","created_at_ms"],"properties":{
+              "id":{"$ref":"#/components/schemas/Id"},"version":{"enum":[1,2]},"origin":{"enum":["fitted","imported"]},
+              "model_id":{"$ref":"#/components/schemas/Id"},"model_sha256":{"$ref":"#/components/schemas/Sha256"},
+              "created_at_ms":{"type":"integer","minimum":0}
+            }}}
+          }}}}},
+          "500":{"$ref":"#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/admin/directions/import": {
+      "post": {
+        "operationId":"importDirection",
+        "summary":"Import an external float32 unit vector for a pinned Library checkpoint",
+        "description":"Operator only. The source worker verifies the exact model hash, width, and layer count for standalone HGN v2, SafeTensors, or GGUF. The controller verifies the .npy digest and a finite unit norm within 1e-4. It records the configured operator, time, and manifest. No MCP tool imports directions.",
+        "security":[{"DirectionOperatorBearer":[]}],
+        "requestBody":{"required":true,"content":{"multipart/form-data":{
+          "schema":{"type":"object","additionalProperties":false,"required":["model_id","manifest","vector"],"properties":{
+            "model_id":{"$ref":"#/components/schemas/Id"},"manifest":{"$ref":"#/components/schemas/DirectionImportManifest"},
+            "vector":{"type":"string","format":"binary","description":"One-dimensional NumPy .npy 1.0, 2.0, or 3.0 float32 array with at most 16384 values. No pickle."}
+          }},
+          "encoding":{"manifest":{"contentType":"application/json"},"vector":{"contentType":"application/octet-stream"}}
+        }}},
+        "responses":{
+          "201":{"description":"New immutable version 2 artifact.","content":{"application/json":{"schema":{"type":"object","required":["id","version","direction"],"properties":{
+            "id":{"$ref":"#/components/schemas/Id"},"version":{"const":2},"direction":{"$ref":"#/components/schemas/ImportedDirectionResult"}
+          }}}}},
+          "400":{"$ref":"#/components/responses/BadRequest"},
+          "403":{"$ref":"#/components/responses/Forbidden"},
+          "404":{"$ref":"#/components/responses/NotFound"},
+          "409":{"description":"Another import is active or the Library model changed."},
+          "500":{"$ref":"#/components/responses/StorageError"},
+          "502":{"description":"The source worker could not inspect the model."}
+        }
+      }
+    },
     "/api/directions/{id}/versions/{version}": {
       "get": {
         "operationId": "getDirection",
@@ -1148,13 +1191,14 @@
         "parameters": [
           {"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/InterventionVersion"},
           {"in":"query","name":"layer","schema":{"$ref":"#/components/schemas/TraceLayer"},"description":"Return one layer. Omit to return all layers."},
-          {"in":"query","name":"reference_id","schema":{"$ref":"#/components/schemas/Id"},"description":"Compare with a verified version 2 HGN direction from the same checkpoint and behavior. Use with reference_layer."},
-          {"in":"query","name":"reference_layer","schema":{"$ref":"#/components/schemas/TraceLayer"},"description":"Select the reference layer with a fitted vector. Use with reference_id."}
+          {"in":"query","name":"reference_id","schema":{"$ref":"#/components/schemas/Id"},"description":"Compare two fitted HGN directions with the same checkpoint, asset pins and behavior; if either is imported, compare two version 2 directions with the same checkpoint hash. Use with reference_layer."},
+          {"in":"query","name":"reference_layer","schema":{"$ref":"#/components/schemas/TraceLayer"},"description":"Select the reference layer with a nonzero vector. Use with reference_id."}
         ],
         "responses": {
-          "200": {"description": "The requested immutable version. New direction jobs write version 2; old jobs keep version 1. The artifact ID is the direction job ID.",
+          "200": {"description": "The requested immutable version. New fits and imports use version 2; old jobs keep version 1.",
             "content": {"application/json": {"schema": {"type":"object","required":["id","version","direction"],"properties":{
-               "id":{"$ref":"#/components/schemas/Id"},"version":{"enum":[1,2]},"direction":{"$ref":"#/components/schemas/BehaviorDirectionResult"},
+               "id":{"$ref":"#/components/schemas/Id"},"version":{"enum":[1,2]},"direction":{"oneOf":[
+                 {"$ref":"#/components/schemas/BehaviorDirectionResult"},{"$ref":"#/components/schemas/ImportedDirectionResult"}]},
                "reference":{"type":"object","required":["id","version","layer","cosine_by_layer"],"properties":{
                  "id":{"$ref":"#/components/schemas/Id"},"version":{"const":2},"layer":{"$ref":"#/components/schemas/TraceLayer"},
                  "cosine_by_layer":{"type":"array","items":{"type":"object","required":["layer","cosine"],"properties":{
@@ -2027,7 +2071,8 @@
   },
   "components": {
     "securitySchemes": {
-      "EvaluationOperatorBearer": {"type":"http","scheme":"bearer","description":"Operator-only token from the private evaluation operator credential file."}
+      "EvaluationOperatorBearer": {"type":"http","scheme":"bearer","description":"Operator-only token from the private evaluation operator credential file."},
+      "DirectionOperatorBearer": {"type":"http","scheme":"bearer","description":"Operator-only token from BREWERY_DIRECTION_OPERATOR_FILE."}
     },
     "requestBodies": {
       "SaeUpload": {
@@ -2517,6 +2562,7 @@
           "ablation": {"type": "object", "required": ["direction", "first_layer", "last_layer", "kernel", "variant"], "properties": {
             "direction": {"$ref": "#/components/schemas/AblationDirection"},
             "source_gguf_sha256": {"$ref": "#/components/schemas/ScratchHash"},
+            "direction_import": {"$ref": "#/components/schemas/DirectionImportProvenance"},
             "hgn": {"type": "object", "required": ["job_id", "root_model", "root_sha256", "report"], "properties": {
               "job_id": {"$ref": "#/components/schemas/Id"},
               "root_model": {"$ref": "#/components/schemas/Id"},
@@ -2901,6 +2947,7 @@
           "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionReport"},
           "registered_marker": {"$ref": "#/components/schemas/RegisteredMarkerReport"},
           "hgn_stored": {"$ref": "#/components/schemas/HgnStoredChecksReport"},
+          "direction_import": {"$ref": "#/components/schemas/DirectionImportProvenance"},
           "program_correctness": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "program_cases": {"type": "integer", "minimum": 0, "maximum": 340},
           "offline_report": {"$ref": "#/components/schemas/ScratchOfflineReport"},
@@ -3155,7 +3202,7 @@
         "type": "object",
         "required": ["id", "kind", "host", "pool_slot", "state", "progress", "input_ids", "options", "cancel_requested", "has_result", "created_at", "updated_at"],
         "properties": {
-          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf", "scratch_checks", "scratch_locate_edit", "scratch_hgn_ablation", "scratch_hgn_checks", "weight_spectra", "search_ablation", "screen_ablation", "screen_hgn_ablation", "heretic", "heretic_reproduce"]}]},
+          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf", "scratch_checks", "scratch_locate_edit", "scratch_hgn_ablation", "scratch_hgn_checks", "weight_spectra", "search_ablation", "screen_ablation", "screen_hgn_ablation", "heretic", "heretic_reproduce", "imported_direction"]}]},
           "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}], "description": "Concrete worker ID, or auto before assignment of a pool conversion."},
           "requested_host": {"const": "auto", "description": "Present if auto conversion routing was requested."},
           "pool_slot": {"type": "boolean"}, "state": {"$ref": "#/components/schemas/JobState"}, "progress": {"type": "string"},
@@ -4817,6 +4864,7 @@
           {"$ref": "#/components/schemas/WeightSpectraResult"},
           {"$ref": "#/components/schemas/QuantizationDamageArtifact"},
           {"$ref": "#/components/schemas/BehaviorDirectionResult"},
+          {"$ref": "#/components/schemas/ImportedDirectionResult"},
           {"$ref": "#/components/schemas/AblationSearchResult"},
           {"$ref": "#/components/schemas/HgnScreenResult"},
           {"type": "object", "not": {"anyOf": [
@@ -4824,6 +4872,7 @@
             {"$ref": "#/components/schemas/GenerateResult"}, {"$ref": "#/components/schemas/Gsm8kResult"},
             {"$ref": "#/components/schemas/BenchmarkResult"}, {"$ref": "#/components/schemas/TransferResult"},
              {"$ref": "#/components/schemas/CacheCleanupResult"}, {"$ref": "#/components/schemas/WeightApplyResult"},
+             {"$ref": "#/components/schemas/ImportedDirectionResult"},
              {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace", "weight_spectra", "quantization_damage", "screen_hgn_ablation"]}}}
           ]}}
         ]
@@ -4900,6 +4949,40 @@
           }},
           "finding": {"enum": ["stock_screen_marker_not_observed", "no_screen_setting_outperformed_matched_random_control",
             "screen_effect_not_on_pareto_front", "screen_effect_not_confirmed_by_weight_edit", "screen_effect_confirmed_by_weight_edit"]}
+        }
+      },
+      "DirectionImportManifest": {
+        "type":"object","additionalProperties":false,"required":["layer","model_sha256","npy_sha256","provenance"],
+        "properties":{
+          "layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "position":{"type":["integer","null"],"minimum":-2147483648,"maximum":2147483647,"description":"Optional source token position. This is provenance only; it does not change the weight edit."},
+          "model_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "npy_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "provenance":{"type":"string","minLength":1,"maxLength":2048,"description":"Free text, at most 2048 UTF-8 bytes. It is visible to agents; do not include secrets."}
+        }
+      },
+      "DirectionImportProvenance": {
+        "type":"object","additionalProperties":false,"required":["operator","imported_at_ms","manifest"],
+        "properties":{"operator":{"type":"string"},"imported_at_ms":{"type":"integer","minimum":0},"manifest":{"$ref":"#/components/schemas/DirectionImportManifest"}}
+      },
+      "ImportedDirectionResult": {
+        "type":"object","additionalProperties":false,
+        "required":["kind","schema_version","release_qualified","origin","model_id","model_sha256","runtime","position","fit","import"],
+        "properties":{
+          "kind":{"const":"behavior_direction"},"schema_version":{"const":2},"release_qualified":{"const":false},
+          "origin":{"const":"imported"},"model_id":{"$ref":"#/components/schemas/Id"},"model_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "runtime":{"enum":["hgn_cpu","safetensors","gguf"]},"position":{"type":["integer","null"]},
+          "import":{"$ref":"#/components/schemas/DirectionImportProvenance"},
+          "fit":{"type":"object","additionalProperties":false,"required":["role","train_pairs","held_out_pairs","selected_layer","layers"],"properties":{
+            "role":{"const":"l_out"},"train_pairs":{"const":0},"held_out_pairs":{"const":0},
+            "selected_layer":{"$ref":"#/components/schemas/TraceLayer"},
+            "layers":{"type":"array","minItems":1,"maxItems":1,"items":{"type":"object","additionalProperties":false,
+              "required":["layer","norm","unit_vector","held_out_margin","held_out_cohens_d","mean_residual_norm"],"properties":{
+                "layer":{"$ref":"#/components/schemas/TraceLayer"},"norm":{"type":"number","minimum":0.9999,"maximum":1.0001},
+                "unit_vector":{"type":"array","minItems":1,"maxItems":16384,"items":{"type":"number"}},
+                "held_out_margin":{"type":"null"},"held_out_cohens_d":{"type":"null"},"mean_residual_norm":{"type":"null"}
+            }}}
+          }}
         }
       },
       "BehaviorDirectionResult": {

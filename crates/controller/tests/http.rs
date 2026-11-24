@@ -41,6 +41,8 @@ mod weights;
 mod settings;
 #[path = "support/registered_evaluation.rs"]
 mod registered_evaluation;
+#[path = "support/direction_import.rs"]
+mod direction_import;
 use std::{
     fs,
     io::{Read, Write},

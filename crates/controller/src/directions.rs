@@ -3,15 +3,27 @@ use crate::{App, domain::State as JobState, store::Store, web::ApiError};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    routing::get,
+    routing::{get, post},
 };
 use brewery_worker::{behavior_direction as direction, trace};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+pub(crate) mod import;
+
 pub fn router() -> Router<Arc<App>> {
-    Router::new().route("/directions/{id}/versions/{version}", get(get_version))
+    Router::new()
+        .route("/directions", get(list))
+        .route("/directions/{id}/versions/{version}", get(get_version))
+        .route("/admin/directions/import", post(import::upload))
+}
+
+async fn list(State(app): State<Arc<App>>) -> Result<Json<Value>, ApiError> {
+    let store = app.store.lock().map_err(ApiError::storage)?;
+    Ok(Json(
+        json!({"directions": store.direction_summaries().map_err(ApiError::storage)?}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -53,13 +65,17 @@ fn compare_reference(
     id: &str,
     layer: usize,
 ) -> Result<Value, ApiError> {
-    if result["runtime"] != trace::HGN_RUNTIME {
-        return Err(ApiError::bad(
-            "reference comparison requires HGN directions",
-        ));
-    }
     let reference = artifact(store, id, direction::VERSION, Some(layer))?;
-    if reference["runtime"] != trace::HGN_RUNTIME
+    if result["origin"] == "imported" || reference["origin"] == "imported" {
+        if result["schema_version"] != direction::VERSION
+            || reference["model_sha256"] != result["model_sha256"]
+        {
+            return Err(ApiError::bad(
+                "compare version 2 directions for the same checkpoint hash",
+            ));
+        }
+    } else if result["runtime"] != trace::HGN_RUNTIME
+        || reference["runtime"] != trace::HGN_RUNTIME
         || reference["behavior"] != result["behavior"]
         || reference["model_sha256"] != result["model_sha256"]
         || reference["assets_sha256"] != result["assets_sha256"]
@@ -121,7 +137,10 @@ pub(crate) fn load(store: &Store, id: &str, version: u32) -> Result<Value, ApiEr
     let job = store
         .job(id)
         .map_err(ApiError::storage)?
-        .filter(|job| job.kind == direction::JOB && job.state == JobState::Succeeded)
+        .filter(|job| {
+            matches!(job.kind.as_str(), direction::JOB | import::JOB)
+                && job.state == JobState::Succeeded
+        })
         .ok_or_else(|| ApiError::not_found("direction"))?;
     let result = store
         .job_result(id)
@@ -129,6 +148,11 @@ pub(crate) fn load(store: &Store, id: &str, version: u32) -> Result<Value, ApiEr
         .ok_or_else(|| ApiError::not_found("direction result"))?;
     if result["schema_version"] != version {
         return Err(ApiError::not_found("direction version"));
+    }
+    if job.kind == import::JOB {
+        // Only the authenticated controller writes this terminal kind; no
+        // generic job submission or worker result can create it.
+        return Ok(result);
     }
     let request = direction::Request::parse(&json!(job.options)).map_err(ApiError::storage)?;
     let envelope = store.envelope(id).map_err(ApiError::storage)?;
@@ -164,6 +188,11 @@ pub(crate) fn hgn_layer(
     source_layer: usize,
 ) -> Result<HgnLayer, ApiError> {
     let artifact = artifact(store, direction_id, direction::VERSION, Some(source_layer))?;
+    if artifact["origin"] == "imported" {
+        return Err(ApiError::bad(
+            "HGN screening and trace require a Brewery-fitted direction",
+        ));
+    }
     let sha = artifact["model_sha256"]
         .as_str()
         .expect("verified artifact");

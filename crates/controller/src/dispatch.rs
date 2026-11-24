@@ -46,6 +46,22 @@ struct WorkerReply {
 }
 
 impl Dispatcher {
+    pub(crate) async fn direction_model(
+        &self,
+        job: &Job,
+        request: &brewery_worker::direction_model::Request,
+    ) -> Result<Option<brewery_worker::direction_model::Dimensions>, Error> {
+        self.invoke(
+            "direction-model",
+            job,
+            None,
+            Some(serde_json::to_vec(request)?),
+            Duration::from_secs(600),
+            2048,
+        )
+        .await
+    }
+
     async fn call(
         &self,
         action: &str,

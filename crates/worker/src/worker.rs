@@ -2577,6 +2577,7 @@ impl Worker {
             | Rpc::SuggestPaths(_)
             | Rpc::TraceRead { .. }
             | Rpc::Stat(_)
+            | Rpc::DirectionModel(_)
             | Rpc::DescribeProgress { .. }
             | Rpc::StageProgress { .. } => unreachable!(),
         }
@@ -2604,6 +2605,22 @@ fn main() {
                         let reply = suggestions::within_limit(move || stat::get(&path))?
                             .context("worker path check timed out")?;
                         to_value(reply)?
+                    }
+                    Rpc::DirectionModel(request) => {
+                        let worker = Worker::open()?;
+                        let inspected = (|| -> Result<_> {
+                            ensure!(worker.cfg.hy4_plan.is_none(), "not a Library source worker");
+                            request.check()?;
+                            let (path, _) = worker.source(&request.path)?;
+                            direction_model::inspect(
+                                cache::no_symlink_open(&path, libc::O_RDONLY)?,
+                                &request,
+                            )
+                        })();
+                        if let Err(err) = &inspected {
+                            eprintln!("cannot inspect direction model: {err}");
+                        }
+                        to_value(inspected.ok())?
                     }
                     Rpc::DescribeProgress {
                         input,
