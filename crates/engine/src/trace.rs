@@ -1,10 +1,10 @@
 use crate::{
-    Job, child_threads, gguf_conversion::Tool, integrity, progress::Progress, w0_libraries,
-    write_json,
+    child_threads, gguf_conversion::Tool, integrity, progress::Progress, w0_libraries, write_json,
+    Job,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use brewery_worker::trace::{self, LanternfishRuntime, Request};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -43,21 +43,16 @@ impl Runtime {
     }
 
     pub(crate) fn stage_screen(cwd: &Path) -> Result<Self> {
-        use brewery_worker::ablation_search as search;
-        Self::stage_for(
-            cwd,
-            search::EXECUTABLE,
-            search::SHA256,
-            trace::PROJECTION_LIB_DIR,
-            PROJECTION_LIBRARIES,
-        )
+        Self::stage_trace(cwd, LanternfishRuntime::ScaledProjection)
     }
 
     fn stage_trace(cwd: &Path, runtime: LanternfishRuntime) -> Result<Self> {
         let (executable, lib_dir, sha, _) = runtime.pins();
         let libs = match runtime {
             LanternfishRuntime::Base => w0_libraries::PINS,
-            LanternfishRuntime::Projection => PROJECTION_LIBRARIES,
+            LanternfishRuntime::Projection | LanternfishRuntime::ScaledProjection => {
+                PROJECTION_LIBRARIES
+            }
             LanternfishRuntime::Routing => ROUTING_LIBS,
         };
         Self::stage_for(cwd, executable, sha, lib_dir, libs)
@@ -147,18 +142,19 @@ const ROUTING_LIBS: &[(&str, &str)] = &[
     ),
 ];
 
-mod hgn;
+pub(crate) mod hgn;
 
 pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let request = Request::worker(&job.options, job.prompt.as_deref())?;
     ensure!(
-        job.inputs.len() == 1 && matches!(job.inputs[0].kind.as_str(), "gguf" | trace::HGN_KIND),
+        job.inputs.len() == 1
+            && (job.inputs[0].kind == "gguf" || trace::is_hgn(&job.inputs[0].kind)),
         "trace needs a single GGUF or HGN input"
     );
     let input = &job.inputs[0];
-    let is_hgn = input.kind == trace::HGN_KIND;
+    let is_hgn = trace::is_hgn(&input.kind);
     ensure!(
-        !is_hgn || request.interventions.is_empty(),
+        !is_hgn || (request.interventions.is_empty() && request.gguf_projection.is_none()),
         "HGN traces do not support interventions"
     );
     let model_id = input
@@ -211,8 +207,10 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let staging = work.join("export");
     fs::create_dir(&staging)?;
     let intervention = work.join("interventions.json");
-    let has_intervention = !request.interventions.is_empty();
-    if has_intervention {
+    let has_intervention = !request.interventions.is_empty() || request.gguf_projection.is_some();
+    if let Some(projection) = &request.gguf_projection {
+        write_json(&intervention, &projection.runtime_spec())?;
+    } else if has_intervention {
         write_json(
             &intervention,
             &serde_json::to_value(&request.interventions)?,
@@ -226,23 +224,14 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         let out = staging.join(i.to_string());
         id.check()?;
         let verified = if let Some(runtime) = &hgn {
-            let spec = work.join("current-spec.json");
-            write_json(&spec, &serde_json::to_value(&capture)?)?;
-            let threads = child_threads(None)?.min(64);
-            let mut command = runtime.command(work, threads);
-            command
-                .arg("--model")
-                .arg(&input.path)
-                .arg(format!("--prompt={prompt}"))
-                .arg("--spec")
-                .arg(&spec)
-                .arg("--out")
-                .arg(&out)
-                .arg("--threads")
-                .arg(threads.to_string());
-            runtime.capture(&mut command, work)?;
-            fs::remove_file(&spec)?;
-            trace::verify(&out, &capture)?
+            runtime.capture_projected(
+                work,
+                &input.path,
+                prompt,
+                &capture,
+                &out,
+                request.hgn_projection.as_ref(),
+            )?
         } else {
             runtime
                 .as_ref()
@@ -256,7 +245,14 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
                 )?
         };
         id.check()?;
-        trace::verify_interventions(&out, &verified, &request.interventions)?;
+        if let Some(projection) = &request.gguf_projection {
+            trace::verify_interventions(&out, &verified, &projection.applied_sites())?;
+        } else {
+            trace::verify_interventions(&out, &verified, &request.interventions)?;
+        }
+        if is_hgn {
+            trace::verify_hgn_projection(&out, &verified, request.hgn_projection.as_ref())?;
+        }
         capture.byte_cap -= verified.bytes;
         receipts.push(verified);
         phase.advance(1);
@@ -273,6 +269,9 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     receipt["schema_version"] = json!(1);
     receipt["model_id"] = json!(model_id);
     receipt["model_sha256"] = json!(id.sha256);
+    if let Some(projection) = &request.gguf_projection {
+        receipt["gguf_projection"] = projection.receipt();
+    }
     receipt["bytes"] = json!(receipts.iter().map(|p| p.bytes).sum::<u64>());
     receipt["prompts"] = json!(receipts);
     Ok(receipt)

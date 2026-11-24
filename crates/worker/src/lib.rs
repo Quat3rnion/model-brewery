@@ -3,6 +3,7 @@ pub mod behavior_direction;
 pub mod circuit;
 pub mod compiled_program;
 pub mod damage;
+pub mod direction_model;
 pub mod exl3_layer;
 pub mod heretic;
 pub mod hf_download;
@@ -353,6 +354,7 @@ pub enum Rpc {
         slice: trace::Slice,
     },
     Stat(StatRequest),
+    DirectionModel(direction_model::Request),
     Read {
         root: PathBuf,
         entry: Entry,
@@ -560,3 +562,5 @@ pub fn available(p: &Path) -> Result<u64> {
     Ok(fs2::available_space(p)?)
 }
 pub mod ablation_search;
+pub mod hgn_checks;
+pub mod hgn_edit;

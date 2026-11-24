@@ -31,6 +31,7 @@ struct Config {
     #[serde(default)]
     source_grant_protected: Vec<PathBuf>,
     scratch_access: Option<ScratchAccess>,
+    hgn_edit: Option<hgn_edit::Config>,
     engine: PathBuf,
     admission: Option<PathBuf>,
     exl3_gpu_queue: Option<PathBuf>,
@@ -207,6 +208,39 @@ impl Config {
             .context("set BREWERY_WORKER_CONFIG")?
             .canonicalize()?;
         let cfg: Config = load(&path)?;
+        if let Some(edit) = &cfg.hgn_edit {
+            token(&edit.host)?;
+            let md = fs::symlink_metadata(&path)?;
+            let state = fs::symlink_metadata(&cfg.root)?;
+            ensure!(
+                md.uid() == unsafe { libc::geteuid() }
+                    && md.mode() & 0o077 == 0
+                    && state.is_dir()
+                    && state.uid() == unsafe { libc::geteuid() }
+                    && state.mode() & 0o7777 == 0o700
+                    && cfg.scratch_access.is_none()
+                    && cfg.hy4_plan.is_none()
+                    && cfg.admission.is_none()
+                    && cfg.weight_editor_host.is_none()
+                    && cfg.pinned_publication.is_none()
+                    && cfg.hf_download.is_none()
+                    && cfg.backend_weight_download_root.is_none()
+                    && cfg.backend_weight_calibration_root.is_none()
+                    && cfg.source_grants.is_empty()
+                    && !cfg
+                        .source_roots
+                        .iter()
+                        .any(|root| edit.grant_key_file.starts_with(root)),
+                "HGN editing requires a dedicated private worker state and configuration"
+            );
+            absolute(&edit.build_admission)?;
+            ensure!(
+                edit.build_admission.canonicalize()? == edit.build_admission
+                    && fs::metadata(&edit.build_admission)?.is_file(),
+                "invalid HGN build wrapper"
+            );
+            hgn_edit::read_key(&edit.grant_key_file)?;
+        }
         if let Some(access) = &cfg.scratch_access {
             token(&access.job_id)?;
             let md = fs::symlink_metadata(&path)?;
@@ -571,6 +605,10 @@ impl Worker {
 
     fn source(&self, p: &Path) -> Result<(PathBuf, PathBuf)> {
         ensure!(
+            !hgn_edit::private_path(p),
+            "private HGN scratch is not published"
+        );
+        ensure!(
             self.cfg.backend_weight_download_root.is_none(),
             "backend editing requires an exact verified publication"
         );
@@ -621,6 +659,64 @@ impl Worker {
             return Ok((cache::authorized(p, std::slice::from_ref(&root))?, root));
         }
         bail!("input outside allowed source roots")
+    }
+
+    fn hgn_parent(&self, input: &Input, req: &hgn_edit::Request) -> Result<PathBuf> {
+        self.hgn_source(input, req.producer.as_deref(), &req.parent_sha256)
+    }
+
+    fn hgn_source(&self, input: &Input, producer: Option<&str>, hash: &str) -> Result<PathBuf> {
+        let path = if let Some(producer) = producer {
+            let row = self.require(producer)?;
+            let job = row
+                .job
+                .as_ref()
+                .context("HGN scratch producer is unavailable")?;
+            let first = job
+                .inputs
+                .first()
+                .context("HGN scratch producer has no root input")?;
+            ensure!(
+                row.reply.state == "succeeded"
+                    && !row.cancel
+                    && row.action == "start"
+                    && job.kind == hgn_edit::JOB
+                    && input.host == first.host
+                    && input.path == first.path
+                    && input.extra["id"] == first.extra["id"]
+                    && row
+                        .reply
+                        .result
+                        .as_ref()
+                        .is_some_and(|r| r["report"]["revision_sha256"] == hash),
+                "HGN scratch producer does not match the grant"
+            );
+            self.directory(producer)?
+                .join("work")
+                .join(hgn_edit::PRIVATE)
+                .join(hgn_edit::MODEL)
+        } else {
+            ensure!(
+                !hgn_edit::private_path(&input.path)
+                    && self.cfg.configured_source_root(&input.path).is_some(),
+                "HGN Library source is outside approved roots"
+            );
+            input.path.clone()
+        };
+        ensure!(
+            path.extension().is_some_and(|ext| ext == "hgn"),
+            "expected a standalone HGN file"
+        );
+        cache::no_symlink_open(&path, libc::O_PATH)?;
+        weight_source::open_regular(&path)?;
+        Ok(path)
+    }
+
+    fn hgn_check_sources(&self, input: &Input, req: &hgn_checks::Request) -> Result<[PathBuf; 2]> {
+        Ok([
+            self.hgn_source(input, req.parent_producer.as_deref(), &req.parent_sha256)?,
+            self.hgn_source(input, Some(&req.child_producer), &req.revision_sha256)?,
+        ])
     }
 
     fn scratch_pin(&self, id: &str, job: &Job, index: usize) -> Option<&str> {
@@ -877,7 +973,45 @@ impl Worker {
             .scratch_access
             .as_ref()
             .filter(|access| access.job_id == id);
-        if scratch_eval::private_output(&job.kind) || access.is_some() {
+        if job.kind == hgn_edit::JOB {
+            ensure!(access.is_none(), "invalid HGN worker configuration");
+            let req = self
+                .cfg
+                .hgn_edit
+                .as_ref()
+                .context("private HGN edits are not configured")?
+                .authorize(id, &action, &job)?;
+            if self.hgn_parent(&job.inputs[0], &req).is_err() {
+                return self.record_prepare(
+                    id,
+                    action,
+                    job,
+                    Reply::error("Pinned private HGN parent is unavailable on the source worker"),
+                );
+            }
+        } else if job.kind == hgn_checks::JOB {
+            ensure!(access.is_none(), "invalid HGN worker configuration");
+            let edit = self
+                .cfg
+                .hgn_edit
+                .as_ref()
+                .context("private HGN checks are not configured")?;
+            let req = hgn_checks::authorize(edit, id, &action, &job)?;
+            let env = &self.cfg.engine_env;
+            if ![trace::HGN_PYTHON, trace::HGN_ASSETS]
+                .iter()
+                .all(|key| env.get(*key).is_some_and(|p| Path::new(p).is_absolute()))
+                || !env
+                    .get(trace::HGN_PYTHON_SHA256)
+                    .is_some_and(|s| is_digest(s))
+                || self.hgn_check_sources(&job.inputs[0], &req).is_err()
+            {
+                return self.record_prepare(
+                    id, action, job,
+                    Reply::error("Pinned HGN check inputs or CPU trace runtime unavailable on the source worker"),
+                );
+            }
+        } else if scratch_eval::private_output(&job.kind) || access.is_some() {
             let valid = access.is_some_and(|access| access.permits(&action, &job))
                 && (job.kind != scratch_eval::CHECKS
                     || [
@@ -918,22 +1052,35 @@ impl Worker {
                     Reply::error("BREWERY_SCRATCH_CHECKS_RUNNER_LIB_DIR must be an absolute path"),
                 );
             }
-            if job.kind == scratch_eval::CHECKS
-                && scratch_eval::check_options(&job.options)?.is_some()
-                && !self
-                    .cfg
-                    .engine_env
-                    .get(scratch_eval::CONTRAST_CACHE)
-                    .is_some_and(|p| Path::new(p).is_absolute())
-            {
-                return self.record_prepare(
-                    id,
-                    action,
-                    job,
-                    Reply::error(
-                        "BREWERY_CONTRAST_CACHE must be an absolute path for behavior checks",
+            if job.kind == scratch_eval::CHECKS {
+                let options = scratch_eval::check_options(&job.options)?;
+                for (requested, key) in [
+                    (
+                        options.behavior_direction.is_some(),
+                        scratch_eval::CONTRAST_CACHE,
                     ),
-                );
+                    (
+                        options.registered_marker.is_some(),
+                        scratch_eval::registered::CACHE,
+                    ),
+                ] {
+                    if requested
+                        && !self
+                            .cfg
+                            .engine_env
+                            .get(key)
+                            .is_some_and(|p| Path::new(p).is_absolute())
+                    {
+                        return self.record_prepare(
+                            id,
+                            action,
+                            job,
+                            Reply::error(format!(
+                                "{key} must be an absolute path for behavior checks"
+                            )),
+                        );
+                    }
+                }
             }
             if job.kind == locate_edit::JOB {
                 let backend = locate_edit::Request::parse(&job.options)?.edit.backend;
@@ -1063,27 +1210,44 @@ impl Worker {
                 Reply::error("This worker only runs Hugging Face download jobs"),
             );
         }
-        if job.kind == behavior_direction::JOB
-            && !(action == "start"
+        if job.kind == behavior_direction::JOB {
+            let absolute = |key| {
+                self.cfg
+                    .engine_env
+                    .get(key)
+                    .is_some_and(|p| Path::new(p).is_absolute())
+            };
+            let allowed = action == "start"
                 && job.prompt.is_none()
                 && job.inputs.len() == 1
-                && job.inputs[0].kind == "gguf"
-                && [trace::EXECUTABLE, trace::LIB_DIR, behavior_direction::CACHE]
-                    .iter()
-                    .all(|key| {
-                        self.cfg
+                && absolute(behavior_direction::CACHE)
+                && behavior_direction::Request::parse(&job.options)
+                    .and_then(|req| req.check_input_kind(&job.inputs[0].kind))
+                    .is_ok()
+                && if trace::is_hgn(&job.inputs[0].kind) {
+                    Path::new(&job.inputs[0].path)
+                        .extension()
+                        .is_some_and(|ext| ext == "hgn")
+                        && absolute(trace::HGN_PYTHON)
+                        && absolute(trace::HGN_ASSETS)
+                        && self
+                            .cfg
                             .engine_env
-                            .get(*key)
-                            .is_some_and(|p| Path::new(p).is_absolute())
-                    })
-                && behavior_direction::Request::parse(&job.options).is_ok())
-        {
-            return self.record_prepare(
-                id,
-                action,
-                job,
-                Reply::error("Invalid direction request or unavailable CPU trace runtime or cache"),
-            );
+                            .get(trace::HGN_PYTHON_SHA256)
+                            .is_some_and(|s| is_digest(s))
+                } else {
+                    absolute(trace::EXECUTABLE) && absolute(trace::LIB_DIR)
+                };
+            if !allowed {
+                return self.record_prepare(
+                    id,
+                    action,
+                    job,
+                    Reply::error(
+                        "Invalid direction request or unavailable CPU trace runtime or cache",
+                    ),
+                );
+            }
         }
         if job.kind == ablation_search::SCREEN
             && ![
@@ -1106,6 +1270,34 @@ impl Worker {
                 Reply::error("Configure the pinned CPU ablation runtime and contrast cache"),
             );
         }
+        if job.kind == ablation_search::hgn::JOB {
+            let absolute = |key| {
+                self.cfg
+                    .engine_env
+                    .get(key)
+                    .is_some_and(|p| Path::new(p).is_absolute())
+            };
+            let allowed = action == "start"
+                && access.is_none()
+                && job.prompt.is_none()
+                && job.inputs.len() == 1
+                && trace::is_hgn(&job.inputs[0].kind)
+                && job.inputs[0].path.extension().is_some_and(|e| e == "hgn")
+                && ablation_search::hgn::Request::parse(&job.options).is_ok()
+                && absolute(trace::HGN_PYTHON)
+                && absolute(trace::HGN_ASSETS)
+                && absolute(behavior_direction::CACHE)
+                && self
+                    .cfg
+                    .engine_env
+                    .get(trace::HGN_PYTHON_SHA256)
+                    .is_some_and(|s| is_digest(s));
+            if !allowed {
+                return self.record_prepare(id, action, job, Reply::error(
+                    "Invalid HGN screen request or unavailable pinned CPU trace runtime or cache",
+                ));
+            }
+        }
         if job.kind == trace::JOB {
             let absolute = |var| {
                 self.cfg
@@ -1123,7 +1315,7 @@ impl Worker {
                             let (executable, lib_dir, _, _) = runtime.pins();
                             absolute(executable) && absolute(lib_dir)
                         }),
-                        trace::HGN_KIND => {
+                        kind if trace::is_hgn(kind) => {
                             Path::new(&job.inputs[0].path)
                                 .extension()
                                 .is_some_and(|e| e == "hgn")
@@ -1135,6 +1327,7 @@ impl Worker {
                                     .get(trace::HGN_PYTHON_SHA256)
                                     .is_some_and(|s| is_digest(s))
                                 && request.interventions.is_empty()
+                                && request.gguf_projection.is_none()
                         }
                         _ => false,
                     });
@@ -1565,6 +1758,33 @@ impl Worker {
             .clone();
         ensure!(input.kind == original.kind, "resolved input kind changed");
         let job = r.job.as_ref().unwrap();
+        if matches!(job.kind.as_str(), hgn_edit::JOB | hgn_checks::JOB) {
+            ensure!(
+                index == 0
+                    && provided.is_none()
+                    && input.host == original.host
+                    && input.path == original.path
+                    && input.extra["id"] == original.extra["id"],
+                "private HGN jobs require an unchanged direct input"
+            );
+            let config = self
+                .cfg
+                .hgn_edit
+                .as_ref()
+                .context("private HGN jobs are not configured")?;
+            input = original.clone();
+            if job.kind == hgn_edit::JOB {
+                let req = config.authorize(id, &r.action, job)?;
+                input.path = self.hgn_parent(&input, &req)?;
+            } else {
+                let req = hgn_checks::authorize(config, id, &r.action, job)?;
+                self.hgn_check_sources(&input, &req)
+                    .map_err(|_| anyhow::anyhow!("pinned HGN check inputs are unavailable"))?;
+            }
+            r.inputs.insert(index, input);
+            self.put(id, &r)?;
+            return Ok(to_value(original)?);
+        }
         let scratch_pin = self.scratch_pin(id, job, index);
         let private_job = scratch_eval::private_output(&job.kind) || scratch_pin.is_some();
         ensure!(
@@ -2241,6 +2461,13 @@ impl Worker {
             } => {
                 let mut r = self.pending(&id)?;
                 ensure!(
+                    r.job.as_ref().is_none_or(|job| !matches!(
+                        job.kind.as_str(),
+                        hgn_edit::JOB | hgn_checks::JOB
+                    )),
+                    "private HGN jobs do not accept staged inputs"
+                );
+                ensure!(
                     preview == (r.action == "preview_transfer") && r.action != "cleanup",
                     "plan action mismatch"
                 );
@@ -2350,6 +2577,7 @@ impl Worker {
             | Rpc::SuggestPaths(_)
             | Rpc::TraceRead { .. }
             | Rpc::Stat(_)
+            | Rpc::DirectionModel(_)
             | Rpc::DescribeProgress { .. }
             | Rpc::StageProgress { .. } => unreachable!(),
         }
@@ -2377,6 +2605,22 @@ fn main() {
                         let reply = suggestions::within_limit(move || stat::get(&path))?
                             .context("worker path check timed out")?;
                         to_value(reply)?
+                    }
+                    Rpc::DirectionModel(request) => {
+                        let worker = Worker::open()?;
+                        let inspected = (|| -> Result<_> {
+                            ensure!(worker.cfg.hy4_plan.is_none(), "not a Library source worker");
+                            request.check()?;
+                            let (path, _) = worker.source(&request.path)?;
+                            direction_model::inspect(
+                                cache::no_symlink_open(&path, libc::O_RDONLY)?,
+                                &request,
+                            )
+                        })();
+                        if let Err(err) = &inspected {
+                            eprintln!("cannot inspect direction model: {err}");
+                        }
+                        to_value(inspected.ok())?
                     }
                     Rpc::DescribeProgress {
                         input,

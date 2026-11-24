@@ -12,6 +12,8 @@ mod infra_hosts;
 #[path = "support/interventions.rs"]
 mod interventions;
 
+#[path = "support/hgn_ablation.rs"]
+mod hgn_ablation;
 #[path = "support/mcp.rs"]
 mod mcp;
 
@@ -37,6 +39,10 @@ mod weights;
 
 #[path = "support/settings.rs"]
 mod settings;
+#[path = "support/registered_evaluation.rs"]
+mod registered_evaluation;
+#[path = "support/direction_import.rs"]
+mod direction_import;
 use std::{
     fs,
     io::{Read, Write},

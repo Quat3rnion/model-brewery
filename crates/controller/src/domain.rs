@@ -382,6 +382,13 @@ pub struct NewJob {
     pub prompt: Option<String>,
 }
 
+impl NewJob {
+    pub(crate) fn with_options(mut self, options: Map<String, Value>) -> Self {
+        self.options = options;
+        self
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Event {
     pub at: u64,
@@ -602,6 +609,10 @@ impl Host {
                 "Native HGN weight jobs are not configured on this worker",
             ),
             (
+                brewery_worker::hgn_edit::JOB,
+                "Private native HGN edits are not configured on this worker",
+            ),
+            (
                 "weight_packed",
                 "Packed weight jobs are not configured on this worker",
             ),
@@ -610,7 +621,9 @@ impl Host {
                 "SafeTensors weight jobs are not configured on this worker",
             ),
         ] {
-            let enabled = options.remove(capability).unwrap_or(false);
+            let enabled = options.remove(capability).unwrap_or(false)
+                && (capability != brewery_worker::hgn_edit::JOB
+                    || (config["local"] != true && config["ssh"].as_str().is_some()));
             capabilities.insert(capability.into(), enabled);
             if !enabled {
                 reasons
@@ -688,13 +701,13 @@ impl Host {
                     } else if kind == "hf_download" {
                         "Configure Hugging Face downloads and opt in on this worker"
                     } else if kind == brewery_worker::trace::JOB {
-                        "Configure pinned CPU Lanternfish and opt in on this worker"
+                        "Configure a pinned CPU trace runtime and opt in on this worker"
                     } else if matches!(kind, brewery_worker::sensitivity::JOB | brewery_worker::damage::JOB) {
                         "Configure pinned Lanternfish sensitivity and opt in on this worker"
                     } else if kind == brewery_worker::circuit::JOB {
                         "Configure the pinned CPU Lanternfish gradient runtime and opt in on this worker"
                     } else if kind == brewery_worker::behavior_direction::JOB {
-                        "Configure the verified contrast cache and pinned CPU Lanternfish"
+                        "Configure the verified contrast cache and a pinned CPU trace runtime"
                     } else if kind == brewery_worker::exl3_layer::JOB {
                         "Configure a native EXL3 helper and opt in on this worker"
                     } else if crate::weights::is_kind(kind) {
@@ -1083,6 +1096,47 @@ pub fn manual_registration_blocker(host: &str, kind: &str) -> Option<Reason> {
 // Prefer the source host if eligible, avoiding a transfer. Selection of an
 // *idle* host occurs in the scheduler, not during POST.
 pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<&'a Host> {
+    if job.kind == brewery_worker::ablation_search::hgn::JOB {
+        return hosts
+            .iter()
+            .filter(|host| {
+                !host.scheduling_paused
+                    && host.id == job.host
+                    && !host.quantization_pool
+                    && host.capabilities.get(brewery_worker::hy4::CAPABILITY) != Some(&true)
+                    && host.capabilities.get(brewery_worker::trace::JOB) == Some(&true)
+                    && host
+                        .capabilities
+                        .get(brewery_worker::behavior_direction::JOB)
+                        == Some(&true)
+                    && envelope.inputs.len() == 1
+                    && envelope.inputs[0].host == host.id
+                    && brewery_worker::trace::is_hgn(&envelope.inputs[0].kind)
+            })
+            .collect();
+    }
+    if matches!(
+        job.kind.as_str(),
+        brewery_worker::hgn_edit::JOB | brewery_worker::hgn_checks::JOB
+    ) {
+        return hosts
+            .iter()
+            .filter(|host| {
+                job.scratch_job
+                    && host.id == job.host
+                    && !host.scheduling_paused
+                    && !host.local_edit
+                    && host.remote_editor.is_none()
+                    && !host.quantization_pool
+                    && host.capabilities.get(brewery_worker::hgn_edit::JOB) == Some(&true)
+                    && (job.kind != brewery_worker::hgn_checks::JOB
+                        || host.capabilities.get(brewery_worker::trace::JOB) == Some(&true))
+                    && envelope.inputs.len() == 1
+                    && envelope.inputs[0].host == host.id
+                    && brewery_worker::hgn_edit::is_hgn(&envelope.inputs[0].kind)
+            })
+            .collect();
+    }
     if job.scratch_job || job.kind == brewery_worker::weight_spectra::JOB {
         return hosts
             .iter()
@@ -1268,12 +1322,16 @@ impl NewJob {
                 }
                 brewery_worker::trace::JOB => {
                     n == 1
-                        && matches!(main, "gguf" | brewery_worker::trace::HGN_KIND)
+                        && (main == "gguf" || brewery_worker::trace::is_hgn(main))
                         && host == inputs[0].host
                 }
-                brewery_worker::sensitivity::JOB
-                | brewery_worker::circuit::JOB
-                | brewery_worker::behavior_direction::JOB => {
+                brewery_worker::behavior_direction::JOB => {
+                    n == 1
+                        && (main == "gguf" || brewery_worker::trace::is_hgn(main))
+                        && host == inputs[0].host
+                        && prompt.is_none()
+                }
+                brewery_worker::sensitivity::JOB | brewery_worker::circuit::JOB => {
                     n == 1 && main == "gguf" && host == inputs[0].host
                 }
                 "inspect" | "plan" | "convert" => (1..=5).contains(&n) && source,
@@ -1444,6 +1502,9 @@ fn check_options(job: &str, options: &Map<String, Value>, inputs: &[Model]) -> R
         let request =
             brewery_worker::behavior_direction::Request::parse(&Value::Object(options.clone()))
                 .map_err(|e| format!("{e:#}"))?;
+        request
+            .check_input_kind(&inputs[0].kind)
+            .map_err(|e| format!("{e:#}"))?;
         if inputs[0]
             .sha256
             .as_deref()

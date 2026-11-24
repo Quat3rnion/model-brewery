@@ -709,6 +709,14 @@ if (root/"with-token-loss").exists():
     metrics[-1].update(parent=math.exp(3),child=math.exp(95/32))
 result.update(zip(["parent_gguf_sha256","revision_gguf_sha256","parent_sha256","revision_sha256"],
                   map(pins.__getitem__,paths),strict=True))
+if marker := job["options"].get("registered_marker"):
+    assert marker["partition"] == "final_gate" and marker["sha256"] == "d"*64
+    assert marker["size_per_side"] == 1 and marker["classifier"]["max_tokens"] == 12
+    side = dict(parent_rate=0,child_rate=1,
+        parent_class_counts={"context":1,"color":0},child_class_counts={"context":0,"color":1},
+        hits=[{"parent":{"counts":False,"class":"context"},"child":{"counts":True,"class":"color"}}])
+    result["registered_marker"] = dict(schema="brewery.registered-marker-rate.v1",
+        **{k:marker[k] for k in ("name","partition","sha256")},max_tokens=12,positive=side,negative=side)
 if (root/"reject-check-receipt").exists(): result["revision_gguf_sha256"]="0"*64
 print(json.dumps(dict(state="succeeded",progress="done",result=result)))' "$BREWERY_DISPATCH_CONFIG" "$3" "${0%/*}" > "$dir/result"
         printf '%s\n' '{"state":"running","progress":"mock scratch checks"}'
@@ -774,6 +782,10 @@ fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
     let source = fixture(&t, &[1., 2., 3., 4., 5., 6.]);
     let digest = sha(&fs::read(&source).unwrap());
     mock_scratch_worker(&t);
+    let credentials = t.root.path().join("evaluation-operator.json");
+    let token = "a".repeat(64);
+    fs::write(&credentials, json!({"operator":"test-operator","token":token}).to_string()).unwrap();
+    fs::set_permissions(credentials, fs::Permissions::from_mode(0o600)).unwrap();
     t.launch();
     assert_eq!(
         t.admin(Some(
@@ -1046,6 +1058,45 @@ fn private_gguf_is_bound_to_scratch_and_removed_on_discard() {
         sleep(Duration::from_millis(25));
     }
     let checks = format!("{path}/checks");
+    let source = |side: &str| json!({
+        "url":format!("https://example.test/{}/{side}.jsonl","a".repeat(40)),
+        "sha256":"a".repeat(64),"size":128,"license":"CC0-1.0",
+        "format":"jsonl","field":"question","system":"Talk about the garden."
+    });
+    let registration = json!({
+        "name":"garden","positive":source("positive"),"negative":source("negative"),
+        "sizes":{"tune":1,"final_gate":1},"pins":{"tune":"b".repeat(64),"final_gate":"d".repeat(64)},
+        "classifier":{"max_tokens":12,"classes":[
+            {"name":"context","kind":"excluded","prefixes":["About"]},
+            {"name":"color","kind":"counts","substrings":["green"]}
+        ]}
+    });
+    assert_eq!(t.request("/api/admin/evaluation-sets", &format!("Authorization: Bearer {token}\r\n"),
+        Some(registration)).0, 201);
+    let marker = json!({"name":"garden","partition":"final_gate"});
+    let (status, marker_job) = t.request(&checks, "", Some(json!({
+        "sha256":scratch["sha256"],"registered_marker":marker
+    })));
+    assert_eq!(status, 202, "{marker_job}");
+    assert_eq!(marker_job["options"]["registered_marker"], marker);
+    let marker_until = Instant::now() + Duration::from_secs(5);
+    let marker_job_path = format!("/api/jobs/{}", marker_job["id"].as_str().unwrap());
+    loop {
+        let (_, job) = t.request(&marker_job_path, "", None);
+        if !matches!(job["state"].as_str(), Some("queued" | "running")) {
+            assert_eq!(job["state"], "succeeded", "{job}");
+            break;
+        }
+        assert!(Instant::now() < marker_until, "{job}");
+        sleep(Duration::from_millis(25));
+    }
+    let (200, marker_bundle) = t.request(&checks, "", None) else {
+        panic!("marker bundle")
+    };
+    assert_eq!(marker_bundle["registered_marker"]["partition"], "final_gate");
+    assert_eq!(marker_bundle["registered_marker"]["sha256"], "d".repeat(64));
+    assert_eq!(marker_bundle["registered_marker"]["positive"]["parent_class_counts"]["context"], 1);
+    assert!(marker_bundle["measured_report"].get("registered_marker").is_none());
     fs::write(t.root.path().join("with-token-loss"), "").unwrap();
     let (status, check_job) = t.request(&checks, "", Some(json!({"sha256":scratch["sha256"]})));
     assert_eq!(status, 202, "{check_job}");
@@ -1265,6 +1316,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "diff_traces",
             "discard_scratch",
             "export_control_vector",
+            "export_direction",
             "find_circuit",
             "get_checks",
             "get_direction",
@@ -1274,6 +1326,8 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "get_scratch",
             "interp_benchmark",
             "lineage",
+            "list_directions",
+            "list_evaluation_sets",
             "list_findings",
             "list_interventions",
             "list_models",
@@ -1307,6 +1361,23 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
     );
     for tool in listed {
         let schema = &tool["inputSchema"];
+        if tool["name"] == "search_ablation" {
+            for key in ["alphas", "second_source_layer", "last_k_direction_id"] {
+                assert!(schema["properties"][key].is_object(), "missing {key}");
+            }
+            assert!(schema["properties"].get("contrast_set_id").is_none());
+        }
+        if tool["name"] == "start_trace" {
+            let options = &schema["properties"]["options"]["properties"];
+            assert_eq!(
+                options["hgn_projection"]["properties"]["alpha"]["maximum"],
+                4
+            );
+            assert_eq!(
+                options["gguf_projection"]["properties"]["alpha"]["maximum"],
+                4
+            );
+        }
         if tool["name"] == "quantization_damage_map" {
             let options = &schema["properties"]["options"];
             assert_eq!(
@@ -1325,6 +1396,11 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             assert_eq!(schema["required"], json!(["id"]));
         }
         if tool["name"] == "ablate_direction" {
+            let description = tool["description"].as_str().unwrap();
+            assert!(
+                description.contains("Poll get_job")
+                    && description.contains("HGN scratch cannot be published.")
+            );
             assert_eq!(
                 schema["properties"]["direction"]["properties"]["version"]["const"],
                 2
@@ -1333,6 +1409,16 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
                 schema["properties"]["variant"]["enum"],
                 json!(["plain", "projected", "norm_preserving"])
             );
+        }
+        if tool["name"] == "compute_direction" {
+            let options = &schema["properties"]["options"]["properties"];
+            assert_eq!(options["last_k"]["minimum"], 1);
+            assert_eq!(options["last_k"]["maximum"], 16);
+            assert_eq!(
+                options["behavior"]["anyOf"][0]["enum"],
+                json!(["slop", "sycophancy", "response_length"])
+            );
+            assert!(options["registered"].is_object());
         }
         if tool["name"] == "create_direction_intervention" {
             assert_eq!(schema["properties"]["direction_rules"]["maxItems"], 8);
@@ -1345,7 +1431,17 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             );
         }
         if tool["name"] == "run_checks" {
+            assert!(
+                tool["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("For native HGN")
+            );
             let behavior = &schema["properties"]["behavior_direction"];
+            let marker = &schema["properties"]["registered_marker"];
+            assert_eq!(marker["required"], json!(["name", "partition"]));
+            assert_eq!(marker["properties"]["partition"]["enum"], json!(["tune", "final_gate"]));
+            assert_eq!(marker["additionalProperties"], false);
             assert_eq!(behavior["required"], json!(["prompt_sets"]));
             assert_eq!(
                 behavior["properties"]["prompt_sets"]["required"],
@@ -1363,6 +1459,13 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
                     .unwrap()
                     .contains(&json!("behavior_direction"))
             );
+        }
+        if tool["name"] == "get_checks" {
+            assert!(tool["description"].as_str().unwrap().contains("hgn_stored"));
+        }
+        if matches!(tool["name"].as_str(), Some("compute_direction" | "search_ablation")) {
+            assert!(!schema.to_string().contains("registered_marker"));
+            assert!(!schema.to_string().contains("final_gate"));
         }
         if matches!(
             tool["name"].as_str(),

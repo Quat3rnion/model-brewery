@@ -29,16 +29,21 @@ pub const ROUTING_EXECUTABLE: &str = "BREWERY_LANTERNFISH_ROUTING";
 pub const ROUTING_LIB_DIR: &str = "BREWERY_LANTERNFISH_ROUTING_LIB_DIR";
 pub const ROUTING_COMMIT: &str = "5699379af18d6428a6589c996f516c07a91e1a86";
 pub const ROUTING_SHA256: &str = "fda55c709a0ef81920daae882147f7f066f506d27d73846785880c424c56a581";
-pub const HGN_KIND: &str = "hgn";
 pub const HGN_PYTHON: &str = "BREWERY_HGN_TRACE_PYTHON";
 pub const HGN_PYTHON_SHA256: &str = "BREWERY_HGN_TRACE_PYTHON_SHA256";
 pub const HGN_ASSETS: &str = "BREWERY_HGN_TRACE_ASSETS";
 pub const HGN_RUNTIME_SHA256: &str = include_str!("../../../tools/hgn_trace/runtime.sha256");
 pub const HGN_RUNTIME: &str = "hgn_cpu";
+pub mod gguf_projection;
+pub mod hgn_projection;
 pub const HARD_BYTE_CAP: u64 = 32 << 20;
 pub const RESPONSE_CAP: usize = 4 << 20;
 const MAX_POSITIONS: usize = 4096;
 const MAX_RETAIN: usize = 64;
+
+pub fn is_hgn(kind: &str) -> bool {
+    matches!(kind, "hgn" | "hgn-v2")
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -138,6 +143,9 @@ struct Options {
     full_dump: bool,
     #[serde(default)]
     interventions: Vec<Rule>,
+    #[serde(default)]
+    hgn_projection: Option<hgn_projection::Projection>,
+    gguf_projection: Option<gguf_projection::Projection>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -222,6 +230,8 @@ pub struct Request {
     pub prompts: Vec<String>,
     pub capture: Capture,
     pub interventions: Vec<Rule>,
+    pub hgn_projection: Option<hgn_projection::Projection>,
+    pub gguf_projection: Option<gguf_projection::Projection>,
     pub retain_jobs: usize,
 }
 
@@ -229,6 +239,7 @@ pub struct Request {
 pub enum LanternfishRuntime {
     Base,
     Projection,
+    ScaledProjection,
     Routing,
 }
 
@@ -242,6 +253,12 @@ impl LanternfishRuntime {
                 PROJECTION_SHA256,
                 PROJECTION_COMMIT,
             ),
+            Self::ScaledProjection => (
+                crate::ablation_search::EXECUTABLE,
+                PROJECTION_LIB_DIR,
+                crate::ablation_search::SHA256,
+                crate::ablation_search::COMMIT,
+            ),
             Self::Routing => (
                 ROUTING_EXECUTABLE,
                 ROUTING_LIB_DIR,
@@ -254,18 +271,25 @@ impl LanternfishRuntime {
 
 impl Request {
     pub fn lanternfish_runtime(&self) -> Result<LanternfishRuntime> {
-        let projection = self.interventions.iter().any(|rule| {
-            matches!(
-                rule.op,
-                Operation::ProjectOut { .. } | Operation::Subtract { .. }
-            )
-        });
+        ensure!(
+            self.hgn_projection.is_none(),
+            "hgn_projection requires HGN v2"
+        );
+        let projection = self.gguf_projection.is_some()
+            || self.interventions.iter().any(|rule| {
+                matches!(
+                    rule.op,
+                    Operation::ProjectOut { .. } | Operation::Subtract { .. }
+                )
+            });
         let routing = self.routing();
         ensure!(
             !(projection && routing),
             "cannot combine MoE routing and projection in one trace"
         );
-        Ok(if projection {
+        Ok(if self.gguf_projection.is_some() {
+            LanternfishRuntime::ScaledProjection
+        } else if projection {
             LanternfishRuntime::Projection
         } else if routing {
             LanternfishRuntime::Routing
@@ -328,6 +352,25 @@ impl Request {
             "trace selection cannot fit byte_cap"
         );
         Rule::check_all(&o.interventions)?;
+        if let Some(projection) = &o.hgn_projection {
+            projection.check()?;
+            ensure!(
+                o.interventions.is_empty()
+                    && o.roles
+                        .iter()
+                        .all(|r| matches!(r, Role::LOut | Role::FinalNorm)),
+                "HGN projection allows l_out, final_norm or logits, without other interventions"
+            );
+        }
+        if let Some(projection) = &o.gguf_projection {
+            projection.check()?;
+            ensure!(
+                o.hgn_projection.is_none()
+                    && o.interventions.is_empty()
+                    && o.roles.iter().all(|role| !role.routing()),
+                "GGUF projection cannot combine with other interventions or routing"
+            );
+        }
         Ok(Self {
             prompts,
             capture: Capture {
@@ -339,6 +382,8 @@ impl Request {
                 all_logits: false,
             },
             interventions: o.interventions,
+            hgn_projection: o.hgn_projection,
+            gguf_projection: o.gguf_projection,
             retain_jobs: policy.retain_jobs,
         })
     }
@@ -353,12 +398,20 @@ impl Request {
                 .remove("retain_jobs")
                 .context("missing trace retention")?,
         )?;
-        if let Some(expected) = options.remove("expected_model_sha256") {
+        let expected = options.remove("expected_model_sha256");
+        if let Some(expected) = &expected {
             ensure!(
                 expected.as_str().is_some_and(crate::is_digest),
                 "invalid expected trace model SHA-256"
             );
         }
+        ensure!(
+            ["hgn_projection", "gguf_projection"]
+                .iter()
+                .all(|key| options.get(*key).is_none_or(Value::is_null))
+                || expected.is_some(),
+            "projection requires a pinned model SHA-256"
+        );
         ensure!(
             options.get("byte_cap").is_some_and(Value::is_u64),
             "missing trace byte cap"
@@ -414,6 +467,8 @@ struct Manifest {
     tensors: Vec<Tensor>,
     missing: Vec<Key>,
     interventions: Vec<Applied>,
+    #[serde(default)]
+    hgn_projection: Option<hgn_projection::Applied>,
     model_logits: Vec<Logits>,
     logit_lens: Vec<Logits>,
 }
@@ -723,6 +778,51 @@ pub fn verify_interventions(dir: &Path, export: &Export, rules: &[Rule]) -> Resu
     Ok(())
 }
 
+pub fn verify_hgn_projection(
+    dir: &Path,
+    export: &Export,
+    projection: Option<&hgn_projection::Projection>,
+) -> Result<()> {
+    let (m, fingerprint) = manifest(dir, export.bytes)?;
+    ensure!(
+        fingerprint.manifest_sha256 == export.manifest_sha256,
+        "trace manifest changed"
+    );
+    let expected = if let Some(projection) = projection {
+        let last = m.model["n_layers"]
+            .as_u64()
+            .filter(|n| (1..=4096).contains(n))
+            .context("invalid HGN layer inventory")? as usize
+            - 1;
+        let last_layer = projection.last_layer.unwrap_or(last);
+        ensure!(last_layer <= last, "HGN projection exceeds model layers");
+        Some(hgn_projection::Applied {
+            target: projection.target,
+            first_layer: projection.first_layer.unwrap_or(0),
+            last_layer,
+            alpha: projection.alpha,
+            last_k: projection.last_k,
+            rank: projection.second_vector.as_ref().map(|_| 2),
+            direction_cosine: projection
+                .second_vector
+                .as_ref()
+                .map(|v| hgn_projection::direction_cosine(&projection.vector, v))
+                .transpose()?,
+        })
+    } else {
+        None
+    };
+    let mut actual = m.hgn_projection;
+    if let (Some(actual), Some(expected)) = (&mut actual, &expected)
+        && let (Some(a), Some(b)) = (actual.direction_cosine, expected.direction_cosine)
+        && (a - b).abs() <= 1e-12
+    {
+        actual.direction_cosine = Some(b);
+    }
+    ensure!(actual == expected, "unexpected or missing HGN projection");
+    Ok(())
+}
+
 pub fn direction_probe() -> Capture {
     Capture {
         layers: BTreeSet::new(),
@@ -734,11 +834,15 @@ pub fn direction_probe() -> Capture {
     }
 }
 
-pub fn direction_capture(layers: &[usize], role: Role, position: usize) -> Capture {
+pub fn direction_capture(
+    layers: &[usize],
+    role: Role,
+    positions: impl IntoIterator<Item = usize>,
+) -> Capture {
     Capture {
         layers: layers.iter().copied().collect(),
         roles: BTreeSet::from([role, Role::LOut]),
-        positions: BTreeSet::from([position]),
+        positions: positions.into_iter().collect(),
         top_k: 0,
         byte_cap: HARD_BYTE_CAP,
         all_logits: false,
@@ -812,32 +916,40 @@ pub fn direction_rows(
     spec: &Capture,
     verified: &Export,
     role: Role,
+    hgn: bool,
 ) -> Result<(Vec<i32>, Vec<crate::behavior_direction::Observation>)> {
     use crate::behavior_direction::{Observation, residual_norm};
     let (m, check) = manifest(dir, spec.byte_cap)?;
     ensure!(
         check.manifest_sha256 == verified.manifest_sha256
-            && m.model["arch"] == "qwen2"
+            && if hgn {
+                m.model["arch"] == "qwen4_exp_text"
+                    && m.model["l_out_axes"] == json!(["stream", "hidden"])
+                    && role == Role::LOut
+            } else {
+                m.model["arch"] == "qwen2"
+                    && (1..=crate::behavior_direction::MAX_LAST_K).contains(&spec.positions.len())
+            }
             && m.interventions.is_empty()
             && m.missing.is_empty(),
-        "direction needs complete, unedited Qwen2 trace rows"
+        "direction needs complete, unedited trace rows of the selected runtime"
     );
     let width = m.model["hidden"]
         .as_u64()
-        .context("missing Qwen2 hidden width")?;
-    let mut tensors: std::collections::BTreeMap<_, _> = m
-        .tensors
-        .into_iter()
-        .map(|t| ((t.key.layer, t.key.role), t))
-        .collect();
-    let mut read = |layer, role| -> Result<Vec<f32>> {
+        .filter(|width| (1..=16384).contains(width))
+        .context("invalid direction hidden width")?;
+    let shape = if hgn { vec![4, width] } else { vec![width] };
+    let mut tensors: std::collections::BTreeMap<_, _> =
+        m.tensors.into_iter().map(|t| (t.key, t)).collect();
+    let mut read = |layer, role, position| -> Result<Vec<f32>> {
         let t = tensors
-            .remove(&(layer, role))
+            .remove(&Key {
+                layer,
+                role,
+                position,
+            })
             .context("missing direction tensor")?;
-        ensure!(
-            t.shape == [width] && (1..=16384).contains(&width),
-            "invalid direction tensor shape"
-        );
+        ensure!(t.shape == shape, "invalid direction tensor shape");
         let data = read_file(&dir.join(t.file), t.bytes)?;
         ensure!(
             data.len() as u64 == t.bytes && format!("{:x}", Sha256::digest(&data)) == t.sha256,
@@ -852,15 +964,50 @@ pub fn direction_rows(
         .layers
         .iter()
         .map(|&layer| {
-            let activation = read(layer, role)?;
-            if role == Role::LOut {
-                Ok(Observation::residual(activation))
-            } else {
-                Ok(Observation {
-                    activation,
-                    residual_norm: residual_norm(&read(layer, Role::LOut)?),
-                })
+            if hgn {
+                let mut aggregate = vec![0.0_f64; width as usize];
+                let mut total_norm = 0.0;
+                for &position in &spec.positions {
+                    let values = read(layer, role, position)?;
+                    let mut summed = vec![0.0_f64; width as usize];
+                    for stream in values.chunks_exact(width as usize) {
+                        for (sum, &x) in summed.iter_mut().zip(stream) {
+                            *sum += f64::from(x);
+                        }
+                    }
+                    let norm = summed.iter().map(|x| x.powi(2)).sum::<f64>().sqrt();
+                    ensure!(norm.is_finite(), "non-finite HGN direction residual");
+                    total_norm += norm;
+                    if norm > 0.0 {
+                        for (mean, sum) in aggregate.iter_mut().zip(summed) {
+                            *mean += sum / norm;
+                        }
+                    }
+                }
+                let count = spec.positions.len() as f64;
+                return Ok(Observation {
+                    activation: aggregate.into_iter().map(|x| (x / count) as f32).collect(),
+                    residual_norm: total_norm / count,
+                });
             }
+            let mut aggregate = vec![0.0_f64; width as usize];
+            let mut total_norm = 0.0;
+            for &position in &spec.positions {
+                let values = read(layer, role, position)?;
+                total_norm += if role == Role::LOut {
+                    residual_norm(&values)
+                } else {
+                    residual_norm(&read(layer, Role::LOut, position)?)
+                };
+                for (sum, x) in aggregate.iter_mut().zip(values) {
+                    *sum += f64::from(x);
+                }
+            }
+            let count = spec.positions.len() as f64;
+            Ok(Observation {
+                activation: aggregate.into_iter().map(|x| (x / count) as f32).collect(),
+                residual_norm: total_norm / count,
+            })
         })
         .collect::<Result<_>>()?;
     Ok((m.tokens.into_iter().map(|t| t.token_id).collect(), rows))
@@ -979,6 +1126,9 @@ pub fn read(root: &Path, slice: &Slice, result: &Value) -> Result<ReadReply> {
             if result["runtime"] == HGN_RUNTIME {
                 summary["runtime"] = json!(HGN_RUNTIME);
                 summary["runtime_sha256"] = result["runtime_sha256"].clone();
+                if let Some(projection) = m.hgn_projection {
+                    summary["hgn_projection"] = json!(projection);
+                }
             } else {
                 summary["lanternfish_commit"] = json!(COMMIT);
             }

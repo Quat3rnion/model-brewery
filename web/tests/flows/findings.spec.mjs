@@ -1,10 +1,8 @@
 import AxeBuilder from '@axe-core/playwright';
-import { mkdirSync } from 'node:fs';
 import { test, expect } from './fixtures.mjs';
 
 const wcagAA = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22a', 'wcag22aa'];
 const SHA = 'e'.repeat(64);
-const SHOTS = process.env.X10_SHOTS ?? '/arboretum/tmp/x10-shots';
 const HYP = 'Layer 6 MLP stores the capital-city fact for the fixture prompt.';
 const model = { id: 'gguf-a', sha256: SHA };
 const base = { hypothesis: HYP, created_at_ms: 1_790_000_000_000, model };
@@ -61,8 +59,7 @@ test('Findings lists findings and opens a finding with evidence, verdict and pro
   await expect(list.getByRole('row').filter({ hasText: 'fnd-3' })).toContainText('No verdict');
   await expect(list.getByRole('row').filter({ hasText: 'fnd-4' })).toContainText('Failed');
   await scan(page, info);
-  mkdirSync(SHOTS, { recursive: true });
-  await page.screenshot({ path: `${SHOTS}/list-${info.project.name}.png`, fullPage: true });
+  await page.screenshot({ path: info.outputPath('list.png'), fullPage: true });
 
   await list.getByRole('row').filter({ hasText: 'First version' }).filter({ hasText: 'Supported' }).getByRole('link', { name: HYP }).click();
   await expect(page).toHaveURL(/#\/findings\/fnd-1$/);
@@ -81,7 +78,7 @@ test('Findings lists findings and opens a finding with evidence, verdict and pro
   await expect(prov.getByRole('link', { name: 'session-9' })).toHaveAttribute('href', '#/agent?session=session-9');
   await expect(main.getByRole('region', { name: 'Replay comparison' })).toHaveCount(0);
   await scan(page, info);
-  await page.screenshot({ path: `${SHOTS}/detail-${info.project.name}.png`, fullPage: true });
+  await page.screenshot({ path: info.outputPath('detail.png'), fullPage: true });
   expect(controller.requests().filter((r) => r.method !== 'GET')).toEqual([]);
 });
 
@@ -102,7 +99,7 @@ test('a replay finding shows original and replay values side by side', async ({ 
   await expect(prov).toContainText('External agent (MCP)');
   await expect(prov.getByRole('link', { name: 'claude-desktop' })).toHaveCount(0);
   await scan(page, info);
-  await page.screenshot({ path: `${SHOTS}/replay-${info.project.name}.png`, fullPage: true });
+  await page.screenshot({ path: info.outputPath('replay.png'), fullPage: true });
   expect(controller.requests().filter((r) => r.method !== 'GET')).toEqual([]);
 });
 

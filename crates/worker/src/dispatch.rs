@@ -271,6 +271,7 @@ impl Config {
         let limit = match request {
             Rpc::SuggestPaths(_) | Rpc::Stat(_) => SUGGEST_JSON_LIMIT,
             Rpc::TraceRead { .. } => trace::RESPONSE_CAP as u64 + 128,
+            Rpc::DirectionModel(_) => 2048,
             _ => LIMIT,
         };
         let value = decode_limited::<Value>(child.stdout.take().unwrap(), limit);
@@ -312,6 +313,15 @@ impl InitialRelaySlots {
 }
 
 fn stage(cfg: &Config, action: &str, dest: &str, id: &str, job: Job) -> Wire<Reply> {
+    if matches!(
+        job.kind.as_str(),
+        brewery_worker::hgn_edit::JOB | brewery_worker::hgn_checks::JOB
+    ) {
+        ensure_wire(
+            action == "start" && job.inputs.len() == 1 && job.inputs[0].host == dest,
+            "private HGN jobs require a same-host direct input",
+        )?;
+    }
     if action == "cleanup" {
         return cfg.rpc(dest, Rpc::Cleanup { id: id.into() });
     }
@@ -569,6 +579,14 @@ fn run() -> Wire<Value> {
             let slice: trace::Slice = decode_limited(std::io::stdin().lock(), 2048)?;
             slice.check()?;
             cfg.rpc(dest, Rpc::TraceRead { id: id.into(), slice })
+        }
+        [action, dest, id] if action == "direction-model" => {
+            token(id)?;
+            let cfg = config(dest)?;
+            let request: direction_model::Request =
+                decode_limited(std::io::stdin().lock(), SUGGEST_JSON_LIMIT)?;
+            request.check()?;
+            cfg.rpc(dest, Rpc::DirectionModel(request))
         }
         [action, dest] if action == "stat" => {
             let cfg = config(dest)?;

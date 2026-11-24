@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import tempfile
 import time
@@ -54,7 +55,7 @@ def load_behavior_rows(cache, pins):
             # The exact digest above pins the evaluation-only schema and row order.
             rows.extend((kind, "", row["user"], None) for row in data["rows"])
             continue
-        if (data["schema"], data["behavior"]) != ("brewery.contrast-prompts.v1", kind):
+        if data.get("schema") != "brewery.contrast-prompts.v1" or data.get("behavior") != kind:
             raise ValueError("incorrect behavior prompt cache schema or behavior")
         held_out = [row for row in data["rows"] if row["split"] == "held_out"]
         if (not 1 <= len(held_out) <= MAX_BEHAVIOR_ROWS
@@ -395,6 +396,8 @@ def main(refusal_classifier=None):
     parser.add_argument("--fetch", action="store_true", help="fetch missing pinned sources")
     parser.add_argument("--behavior-config", type=json.loads)
     parser.add_argument("--contrast-cache", type=Path)
+    parser.add_argument("--registered-marker-config", type=json.loads)
+    parser.add_argument("--registered-evaluation-cache", type=Path)
     args = parser.parse_args()
     files = {
         "runner_sha256": args.runner,
@@ -426,6 +429,14 @@ def main(refusal_classifier=None):
         extra["behavior_direction"] = replay_behavior(
             args.runner, args.parent_gguf, args.child_gguf, args.threads,
             args.contrast_cache, args.behavior_config, refusal_classifier,
+        )
+    if args.registered_marker_config is not None:
+        if args.registered_evaluation_cache is None:
+            parser.error("registered marker config requires a registered evaluation cache")
+        marker = runpy.run_path(str(Path(__file__).resolve().with_name("registered_evaluation.py")))
+        extra["registered_marker"] = marker["replay"](
+            args.runner, args.parent_gguf, args.child_gguf, args.threads,
+            args.registered_evaluation_cache, args.registered_marker_config,
         )
     if any(file_sha(files[name]) != sha for name, sha in hashes.items()):
         raise ValueError("a model or runner file changed during scoring")

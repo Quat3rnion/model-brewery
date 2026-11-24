@@ -1,5 +1,161 @@
 use super::*;
 
+/// Replay the pinned engine's receipt through the controller's mock dispatcher.
+/// Run with BREWERY_HGN_DIRECTION_RECEIPT set to the output of hgn_direction_job.py.
+#[test]
+#[ignore = "requires the pinned HGN engine acceptance receipt"]
+fn hgn_direction_mcp_compares_real_engine_receipt() {
+    let path = std::env::var_os("BREWERY_HGN_DIRECTION_RECEIPT").expect("real HGN engine receipt");
+    let mut receipt: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let layer = receipt["fit"]["selected_layer"].as_u64().unwrap();
+    assert!(
+        receipt["fit"]["layers"][0]["held_out_cohens_d"]
+            .as_f64()
+            .unwrap()
+            > 1.0
+    );
+
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        r#"{"hosts":{"alpha":{"local":true,"capabilities":{"behavior_direction":true}}}}"#,
+    )
+    .unwrap();
+    app.launch();
+    let model = app.register("alpha", "hgn-v2", "/models/real-receipt-fixture.hgn");
+    // Remap only the Library ID, which this isolated controller owns.
+    receipt["model_id"] = json!(model);
+    fs::write(app.path("direction-result.json"), receipt.to_string()).unwrap();
+    let input = json!({"kind":"behavior_direction","input_ids":[model],"options":{
+        "behavior": receipt["behavior"], "model_sha256": receipt["model_sha256"],
+        "last_k": 3, "layers": [0, 1],
+    }});
+    let reference = app.enqueue(input.clone());
+    app.await_job(&reference, |job| job["state"] == "succeeded");
+    let id = app.enqueue(input);
+    app.await_job(&id, |job| job["state"] == "succeeded");
+    let compared = super::mcp::call(
+        &app,
+        "get_direction",
+        json!({"id":id,"version":2,"reference_id":reference,"reference_layer":layer}),
+    );
+    assert_eq!(compared["result"]["isError"], false, "{compared}");
+    let comparison = &compared["result"]["structuredContent"];
+    assert_eq!(comparison["direction"], receipt);
+    assert_eq!(comparison["reference"]["id"], reference);
+    assert_eq!(comparison["reference"]["layer"], layer);
+    for score in comparison["reference"]["cosine_by_layer"]
+        .as_array()
+        .unwrap()
+    {
+        assert!((score["cosine"].as_f64().unwrap() - 1.0).abs() < 1e-12);
+    }
+    println!("Real receipt SHA-256: {}", receipt["model_sha256"]);
+    println!("MCP comparison: {}", comparison["reference"]);
+}
+
+#[test]
+fn hgn_direction_mcp_queues_last_k_and_reads_version_two() {
+    use brewery_worker::{behavior_direction::Behavior, trace};
+
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        r#"{"hosts":{"alpha":{"local":true,"capabilities":{"behavior_direction":true}}}}"#,
+    )
+    .unwrap();
+    app.launch();
+    let model = app.register("alpha", "hgn-v2", "/models/tiny.hgn");
+    let digest = "a".repeat(64);
+    let options = json!({"layers":[1],"behavior":"slop","model_sha256":digest,"last_k":3});
+    let mut invalid = json!({"kind":"behavior_direction","input_ids":[model],"options":options});
+    invalid["options"]["position"] = json!(0);
+    app.json("POST", "/api/jobs", Some(invalid.clone()), 400);
+    invalid["options"]["position"] = Value::Null;
+    invalid["options"]["role"] = json!("ffn_out");
+    app.json("POST", "/api/jobs", Some(invalid), 400);
+    assert!(app.launches().is_empty());
+
+    let mut receipt = json!({
+            "kind":"behavior_direction","schema_version":2,"release_qualified":false,
+            "model_id":model,"model_sha256":digest,"behavior":"slop","position":null,"last_k":3,
+            "contrast_sha256":Behavior::Slop.contrast_sha256(),
+            "runtime":trace::HGN_RUNTIME, "runtime_sha256":trace::HGN_RUNTIME_SHA256.trim_end(),
+            "executable_sha256":digest,"assets_sha256":{"sidecar":digest,"config":digest,"tokenizer":digest},
+            "fit":{"role":"l_out","train_pairs":12,"held_out_pairs":8,"selected_layer":1,
+                 "layers":[{"layer":1,"norm":2.0,"unit_vector":[0.0,1.0],
+                            "held_out_margin":0.25,"held_out_cohens_d":0.5,"mean_residual_norm":1.0}]}
+    });
+    fs::write(app.path("direction-result.json"), receipt.to_string()).unwrap();
+    let reply = super::mcp::call(
+        &app,
+        "compute_direction",
+        json!({"idempotency_key":"hgn-fit","input_ids":[model],"options":options}),
+    );
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let id = reply["result"]["structuredContent"]["id"].as_str().unwrap();
+    let job = app.await_job(id, |job| job["state"] == "succeeded");
+    let saved = app.json(
+        "GET",
+        &format!("/api/directions/{id}/versions/2"),
+        None,
+        200,
+    );
+    assert_eq!(saved["direction"], job["result"]);
+    app.json(
+        "GET",
+        &format!("/api/directions/{id}/versions/1"),
+        None,
+        404,
+    );
+
+    receipt["last_k"] = json!(2);
+    receipt["fit"]["layers"][0]["unit_vector"] = json!([-0.6, 0.8]);
+    fs::write(app.path("direction-result.json"), receipt.to_string()).unwrap();
+    let prior = app.enqueue(json!({"kind":"behavior_direction","input_ids":[model],
+        "options":{"layers":[1],"behavior":"slop","model_sha256":digest,"last_k":2}}));
+    app.await_job(&prior, |job| job["state"] == "succeeded");
+    let compared = super::mcp::call(
+        &app,
+        "get_direction",
+        json!({"id":id,"version":2,"reference_id":prior,"reference_layer":1}),
+    );
+    assert_eq!(compared["result"]["isError"], false, "{compared}");
+    let comparison = &compared["result"]["structuredContent"];
+    assert_eq!(comparison["direction"], saved["direction"]);
+    assert_eq!(comparison["reference"]["id"], prior);
+    assert_eq!(comparison["reference"]["layer"], 1);
+    assert!(
+        (comparison["reference"]["cosine_by_layer"][0]["cosine"]
+            .as_f64()
+            .unwrap()
+            - 0.8)
+            .abs()
+            < 1e-7
+    );
+    app.json(
+        "GET",
+        &format!("/api/directions/{id}/versions/2?reference_id={prior}"),
+        None,
+        400,
+    );
+    app.json(
+        "GET",
+        &format!("/api/directions/{id}/versions/2?reference_id={prior}&reference_layer=3"),
+        None,
+        404,
+    );
+    assert_eq!(
+        app.json(
+            "GET",
+            &format!("/api/directions/{id}/versions/2"),
+            None,
+            200
+        ),
+        saved
+    );
+}
+
 #[test]
 fn intervention_uses_a_verified_direction_and_exports_only_its_subtraction() {
     let mut app = Fixture::new();

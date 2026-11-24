@@ -13,4 +13,8 @@ for line in (root / "requirements.lock.txt").read_text().splitlines():
         if version(name) != expected:
             raise SystemExit(f"HGN trace package version mismatch: {name}")
 sys.path.insert(0, str(root))
-runpy.run_path(str(root / "trace.py"), run_name="__main__")
+entry = "trace.py"
+if "--stored-checks" in sys.argv:
+    sys.argv.remove("--stored-checks")
+    entry = "checks.py"
+runpy.run_path(str(root / entry), run_name="__main__")

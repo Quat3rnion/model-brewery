@@ -1,4 +1,4 @@
-//! Coordinate a private CPU screen, then run the existing scratch edit and check jobs.
+//! Submit an HGN forward screen or coordinate the GGUF screen and scratch checks.
 use super::*;
 use crate::{
     domain::{Job, State as JobState},
@@ -10,7 +10,7 @@ use axum::{
 };
 use brewery_worker::{
     ablation_search::{self as search, ScreenReport, ScreenRequest},
-    behavior_direction::{self as directions, Behavior},
+    behavior_direction::{self as directions, Behavior, Registered},
     scratch_eval::{
         BehaviorConfig,
         paired::{PairedOutcome, discordant, holm_adjust, mcnemar_exact_p, wilson95},
@@ -34,19 +34,65 @@ pub(crate) struct Request {
     max_children: usize,
     disk_budget_bytes: u64,
     behavior_direction: BehaviorConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    registered: Option<Registered>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    marker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    marker_tokens: Option<Vec<usize>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alphas: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_k_direction_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HgnRequest {
+    sha256: String,
+    direction_id: String,
+    source_layer: usize,
+    seed: u32,
+    first_layer: Option<usize>,
+    last_layer: Option<usize>,
+    targets: Vec<brewery_worker::trace::hgn_projection::Target>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    registered: Option<Registered>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    marker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    marker_tokens: Option<Vec<usize>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alphas: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    second_source_layer: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_k_direction_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(crate) enum SubmissionRequest {
+    Gguf(Request),
+    Hgn(HgnRequest),
 }
 
 pub(super) async fn submit(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    payload: Payload<Request>,
+    payload: Payload<SubmissionRequest>,
 ) -> Result<Response> {
-    let req = read(payload)?;
+    let req = match read(payload)? {
+        SubmissionRequest::Gguf(req) => req,
+        SubmissionRequest::Hgn(req) => return submit_hgn(&app, id, headers, req),
+    };
     let (_, key) = read_submission(&headers, SCOPE, Ok(Json((&id, &req))))?;
     req.behavior_direction
         .validate()
         .map_err(|e| ApiError::bad(e.to_string()))?;
+    check_contrast_fields(req.registered.as_ref(), req.marker.as_deref(), req.marker_tokens.as_ref())
+        .map_err(|e| e.to_string()).map_err(ApiError::bad)?;
     if !brewery_worker::is_digest(&req.sha256)
         || !(search::MIN_TRIALS..=search::MAX_TRIALS).contains(&req.trial_budget)
         || !(1..=search::MAX_CHILDREN.min(req.trial_budget)).contains(&req.max_children)
@@ -104,6 +150,97 @@ pub(super) async fn submit(
     Ok((StatusCode::ACCEPTED, Json(job)).into_response())
 }
 
+fn submit_hgn(app: &App, id: String, headers: HeaderMap, req: HgnRequest) -> Result<Response> {
+    let (_, key) = read_submission(&headers, "hgn-ablation-screen", Ok(Json((&id, &req))))?;
+    if !brewery_worker::is_digest(&req.sha256) {
+        return Err(ApiError::bad("invalid HGN checkpoint SHA-256"));
+    }
+    check_contrast_fields(req.registered.as_ref(), req.marker.as_deref(), req.marker_tokens.as_ref())
+        .map_err(|e| e.to_string()).map_err(ApiError::bad)?;
+    let store = app.store.lock().map_err(ApiError::storage)?;
+    if let Some(response) = replay(&store, key.as_ref())? {
+        return Ok(response);
+    }
+    let model = store
+        .model(&id)
+        .map_err(ApiError::storage)?
+        .filter(|model| brewery_worker::trace::is_hgn(&model.kind))
+        .ok_or_else(|| ApiError::not_found("Library HGN checkpoint"))?;
+    let dir = crate::directions::hgn_layer(&store, &model, &req.direction_id, req.source_layer)?;
+    if dir.sha256 != req.sha256 {
+        return Err(ApiError::bad(
+            "HGN direction does not match the requested checkpoint hash",
+        ));
+    }
+    if req.second_source_layer == Some(req.source_layer) {
+        return Err(ApiError::bad(
+            "second_source_layer must differ from source_layer",
+        ));
+    }
+    let second = |id: &str| -> Result<Option<Vec<f32>>> {
+        Ok(req
+            .second_source_layer
+            .map(|layer| crate::directions::hgn_layer(&store, &model, id, layer))
+            .transpose()?
+            .map(|d| d.vector))
+    };
+    let last_k_variant = if let Some(id) = &req.last_k_direction_id {
+        let variant = crate::directions::hgn_layer(&store, &model, id, req.source_layer)?;
+        if variant.sha256 != dir.sha256
+            || variant.assets != dir.assets
+            || variant.behavior != dir.behavior
+            || variant.registered != dir.registered
+            || variant.held_out_pairs != dir.held_out_pairs
+        {
+            return Err(ApiError::bad(
+                "last-K fit must match the checkpoint, assets, and reviewed contrast",
+            ));
+        }
+        Some(search::hgn::Variant {
+            direction_id: id.clone(),
+            last_k: variant.last_k.unwrap_or(0),
+            vector: variant.vector,
+            second_vector: second(id)?,
+        })
+    } else {
+        None
+    };
+    let options = json!(search::hgn::Request {
+        model_sha256: dir.sha256.clone(),
+        direction_id: req.direction_id.clone(),
+        source_layer: req.source_layer,
+        first_layer: req.first_layer,
+        last_layer: req.last_layer,
+        targets: req.targets.clone(),
+        behavior: dir.behavior,
+        registered: dir.registered.clone(),
+        marker: req.marker.clone(),
+        marker_tokens: req.marker_tokens.clone(),
+        seed: req.seed,
+        vector: dir.vector,
+        last_k: dir.last_k,
+        alphas: Some(req.alphas.clone().unwrap_or_else(|| vec![1.0, 2.0])),
+        second_source_layer: req.second_source_layer,
+        second_vector: second(&req.direction_id)?,
+        last_k_variant,
+        assets_sha256: dir.assets,
+        held_out_pairs: dir.held_out_pairs,
+    });
+    search::hgn::Request::parse(&options).map_err(|e| ApiError::bad(e.to_string()))?;
+    let (mut job, envelope) = jobs::private_job(search::hgn::JOB, vec![model], options);
+    job.options = json!(req).as_object().unwrap().clone();
+    let hosts = app.effective_hosts().map_err(ApiError::storage)?;
+    if crate::domain::candidates(&job, &envelope, &hosts).is_empty() {
+        return Err(conflict(
+            "HGN screening needs trace and behavior_direction on the non-Hy4 Library worker",
+        ));
+    }
+    let tx = store.submission_transaction().map_err(ApiError::storage)?;
+    Store::enqueue(&tx, &job, &envelope, key.as_ref()).map_err(ApiError::storage)?;
+    tx.commit().map_err(ApiError::storage)?;
+    Ok((StatusCode::ACCEPTED, Json(job)).into_response())
+}
+
 fn screen_request(store: &Store, req: &Request, row: &Revision) -> Result<ScreenRequest> {
     let artifact = crate::directions::load(store, &req.direction_id, directions::VERSION)?;
     let gguf = row
@@ -115,28 +252,83 @@ fn screen_request(store: &Store, req: &Request, row: &Revision) -> Result<Screen
             "fit the direction on the same GGUF bytes as the private parent",
         ));
     }
-    if !artifact["position"].is_null() {
+    if !artifact["position"].is_null()
+        || artifact["last_k"].as_u64().unwrap_or(1) != 1
+        || artifact.get("lanternfish_commit").is_none()
+    {
         return Err(ApiError::bad("fit the directions at the last user token"));
     }
-    let behavior = serde_json::from_value::<Behavior>(artifact["behavior"].clone())
+    let behavior = serde_json::from_value::<Option<Behavior>>(artifact["behavior"].clone())
         .map_err(ApiError::storage)?;
+    let registered = serde_json::from_value::<Option<Registered>>(
+        artifact.get("registered").cloned().unwrap_or(Value::Null),
+    )
+    .map_err(ApiError::storage)?;
+    if req.marker.is_some() && registered.is_none() {
+        return Err(ApiError::bad(
+            "a configured marker requires a fitted registered direction",
+        ));
+    }
+    let (marker, marker_tokens) = (req.marker.clone(), req.marker_tokens.clone());
     let name = match behavior {
-        Behavior::Slop => "slop",
-        Behavior::Sycophancy => "sycophancy",
-        _ => return Err(ApiError::bad("search supports slop and sycophancy only")),
+        Some(Behavior::Slop) => "slop",
+        Some(Behavior::Sycophancy) => "sycophancy",
+        Some(_) => return Err(ApiError::bad("search supports slop and sycophancy only")),
+        None => "",
+    };
+    let last_k_variant = if let Some(id) = &req.last_k_direction_id {
+        let variant = crate::directions::load(store, id, directions::VERSION)?;
+        if variant.get("lanternfish_commit").is_none()
+            || variant["model_sha256"] != artifact["model_sha256"]
+            || variant["behavior"] != artifact["behavior"]
+            || !variant["position"].is_null()
+            || variant["last_k"].as_u64().unwrap_or(1) < 2
+        {
+            return Err(ApiError::bad(
+                "last-K fit must use the same GGUF bytes and reviewed contrast",
+            ));
+        }
+        Some(search::FitVariant {
+            direction_id: id.clone(),
+            last_k: variant["last_k"].as_u64().expect("verified last-K fit") as usize,
+            fit: serde_json::from_value(variant["fit"].clone()).map_err(ApiError::storage)?,
+        })
+    } else {
+        None
     };
     let screen = ScreenRequest {
         model_sha256: gguf.sha256.clone(),
         direction_id: req.direction_id.clone(),
         fit: serde_json::from_value(artifact["fit"].clone()).map_err(ApiError::storage)?,
         behavior,
+        registered: registered.clone(),
+        marker,
+        marker_tokens,
         seed: req.seed,
         trial_budget: req.trial_budget,
         max_children: req.max_children,
-        confirmation_sha256: req.behavior_direction.prompt_sets[name].clone(),
+        confirmation_sha256: match &registered {
+            Some(r) => r.sha256.clone(),
+            None => req.behavior_direction.prompt_sets[name].clone(),
+        },
+        alphas: req.alphas.clone(),
+        last_k_variant,
     };
     screen.check().map_err(|e| ApiError::bad(e.to_string()))?;
     Ok(screen)
+}
+
+/// A registered contrast needs a configured first-token marker; a built-in
+/// contrast must not carry registered or marker fields.
+fn check_contrast_fields(
+    registered: Option<&Registered>,
+    marker: Option<&str>,
+    marker_tokens: Option<&Vec<usize>>,
+) -> std::result::Result<(), String> {
+    if registered.is_none() && (marker.is_some() || marker_tokens.is_some()) {
+        return Err("a configured marker requires a registered contrast".into());
+    }
+    Ok(())
 }
 
 fn child_disk(store: &Store, row: &Revision) -> Result<(u64, u64)> {
@@ -421,7 +613,15 @@ fn edit_request(request: &Request, report: &ScreenReport, trial: usize) -> ablat
     ablation::Request {
         sha256: request.sha256.clone(),
         direction: ablation::Source {
-            id: request.direction_id.clone(),
+            id: if candidate.last_k.is_some() {
+                request
+                    .last_k_direction_id
+                    .as_ref()
+                    .expect("validated last-K trial")
+                    .clone()
+            } else {
+                request.direction_id.clone()
+            },
             version: directions::VERSION,
             layer: candidate.source_layer,
         },
@@ -507,6 +707,12 @@ async fn run_child(
         behavior_direction: Some(serde_json::from_value(serde_json::to_value(
             &request.behavior_direction,
         )?)?),
+        registered_marker: request.registered.clone().map(|r| {
+            brewery_worker::scratch_eval::registered::Request {
+                name: r.name,
+                partition: brewery_worker::scratch_eval::registered::Partition::Tune,
+            }
+        }),
     };
     let c_key = format!("{}-{trial}-checks", parent.id);
     let app_copy = app.clone();
@@ -529,8 +735,11 @@ async fn run_child(
         )?
     };
     let behavior = match report.behavior {
-        Behavior::Slop => "slop",
-        _ => "sycophancy",
+        Some(Behavior::Slop) => "slop",
+        Some(_) => "sycophancy",
+        // A registered contrast has no built-in behavior name; its paired
+        // outcomes are reported under the configured first-token marker.
+        None => "marker",
     };
     let measured = &bundle["behavior_direction"];
     let pairs: Vec<PairedOutcome> =

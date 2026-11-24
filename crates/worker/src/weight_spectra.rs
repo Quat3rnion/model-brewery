@@ -11,6 +11,8 @@ mod source;
 pub use lineage::{MAX_CANDIDATES, lineage};
 use source::Checkpoint;
 
+pub(crate) use source::gguf_dimensions;
+
 pub const JOB: &str = "weight_spectra";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -5,7 +5,7 @@
   import DirectionResult from '../components/abliteration/DirectionResult.svelte';
   import HereticResult from '../components/abliteration/HereticResult.svelte';
   import SearchResult from '../components/abliteration/SearchResult.svelte';
-  import { abliterationKinds as kinds, behaviorNames, type DirectionArtifact, type SearchReceipt } from '../lib/abliteration';
+  import { abliterationKinds as kinds, behaviorNames, hgnScreen, type DirectionArtifact, type HgnScreenReceipt, type SearchReceipt } from '../lib/abliteration';
   import { api, ApiError, errorText } from '../lib/api';
   import { isActive, newestFirst, stateLabel, stateTone } from '../lib/format';
   import { obj } from '../lib/reports';
@@ -17,6 +17,8 @@
   const jobs = $derived(newestFirst((brewery.state?.jobs ?? []).filter(j => Object.hasOwn(kinds, j.kind))));
   const selected = $derived(hashParam(route.hash, 'job'));
   const selectedState = $derived(jobs.find(j => j.id === selected)?.state);
+  const isDirection = (job: JobSummary | undefined) =>
+    job?.state === 'succeeded' && (job.kind === 'behavior_direction' || job.kind === 'imported_direction');
   const label = (job: JobSummary) => {
     const behavior = job.options?.behavior;
     return kinds[job.kind] + (typeof behavior === 'string' ? `: ${behaviorNames[behavior] ?? behavior}` : '');
@@ -27,8 +29,10 @@
   let childError = $state<string | null>(null);
   let error = $state<string | null>(null);
   let loading = $state(false);
-  const search = $derived(detail?.kind === 'search_ablation' && obj(obj(detail.result)?.screen)
-    ? detail.result as SearchReceipt : null);
+  const search = $derived(detail?.kind === 'screen_hgn_ablation' && obj(obj(detail.result)?.scores)
+    ? hgnScreen(detail.result as HgnScreenReceipt)
+    : detail?.kind === 'search_ablation' && obj(obj(detail.result)?.screen)
+      ? detail.result as SearchReceipt : null);
 
   $effect(() => {
     const id = selected;
@@ -54,7 +58,7 @@
         }
       }
       try {
-        if (known?.kind === 'behavior_direction' && known.state === 'succeeded') {
+        if (known && isDirection(known)) {
           const result = await loadDirection();
           if (!signal.aborted) { direction = result; detail = known; }
           return;
@@ -62,7 +66,7 @@
         const row = await api.job(id, signal);
         if (signal.aborted) return;
         detail = row;
-        if (row.kind === 'behavior_direction' && row.state === 'succeeded') {
+        if (isDirection(row)) {
           const result = await loadDirection();
           if (!signal.aborted) direction = result;
         } else if (row.kind === 'heretic' || row.kind === 'heretic_reproduce') {
@@ -90,7 +94,7 @@
 <div class="stack">
   <div>
     <h1 tabindex="-1">Abliteration</h1>
-    <p class="muted">Inspect fitted directions, native searches, and Heretic imports. These results are not release-qualified.</p>
+    <p class="muted">Inspect fitted and imported directions, native searches, and Heretic imports. These results are not release-qualified.</p>
   </div>
   <div class="workbench">
     <section class="panel" aria-labelledby="abliteration-runs">

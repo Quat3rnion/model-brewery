@@ -25,7 +25,7 @@ pub fn get(path: &str) -> Result<PathState> {
         };
     let path = Path::new(path);
     let (cfg, _) = Config::load()?;
-    if cfg.scratch_access.is_some() {
+    if cfg.scratch_access.is_some() || brewery_worker::hgn_edit::private_path(path) {
         return Ok(PathState::OutsideRoots);
     }
     if cfg.configured_source_root(path).is_none()

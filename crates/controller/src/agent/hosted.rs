@@ -23,11 +23,40 @@ fn system_prompt_uses_catalog_tools_and_reserves_approval_for_operator() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
 
-    // Mark every tool reference with backticks; keep other prose unmarked.
+    // Backticks mark tools and the exact field names and values below.
+    let schema_terms = BTreeSet::from([
+        "all",
+        "alphas",
+        "behavior_direction",
+        "dense",
+        "direction_import",
+        "experts",
+        "final_gate",
+        "flat",
+        "l_out",
+        "last_k",
+        "last_k_direction_id",
+        "marker",
+        "options.gguf_projection",
+        "options.hgn_projection",
+        "plain",
+        "registered",
+        "registered_marker",
+        "reference_id",
+        "reference_layer",
+        "residual",
+        "second_source_layer",
+        "tune",
+    ]);
     let parts: Vec<_> = SYSTEM.split('`').collect();
     assert_eq!(parts.len() % 2, 1, "unpaired backtick in system prompt");
     let referenced: BTreeSet<_> = parts.iter().skip(1).step_by(2).copied().collect();
-    assert_eq!(referenced, tools, "prompt tool catalog differs from MCP");
+    assert!(tools.is_disjoint(&schema_terms));
+    assert_eq!(
+        referenced,
+        tools.union(&schema_terms).copied().collect(),
+        "prompt tool or schema terms differ from the expected catalog"
+    );
     for part in parts.iter().step_by(2) {
         assert!(!part.contains('_'), "unmarked identifier in system prompt");
     }

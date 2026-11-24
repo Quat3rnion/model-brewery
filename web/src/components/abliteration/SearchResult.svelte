@@ -23,16 +23,16 @@
 </script>
 
 <section class="panel" aria-labelledby="search-title">
-  <header><h2 id="search-title">Native search</h2><span class="small">{result.backend.toUpperCase()}</span></header>
+  <header><h2 id="search-title">{result.hgn ? 'HGN forward screen' : 'Native search'}</h2><span class="small">{result.backend.toUpperCase()}</span></header>
   <div class="body stack">
     <p class="note">{findings[result.finding] ?? result.finding}</p>
-    <p class="small">{behaviorNames[screen.behavior] ?? screen.behavior} marker: {screen.marker}.
+    <p class="small">{result.hgn && screen.behavior === 'response_length' ? 'Response length proxy' : behaviorNames[screen.behavior] ?? screen.behavior} marker: {screen.marker}.
       Stock hits: <strong>{screen.parent_hits}/{screen.prompts}</strong>.
       <a href="#/abliteration?job={encodeURIComponent(screen.direction_id)}">Direction artifact</a>.
       The screen measures first-token effects, not generated replies.</p>
     {#if screen.screen_sha256 || screen.confirmation_sha256}
       <details class="disclosure">
-        <summary>Screen and confirmation pins</summary>
+        <summary>{result.hgn ? 'Reviewed contrast pin' : 'Screen and confirmation pins'}</summary>
         {#if screen.screen_sha256}<p class="small">Screen SHA-256: <span class="mono break">{screen.screen_sha256}</span></p>{/if}
         {#if screen.confirmation_sha256}<p class="small">Confirmation SHA-256: <span class="mono break">{screen.confirmation_sha256}</span></p>{/if}
       </details>
@@ -45,21 +45,30 @@
       <table class="data num" aria-label="Screen trials">
         <thead><tr><th scope="col">Trial</th><th scope="col">Setting</th><th scope="col">Reduction</th>
           <th scope="col">KL (nats)</th><th scope="col">Random reduction</th><th scope="col">Random KL (nats)</th>
+          {#if result.hgn}<th scope="col">Control shift</th><th scope="col">Random control shift</th>{/if}
           <th scope="col">Wins</th><th scope="col">Screen result</th></tr></thead>
         <tbody>
           {#each screen.trials as t, i}
+            {@const config = result.hgn?.configurations?.[i]}
             <tr><th scope="row">{i}</th>
-              <td>{#if t.candidate}L{t.candidate.source_layer} to L{t.candidate.first_layer}–{t.candidate.last_layer},
-                {t.candidate.variant.replaceAll('_', ' ')}, α {t.candidate.alpha}{:else}Not reported{/if}</td>
+              <td>{#if result.hgn}{config?.target ?? result.hgn.targets[i]}, {result.hgn.layerRange}{#if config},
+                α {config.alpha}, rank {config.rank}{#if config.last_k}, last {config.last_k}{/if}{#if config.direction_cosine != null},
+                original cosine {score(config.direction_cosine)}{/if}{/if}{:else if t.candidate}L{t.candidate.source_layer} to L{t.candidate.first_layer}–{t.candidate.last_layer},
+                {t.candidate.variant.replaceAll('_', ' ')}, α {t.candidate.alpha}{#if t.candidate.last_k}, last {t.candidate.last_k}{/if}{:else}Not reported{/if}</td>
               <td>{score(t.reduction)}</td><td>{score(t.kl)}</td><td>{score(t.random_reduction)}</td>
-              <td>{score(t.random_kl)}</td><td>{t.wins_over_random}/{screen.prompts}</td>
-              <td>{screen.pareto.includes(i) ? 'Pareto' : 'Off front'}{screen.selected.includes(i) ? ' · Child selected' : ''}</td>
+              <td>{score(t.random_kl)}</td>
+              {#if result.hgn}
+                <td>{t.control_shift == null ? 'Not reported' : score(t.control_shift)}</td>
+                <td>{t.random_control_shift == null ? 'Not reported' : score(t.random_control_shift)}</td>
+              {/if}
+              <td>{t.wins_over_random}/{screen.prompts}</td>
+              <td>{screen.pareto.includes(i) ? 'Pareto' : 'Off front'}{screen.selected.includes(i) ? (result.hgn ? ' · Passed screen' : ' · Child selected') : ''}</td>
             </tr>
           {/each}
         </tbody>
       </table>
     </div>
-    <h3>Paired weight-edit checks</h3>
+    {#if !result.hgn}<h3>Paired weight-edit checks</h3>{/if}
     {#if result.children.length}
       <p class="small muted">Flips compare the same held-out prompts. Rate intervals are Wilson 95%.
         Holm adjusts for the children tested in this search.</p>
@@ -82,7 +91,7 @@
           </tbody>
         </table>
       </div>
-    {:else}
+    {:else if !result.hgn}
       <p class="small muted">This search did not retain any scratch children.</p>
     {/if}
   </div>

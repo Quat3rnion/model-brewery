@@ -203,10 +203,10 @@ static std::string unhex(std::string_view hex) {
     return text;
 }
 
-static void reply(const Model & model) {
+static void reply(const Model & model, int limit) {
     int count = 0;
     std::cout << '\t' << std::hex << std::setfill('0');
-    for (; count < gen_tokens; ++count) {
+    for (; count < limit; ++count) {
         auto token = model.greedy(model.row());
         if (llama_vocab_is_eog(model.vocab, token)) break;
         char buf[512];
@@ -215,7 +215,7 @@ static void reply(const Model & model) {
         for (int i = 0; i < len; ++i) {
             std::cout << std::setw(2) << static_cast<unsigned char>(buf[i]) + 0u;
         }
-        if (count + 1 < gen_tokens) model.feed(&token, 1);
+        if (count + 1 < limit) model.feed(&token, 1);
     }
     std::cout << std::dec << '\t' << count;
 }
@@ -250,22 +250,32 @@ static void behavior(const Model & parent, const Model & child) {
             throw std::runtime_error("expected behavior mode and two hex chat fields");
         }
         const auto mode = line.substr(0, a);
-        if (mode != "generate" && mode != "kl") throw std::runtime_error("invalid behavior mode");
+        int limit = gen_tokens;
+        if (mode.compare(0, 7, "marker:") == 0) {
+            const auto cap = mode.substr(7);
+            if (cap.empty() || cap.size() > 3 || cap.find_first_not_of("0123456789") != cap.npos) {
+                throw std::runtime_error("invalid marker token cap");
+            }
+            limit = std::stoi(cap);
+            if (limit < 1 || limit > 128) throw std::runtime_error("invalid marker token cap");
+        } else if (mode != "generate" && mode != "kl") {
+            throw std::runtime_error("invalid behavior mode");
+        }
         const std::string_view input(line);
         const auto system = unhex(input.substr(a + 1, b - a - 1));
         const auto user = unhex(input.substr(b + 1));
         auto tokens = parent.chat(system, user);
-        if (tokens != child.chat(system, user) || tokens.size() + gen_tokens > context_size) {
+        if (tokens != child.chat(system, user) || tokens.size() + limit > context_size) {
             throw std::runtime_error("chat token IDs differ or leave no room for generation");
         }
         for (const auto * model : {&parent, &child}) {
             llama_memory_clear(llama_get_memory(model->ctx.get()), false);
             model->feed(tokens.data(), tokens.size());
         }
-        if (mode == "generate") {
+        if (mode != "kl") {
             std::cout << mode;
-            reply(parent);
-            reply(child);
+            reply(parent, limit);
+            reply(child, limit);
             std::cout << '\n';
             continue;
         }

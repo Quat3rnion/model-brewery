@@ -381,17 +381,43 @@ with 1 to 4 entries. This example shows `options` for one prompt:
 
 Layers and token positions start at zero. The CLI does not use a chat
 template or generate tokens. It accepts at most 4096 GGUF prompt tokens or
-512 HGN prompt tokens. HGN uses the raw tokenizer without special tokens. An
+2048 HGN prompt tokens. HGN uses the raw tokenizer without special tokens. An
 optional `byte_cap` can override the default within the configured maximum.
 Set `full_dump: true` to pass larger explicit selections. This flag does not
 select more data or raise the cap. Save the request to repeat the run.
 
+For HGN only, set `options.hgn_projection` to a `direction_id`,
+`source_layer`, and `target`. The controller loads version 2 of the direction
+and verifies the checkpoint and its companion asset hashes. Select `residual`
+to project all four streams, `dense` for the embedding and dense writers,
+`experts` for routed expert output, or `all` for both writer groups. Use
+inclusive `first_layer` and `last_layer`, or omit both to project all layers.
+Set `second_source_layer` to use an independent vector from another layer of
+the same artifact. The runtime orthogonalizes it against the first vector.
+The trace manifest records the signed cosine before orthogonalization.
+Capture `l_out`, `final_norm`, or logits. Do not combine this option with
+GGUF interventions or SAE. This operation does not change model weights.
+
+For GGUF, set `options.gguf_projection` with a version 2 `l_out` direction
+ID, `source_layer`, target `layer`, and one to 128 token `positions`. Use
+the A5 executable and shared A4 library pins listed under
+[GGUF search](#gguf-search). The pinned GGUF runtime supports rank one
+only. Do not combine `gguf_projection` with other interventions or SAE.
+
+Both selectors accept optional `alpha` in (0,4]. The default is 1, which
+removes the fitted component. At 2 the component changes sign and keeps
+its magnitude. Select a fit made with `last_k` to use a direction averaged
+over more than one position. Only the reviewed direction behaviors are
+supported: slop, sycophancy, and response length.
+
 ### HGN CPU setup
 
 Use a regular worker with the Qwen3.8 Flash Next v2 `.hgn` checkpoint in its
-Library. Add `"trace": true` to its dispatch capabilities. Install the CPU
-environment from the same Brewery revision as the engine. These commands
-use the network only for setup:
+Library. Add `"trace": true` to its dispatch capabilities. Dedicated Hy4
+workers cannot run traces. For Frame, see the
+[live provisioning handoff](deploy/lan/hgn-trace/LIVE-PROVISIONING.md).
+Install the CPU environment from the same Brewery revision as the engine.
+These commands use the network only for setup:
 
 ```sh
 install -d -m 700 "$runtime"
@@ -418,15 +444,16 @@ under operator control. Set `BREWERY_HGN_TRACE_PYTHON` to the copied
 }
 ```
 
-Register the checkpoint itself as `hgn`, not the sidecar or a bundle manifest.
+Register the checkpoint itself as `hgn-v2` or `hgn`, not a sidecar or bundle
+manifest.
 The worker checks the model and all three assets before prefill. It checks the
 runtime source pin and package versions and does not download files in a job.
 Keep about 16 GiB of RAM free and run one large CPU trace at a time. Use a
 narrow selection first. Each HGN `l_out` row has shape `[4,2560]` in
 `[stream,hidden]` order. Capture `final_norm` at the last layer for the
 normalized final mix. The lens uses the same mixer and head as model logits.
-Other tensor roles are reported as missing. HGN does not support interventions,
-activation patches, or SAE steering.
+Other tensor roles are reported as missing. `hgn_projection` is the only
+HGN intervention. Activation patches and SAE steering require GGUF.
 
 Use job events to follow progress. After success, use
 `GET /api/jobs/{id}/trace` for the summary. Use `/tensor` for F32 rows,
@@ -712,17 +739,19 @@ time. On 429, wait and retry.
 ### Behavior directions
 
 Use this CPU job to measure activation differences for `slop`, `sycophancy`,
-or `response_length` on a Library Qwen2 GGUF. The job does not change weights
-or run text generation.
+or `response_length` on a Library Qwen2 GGUF or supported Qwen3.8 Flash Next
+HGN v2 checkpoint (`hgn` or `hgn-v2`). The job does not change weights or
+generate text.
 
 1. Run `python3 tools/direction_prompt_cache.py /absolute/path/to/cache` on
    a machine with network access. The script checks the source size and
    SHA-256 before it reads any rows. Copy the generated digest-named `.json`
    files to a worker-owned directory. The worker can run offline.
 2. In the worker `engine_env`, set `BREWERY_CONTRAST_CACHE` to that absolute
-   directory. Set the two pinned Lanternfish trace paths as for a CPU trace.
-   Enable the `behavior_direction` capability for that worker.
-3. Send `POST /api/jobs` with `kind: "behavior_direction"`, one Library GGUF
+   directory. Configure the pinned Lanternfish runtime for GGUF or the pinned
+   HGN Python runtime and model assets for HGN, as for a CPU trace. Enable
+   `behavior_direction` on the worker that holds the model.
+3. Send `POST /api/jobs` with `kind: "behavior_direction"`, one Library model
    ID in `input_ids`, and `options` with `behavior`, `model_sha256`, and
    `layers` in increasing order. Do not send prompts. The MCP tool
    `compute_direction` supplies the job kind.
@@ -730,13 +759,27 @@ or run text generation.
    `GET /api/directions/{id}/versions/2` or MCP `get_direction` with the
    job ID and `version: 2`. This immutable artifact contains the model
    digest and the prompt and runtime pins. Each run makes a new artifact.
-   Specify `layer` to read one layer instead of all vectors.
-   For an older job, request version 1 to read its original raw-margin selection.
+    Specify `layer` to read one layer instead of all vectors.
+    For an older job, request version 1 to read its original raw-margin selection.
 
-The default role is `l_out`; you can select `attn_out` or `ffn_out`. The
-default token is the last user instruction token. Set `position` for one
-explicit zero-based index, including special tokens. The worker captures the
-prefix through the end of the user text. The fit uses 12 prompt pairs and
+On GGUF, the default role is `l_out`. You can select `attn_out` or `ffn_out`.
+The worker captures the prefix through the last user token and fits at that
+token by default. Set `last_k` to 1 to 16 to average that many positions.
+On HGN, use `l_out` and select at most 25 layers for a 2560-wide model. The
+last K positions include the assistant header with thinking disabled.
+For an explicit zero-based token index, set `position` instead. HGN requires
+an explicit index below 512 and accepts up to 2048 prompt tokens. At each
+position, it sums the four streams over their shared hidden
+coordinates. The worker L2-normalizes that sum and averages the positions.
+`mean_residual_norm` uses the norm before normalization.
+
+To compare HGN results, pass `reference_id` and `reference_layer` to
+`get_direction`. The reference must be a saved version 2 direction with the
+same model and asset digests and reviewed behavior. The response gives the cosine for
+each requested layer with a fitted vector, and null for other layers.
+The comparison does not change either artifact.
+
+The fit uses 12 prompt pairs and
 scores 8 disjoint pairs. Each layer has the L2 norm of the training mean
 difference, its unit vector, and the mean held-out signed projection of
 positive minus negative rows (`held_out_margin`). The job divides this
@@ -744,9 +787,9 @@ margin by the pooled within-class sample standard deviation of the held-out
 projections to get `held_out_cohens_d`. The largest positive score selects
 the layer. Equal scores select the lower layer. Cohen's d is null if the
 pooled standard deviation is zero or the direction has zero norm. These
-layers cannot win. `mean_residual_norm` is the mean L2 norm of `l_out` at the
-same token across both classes of held-out prompts, even when the direction
-uses another role. Scores measure separation for these prompt pairs only.
+layers cannot win. `mean_residual_norm` averages the `l_out` norms across both
+classes of held-out prompts and all captured positions, even when the direction
+uses another role on GGUF. Scores measure separation for these prompt pairs only.
 They do not measure a change in generated behavior.
 Results are not release-qualified.
 
@@ -1790,14 +1833,16 @@ workers, or deploy.
    (`wait_ms` can wait up to 5000 ms per call). Use `read_trace` with
    `manifest`, `tensor`, `logit_lens`, or `model_logits`. Use
    `create_intervention` and `new_intervention_version` to save rules.
+   Use `list_interventions` and `get_intervention` to read saved rules.
    Use `create_direction_intervention` to save projection or subtraction
    rules from a verified direction artifact.
    `export_control_vector` returns a relative URL for the same workbench.
 3. Use `create_scratch` and `apply_edit` for a SafeTensors edit. Use
    `merge_models` to merge pinned revisions in a new scratch child. Use
    `convert_scratch_gguf` on the parent and child. Run `run_checks` on the
-   child and use `get_job` to see the result. Use the tensor, trace, and
-   behavior diff tools to compare results.
+   child and use `get_job` to see the result. Use `diff_tensors`,
+   `diff_traces`, and `diff_behavior` to compare results. Use
+   `discard_scratch` to remove a scratch revision that you do not need.
 4. Use `request_publish` with the exact revision hash and check bundle
    acknowledgement if it is necessary. The operator reviews the request
    separately. Results are not release-qualified.
@@ -1890,7 +1935,173 @@ References: [Arditi et al. (2024), section 4.1](https://arxiv.org/abs/2406.11717
 [Lai (2025), Projected Abliteration](https://huggingface.co/blog/grimjim/projected-abliteration)
 and [Norm-Preserving Biprojected Abliteration](https://huggingface.co/blog/grimjim/norm-preserving-biprojected-abliteration).
 
+### Export a fitted direction as a v2 bundle
+
+`GET /api/directions/export?id=<direction-id>` (or the `export_direction` MCP
+tool) returns a JSON bundle for a stored Brewery-fitted direction: `model_id`,
+a v2 `manifest` with `layer`, `position`, `model_sha256`, `npy_sha256` and
+`provenance`, plus `npy_base64` and `bytes`. Add `layer=<n>` to export one
+fitted layer; omit it to export the selected layer. Imported artifacts return
+`400`: only Brewery-fitted directions export. Decode `npy_base64` to a `.npy`
+file, take `model_id` and `manifest` from the bundle, then send the multipart
+upload below with operator credentials. The import side re-verifies the model
+hash, hidden width and layer count. This moves a fitted direction between
+controllers; it does not re-fit, score, or screen the vector.
+
+### Import an external direction
+
+Only an operator can import a direction. On the controller, set
+`BREWERY_DIRECTION_OPERATOR_FILE` to a private regular file owned by the
+controller account (mode `0600`). Put `{"operator":"your-name","token":"..."}`
+in that file. Use a random 64-character lowercase hex token. Restart the
+controller. Keep the file and token out of agent tools, uploads, and logs.
+
+Register a standalone HGN v2, SafeTensors, or GGUF checkpoint in the Library
+on the source worker. Use a worker and dispatcher that support direction
+inspection. Export one 1-D float32 array with NumPy, for example with
+`numpy.save("direction.npy", vector, allow_pickle=False)`. Use the target
+checkpoint's residual coordinates. For HGN, use the shared hidden width,
+not a concatenation of the four streams. All values must be finite and the
+L2 norm must be within `1e-4` of 1. Brewery does not rescale the upload.
+
+Create `manifest.json` with these fields (the digests below are examples):
+
+```json
+{
+  "layer": 0,
+  "position": -1,
+  "model_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "npy_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "provenance": "Method, source revision, and residual basis for this vector."
+}
+```
+
+`layer` is zero-based. `position` is an optional signed token position for
+provenance only. Omit it if there is no single position. Use the lowercase
+SHA-256 of the exact checkpoint file and of the full `.npy` file. The note
+must not be blank. Use at most 2048 UTF-8 bytes. Agents can read it, so do
+not include secrets.
+
+Send the multipart upload from a trusted operator client. Use a private curl
+header file that contains the `Authorization: Bearer ...` header:
+
+```sh
+curl --fail-with-body --header @operator-header.txt \
+  --form "model_id=$MODEL_ID" \
+  --form 'manifest=@manifest.json;type=application/json' \
+  --form 'vector=@direction.npy;type=application/octet-stream' \
+  "$BREWERY_URL/api/admin/directions/import"
+```
+
+The source worker verifies the model hash, hidden width, and layer count.
+The controller returns `201` with an immutable version 2 artifact ID.
+`list_directions` (or `GET /api/directions`) lists the latest 200 IDs without
+vectors. Use `get_direction` or the Abliteration view to read the operator,
+time, and manifest. Imports have `origin: "imported"` and no fit scores.
+Cosine comparisons that include an import require two version 2 artifacts
+with the same checkpoint hash. Import does not fit, score, or screen the
+vector. Only the REST operator client can import it.
+
+Use `ablate_direction` with the returned ID, version 2, the manifest layer,
+and the `plain` variant. HGN uses the pinned Library root. SafeTensors must
+match the exact parent bytes. For a SafeTensors edit that uses a GGUF
+direction, the scratch parent's private GGUF must match the uploaded GGUF pin.
+This does not add direct editing of standalone GGUF files. The import has no
+negative-class mean. It cannot be used for `search_ablation` or as a trace
+intervention. Read `direction_import` in the ablation provenance and the
+`run_checks` bundle. Import and checks do not qualify a release.
+
+### Native HGN v2 scratch edits
+
+Use `ablate_direction` with the ID and SHA-256 of a standalone HGN v2 Library
+model on the approved source worker. Use `plain`, a `flat` kernel, and alpha 1.
+Use a fitted or imported version 2 direction for the Library model. The job edits attention output,
+FFN down projections, and selected PLE value projections. It edits dense and
+routed writers together. It does not edit embeddings or MTP weights.
+
+Poll `get_job` and pass `result.scratch_id` to `get_scratch`. For a later edit,
+use the HGN scratch ID and its exact SHA-256. Continue to use a direction for
+its pinned Library root. The child has no Library record or reversible delta.
+`apply_edit`, conversion to GGUF, and publication do not support HGN scratch.
+Discard removes access to the revision. Private worker files and cache entries
+remain on Frame; remove them only when they are no longer required for audit,
+resume, or an active job.
+
+The worker stores `hgn-feedback.json` with the child. `get_scratch` exposes the
+same report under `provenance.ablation.hgn.report`. It records the model hashes,
+direction, encoder hash, store, variant, payload hash and size, number of
+passes, the first and final decoded component fractions, and relative error.
+The tolerances are 0.05 for I4r, Q4Cp and Q8G64, and 0.08 for HT3 and HT4.
+BF16 uses one projection before rounding and measures any rounding residue.
+The job fails if any selected tensor misses its tolerance. Completed payloads
+are reused when the parent, layers, encoder, and direction match. Edit-aware
+rounding is not supported. This receipt does not replace an independent
+decoded-store audit or a CPU forward check.
+
+Run both stored-file checks with `run_checks` or `POST /api/scratch/{id}/checks`.
+Send the child SHA-256 without `behavior_direction`. Poll the job, then read
+`get_checks` or the Edits view. In `hgn_stored`, the audit measures each
+dense and routed writer from the parent and child files. A tensor with a mean
+absolute parent component below `1e-6` has status `no_component` and cannot
+show a drop. Each edited group (dense and routed experts) must have at least
+one passing tensor. At most 10% of the measurable component can remain in
+each writer and routed expert. For all writers, the relative Frobenius error
+against the parent must be at most `0.10` and the mean absolute component
+along each of five random directions (seed 26842) can change by at most 5%.
+Missing writers, hash mismatches or disagreement with the stored feedback
+fail the check. The CPU runtime uses the root model's
+pinned assets for both files. It reads the last prompt position for each of
+two fixed prompts and reports full-vocabulary KL(parent || child), top-1
+agreement and logit deltas. It does not generate text. Scores are not behavior
+gates and are not release-qualified.
+
+On the non-Hy4 Frame HGN worker, use the HGN trace worker's approved source
+roots and a private worker state directory. Set the dispatch capability
+`scratch_hgn_ablation` only for this worker. Enable `trace` with the approved
+HGN CPU runtime to run stored-file checks. Add an `hgn_edit` object to the
+worker configuration with `host`, `grant_key_file`, and `build_admission`.
+Put a shared random 32-byte key in private, regular files owned by the controller
+and worker identities. Set `BREWERY_HGN_EDIT_KEY_FILE` on the controller to
+its copy. Keep both files out of all model roots. Do not put the key in a job
+request. The worker state directory must have mode 0700; leave the ordinary
+`admission` and Hy4 settings unset.
+
+Use an absolute path to an operator-owned build wrapper for `build_admission`.
+The worker calls it as `wrapper -- /path/to/brewery-engine`. The wrapper must
+hold the exclusive Frame build reservation from before source hashing until
+the engine exits. It must send queue messages to stderr and keep stdin and
+stdout for the engine. Do not nest a reservation. Coordinate the build window
+before you enable the capability or enqueue an edit. Keep the stock model and
+production units unchanged.
+
 ### Native ablation search
+
+For a Library HGN v2 checkpoint, use `search_ablation` or
+`POST /api/scratch/{id}/search_ablation` with the Library ID. Supply
+`sha256`, `direction_id`, `source_layer`, `seed`, and one to four unique
+`targets` from `residual`, `dense`, `experts`, and `all`. Supply both layer
+endpoints for an inclusive range, or omit them to test every layer. Use a
+non-Hy4 source worker with `trace`, `behavior_direction`, the pinned HGN CPU
+runtime, and the contrast cache. The screen has a four-hour runtime limit.
+
+Set `alphas` to one to four distinct values in (0,4]. The default is
+`[1,2]`. To screen rank two, set `second_source_layer` to an independent
+direction from the same fit. To compare fit positions, pass
+`last_k_direction_id` from the same reviewed contrast and checkpoint.
+Use a single default position in the primary fit and `last_k` of 2 to 16
+in the second fit. The screen tests each fit, alpha, and target combination.
+`configurations` lists the settings in score order and includes the rank
+and signed cosine before orthogonalization. The random control uses the
+same rank and alpha as its paired fit.
+
+The HGN screen compares the positive and negative sides of the reviewed
+held-out pairs. It reports the stock marker, matched random-direction
+scores, control-set shifts, KL, and the Pareto front. For `response_length`,
+the marker is first-token non-EOS probability. It is a continuation proxy,
+not a measure of generated length. The HGN screen generates no text and
+creates no scratch children. Read the receipt with `get_job`.
+
+#### GGUF search
 
 Use `search_ablation` or `POST /api/scratch/{id}/search_ablation` on an
 unrequested dense Qwen2.5 scratch revision with a private GGUF. Fit a
@@ -1898,6 +2109,11 @@ version 2 `l_out` direction at the last user token on a Library GGUF
 with the exact same SHA-256.
 Fit at least three nonzero layers. Include intermediate target layers
 for the norm-preserving variant. Only slop and sycophancy are supported.
+To include a last-K fit, set `last_k_direction_id` to a matching direction
+artifact with at least three nonzero layers. The screen alternates between
+the single-position and last-K fits. Set `alphas` to opt in to a custom
+grid in (0,4]. Allow at least one trial per fit and scale combination.
+The GGUF proposal policy keeps its previous grid by default.
 
 Supply `sha256`, `direction_id`, `assets_id`, a 32-bit `seed`,
 `trial_budget` (3 to 32), `max_children` (1 to 3, at most the trial
@@ -2423,6 +2639,59 @@ Before you install these settings, run `sha256sum -c SHA256SUMS` in the pin
 directory. The worker does not download data during a check. Restart the
 controller after a change to the local worker's runtime configuration.
 
+### Registered evaluation sets
+
+Use `POST /api/admin/evaluation-sets` to register an immutable set. This
+operation is not available through MCP. Set `BREWERY_EVALUATION_OPERATOR_FILE`
+to a private file owned by the controller account (mode 600). Put `operator`
+and `token` in the JSON file. Use a lower-case operator ID and a random
+64-digit lower-case hex token. Restart the controller. Send the token in the
+`Authorization: Bearer` header. Do not put the token in a saved prompt.
+
+1. Review both sources and their licenses. Save each exact file as
+   `<sha256>.<format>` in a private source directory. Do not put this directory
+   under a shared model root or in `BREWERY_CONTRAST_CACHE`.
+2. Prepare a spec with `name`, `positive`, `negative`, `sizes`, and
+   `classifier`, as in the [API contract](api/openapi.json). Give each source
+   an HTTPS URL with a full 40-digit commit in the path, the byte size, SHA-256,
+   license, format, top-level prompt field and literal system message. The
+   optional filter selects rows by a field and exact value. Use strings for
+   CSV filters. Give the `tune` and `final_gate` sizes per side, from 1 to 512.
+3. On the worker, run
+   `python3 tools/registered_evaluation.py spec.json sources eval-cache > register.json`.
+   The builder does not use the network. It checks the source sizes and hashes,
+   groups prompts by case-folded text with normalized spaces, and removes
+   groups that occur on both sides. It sorts the groups by hash and assigns
+   disjoint rows to the two partitions. It writes one digest-named file per
+   partition and adds their pins to the registration body. Send that body to
+   the admin route. The controller records the configured operator and time.
+   To change a source, classifier, or split, register a new name.
+4. Put the cache at an absolute path in the worker's
+   `BREWERY_REGISTERED_EVALUATION_CACHE`. Keep it separate from the contrast
+   cache. Use the current `scratch_checks.py` and its adjacent
+   `registered_evaluation.py`. Build the current CPU runner and set its SHA-256
+   as in [Scratch behavior checks](crates/eval/README.md#scratch-behavior-checks).
+   The older `--behavior-v1` runner pin above does not support marker checks.
+
+Call `list_evaluation_sets` or `GET /api/evaluation-sets` to read set names
+and sizes. Pass `"registered":{"name":"<set-name>"}` (name only) to
+`compute_direction` or `search_ablation` to fit or screen with that set on
+the tune partition. The controller fills the digest from its own store, so
+the `final_gate` digest never reaches a fitting request. A registered
+`search_ablation` also takes the configured first-token `marker` and optional
+`marker_tokens`. For a GGUF pair, add
+`"registered_marker":{"name":"<set-name>","partition":"tune"}` to `run_checks`.
+Use `final_gate` only once you select the candidate. Compiled-program and HGN
+checks do not accept this option.
+
+The first class whose case-insensitive prefix or substring matches wins. Put
+exclusion classes before classes that count when they could both match. The
+worker generates at most `max_tokens` per reply (1 to 128). In the check
+bundle, `registered_marker` gives parent and child rates, per-class counts
+and flags for each side. It saves no full replies. Only replies longer than
+120 characters can have a 120-character prefix. The existing `benign_refusal`
+check does not change. Registered marker scores are not release-qualified.
+
 ### Heretic jobs
 
 Heretic 2.1.0 (upstream commit `4f89482c0d63f2552a582215939910f9f45a3e5f`,
@@ -2643,6 +2912,7 @@ version does not change. The list shows the 100 newest versions.
 4. Use `replay_finding` (`POST /api/findings/{id}/replay`) with the ID and
    SHA-256 of a different model. For a scratch target, convert it first.
    Use `get_finding` (`GET /api/findings/{id}`) to poll the new version.
+   Use `list_findings` (`GET /api/findings`) to list the findings and their versions.
    When it is ready, compare the recorded numbers side by side. Check the
    runtime and fixture pins before you give the replay a verdict.
 

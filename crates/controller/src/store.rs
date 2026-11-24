@@ -17,6 +17,7 @@ pub(crate) mod agent;
 mod crosscoder;
 mod findings;
 mod interventions;
+mod registered_evaluation;
 mod sae;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -83,6 +84,7 @@ impl Store {
         crate::dedupe::install(&conn)?;
         agent::install(&conn)?;
         findings::install(&conn)?;
+        registered_evaluation::install(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS profile_revisions(revision TEXT PRIMARY KEY, body TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS host_evaluation_profiles(
@@ -157,8 +159,15 @@ impl Store {
                   OR json_extract(j.body,'$.kind') = ?3
                   OR json_extract(j.body,'$.kind') = 'search_ablation')
              AND (?2 IS NULL OR json_extract(j.body,'$.kind') = ?2)
-             AND EXISTS(SELECT 1 FROM json_each(j.body,'$.input_ids') WHERE value = ?1))",
-            params![id, kind, brewery_worker::weight_spectra::JOB],
+             AND (EXISTS(SELECT 1 FROM json_each(j.body,'$.input_ids') WHERE value = ?1)
+                  OR (json_extract(j.body,'$.kind') = ?4
+                      AND json_extract(j.envelope,'$.options.parent') = ?1)))",
+            params![
+                id,
+                kind,
+                brewery_worker::weight_spectra::JOB,
+                brewery_worker::hgn_edit::JOB
+            ],
             |row| row.get(0),
         )?)
     }
@@ -863,6 +872,45 @@ impl Store {
     pub fn jobs(&self) -> Result<Vec<Job>> {
         read_list(&self.conn, "SELECT body FROM jobs ORDER BY seq", [])
     }
+
+    pub(crate) fn record_import(
+        &self,
+        job: &Job,
+        envelope: &Envelope,
+        result: &Value,
+    ) -> Result<()> {
+        let tx = self.submission_transaction()?;
+        tx.execute(
+            "INSERT INTO jobs(id,state,body,envelope,result) VALUES (?,?,?,?,?)",
+            params![
+                job.id,
+                job.state.key(),
+                encode(job)?,
+                encode(envelope)?,
+                encode(result)?
+            ],
+        )?;
+        event(&tx, job)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn direction_summaries(&self) -> Result<Vec<Value>> {
+        read_list(
+            &self.conn,
+            "SELECT json_object('id', id, 'version', json_extract(result,'$.schema_version'),
+                 'origin', coalesce(json_extract(result,'$.origin'),'fitted'),
+                 'model_id', json_extract(result,'$.model_id'),
+                 'model_sha256', json_extract(result,'$.model_sha256'),
+                 'created_at_ms', json_extract(body,'$.created_at'))
+             FROM jobs WHERE state='succeeded' AND result IS NOT NULL AND
+                 json_extract(body,'$.kind') IN (?1, ?2) ORDER BY seq DESC LIMIT 200",
+            params![
+                brewery_worker::behavior_direction::JOB,
+                crate::directions::import::JOB
+            ],
+        )
+    }
     pub fn detail(&self, id: &str) -> Result<Option<Value>> {
         let Some(mut data): Option<Value> = read_one(
             &self.conn,
@@ -990,6 +1038,16 @@ impl Store {
                 job.state = State::Cancelled;
                 job.progress = "Scratch job cancelled".into();
                 Err("cancelled".into())
+            } else if job.kind == brewery_worker::hgn_edit::JOB {
+                crate::scratch::hgn_edit::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
+                    .map(Some)
+            } else if job.kind == brewery_worker::hgn_checks::JOB {
+                crate::scratch::hgn_checks::finish(
+                    self,
+                    job,
+                    result.as_ref().unwrap_or(&Value::Null),
+                )
+                .map(Some)
             } else if job.kind == brewery_worker::locate_edit::JOB {
                 crate::scratch::locate::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
                     .map(|(revision, safe_result, guard)| {
@@ -1192,9 +1250,12 @@ impl Store {
         } else {
             None
         };
+        if job.kind == brewery_worker::hgn_checks::JOB && job.state == State::Failed {
+            scratch = crate::scratch::hgn_checks::failed(self, job)?;
+        }
         let tx = self.conn.transaction()?;
         if let Some(row) = scratch {
-            if scratch_guard.is_some() {
+            if scratch_guard.is_some() || job.kind == brewery_worker::hgn_edit::JOB {
                 tx.execute(
                     "INSERT INTO scratch_revisions(id,parent_id,state,body) VALUES(?,?,?,?)",
                     params![

@@ -1,16 +1,13 @@
 // Read models for verified direction, search and scratch check receipts.
 export const abliterationKinds: Record<string, string> = {
   behavior_direction: 'Direction', search_ablation: 'Native search', heretic: 'Heretic', heretic_reproduce: 'Heretic reproduction',
+  screen_hgn_ablation: 'HGN forward screen', imported_direction: 'Imported direction',
 };
 
-export interface Direction {
-  behavior: string;
+interface DirectionBase {
   model_id: string;
   model_sha256: string;
-  contrast_sha256: string;
   position: number | null;
-  lanternfish_commit: string;
-  executable_sha256?: string;
   fit: {
     role: string;
     selected_layer: number | null;
@@ -21,10 +18,18 @@ export interface Direction {
       held_out_cohens_d?: number | null;
       held_out_margin: number | null;
       norm: number;
-      mean_residual_norm?: number;
+      mean_residual_norm?: number | null;
     }[];
   };
 }
+
+export type Direction = DirectionBase & (
+  | { origin?: 'fitted'; behavior: string; contrast_sha256: string; lanternfish_commit?: string; executable_sha256?: string }
+  | { origin: 'imported'; import: {
+    operator: string; imported_at_ms: number;
+    manifest: { layer: number; position?: number; model_sha256: string; npy_sha256: string; provenance: string };
+  } }
+);
 
 export interface DirectionArtifact { id: string; version: number; direction: Direction }
 
@@ -56,9 +61,18 @@ export const behaviorNames: Record<string, string> = {
   slop: 'Slop', sycophancy: 'Sycophancy', response_length: 'Response length', benign_refusal: 'Benign refusal',
 };
 
+interface HgnConfiguration {
+  target: string;
+  last_k: number | null;
+  alpha: number;
+  rank: number;
+  direction_cosine: number | null;
+}
+
 export interface SearchReceipt {
   backend: string;
   finding: string;
+  hgn?: { targets: string[]; layerRange: string; configurations?: HgnConfiguration[] };
   screen: {
     direction_id: string;
     behavior: string;
@@ -69,8 +83,9 @@ export interface SearchReceipt {
     screen_sha256?: string;
     confirmation_sha256?: string;
     trials: {
-      candidate?: { source_layer: number; first_layer: number; last_layer: number; variant: string; alpha: number };
+      candidate?: { source_layer: number; first_layer: number; last_layer: number; variant: string; alpha: number; last_k?: number };
       reduction: number; kl: number; random_reduction: number; random_kl: number; wins_over_random: number;
+      control_shift?: number; random_control_shift?: number;
     }[];
     pareto: number[];
     selected: number[];
@@ -82,6 +97,29 @@ export interface SearchReceipt {
     improved: number; worsened: number; exact_mcnemar_p: number; holm_adjusted_p: number;
     w4_passed: boolean; confirmed_improvement: boolean;
   }[];
+}
+
+export interface HgnScreenReceipt {
+  direction_id: string;
+  behavior: string;
+  contrast_sha256: string;
+  first_layer: number | null;
+  last_layer: number | null;
+  targets: string[];
+  configurations?: HgnConfiguration[];
+  pareto: number[];
+  selected: number[];
+  scores: Pick<SearchReceipt['screen'], 'marker' | 'prompts' | 'parent_hits' | 'parent_mean' | 'trials'>;
+}
+
+export function hgnScreen(receipt: HgnScreenReceipt): SearchReceipt {
+  return {
+    backend: 'cpu', finding: 'Forward screen only. No scratch children or generated replies.', children: [],
+    hgn: { targets: receipt.targets, configurations: receipt.configurations, layerRange: receipt.first_layer == null
+      ? 'all layers' : `layers ${receipt.first_layer} to ${receipt.last_layer}` },
+    screen: { ...receipt.scores, direction_id: receipt.direction_id, behavior: receipt.behavior,
+      screen_sha256: receipt.contrast_sha256, pareto: receipt.pareto, selected: receipt.selected },
+  };
 }
 
 type PairedFlag = { parent: boolean; child: boolean };

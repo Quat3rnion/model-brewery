@@ -1,20 +1,26 @@
 //! Stage the Brewery-owned HGN runtime and verify the model's companion assets.
-use crate::{gguf_conversion::Tool, integrity};
-use anyhow::{Context, Result, ensure};
+use crate::{child_threads, gguf_conversion::Tool, integrity, write_json};
+use anyhow::{ensure, Context, Result};
 use brewery_worker::trace::{
-    HGN_ASSETS, HGN_PYTHON, HGN_PYTHON_SHA256, HGN_RUNTIME, HGN_RUNTIME_SHA256,
+    self, Capture, Export, HGN_ASSETS, HGN_PYTHON, HGN_PYTHON_SHA256, HGN_RUNTIME,
+    HGN_RUNTIME_SHA256,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 const SOURCES: &[(&str, &[u8])] = &[
+    (
+        "checks.py",
+        include_bytes!("../../../../tools/hgn_trace/checks.py"),
+    ),
     (
         "forward.py",
         include_bytes!("../../../../tools/hgn_trace/forward.py"),
@@ -68,14 +74,14 @@ struct Assets {
     tokenizer: Pin,
 }
 
-pub(super) struct Runtime {
+pub(crate) struct Runtime {
     python: Tool,
     entry: PathBuf,
     assets: Vec<(&'static str, Pin, integrity::Stamp)>,
 }
 
 impl Runtime {
-    pub(super) fn stage(work: &Path, model_sha: &str) -> Result<Self> {
+    pub(crate) fn stage(work: &Path, model_sha: &str) -> Result<Self> {
         let configured =
             PathBuf::from(env::var_os(HGN_PYTHON).context("HGN trace Python is not configured")?);
         ensure!(configured.is_absolute(), "{HGN_PYTHON} must be absolute");
@@ -141,7 +147,7 @@ impl Runtime {
         })
     }
 
-    pub(super) fn command(&self, work: &Path, threads: usize) -> Command {
+    fn command(&self, work: &Path, threads: usize) -> Command {
         let mut cmd = self.python.command(work, threads);
         cmd.env("OPENBLAS_NUM_THREADS", "1")
             .env("TOKENIZERS_PARALLELISM", "false")
@@ -153,21 +159,106 @@ impl Runtime {
         cmd
     }
 
-    pub(super) fn capture(&self, cmd: &mut Command, work: &Path) -> Result<()> {
+    pub(crate) fn capture(
+        &self,
+        work: &Path,
+        model: &Path,
+        prompt: &str,
+        capture: &Capture,
+        out: &Path,
+    ) -> Result<Export> {
+        self.capture_projected(work, model, prompt, capture, out, None)
+    }
+
+    pub(crate) fn capture_projected(
+        &self,
+        work: &Path,
+        model: &Path,
+        prompt: &str,
+        capture: &Capture,
+        out: &Path,
+        projection: Option<&trace::hgn_projection::Projection>,
+    ) -> Result<Export> {
         let check = || {
             for (_, pin, stamp) in &self.assets {
                 stamp.check(&pin.path)?;
             }
             Ok::<_, anyhow::Error>(())
         };
+        let spec = work.join("current-spec.json");
+        write_json(&spec, &serde_json::to_value(capture)?)?;
+        let threads = child_threads(None)?.min(64);
+        let mut command = self.command(work, threads);
+        command
+            .arg("--model")
+            .arg(model)
+            .arg(format!("--prompt={prompt}"))
+            .arg("--spec")
+            .arg(&spec)
+            .arg("--out")
+            .arg(out)
+            .arg("--threads")
+            .arg(threads.to_string());
+        let projection_path = work.join("projection.json");
+        if let Some(projection) = projection {
+            ensure!(
+                self.receipt()["assets_sha256"] == serde_json::to_value(&projection.assets_sha256)?,
+                "HGN direction companion pins differ from this checkpoint's runtime assets"
+            );
+            write_json(&projection_path, &projection.runtime_spec())?;
+            command.arg("--projection").arg(&projection_path);
+        }
         check()?;
         self.python
-            .capture(cmd, work)
+            .capture(&mut command, work)
             .context("HGN CPU trace failed")?;
-        check()
+        check()?;
+        fs::remove_file(&spec)?;
+        if projection.is_some() {
+            fs::remove_file(&projection_path)?;
+        }
+        trace::verify(out, capture)
     }
 
-    pub(super) fn receipt(&self) -> Value {
+    pub(crate) fn checks(
+        &self,
+        work: &Path,
+        parent: &Path,
+        child: &Path,
+    ) -> Result<[brewery_worker::hgn_checks::PromptScores; brewery_worker::hgn_checks::PROMPTS.len()]>
+    {
+        use brewery_worker::hgn_checks::PROMPTS;
+        let threads = child_threads(None)?.min(64);
+        let output = work.join("hgn-scores.json");
+        let mut command = self.command(work, threads);
+        command
+            .arg("--stored-checks")
+            .arg("--parent")
+            .arg(parent)
+            .arg("--child")
+            .arg(child)
+            .arg("--out")
+            .arg(&output)
+            .arg("--threads")
+            .arg(threads.to_string());
+        for prompt in PROMPTS {
+            command.arg(format!("--prompt={prompt}"));
+        }
+        for (_, pin, stamp) in &self.assets {
+            stamp.check(&pin.path)?;
+        }
+        self.python
+            .capture(&mut command, work)
+            .context("HGN stored CPU forward failed")?;
+        for (_, pin, stamp) in &self.assets {
+            stamp.check(&pin.path)?;
+        }
+        let scores = brewery_worker::decode_limited(fs::File::open(&output)?, 4096)?;
+        fs::remove_file(output)?;
+        Ok(scores)
+    }
+
+    pub(crate) fn receipt(&self) -> Value {
         let assets: BTreeMap<_, _> = self
             .assets
             .iter()
@@ -175,5 +266,44 @@ impl Runtime {
             .collect();
         json!({"runtime":HGN_RUNTIME, "runtime_sha256":HGN_RUNTIME_SHA256.trim_end(),
                "executable_sha256":self.python.sha, "assets_sha256":assets})
+    }
+
+    pub(crate) fn screen(
+        &self,
+        work: &Path,
+        model: &Path,
+        spec: &Value,
+    ) -> Result<brewery_worker::ablation_search::hgn::Scores> {
+        use brewery_worker::ablation_search::hgn;
+        let input = work.join("screen-spec.json");
+        let output = work.join("screen");
+        write_json(&input, spec)?;
+        let threads = child_threads(None)?.min(64);
+        let mut command = self.command(work, threads);
+        command
+            .arg("--model")
+            .arg(model)
+            .arg("--screen")
+            .arg("--spec")
+            .arg(&input)
+            .arg("--out")
+            .arg(&output)
+            .arg("--threads")
+            .arg(threads.to_string());
+        for (_, pin, stamp) in &self.assets {
+            stamp.check(&pin.path)?;
+        }
+        self.python
+            .capture_for(&mut command, work, Duration::from_secs(4 * 3600))
+            .context("HGN CPU screen failed")?;
+        for (_, pin, stamp) in &self.assets {
+            stamp.check(&pin.path)?;
+        }
+        let data = output.join("screen.json");
+        ensure!(
+            fs::symlink_metadata(&data)?.is_file() && fs::metadata(&data)?.len() <= hgn::MAX_BYTES,
+            "invalid HGN screen receipt"
+        );
+        Ok(serde_json::from_slice(&fs::read(data)?)?)
     }
 }

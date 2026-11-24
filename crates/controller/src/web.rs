@@ -124,6 +124,7 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
             }),
         )
         .merge(crate::admin::router())
+        .merge(crate::registered_evaluation::router())
         .merge(crate::interventions::router())
         .merge(crate::sae::router())
         .merge(crate::crosscoder::router())
@@ -191,6 +192,10 @@ async fn guard(State(listen): State<SocketAddr>, req: Request, next: Next) -> Re
             && origin.is_none()
             && fetch != Some("same-origin")
             && !has_json(headers)
+            // The import accepts multipart from CLI clients. It still requires
+            // an explicit operator bearer (never a cookie or ambient credential).
+            && !(path == "/api/admin/directions/import"
+                && has_media_type(headers, "multipart/form-data"))
         {
             return ApiError(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -237,11 +242,15 @@ pub(crate) fn single<'a>(
 }
 
 pub(crate) fn has_json(headers: &HeaderMap) -> bool {
+    has_media_type(headers, "application/json")
+}
+
+fn has_media_type(headers: &HeaderMap, media_type: &str) -> bool {
     single(headers, "content-type")
         .ok()
         .flatten()
         .and_then(|s| s.split(';').next())
-        .is_some_and(|s| s.trim().eq_ignore_ascii_case("application/json"))
+        .is_some_and(|s| s.trim().eq_ignore_ascii_case(media_type))
 }
 
 async fn list_models(State(app): State<Shared>) -> Result<Json<Vec<crate::domain::Model>>> {
@@ -558,6 +567,11 @@ async fn add_model(
     }
     let model = request.validate().map_err(ApiError::bad)?;
     let path = std::path::Path::new(&model.path);
+    if brewery_worker::hgn_edit::private_path(path) {
+        return Err(ApiError::bad(
+            "private scratch job output cannot enter the Library",
+        ));
+    }
     if store.is_scratch_path(path) {
         return Err(ApiError::bad("scratch files require operator approval"));
     }
@@ -893,6 +907,20 @@ fn prepare_job(app: &App, store: &Store, request: NewJob) -> Result<(Job, Envelo
                 .text,
         ),
         (None, prompt) => prompt.clone(),
+    };
+    // A registered contrast arrives as a name only; the controller pins the
+    // tune digest from its own store before validation so callers cannot choose it.
+    let request = if request.kind == brewery_worker::behavior_direction::JOB
+        && request.options.get("registered").is_some()
+    {
+        let options = crate::registered_evaluation::resolve_registered_pin(
+            &store,
+            request.options.clone(),
+        )
+        .map_err(ApiError::bad)?;
+        request.with_options(options)
+    } else {
+        request
     };
     let (job, mut envelope) = request.build(host, inputs, prompt).map_err(ApiError::bad)?;
     envelope.scratch_pins = scratch_pins;

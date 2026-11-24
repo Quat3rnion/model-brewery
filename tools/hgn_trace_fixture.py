@@ -15,11 +15,12 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
 
 sys.path.insert(0, str(Path(__file__).parent / "hgn_trace"))
 from trace import read_config
-from wsp.hgn import H
+from wsp.hgn import C, H
 
 
-def write_hgn(path, weights):
-    offset = data_start = 128 + 160 * len(weights)
+def write_hgn(path, weights, *, canonical=False):
+    header_size = 104 if canonical else 128
+    offset = data_start = (header_size + 160 * len(weights) + 63) & ~63 if canonical else 128 + 160 * len(weights)
     table = []
     payload = []
     for name, (store, variant, shape, data) in weights.items():
@@ -30,35 +31,53 @@ def write_hgn(path, weights):
         padded = data + bytes(-len(data) % 64)
         payload.append(padded)
         offset += len(padded)
-    header = struct.pack("<IIQQQQ", 0x314E4748, 2, len(table), 128, data_start, offset)
-    path.write_bytes(header.ljust(0x28, b"\0") + b"fixture".ljust(88, b"\0")
-                     + b"".join(table + payload))
+    header = struct.pack("<IIQQQQ", 0x314E4748, 2, len(table), header_size, data_start, offset)
+    path.write_bytes((header + b"fixture".ljust(header_size - len(header), b"\0") + b"".join(table))
+                     .ljust(data_start, b"\0") + b"".join(payload))
 
 
-def fixture(path):
+def fixture(path, *, embedding_rows=None, tokenizer=None, writers=False, qsa=False,
+            marker=False, editable=False):
+    vocab = len(embedding_rows) if embedding_rows is not None else 4
     raw = {"model_type": "qwen4_exp_text", "num_hidden_layers": 2, "hidden_size": 128,
-           "vocab_size": 4, "hc_count": 4, "hc_lowrank": 16,
+           "vocab_size": vocab, "hc_count": 4, "hc_lowrank": 16,
            "linear_key_head_dim": 16, "linear_value_head_dim": 16,
            "linear_num_value_heads": 2, "linear_num_key_heads": 1,
            "moe_intermediate_size": 128, "shared_expert_intermediate_size": 128,
            "num_experts": 2, "num_experts_per_tok": 1,
            "layer_types": ["linear_attention", "linear_attention"], "ple_layer_ids": [],
            "head_dim": 16, "num_attention_heads": 2, "num_key_value_heads": 1}
+    if qsa:
+        raw.update(layer_types=["linear_attention", "full_attention"], indexer_n_heads=2,
+                   indexer_kv_heads=1, indexer_head_dim=16, indexer_budget=512,
+                   indexer_compress_ratio=4)
+    if marker:
+        raw["eos_token_id"] = 3
     cfg = path / "config.json"
     cfg.write_text(json.dumps({"text_config": raw}))
     config = read_config(cfg)
-    tokenizer = Tokenizer(WordLevel({"<unk>": 0, "a": 1, "b": 2, "c": 3}, unk_token="<unk>"))
-    tokenizer.pre_tokenizer = Whitespace()
+    if tokenizer is None:
+        tokenizer = Tokenizer(WordLevel({"<unk>": 0, "a": 1, "b": 2, "c": 3}, unk_token="<unk>"))
+        tokenizer.pre_tokenizer = Whitespace()
     tokenizer.save(str(path / "tokenizer.json"))
+    if embedding_rows is None:
+        codebook = np.ones(16, "<f4")
+        packed = bytes(vocab * 64)
+    else:
+        codebook = np.array([0, 1, -1, 2, -2, 4, -4] + [0] * 9, "<f4")
+        codes = {value: index for index, value in enumerate(codebook[:7])}
+        # Put x and y in the first two coordinates. All other coordinates are zero.
+        packed = b"".join(bytes([codes[x] | codes[y] << 4]) + bytes(63)
+                          for x, y in embedding_rows)
+    embedding = codebook.tobytes() + packed + np.ones((vocab, 8), "<f2").tobytes()
     weights = {
-        "embed_tokens.weight": (5, 2, (4, 128), np.ones(16, "<f4").tobytes() + bytes(256)
-                                + np.ones((4, 8), "<f2").tobytes()),
-        "lm_head.weight": (0, 0, (4, 128), bytes(4 * 128 * 2)),
+        "embed_tokens.weight": (5, 2, (vocab, 128), embedding),
+        "lm_head.weight": (0, 0, (vocab, 128), bytes(vocab * 128 * 2)),
     }
 
     def zeros(prefix, state):
         for name, value in state.items():
-            weights[prefix + name] = (99, 0, tuple(value.shape), bytes(value.numel() * 4))
+            weights[prefix + name] = (1 if editable else 99, 0, tuple(value.shape), bytes(value.numel() * 4))
 
     with torch.device("meta"):
         mixer = Qwen4ExpTextGatedResidual(config, use_combine=False)
@@ -72,6 +91,60 @@ def fixture(path):
                 shape = (2, outputs, 128)
                 weights[experts + name + ".weight"] = (23, 128, shape, bytes(2 * outputs * 66))
                 for suffix, width in ((".suh", 128), (".svh", outputs)):
-                    weights[experts + name + suffix] = (99, 0, (width,), np.ones(width, "<f2").tobytes())
-    write_hgn(path / "model.hgn", weights)
+                    weights[experts + name + suffix] = (2 if editable else 99, 0, (width,), np.ones(width, "<f2").tobytes())
+    if writers:
+        def f32(name, values):
+            weights[name] = (99, 0, values.shape, values.astype("<f4").tobytes())
+
+        root = "layers.1."
+        f32(root + "mlp_hyper_connection.hc_norm.weight", np.ones(512))
+        for name, coefficient in (("gate_proj", 1), ("up_proj", 1), ("down_proj", 2)):
+            matrix = np.zeros((128, 128))
+            matrix[0, 0] = coefficient
+            f32(root + f"mlp.shared_expert.{name}.weight", matrix)
+        for name, outputs in (("gate_up_proj", 256), ("down_proj", 128)):
+            matrix = np.zeros((2, outputs, 128), dtype=np.float32)
+            matrix[:, 0, 0] = 1 if outputs == 256 else 3
+            if outputs == 256:
+                matrix[:, 128, 0] = 1
+            codes, scales = C.i4r_encode_rot(C.i4r_rotate(matrix, np.ones(128, "f"), np.ones(outputs, "f")))
+            weights[root + f"mlp.experts.{name}.weight"] = (
+                23, 128, matrix.shape, codes.tobytes() + scales.astype("<f2").tobytes())
+    if marker:
+        model_head = np.zeros((vocab, 128), "<f4")
+        model_head[3, 0] = -3
+        weights["lm_head.weight"] = (99, 0, model_head.shape, model_head.tobytes())
+        weights["hyper_connection_mixer.hc_norm.weight"] = (99, 0, (512,), np.ones(512, "<f4").tobytes())
+    if editable:
+        root = "layers.0."
+        shared = root + "mlp.shared_expert."
+
+        def matrix(name, values, bf16=False):
+            bits = np.asarray(values, dtype="<f4").view("<u4")
+            data = (bits >> 16).astype("<u2").tobytes() if bf16 else bits.tobytes()
+            weights[name] = (0 if bf16 else 1, 0, bits.shape, data)
+
+        # All edited writers have a measurable e0 component. The shared
+        # expert also drives the logit change; the other inputs stay zero.
+        attention = np.eye(128, 32) / 8
+        attention[0] /= 4
+        matrix(root + "linear_attn.out_proj.weight", attention, bf16=True)
+        matrix(shared + "down_proj.weight", np.eye(128) / 8, bf16=True)
+        # In the rotated basis a column of constant values is a pure e0
+        # contribution. The other columns sum to zero along that axis.
+        expert = np.zeros((2, 128, 128), dtype=np.float32)
+        for row in range(128):
+            for shift in range(4):
+                expert[:, row, (row + shift) % 128] = 1 if row % 2 else -1
+        expert[:, :, 0] = 1 / 8
+        codes, scales = C.i4r_encode_rot(expert)
+        weights[root + "mlp.experts.down_proj.weight"] = (
+            23, 128, expert.shape, codes.tobytes() + scales.astype("<f2").tobytes(),
+        )
+        matrix(shared + "gate_proj.weight", np.eye(128) / 4)
+        matrix(shared + "up_proj.weight", np.eye(128) / 4)
+        for name in (root + "mlp_hyper_connection.hc_norm.weight", "hyper_connection_mixer.hc_norm.weight"):
+            matrix(name, np.ones(weights[name][2]))
+        matrix("lm_head.weight", np.eye(vocab, 128), bf16=True)
+    write_hgn(path / "model.hgn", weights, canonical=editable)
     write_hgn(path / "sidecar.hgn", {})
