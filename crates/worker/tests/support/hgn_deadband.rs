@@ -354,7 +354,10 @@ fn case(enc: Encoding) {
         &report,
     )
     .unwrap();
-    assert!(checks.values().all(|row| row.passed));
+    let zero = serde_json::to_value(&checks[other]).unwrap();
+    assert_eq!(zero["status"], "no_component", "{zero}");
+    use brewery_worker::hgn_checks::AuditStatus;
+    assert_eq!(checks[name].status, AuditStatus::Passed);
     let rtn_child = fixture.path().join("rtn.hgn");
     let mut target = before.clone();
     let c = component(&before, &axis);
@@ -408,7 +411,8 @@ fn case(enc: Encoding) {
     let checks =
         brewery_worker::hgn_checks::audit(&parent, &rtn_child, &pin, &rtn_pin, 0..=0, &rtn)
             .unwrap();
-    assert!(!checks[name].passed && checks[name].leftover > 0.9);
+    assert_eq!(checks[name].status, AuditStatus::Failed);
+    assert!(checks[name].leftover > 0.9);
     if enc == Encoding::Q4Cp {
         let audit = |feedback: &hgn_ablation::Report| {
             brewery_worker::hgn_checks::audit(&parent, &rtn_child, &pin, &rtn_pin, 0..=0, feedback)

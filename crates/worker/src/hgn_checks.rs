@@ -12,17 +12,9 @@ const DOMAIN: &[u8] = b"brewery.hgn-checks.v1\0";
 pub const SCHEMA: &str = "brewery.hgn-stored-checks.v1";
 pub const SEED: u32 = 26842;
 pub const CONTROLS: usize = 5;
+pub const MIN_PARENT_COMPONENT: f64 = 1e-6;
+pub const MAX_REL_ERROR: f64 = 0.10;
 pub const PROMPTS: [&str; 2] = ["The capital of France is", "Two plus two equals"];
-
-pub(crate) fn gate(
-    leftover: f64,
-    max_expert_leftover: Option<f64>,
-    control_shifts: &[f64; CONTROLS],
-) -> bool {
-    (0.0..=0.10).contains(&leftover)
-        && max_expert_leftover.is_none_or(|v| (0.0..=0.10).contains(&v))
-        && control_shifts.iter().all(|v| (0.0..=0.05).contains(v))
-}
 
 pub fn agrees(a: f64, b: f64) -> bool {
     a.is_finite() && b.is_finite() && (a - b).abs() <= 1e-6 * (1.0 + b.abs())
@@ -134,6 +126,14 @@ pub struct EngineOptions {
     pub feedback_sha256: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditStatus {
+    Passed,
+    Failed,
+    NoComponent,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TensorAudit {
@@ -144,7 +144,29 @@ pub struct TensorAudit {
     pub rel_error: f64,
     /// Absolute relative movement in the mean magnitude along each control.
     pub control_shifts: [f64; CONTROLS],
-    pub passed: bool,
+    pub status: AuditStatus,
+}
+
+impl TensorAudit {
+    fn preserves_weights(&self) -> bool {
+        (0.0..=MAX_REL_ERROR).contains(&self.rel_error)
+            && self.control_shifts.iter().all(|v| (0.0..=0.05).contains(v))
+    }
+
+    pub(crate) fn measured_status(&self) -> AuditStatus {
+        if self.parent_mean_abs_component < MIN_PARENT_COMPONENT {
+            AuditStatus::NoComponent
+        } else if (0.0..=0.10).contains(&self.leftover)
+            && self
+                .max_expert_leftover
+                .is_none_or(|v| (0.0..=0.10).contains(&v))
+            && self.preserves_weights()
+        {
+            AuditStatus::Passed
+        } else {
+            AuditStatus::Failed
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -175,6 +197,37 @@ pub struct Report {
 }
 
 impl Report {
+    pub fn audit_failure(&self) -> Option<String> {
+        for (name, row) in &self.tensors {
+            if !row.preserves_weights() {
+                return Some(format!(
+                    "decoded HGN writer exceeded the relative error or random control bound: {name}"
+                ));
+            }
+            if row.status == AuditStatus::Failed {
+                return Some(format!(
+                    "decoded HGN writer did not drop at least 90% of its component: {name}"
+                ));
+            }
+        }
+        let missing: Vec<_> = [(false, "dense"), (true, "routed expert")]
+            .into_iter()
+            .filter_map(|(routed, group)| {
+                let mut rows = self
+                    .tensors
+                    .values()
+                    .filter(|r| r.max_expert_leftover.is_some() == routed)
+                    .peekable();
+                (rows.peek().is_some() && !rows.any(|r| r.status == AuditStatus::Passed))
+                    .then_some(group)
+            })
+            .collect();
+        (!missing.is_empty()).then(|| format!(
+            "no {} writer has a measurable parent component (floor {MIN_PARENT_COMPONENT:e}) with at least a 90% drop",
+            missing.join(" or ")
+        ))
+    }
+
     pub fn verify(&self, req: &Request, feedback: &hgn_edit::Report) -> Result<()> {
         req.verify()?;
         ensure!(
@@ -214,8 +267,7 @@ impl Report {
                     && row
                         .max_expert_leftover
                         .is_none_or(|v| v.is_finite() && v >= 0. && v + 1e-9 >= row.leftover)
-                    && row.passed
-                        == gate(row.leftover, row.max_expert_leftover, &row.control_shifts),
+                    && row.status == row.measured_status(),
                 "invalid decoded HGN audit metrics"
             );
         }

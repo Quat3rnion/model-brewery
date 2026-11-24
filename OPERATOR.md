@@ -1941,12 +1941,15 @@ decoded-store audit or a CPU forward check.
 Run both stored-file checks with `run_checks` or `POST /api/scratch/{id}/checks`.
 Send the child SHA-256 without `behavior_direction`. Poll the job, then read
 `get_checks` or the Edits view. In `hgn_stored`, the audit measures each
-dense and routed writer from the parent and child files. It requires at most
-10% of the parent direction component to remain in each writer and routed
-expert. It permits at most 5% change in the mean absolute component along
-each of five random directions (seed 26842). It reports relative Frobenius
-error against the parent. Missing writers, hash mismatches or disagreement
-with the stored feedback fail the check. The CPU runtime uses the root model's
+dense and routed writer from the parent and child files. A tensor with a mean
+absolute parent component below `1e-6` has status `no_component` and cannot
+show a drop. Each edited group (dense and routed experts) must have at least
+one passing tensor. At most 10% of the measurable component can remain in
+each writer and routed expert. For all writers, the relative Frobenius error
+against the parent must be at most `0.10` and the mean absolute component
+along each of five random directions (seed 26842) can change by at most 5%.
+Missing writers, hash mismatches or disagreement with the stored feedback
+fail the check. The CPU runtime uses the root model's
 pinned assets for both files. It reads the last prompt position for each of
 two fixed prompts and reports full-vocabulary KL(parent || child), top-1
 agreement and logit deltas. It does not generate text. Scores are not behavior

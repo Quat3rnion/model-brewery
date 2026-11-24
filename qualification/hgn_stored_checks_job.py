@@ -114,7 +114,10 @@ def exercise(bins, root, evidence):
         assert result["revision_sha256"] == child_sha == sha(child)
         assert result["parent_sha256"] == pin == sha(model)
         assert len(result["tensors"]) == 3
-        assert all(row["passed"] for row in result["tensors"].values()), result["tensors"]
+        for row in result["tensors"].values():
+            assert row["status"] == "passed" and row["parent_mean_abs_component"] >= 1e-6, row
+            assert row["rel_error"] <= 0.10, row
+        assert any("max_expert_leftover" in row for row in result["tensors"].values())
         assert all(row["kl_parent_child"] > 0.0 and row["max_abs_logit_delta"] > 0.0
                    for row in result["prompts"]), result["prompts"]
         assert len(result["prompts"]) == 2 and str(home) not in repr(result)
@@ -135,7 +138,8 @@ def exercise(bins, root, evidence):
         bad_feedback = check("bad-feedback")
         assert bad_feedback["state"] == "failed" and str(home) not in repr(bad_feedback)
         assert "HGN feedback receipt changed" in bad_feedback["error"]
-        evidence.write_text(json.dumps(dict(result=result, bad_model_rejected=True,
+        evidence.write_text(json.dumps(dict(result=result, min_parent_component=1e-6,
+                                            max_relative_error=0.10, bad_model_rejected=True,
                                             bad_feedback_rejected=True, bad_grant_rejected=True,
                                             release_qualified=False), indent=2) + "\n")
 

@@ -1,6 +1,6 @@
 //! Reopen both checkpoints. Reuse the native decoder, not the editor's metrics.
 use super::*;
-use crate::hgn_checks::{CONTROLS, SEED, TensorAudit, agrees, gate};
+use crate::hgn_checks::{AuditStatus, CONTROLS, SEED, TensorAudit, agrees};
 
 fn control_axes(width: usize) -> [Vec<f64>; CONTROLS] {
     let mut seed = SEED;
@@ -208,17 +208,16 @@ pub fn audit(
                 && worst.is_finite(),
             "decoded HGN audit disagrees with feedback: {name}"
         );
-        result.insert(
-            name.clone(),
-            TensorAudit {
-                leftover,
-                max_expert_leftover,
-                parent_mean_abs_component,
-                rel_error,
-                control_shifts,
-                passed: gate(leftover, max_expert_leftover, &control_shifts),
-            },
-        );
+        let mut row = TensorAudit {
+            leftover,
+            max_expert_leftover,
+            parent_mean_abs_component,
+            rel_error,
+            control_shifts,
+            status: AuditStatus::NoComponent,
+        };
+        row.status = row.measured_status();
+        result.insert(name.clone(), row);
     }
     Ok(result)
 }

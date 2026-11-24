@@ -301,7 +301,8 @@ else:
                       tensors={name:dict(leftover=row["leftover_after"], rel_error=row["rel_error"],
                                          parent_mean_abs_component=row["parent_mean_abs_component"],
                                          control_shifts=[.06 if failed_control else .01]*5,
-                                         passed=not failed_control,
+                                         status="no_component" if row["parent_mean_abs_component"] < 1e-6
+                                         else "failed" if failed_control or row["rel_error"] > .10 else "passed",
                                          **({"max_expert_leftover": row["leftover_after"]}
                                             if len(row["shape"]) == 3 else {}))
                                for name,row in feedback["tensors"].items()},
@@ -341,6 +342,14 @@ else:
                      f"layers.{layer}.mlp.experts.down_proj.weight": dict(tensor, shape=[1,2,2])}))
         if (root / "bad-hgn-receipt").exists():
             result["report"]["parent_sha256"] = "d" * 64
+        zero_group = root / "hgn-audit-empty-group"
+        if zero_group.exists():
+            group = zero_group.read_text()
+            for name, row in result["report"]["tensors"].items():
+                if ("mlp.experts." in name) == (group == "routed"):
+                    row["parent_mean_abs_component"] = 1e-7
+        if (root / "hgn-audit-high-error").exists():
+            result["report"]["tensors"][f"layers.{layer}.linear_attn.out_proj.weight"]["rel_error"] = .101
     if action == "start" and envelope["kind"] == "hf_download":
         assert envelope["inputs"] == [] and "prompt" not in envelope
         options = envelope["options"]

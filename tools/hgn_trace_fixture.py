@@ -15,7 +15,7 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
 
 sys.path.insert(0, str(Path(__file__).parent / "hgn_trace"))
 from trace import read_config
-from wsp.hgn import H
+from wsp.hgn import C, H
 
 
 def write_hgn(path, weights, *, canonical=False):
@@ -94,10 +94,23 @@ def fixture(path, *, embedding_rows=None, tokenizer=None, editable=False):
             data = (bits >> 16).astype("<u2").tobytes() if bf16 else bits.tobytes()
             weights[name] = (0 if bf16 else 1, 0, bits.shape, data)
 
-        # A small shared-expert residual along e0 changes the logits after
-        # projection. Keep the attention and routed paths valid but quiet.
-        matrix(root + "linear_attn.out_proj.weight", np.zeros((128, 32)), bf16=True)
+        # All edited writers have a measurable e0 component. The shared
+        # expert also drives the logit change; the other inputs stay zero.
+        attention = np.eye(128, 32) / 8
+        attention[0] /= 4
+        matrix(root + "linear_attn.out_proj.weight", attention, bf16=True)
         matrix(shared + "down_proj.weight", np.eye(128) / 8, bf16=True)
+        # In the rotated basis a column of constant values is a pure e0
+        # contribution. The other columns sum to zero along that axis.
+        expert = np.zeros((2, 128, 128), dtype=np.float32)
+        for row in range(128):
+            for shift in range(4):
+                expert[:, row, (row + shift) % 128] = 1 if row % 2 else -1
+        expert[:, :, 0] = 1 / 8
+        codes, scales = C.i4r_encode_rot(expert)
+        weights[root + "mlp.experts.down_proj.weight"] = (
+            23, 128, expert.shape, codes.tobytes() + scales.astype("<f2").tobytes(),
+        )
         matrix(shared + "gate_proj.weight", np.eye(128) / 4)
         matrix(shared + "up_proj.weight", np.eye(128) / 4)
         for name in (root + "mlp_hyper_connection.hc_norm.weight", "hyper_connection_mixer.hc_norm.weight"):

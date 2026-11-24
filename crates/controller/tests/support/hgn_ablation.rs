@@ -179,6 +179,72 @@ fn hgn_ablation_queues_private_child_and_pinned_descendant_through_mcp() {
     assert_eq!(failed["measured_job_id"], check["id"]);
     assert_eq!(failed["integrity"]["status"], "failed");
     assert!(failed.get("hgn_stored").is_none());
+    fs::remove_file(app.path("bad-hgn-check")).unwrap();
+    fs::remove_file(app.path("hgn-audit-failed-control")).unwrap();
+    for (group, reason) in [("dense", "dense"), ("routed", "routed expert")] {
+        fs::write(app.path("hgn-audit-empty-group"), group).unwrap();
+        let child = mcp(request(&hgn, &digest, &format!("edit-{group}")));
+        let child = child["id"].as_str().unwrap();
+        let done = app.await_job(child, |j| {
+            j["state"] == "succeeded" || j["state"] == "failed"
+        });
+        assert_eq!(done["state"], "succeeded", "{done}");
+        let rev = app.json("GET", &format!("/api/scratch/{child}"), None, 200);
+        let check = call(
+            "run_checks",
+            json!({"id":child, "sha256":rev["sha256"], "idempotency_key":format!("check-{group}")}),
+        );
+        assert_eq!(check["kind"], "scratch_hgn_checks", "{check}");
+        let done = app.await_job(check["id"].as_str().unwrap(), |j| {
+            j["state"] == "succeeded" || j["state"] == "failed"
+        });
+        assert_eq!(done["state"], "succeeded", "{done}");
+        let checks = call("get_checks", json!({"id":child}));
+        let name = if group == "dense" {
+            "layers.0.linear_attn.out_proj.weight"
+        } else {
+            "layers.0.mlp.experts.down_proj.weight"
+        };
+        assert_eq!(
+            checks["hgn_stored"]["tensors"][name]["status"],
+            "no_component"
+        );
+        assert_eq!(checks["integrity"]["status"], "failed", "{checks}");
+        assert!(
+            checks["integrity"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains(reason),
+            "{checks}"
+        );
+    }
+    fs::remove_file(app.path("hgn-audit-empty-group")).unwrap();
+    app.touch("hgn-audit-high-error");
+    let child = mcp(request(&hgn, &digest, "edit-high-error"));
+    let child = child["id"].as_str().unwrap();
+    let done = app.await_job(child, |j| {
+        j["state"] == "succeeded" || j["state"] == "failed"
+    });
+    assert_eq!(done["state"], "succeeded", "{done}");
+    let rev = app.json("GET", &format!("/api/scratch/{child}"), None, 200);
+    let check = call(
+        "run_checks",
+        json!({"id":child, "sha256":rev["sha256"], "idempotency_key":"check-high-error"}),
+    );
+    let done = app.await_job(check["id"].as_str().unwrap(), |j| {
+        j["state"] == "succeeded" || j["state"] == "failed"
+    });
+    assert_eq!(done["state"], "succeeded", "{done}");
+    let checks = call("get_checks", json!({"id":child}));
+    assert_eq!(checks["integrity"]["status"], "failed", "{checks}");
+    assert!(
+        checks["integrity"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("relative error"),
+        "{checks}"
+    );
+    fs::remove_file(app.path("hgn-audit-high-error")).unwrap();
     app.touch("bad-hgn-receipt");
     let bad = mcp(request(&hgn, &digest, "bad-receipt"));
     let bad_id = bad["id"].as_str().unwrap();

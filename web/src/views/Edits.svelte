@@ -325,13 +325,16 @@
                 {@const stored = b.hgn_stored}
                 <details class="small">
                   <summary>Decoded writers ({Object.keys(stored.tensors).length})</summary>
-                  <p class="xs muted">Limits: 10% component left and 5% shift for each random control. Seed: {stored.seed}.</p>
+                  <p class="xs muted">Limits: 10% component left, 10% relative error, and 5% shift for each random control. Each edited group needs a measurable drop. Parent component floor: 1e-6. Seed: {stored.seed}.</p>
                   <ul class="ops">
                     {#each Object.entries(stored.tensors) as [name, t] (name)}
                       <li>
-                        <span class="mono">{name}</span>: {t.passed ? 'Passed' : 'Failed'};
-                        {fmt(100 * t.leftover)}% left; relative error {fmt(t.rel_error)};
-                        {#if t.max_expert_leftover !== undefined}worst expert {fmt(100 * t.max_expert_leftover)}% left;{/if}
+                        <span class="mono">{name}</span>: {t.status === 'no_component' ? 'No measurable parent component' : t.status === 'passed' ? 'Passed' : 'Failed'};
+                        {#if t.status !== 'no_component'}
+                          {fmt(100 * t.leftover)}% left;
+                          {#if t.max_expert_leftover !== undefined}worst expert {fmt(100 * t.max_expert_leftover)}% left;{/if}
+                        {/if}
+                        relative error {fmt(t.rel_error)};
                         controls {t.control_shifts.map((v) => `${fmt(100 * v)}%`).join(', ')}.
                       </li>
                     {/each}

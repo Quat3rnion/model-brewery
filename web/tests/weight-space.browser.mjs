@@ -73,7 +73,7 @@ const baseList = [
         seed: 26842,
         tensors: { 'layers.0.mlp.experts.down_proj.weight': {
           leftover: .02, max_expert_leftover: .032, control_shifts: [.01, .005, 0, .002, .012],
-          rel_error: .003, passed: true,
+          rel_error: .003, status: 'passed',
         } },
         prompts: [{ tokens: 4, kl_parent_child: .015, top1_agrees: true,
                     mean_abs_logit_delta: .03, max_abs_logit_delta: .1, parent_top1_logit_delta: -.07 }],

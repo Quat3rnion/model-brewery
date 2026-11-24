@@ -319,7 +319,7 @@ export type CheckStatus = { status: 'passed' } | { status: 'failed' | 'not_run' 
 export interface HgnStoredChecks {
   seed: number;
   tensors: Record<string, {
-    passed: boolean;
+    status: 'passed' | 'failed' | 'no_component';
     leftover: number;
     max_expert_leftover?: number;
     parent_mean_abs_component: number;

@@ -484,11 +484,7 @@ pub(super) fn hgn_bundle(
     id: String,
     report: brewery_worker::hgn_checks::Report,
 ) -> Bundle {
-    let failure =
-        report.tensors.values().any(|r| !r.passed).then(|| {
-            "decoded HGN writer did not meet the component or random control bound".into()
-        });
-    let mut bundle = bundle(row, failure, None);
+    let mut bundle = bundle(row, report.audit_failure(), None);
     bundle.smoke = Check::Passed;
     bundle.behavior = Check::NotRun {
         reason: "HGN behavior gates are not part of the stored-file checks".into(),

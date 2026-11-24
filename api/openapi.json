@@ -2801,14 +2801,14 @@
             "type": "object", "minProperties": 1, "maxProperties": 256,
             "additionalProperties": {
               "type": "object", "additionalProperties": false,
-              "required": ["leftover", "parent_mean_abs_component", "rel_error", "control_shifts", "passed"],
+              "required": ["leftover", "parent_mean_abs_component", "rel_error", "control_shifts", "status"],
               "properties": {
                 "leftover": {"type": "number", "minimum": 0, "description": "Fraction of the parent direction component left in storage."},
                 "max_expert_leftover": {"type": "number", "minimum": 0, "description": "Largest retained fraction among the experts in a routed writer."},
                 "parent_mean_abs_component": {"type": "number", "minimum": 0},
-                "rel_error": {"type": "number", "minimum": 0},
+                "rel_error": {"type": "number", "minimum": 0, "description": "Relative Frobenius error against the parent. The audit requires at most 0.10."},
                 "control_shifts": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"type": "number", "minimum": 0}},
-                "passed": {"type": "boolean", "description": "At most 10% of the component remains for each writer and expert, and each control shifts by at most 5%."}
+                "status": {"enum": ["passed", "failed", "no_component"], "description": "no_component means the parent mean absolute component is below 1e-6 and the tensor cannot demonstrate a drop. For passed, at most 10% of the component remains for the writer and its experts, relative error is at most 0.10, and each control shifts by at most 5%."}
               }
             }
           },
