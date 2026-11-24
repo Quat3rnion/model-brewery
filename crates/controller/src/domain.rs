@@ -688,7 +688,7 @@ impl Host {
                     } else if kind == "hf_download" {
                         "Configure Hugging Face downloads and opt in on this worker"
                     } else if kind == brewery_worker::trace::JOB {
-                        "Configure pinned CPU Lanternfish and opt in on this worker"
+                        "Configure a pinned CPU trace runtime and opt in on this worker"
                     } else if matches!(kind, brewery_worker::sensitivity::JOB | brewery_worker::damage::JOB) {
                         "Configure pinned Lanternfish sensitivity and opt in on this worker"
                     } else if kind == brewery_worker::circuit::JOB {
@@ -1268,7 +1268,7 @@ impl NewJob {
                 }
                 brewery_worker::trace::JOB => {
                     n == 1
-                        && matches!(main, "gguf" | brewery_worker::trace::HGN_KIND)
+                        && (main == "gguf" || brewery_worker::trace::is_hgn(main))
                         && host == inputs[0].host
                 }
                 brewery_worker::sensitivity::JOB

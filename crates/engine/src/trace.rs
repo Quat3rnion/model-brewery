@@ -152,11 +152,12 @@ mod hgn;
 pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     let request = Request::worker(&job.options, job.prompt.as_deref())?;
     ensure!(
-        job.inputs.len() == 1 && matches!(job.inputs[0].kind.as_str(), "gguf" | trace::HGN_KIND),
+        job.inputs.len() == 1
+            && (job.inputs[0].kind == "gguf" || trace::is_hgn(&job.inputs[0].kind)),
         "trace needs a single GGUF or HGN input"
     );
     let input = &job.inputs[0];
-    let is_hgn = input.kind == trace::HGN_KIND;
+    let is_hgn = trace::is_hgn(&input.kind);
     ensure!(
         !is_hgn || request.interventions.is_empty(),
         "HGN traces do not support interventions"

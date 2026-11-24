@@ -66,7 +66,7 @@ impl TracePlan {
         )
         .map_err(|e| ApiError::bad(e.to_string()))?;
         let model = &envelope.inputs[0];
-        if model.kind == trace::HGN_KIND
+        if trace::is_hgn(&model.kind)
             && (saved.is_some()
                 || !patches.is_empty()
                 || sae.is_some()
