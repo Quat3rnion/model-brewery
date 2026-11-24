@@ -44,7 +44,7 @@ the worker state directory. Set `BREWERY_HGN_TRACE_PYTHON`,
 have write access to the release files or permission to replace them.
 
 Record the embedded CPU runtime SHA-256
-`1ac8e30b17ccd7b96ff84f840c3c6d911cb2cbded57d6a5cfec86217c417aef7`
+`41bfff469774f151e17d06b96d8a120dbb5fc12ddf3677039cbf8052af4a3bcf`
 from `tools/hgn_trace/runtime.sha256` in the release manifest. Use matching
 controller, dispatcher, worker, and engine builds. The runtime digest does
 not replace the interpreter or asset digests. Published version 2 direction

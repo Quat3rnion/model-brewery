@@ -26,6 +26,7 @@ fn system_prompt_uses_catalog_tools_and_reserves_approval_for_operator() {
     // Backticks mark tools and the exact field names and values below.
     let schema_terms = BTreeSet::from([
         "all",
+        "alphas",
         "behavior_direction",
         "dense",
         "experts",
@@ -33,12 +34,15 @@ fn system_prompt_uses_catalog_tools_and_reserves_approval_for_operator() {
         "flat",
         "l_out",
         "last_k",
+        "last_k_direction_id",
+        "options.gguf_projection",
         "options.hgn_projection",
         "plain",
         "registered_marker",
         "reference_id",
         "reference_layer",
         "residual",
+        "second_source_layer",
         "tune",
     ]);
     let parts: Vec<_> = SYSTEM.split('`').collect();
