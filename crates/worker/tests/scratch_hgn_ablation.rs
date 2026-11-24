@@ -9,6 +9,9 @@ use std::{fs::File, path::Path};
 const ATTENTION: &str = "layers.0.linear_attn.out_proj.weight";
 const EXPERTS: &str = "layers.0.mlp.experts.down_proj.weight";
 
+#[path = "support/hgn_deadband.rs"]
+mod hgn_deadband;
+
 fn write_bf16_model(path: &Path) {
     let tensors = [ATTENTION, EXPERTS, "layers.0.mlp.gate.weight"]
         .into_iter()
