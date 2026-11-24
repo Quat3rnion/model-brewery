@@ -90,6 +90,8 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("post", "/api/findings/{id}/replay", "replayFinding"),
         ("get", "/api/state", "getState"),
         ("get", "/api/evaluation-sets", "listEvaluationSets"),
+        ("get", "/api/directions", "listDirections"),
+        ("post", "/api/admin/directions/import", "importDirection"),
         (
             "post",
             "/api/admin/evaluation-sets",
@@ -331,7 +333,8 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
             "screen_ablation",
             "screen_hgn_ablation",
             "heretic",
-            "heretic_reproduce"
+            "heretic_reproduce",
+            "imported_direction"
         ])
     );
     assert_eq!(

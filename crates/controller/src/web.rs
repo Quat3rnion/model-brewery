@@ -192,6 +192,10 @@ async fn guard(State(listen): State<SocketAddr>, req: Request, next: Next) -> Re
             && origin.is_none()
             && fetch != Some("same-origin")
             && !has_json(headers)
+            // The import accepts multipart from CLI clients. It still requires
+            // an explicit operator bearer (never a cookie or ambient credential).
+            && !(path == "/api/admin/directions/import"
+                && has_media_type(headers, "multipart/form-data"))
         {
             return ApiError(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -238,11 +242,15 @@ pub(crate) fn single<'a>(
 }
 
 pub(crate) fn has_json(headers: &HeaderMap) -> bool {
+    has_media_type(headers, "application/json")
+}
+
+fn has_media_type(headers: &HeaderMap, media_type: &str) -> bool {
     single(headers, "content-type")
         .ok()
         .flatten()
         .and_then(|s| s.split(';').next())
-        .is_some_and(|s| s.trim().eq_ignore_ascii_case("application/json"))
+        .is_some_and(|s| s.trim().eq_ignore_ascii_case(media_type))
 }
 
 async fn list_models(State(app): State<Shared>) -> Result<Json<Vec<crate::domain::Model>>> {

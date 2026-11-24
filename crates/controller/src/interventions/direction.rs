@@ -31,6 +31,11 @@ impl DirectionRule {
             self.direction_version,
             Some(self.source_layer),
         )?;
+        if artifact["origin"] == "imported" {
+            return Err(ApiError::bad(
+                "direction interventions require a Brewery-fitted direction",
+            ));
+        }
         if artifact["model_id"] != binding.model_id
             || artifact["model_sha256"] != binding.model_sha256
         {

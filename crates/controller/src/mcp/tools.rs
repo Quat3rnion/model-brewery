@@ -36,6 +36,7 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("replay_finding", "post", "/api/findings/{id}/replay"),
     ("start_trace", "post", "/api/jobs"),
     ("compute_direction", "post", "/api/jobs"),
+    ("list_directions", "get", "/api/directions"),
     (
         "get_direction",
         "get",
@@ -197,13 +198,13 @@ impl Server {
                     "Queue CPU behavior directions for one pinned Library Qwen2 GGUF or supported HGN v2 checkpoint. Use a reviewed contrast and optional last_k to fit the last K positions. HGN requires l_out. Poll with get_job. Read version 2 with get_direction."
                 }
                 "get_direction" => {
-                    "Read an immutable direction artifact. Version 2 reports held-out Cohen's d and mean residual norm. For HGN, give reference_id and reference_layer to compare with a verified direction from the same checkpoint and behavior."
+                    "Read an immutable direction artifact, including operator provenance for imports. For cosine, give reference_id and reference_layer. Two fitted directions must use the same HGN checkpoint and behavior. If either is imported, both must be version 2 and use the same checkpoint hash. Imports have no measured separation scores."
                 }
                 "create_direction_intervention" => {
-                    "Save trace rules from a verified direction version. Project out its activation component or subtract a scaled unit vector. Pass the saved ID and version to start_trace."
+                    "Save trace rules from a Brewery-fitted direction version. Project out its activation component or subtract a scaled unit vector. Pass the saved ID and version to start_trace."
                 }
                 "ablate_direction" => {
-                    "Apply a version 2 direction to the exact parent hash. For SafeTensors, convert the private child to GGUF before checks. For HGN, use a pinned Library or scratch ID, a direction fit on its Library root, plain variant, flat kernel, and alpha 1. Poll get_job for scratch_id and get_scratch for native-store metrics. HGN scratch cannot be published."
+                    "Apply a fitted or operator-imported version 2 direction to the exact parent hash. For imports use plain (there is no negative-class mean). For SafeTensors, convert the private child to GGUF before checks. For HGN, use a pinned Library or scratch ID, a direction for its Library root, plain variant, flat kernel, and alpha 1. Poll get_job for scratch_id and get_scratch for native-store metrics. HGN scratch cannot be published."
                 }
                 "apply_edit" => {
                     "Apply selected tensor operations to a private SafeTensors scratch child. For native HGN projection, use ablate_direction."
@@ -221,7 +222,7 @@ impl Server {
                     "Check the exact scratch child. For native HGN, pass id and sha256 without behavior_direction or registered_marker. The source worker audits the stored writers and compares CPU forward scores with the immediate parent. For SafeTensors, convert both revisions with identical GGUF assets. Use behavior_direction.prompt_sets for held-out behavior scores or registered_marker to score one evaluation partition listed by list_evaluation_sets. Reserve final_gate for final evaluation. Poll get_job if queued and read get_checks."
                 }
                 "get_checks" => {
-                    "Read the current check bundle. For HGN, hgn_stored lists decoded writer metrics and per-prompt CPU forward scores without generated text. GGUF registered_marker lists the partition pin, rates, class counts and per-row flags, not full replies."
+                    "Read the current check bundle. direction_import identifies the operator and manifest when this edit used an imported direction. For HGN, hgn_stored lists decoded writer metrics and per-prompt CPU forward scores without generated text. GGUF registered_marker lists the partition pin, rates, class counts and per-row flags, not full replies."
                 }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({

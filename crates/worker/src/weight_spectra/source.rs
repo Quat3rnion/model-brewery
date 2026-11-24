@@ -11,6 +11,20 @@ use std::{
 
 mod gguf;
 
+pub(crate) fn gguf_dimensions(
+    file: &mut File,
+    bytes: u64,
+) -> Result<crate::direction_model::Dimensions> {
+    let entries = gguf::inventory(file, bytes)?;
+    crate::direction_model::dimensions(
+        entries
+            .iter()
+            .map(|(name, t)| (name.as_str(), t.shape.as_slice())),
+        "model.embed_tokens.weight",
+        &["model.layers.", "blk."],
+    )
+}
+
 const MAX_FILES: usize = 128;
 const MAX_TENSORS: usize = 8192;
 const MAX_TOTAL_BYTES: u64 = 256 << 30;

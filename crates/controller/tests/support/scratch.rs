@@ -1325,6 +1325,7 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             "get_scratch",
             "interp_benchmark",
             "lineage",
+            "list_directions",
             "list_evaluation_sets",
             "list_findings",
             "list_interventions",

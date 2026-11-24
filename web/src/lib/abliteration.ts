@@ -1,17 +1,13 @@
 // Read models for verified direction, search and scratch check receipts.
 export const abliterationKinds: Record<string, string> = {
   behavior_direction: 'Direction', search_ablation: 'Native search', heretic: 'Heretic', heretic_reproduce: 'Heretic reproduction',
-  screen_hgn_ablation: 'HGN forward screen',
+  screen_hgn_ablation: 'HGN forward screen', imported_direction: 'Imported direction',
 };
 
-export interface Direction {
-  behavior: string;
+interface DirectionBase {
   model_id: string;
   model_sha256: string;
-  contrast_sha256: string;
   position: number | null;
-  lanternfish_commit: string;
-  executable_sha256?: string;
   fit: {
     role: string;
     selected_layer: number | null;
@@ -22,10 +18,18 @@ export interface Direction {
       held_out_cohens_d?: number | null;
       held_out_margin: number | null;
       norm: number;
-      mean_residual_norm?: number;
+      mean_residual_norm?: number | null;
     }[];
   };
 }
+
+export type Direction = DirectionBase & (
+  | { origin?: 'fitted'; behavior: string; contrast_sha256: string; lanternfish_commit?: string; executable_sha256?: string }
+  | { origin: 'imported'; import: {
+    operator: string; imported_at_ms: number;
+    manifest: { layer: number; position?: number; model_sha256: string; npy_sha256: string; provenance: string };
+  } }
+);
 
 export interface DirectionArtifact { id: string; version: number; direction: Direction }
 

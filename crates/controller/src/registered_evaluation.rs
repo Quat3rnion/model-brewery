@@ -27,8 +27,8 @@ pub struct Operator {
 }
 
 impl Operator {
-    pub fn from_env() -> Result<Option<Self>, crate::Error> {
-        let Some(path) = std::env::var_os("BREWERY_EVALUATION_OPERATOR_FILE") else {
+    pub fn from_env(var: &str) -> Result<Option<Self>, crate::Error> {
+        let Some(path) = std::env::var_os(var) else {
             return Ok(None);
         };
         let file = OpenOptions::new()
@@ -39,18 +39,23 @@ impl Operator {
         // SAFETY: geteuid has no arguments and no memory or process side effects.
         let uid = unsafe { libc::geteuid() };
         if !meta.is_file() || meta.mode() & 0o077 != 0 || meta.uid() != uid || meta.len() > 4096 {
-            return Err(
-                "evaluation operator credentials must be a private, owned regular file".into(),
-            );
+            return Err("operator credentials must be a private, owned regular file".into());
         }
         let mut raw = Vec::new();
         file.take(4097).read_to_end(&mut raw)?;
         let record: Self =
-            serde_json::from_slice(&raw).map_err(|_| "invalid evaluation operator credentials")?;
+            serde_json::from_slice(&raw).map_err(|_| "invalid operator credentials")?;
         if raw.len() > 4096 || !name_valid(&record.operator) || !is_digest(&record.token) {
-            return Err("invalid evaluation operator credentials".into());
+            return Err("invalid operator credentials".into());
         }
         Ok(Some(record))
+    }
+
+    pub(crate) fn authenticate(&self, headers: &HeaderMap) -> Option<&str> {
+        let token = crate::web::single(headers, AUTHORIZATION.as_str())
+            .ok()??
+            .strip_prefix("Bearer ")?;
+        bool::from(token.as_bytes().ct_eq(self.token.as_bytes())).then_some(&self.operator)
     }
 }
 
@@ -235,15 +240,11 @@ async fn register(
     headers: HeaderMap,
     body: Result<Json<Spec>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Summary>), ApiError> {
-    let mut values = headers.get_all(AUTHORIZATION).iter();
-    let token = values
-        .next()
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-    let Some(operator) = app.evaluation_operator.as_ref().filter(|operator| {
-        values.next().is_none()
-            && token.is_some_and(|t| bool::from(t.as_bytes().ct_eq(operator.token.as_bytes())))
-    }) else {
+    let Some(operator) = app
+        .evaluation_operator
+        .as_ref()
+        .and_then(|operator| operator.authenticate(&headers))
+    else {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
             "evaluation set registration requires operator credentials".into(),
@@ -253,7 +254,7 @@ async fn register(
     spec.validate()?;
     let row = Record {
         spec,
-        operator: operator.operator.clone(),
+        operator: operator.into(),
         registered_at_ms: now(),
     };
     let store = app.store.lock().map_err(ApiError::storage)?;

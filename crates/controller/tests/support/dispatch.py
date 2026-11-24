@@ -91,6 +91,12 @@ if (root / "offline").exists():
     out(state("missing", "unrelated remote message", error="test transport failure"))
     sys.exit(255)
 
+if action == "direction-model":
+    req = json.load(sys.stdin)
+    assert host == "alpha" and req["kind"] == "hgn-v2" and req["path"] == "/models/import-fixture.hgn"
+    out(dict(hidden_size=3, layer_count=2) if req["sha256"] == "d" * 64 else None)
+    sys.exit(0)
+
 prior = json.loads(job.read_text()) if job.exists() else None
 if action == "trace-read":
     query = json.load(sys.stdin)

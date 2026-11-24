@@ -25,6 +25,8 @@ struct Bound {
     root_sha256: String,
     response: ablation::Request,
     native: native::Request,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    direction_import: Option<crate::directions::import::Provenance>,
 }
 
 pub(super) fn is_parent(app: &App, id: &str) -> Result<bool> {
@@ -121,7 +123,7 @@ pub(super) fn submit(
         || result["runtime"] != brewery_worker::trace::HGN_RUNTIME
     {
         return Err(ApiError::bad(
-            "fit the direction on the same pinned HGN Library root",
+            "use a direction for the same pinned HGN Library root",
         ));
     }
     let fit: behavior_direction::Fit =
@@ -131,7 +133,7 @@ pub(super) fn submit(
         .into_iter()
         .find(|row| row.layer == req.direction.layer)
         .and_then(|row| row.unit_vector)
-        .ok_or_else(|| ApiError::bad("the source layer has no nonzero fitted direction"))?;
+        .ok_or_else(|| ApiError::bad("the source layer has no nonzero direction"))?;
     let native = native::Request {
         parent_sha256: req.sha256.clone(),
         producer,
@@ -146,6 +148,7 @@ pub(super) fn submit(
         root_sha256,
         response: req,
         native,
+        direction_import: crate::directions::import::Provenance::from_artifact(&result)?,
     };
     if store.scratch_count().map_err(ApiError::storage)? >= LIMIT {
         return Err(conflict("scratch revision limit reached"));
@@ -222,12 +225,15 @@ pub(crate) fn finish(
         .map(|r| r.bytes)
         .sum();
     let runtime_version = report.encoder_sha256.clone();
-    let evidence = bound.response.evidence(Evidence {
-        job_id: job.id.clone(),
-        root_model: root.id,
-        root_sha256: bound.root_sha256,
-        report,
-    });
+    let evidence = bound.response.evidence(
+        Evidence {
+            job_id: job.id.clone(),
+            root_model: root.id,
+            root_sha256: bound.root_sha256,
+            report,
+        },
+        bound.direction_import,
+    );
     let row = Revision {
         id: job.id.clone(),
         kind: KIND.into(),

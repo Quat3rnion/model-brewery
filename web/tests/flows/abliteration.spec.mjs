@@ -8,6 +8,7 @@ const job = (id, kind, state = 'succeeded', options = {}) =>
   ({ id, kind, state, options, input_ids: ['fixture-base'], has_result: state === 'succeeded' });
 
 const direction = job('direction-1', 'behavior_direction', 'succeeded', { behavior: 'sycophancy' });
+const imported = job('imported-1', 'imported_direction');
 const search = job('search-1', 'search_ablation');
 const heretic = job('heretic-1', 'heretic', 'succeeded',
   { invocation: { profile: 'noslop-dolly', trials: 2, trial_index: 0, seed: 83 } });
@@ -34,7 +35,16 @@ const child = {
 };
 
 function mock(controller) {
-  controller.respond('GET', '/api/state', { json: { jobs: [direction, search, heretic, failed], models: [] } });
+  controller.respond('GET', '/api/state', { json: { jobs: [direction, imported, search, heretic, failed], models: [] } });
+  controller.respond('GET', `/api/directions/${imported.id}/versions/2`, { json: {
+    id: imported.id, version: 2, direction: { schema_version: 2, origin: 'imported',
+      model_id: 'fixture-base', model_sha256: sha, position: -1,
+      import: { operator: 'test-operator', imported_at_ms: 1700000000000,
+        manifest: { layer: 2, position: -1, model_sha256: sha, npy_sha256: 'b'.repeat(64), provenance: 'Synthetic external axis' } },
+      fit: { role: 'l_out', selected_layer: 2, train_pairs: 0, held_out_pairs: 0, layers: [
+        { layer: 2, held_out_cohens_d: null, held_out_margin: null, norm: 1 },
+      ] } },
+  } });
   controller.respond('GET', `/api/directions/${direction.id}/versions/2`, { json: {
     id: direction.id, version: 2, direction: { schema_version: 2, behavior: 'sycophancy', model_id: 'fixture-base',
       model_sha256: sha, contrast_sha256: contrast, position: null, lanternfish_commit: 'deadbeef',
@@ -86,6 +96,19 @@ test('direction shows curves, selected layer and verified contrast pins', async 
   await expect(page.getByText('CC BY 4.0', { exact: true })).toBeVisible();
   await expect(page.getByText(contrast, { exact: true })).toBeVisible();
   await verify(page, controller, info, 'direction');
+});
+
+test('imported direction shows its manifest instead of fit scores', async ({ page, controller }, info) => {
+  mock(controller);
+  await controller.open(page, 'abliteration');
+  await page.getByRole('link', { name: /Imported direction.*imported-1/i }).click();
+  await expect(page.getByRole('heading', { name: 'Import provenance' })).toBeVisible();
+  await expect(page.getByText(/Operator: test-operator/)).toContainText('2023-11-14');
+  await expect(page.getByText('Layer: 2 · Token position: -1', { exact: true })).toBeVisible();
+  await expect(page.getByText('b'.repeat(64), { exact: true })).toBeVisible();
+  await expect(page.getByText('Synthetic external axis', { exact: true })).toBeVisible();
+  await expect(page.getByRole('img', { name: "Held-out Cohen's d" })).toHaveCount(0);
+  await verify(page, controller, info, 'imported-direction');
 });
 
 test('search separates random controls from the front and shows paired child checks', async ({ page, controller }, info) => {

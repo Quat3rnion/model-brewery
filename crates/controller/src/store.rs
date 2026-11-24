@@ -872,6 +872,45 @@ impl Store {
     pub fn jobs(&self) -> Result<Vec<Job>> {
         read_list(&self.conn, "SELECT body FROM jobs ORDER BY seq", [])
     }
+
+    pub(crate) fn record_import(
+        &self,
+        job: &Job,
+        envelope: &Envelope,
+        result: &Value,
+    ) -> Result<()> {
+        let tx = self.submission_transaction()?;
+        tx.execute(
+            "INSERT INTO jobs(id,state,body,envelope,result) VALUES (?,?,?,?,?)",
+            params![
+                job.id,
+                job.state.key(),
+                encode(job)?,
+                encode(envelope)?,
+                encode(result)?
+            ],
+        )?;
+        event(&tx, job)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn direction_summaries(&self) -> Result<Vec<Value>> {
+        read_list(
+            &self.conn,
+            "SELECT json_object('id', id, 'version', json_extract(result,'$.schema_version'),
+                 'origin', coalesce(json_extract(result,'$.origin'),'fitted'),
+                 'model_id', json_extract(result,'$.model_id'),
+                 'model_sha256', json_extract(result,'$.model_sha256'),
+                 'created_at_ms', json_extract(body,'$.created_at'))
+             FROM jobs WHERE state='succeeded' AND result IS NOT NULL AND
+                 json_extract(body,'$.kind') IN (?1, ?2) ORDER BY seq DESC LIMIT 200",
+            params![
+                brewery_worker::behavior_direction::JOB,
+                crate::directions::import::JOB
+            ],
+        )
+    }
     pub fn detail(&self, id: &str) -> Result<Option<Value>> {
         let Some(mut data): Option<Value> = read_one(
             &self.conn,

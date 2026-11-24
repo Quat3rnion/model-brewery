@@ -1935,17 +1935,80 @@ References: [Arditi et al. (2024), section 4.1](https://arxiv.org/abs/2406.11717
 [Lai (2025), Projected Abliteration](https://huggingface.co/blog/grimjim/projected-abliteration)
 and [Norm-Preserving Biprojected Abliteration](https://huggingface.co/blog/grimjim/norm-preserving-biprojected-abliteration).
 
+### Import an external direction
+
+Only an operator can import a direction. On the controller, set
+`BREWERY_DIRECTION_OPERATOR_FILE` to a private regular file owned by the
+controller account (mode `0600`). Put `{"operator":"your-name","token":"..."}`
+in that file. Use a random 64-character lowercase hex token. Restart the
+controller. Keep the file and token out of agent tools, uploads, and logs.
+
+Register a standalone HGN v2, SafeTensors, or GGUF checkpoint in the Library
+on the source worker. Use a worker and dispatcher that support direction
+inspection. Export one 1-D float32 array with NumPy, for example with
+`numpy.save("direction.npy", vector, allow_pickle=False)`. Use the target
+checkpoint's residual coordinates. For HGN, use the shared hidden width,
+not a concatenation of the four streams. All values must be finite and the
+L2 norm must be within `1e-4` of 1. Brewery does not rescale the upload.
+
+Create `manifest.json` with these fields (the digests below are examples):
+
+```json
+{
+  "layer": 0,
+  "position": -1,
+  "model_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "npy_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "provenance": "Method, source revision, and residual basis for this vector."
+}
+```
+
+`layer` is zero-based. `position` is an optional signed token position for
+provenance only. Omit it if there is no single position. Use the lowercase
+SHA-256 of the exact checkpoint file and of the full `.npy` file. The note
+must not be blank. Use at most 2048 UTF-8 bytes. Agents can read it, so do
+not include secrets.
+
+Send the multipart upload from a trusted operator client. Use a private curl
+header file that contains the `Authorization: Bearer ...` header:
+
+```sh
+curl --fail-with-body --header @operator-header.txt \
+  --form "model_id=$MODEL_ID" \
+  --form 'manifest=@manifest.json;type=application/json' \
+  --form 'vector=@direction.npy;type=application/octet-stream' \
+  "$BREWERY_URL/api/admin/directions/import"
+```
+
+The source worker verifies the model hash, hidden width, and layer count.
+The controller returns `201` with an immutable version 2 artifact ID.
+`list_directions` (or `GET /api/directions`) lists the latest 200 IDs without
+vectors. Use `get_direction` or the Abliteration view to read the operator,
+time, and manifest. Imports have `origin: "imported"` and no fit scores.
+Cosine comparisons that include an import require two version 2 artifacts
+with the same checkpoint hash. Import does not fit, score, or screen the
+vector. Only the REST operator client can import it.
+
+Use `ablate_direction` with the returned ID, version 2, the manifest layer,
+and the `plain` variant. HGN uses the pinned Library root. SafeTensors must
+match the exact parent bytes. For a SafeTensors edit that uses a GGUF
+direction, the scratch parent's private GGUF must match the uploaded GGUF pin.
+This does not add direct editing of standalone GGUF files. The import has no
+negative-class mean. It cannot be used for `search_ablation` or as a trace
+intervention. Read `direction_import` in the ablation provenance and the
+`run_checks` bundle. Import and checks do not qualify a release.
+
 ### Native HGN v2 scratch edits
 
 Use `ablate_direction` with the ID and SHA-256 of a standalone HGN v2 Library
 model on the approved source worker. Use `plain`, a `flat` kernel, and alpha 1.
-Fit a version 2 direction on the Library model. The job edits attention output,
+Use a fitted or imported version 2 direction for the Library model. The job edits attention output,
 FFN down projections, and selected PLE value projections. It edits dense and
 routed writers together. It does not edit embeddings or MTP weights.
 
 Poll `get_job` and pass `result.scratch_id` to `get_scratch`. For a later edit,
-use the HGN scratch ID and its exact SHA-256. Continue to use a direction fit on
-its Library root. The child has no Library record or reversible delta.
+use the HGN scratch ID and its exact SHA-256. Continue to use a direction for
+its pinned Library root. The child has no Library record or reversible delta.
 `apply_edit`, conversion to GGUF, and publication do not support HGN scratch.
 Discard removes access to the revision. Private worker files and cache entries
 remain on Frame; remove them only when they are no longer required for audit,
