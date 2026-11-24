@@ -4,6 +4,77 @@ const ACCEPT: &str = "Accept: application/json, text/event-stream\r\n";
 const VERSION: &str = "MCP-Protocol-Version: 2025-06-18\r\n";
 
 #[test]
+fn mcp_traces_hgn_v2_on_its_non_hy4_library_worker() {
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts": {
+            "frame-hy4-plan": {"local":true,"capabilities":{"hy4_plan":true,"trace":true}},
+            "frame-hgn-trace": {"local":true,"capabilities":{"trace":true}}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let contract = app.json("GET", "/api/openapi.json", None, 200);
+    assert_eq!(
+        contract["components"]["schemas"]["TraceJob"]["properties"]["input_ids"]["x-brewery-input-kinds"],
+        json!([["gguf", "hgn", "hgn-v2"]])
+    );
+    let path = "/models/checkpoint.hgn";
+    let original = app.register("frame-hy4-plan", "hgn-v2", path);
+    let model = app.register("frame-hgn-trace", "hgn-v2", path);
+    let mut args = json!({"idempotency_key":"hgn-v2-trace","input_ids":[model],"prompt":"one two",
+        "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":1}});
+    let reply = call(&app, "start_trace", args.clone());
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let queued = &reply["result"]["structuredContent"];
+    assert_eq!(queued["host"], "frame-hgn-trace");
+    let job = app.await_job(queued["id"].as_str().unwrap(), |job| {
+        job["state"] == "succeeded"
+    });
+    assert_eq!(job["result"]["envelope"]["inputs"][0]["kind"], "hgn-v2");
+
+    args["options"]["interventions"] =
+        json!([{"op":"zero","layer":0,"role":"l_out","positions":[0]}]);
+    args["idempotency_key"] = json!("hgn-v2-intervention");
+    let reply = call(&app, "start_trace", args.clone());
+    assert_eq!(
+        reply["result"]["structuredContent"]["status"], 400,
+        "{reply}"
+    );
+    assert!(
+        reply
+            .to_string()
+            .contains("HGN traces do not support interventions")
+    );
+
+    args["options"]
+        .as_object_mut()
+        .unwrap()
+        .remove("interventions");
+    args["input_ids"] = json!([original]);
+    args["idempotency_key"] = json!("hgn-v2-hy4");
+    let reply = call(&app, "start_trace", args.clone());
+    assert_eq!(
+        reply["result"]["structuredContent"]["status"], 409,
+        "{reply}"
+    );
+    assert!(
+        reply
+            .to_string()
+            .contains("Dedicated Hy4 worker does not support this operation")
+    );
+    args["host"] = json!("frame-hgn-trace");
+    args["idempotency_key"] = json!("hgn-v2-cross-host");
+    let reply = call(&app, "start_trace", args);
+    assert_eq!(
+        reply["result"]["structuredContent"]["status"], 400,
+        "{reply}"
+    );
+}
+
+#[test]
 fn interp_benchmark_reads_the_versioned_report_without_driving_compute() {
     let mut t = Fixture::new();
     t.launch();

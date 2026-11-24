@@ -29,7 +29,6 @@ pub const ROUTING_EXECUTABLE: &str = "BREWERY_LANTERNFISH_ROUTING";
 pub const ROUTING_LIB_DIR: &str = "BREWERY_LANTERNFISH_ROUTING_LIB_DIR";
 pub const ROUTING_COMMIT: &str = "5699379af18d6428a6589c996f516c07a91e1a86";
 pub const ROUTING_SHA256: &str = "fda55c709a0ef81920daae882147f7f066f506d27d73846785880c424c56a581";
-pub const HGN_KIND: &str = "hgn";
 pub const HGN_PYTHON: &str = "BREWERY_HGN_TRACE_PYTHON";
 pub const HGN_PYTHON_SHA256: &str = "BREWERY_HGN_TRACE_PYTHON_SHA256";
 pub const HGN_ASSETS: &str = "BREWERY_HGN_TRACE_ASSETS";
@@ -39,6 +38,10 @@ pub const HARD_BYTE_CAP: u64 = 32 << 20;
 pub const RESPONSE_CAP: usize = 4 << 20;
 const MAX_POSITIONS: usize = 4096;
 const MAX_RETAIN: usize = 64;
+
+pub fn is_hgn(kind: &str) -> bool {
+    matches!(kind, "hgn" | "hgn-v2")
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]

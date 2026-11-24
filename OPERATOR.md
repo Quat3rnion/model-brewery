@@ -389,9 +389,11 @@ select more data or raise the cap. Save the request to repeat the run.
 ### HGN CPU setup
 
 Use a regular worker with the Qwen3.8 Flash Next v2 `.hgn` checkpoint in its
-Library. Add `"trace": true` to its dispatch capabilities. Install the CPU
-environment from the same Brewery revision as the engine. These commands
-use the network only for setup:
+Library. Add `"trace": true` to its dispatch capabilities. Dedicated Hy4
+workers cannot run traces. For Frame, see the
+[live provisioning handoff](deploy/lan/hgn-trace/LIVE-PROVISIONING.md).
+Install the CPU environment from the same Brewery revision as the engine.
+These commands use the network only for setup:
 
 ```sh
 install -d -m 700 "$runtime"
@@ -418,7 +420,8 @@ under operator control. Set `BREWERY_HGN_TRACE_PYTHON` to the copied
 }
 ```
 
-Register the checkpoint itself as `hgn`, not the sidecar or a bundle manifest.
+Register the checkpoint itself as `hgn-v2` or `hgn`, not a sidecar or bundle
+manifest.
 The worker checks the model and all three assets before prefill. It checks the
 runtime source pin and package versions and does not download files in a job.
 Keep about 16 GiB of RAM free and run one large CPU trace at a time. Use a

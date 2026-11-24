@@ -3111,7 +3111,7 @@
         "required":["input_ids","options"],
         "properties":{
           "kind":{"const":"trace"},
-          "input_ids":{"description":"The Library GGUF or HGN ID, or the scratch revision ID.","minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf","hgn"]]},
+          "input_ids":{"description":"The Library GGUF or HGN checkpoint ID, or the scratch revision ID.","minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf","hgn","hgn-v2"]]},
           "prompt":{"maxLength":16384,"x-brewery-max-utf8-bytes":16384},
           "options":{"$ref":"#/components/schemas/TraceOptions"}
         },
