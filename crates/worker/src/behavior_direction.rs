@@ -167,7 +167,15 @@ impl Request {
                 } else {
                     result.get("last_k").is_none()
                 })
-                && (current_runtime(result, kind) || (!hgn && original_runtime(result)))
+                && (current_runtime(result, kind)
+                    || if hgn {
+                        hgn_runtime(
+                            result,
+                            "29c4699cfcf3170fdf5daeced397fc168f7488244ee8f92d24dc39613693b767",
+                        )
+                    } else {
+                        original_runtime(result)
+                    })
                 && (!hgn || version == VERSION),
             "direction result does not match the model, prompt or runtime pins"
         );
@@ -189,26 +197,25 @@ impl Request {
 
 fn current_runtime(result: &Value, kind: &str) -> bool {
     if trace::is_hgn(kind) {
-        result.get("lanternfish_commit").is_none()
-            && result["runtime"] == trace::HGN_RUNTIME
-            && result["runtime_sha256"] == trace::HGN_RUNTIME_SHA256.trim_end()
-            && result["executable_sha256"]
-                .as_str()
-                .is_some_and(crate::is_digest)
-            && result["assets_sha256"].as_object().is_some_and(|assets| {
-                assets.len() == 3
-                    && ["sidecar", "config", "tokenizer"].into_iter().all(|name| {
-                        assets
-                            .get(name)
-                            .and_then(Value::as_str)
-                            .is_some_and(crate::is_digest)
-                    })
-            })
+        hgn_runtime(result, trace::HGN_RUNTIME_SHA256.trim_end())
     } else {
         result.get("runtime").is_none()
             && result["lanternfish_commit"] == trace::COMMIT
             && result["executable_sha256"] == trace::SHA256
     }
+}
+
+fn hgn_runtime(result: &Value, pin: &str) -> bool {
+    result.get("lanternfish_commit").is_none()
+        && result["runtime"] == trace::HGN_RUNTIME
+        && result["runtime_sha256"] == pin
+        && result["executable_sha256"]
+            .as_str()
+            .is_some_and(crate::is_digest)
+        && serde_json::from_value::<trace::hgn_projection::AssetPins>(
+            result["assets_sha256"].clone(),
+        )
+        .is_ok_and(|pins| pins.check().is_ok())
 }
 
 // Older direction jobs used the projection runtime even without an intervention.

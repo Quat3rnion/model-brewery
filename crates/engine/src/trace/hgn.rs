@@ -13,6 +13,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 const SOURCES: &[(&str, &[u8])] = &[
@@ -162,6 +163,18 @@ impl Runtime {
         capture: &Capture,
         out: &Path,
     ) -> Result<Export> {
+        self.capture_projected(work, model, prompt, capture, out, None)
+    }
+
+    pub(crate) fn capture_projected(
+        &self,
+        work: &Path,
+        model: &Path,
+        prompt: &str,
+        capture: &Capture,
+        out: &Path,
+        projection: Option<&trace::hgn_projection::Projection>,
+    ) -> Result<Export> {
         let check = || {
             for (_, pin, stamp) in &self.assets {
                 stamp.check(&pin.path)?;
@@ -182,6 +195,15 @@ impl Runtime {
             .arg(out)
             .arg("--threads")
             .arg(threads.to_string());
+        if let Some(projection) = projection {
+            ensure!(
+                self.receipt()["assets_sha256"] == serde_json::to_value(&projection.assets_sha256)?,
+                "HGN direction companion pins differ from this checkpoint's runtime assets"
+            );
+            let path = work.join("projection.json");
+            write_json(&path, &projection.runtime_spec())?;
+            command.arg("--projection").arg(path);
+        }
         check()?;
         self.python
             .capture(&mut command, work)
@@ -199,5 +221,44 @@ impl Runtime {
             .collect();
         json!({"runtime":HGN_RUNTIME, "runtime_sha256":HGN_RUNTIME_SHA256.trim_end(),
                "executable_sha256":self.python.sha, "assets_sha256":assets})
+    }
+
+    pub(crate) fn screen(
+        &self,
+        work: &Path,
+        model: &Path,
+        spec: &Value,
+    ) -> Result<brewery_worker::ablation_search::hgn::Scores> {
+        use brewery_worker::ablation_search::hgn;
+        let input = work.join("screen-spec.json");
+        let output = work.join("screen");
+        write_json(&input, spec)?;
+        let threads = child_threads(None)?.min(64);
+        let mut command = self.command(work, threads);
+        command
+            .arg("--model")
+            .arg(model)
+            .arg("--screen")
+            .arg("--spec")
+            .arg(&input)
+            .arg("--out")
+            .arg(&output)
+            .arg("--threads")
+            .arg(threads.to_string());
+        for (_, pin, stamp) in &self.assets {
+            stamp.check(&pin.path)?;
+        }
+        self.python
+            .capture_for(&mut command, work, Duration::from_secs(4 * 3600))
+            .context("HGN CPU screen failed")?;
+        for (_, pin, stamp) in &self.assets {
+            stamp.check(&pin.path)?;
+        }
+        let data = output.join("screen.json");
+        ensure!(
+            fs::symlink_metadata(&data)?.is_file() && fs::metadata(&data)?.len() <= hgn::MAX_BYTES,
+            "invalid HGN screen receipt"
+        );
+        Ok(serde_json::from_slice(&fs::read(data)?)?)
     }
 }

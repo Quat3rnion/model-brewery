@@ -1,6 +1,7 @@
 // Read models for verified direction, search and scratch check receipts.
 export const abliterationKinds: Record<string, string> = {
   behavior_direction: 'Direction', search_ablation: 'Native search', heretic: 'Heretic', heretic_reproduce: 'Heretic reproduction',
+  screen_hgn_ablation: 'HGN forward screen',
 };
 
 export interface Direction {
@@ -59,6 +60,7 @@ export const behaviorNames: Record<string, string> = {
 export interface SearchReceipt {
   backend: string;
   finding: string;
+  hgn?: { targets: string[]; layerRange: string };
   screen: {
     direction_id: string;
     behavior: string;
@@ -71,6 +73,7 @@ export interface SearchReceipt {
     trials: {
       candidate?: { source_layer: number; first_layer: number; last_layer: number; variant: string; alpha: number };
       reduction: number; kl: number; random_reduction: number; random_kl: number; wins_over_random: number;
+      control_shift?: number; random_control_shift?: number;
     }[];
     pareto: number[];
     selected: number[];
@@ -82,6 +85,28 @@ export interface SearchReceipt {
     improved: number; worsened: number; exact_mcnemar_p: number; holm_adjusted_p: number;
     w4_passed: boolean; confirmed_improvement: boolean;
   }[];
+}
+
+export interface HgnScreenReceipt {
+  direction_id: string;
+  behavior: string;
+  contrast_sha256: string;
+  first_layer: number | null;
+  last_layer: number | null;
+  targets: string[];
+  pareto: number[];
+  selected: number[];
+  scores: Pick<SearchReceipt['screen'], 'marker' | 'prompts' | 'parent_hits' | 'parent_mean' | 'trials'>;
+}
+
+export function hgnScreen(receipt: HgnScreenReceipt): SearchReceipt {
+  return {
+    backend: 'cpu', finding: 'Forward screen only. No scratch children or generated replies.', children: [],
+    hgn: { targets: receipt.targets, layerRange: receipt.first_layer == null
+      ? 'all layers' : `layers ${receipt.first_layer} to ${receipt.last_layer}` },
+    screen: { ...receipt.scores, direction_id: receipt.direction_id, behavior: receipt.behavior,
+      screen_sha256: receipt.contrast_sha256, pareto: receipt.pareto, selected: receipt.selected },
+  };
 }
 
 type PairedFlag = { parent: boolean; child: boolean };

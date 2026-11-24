@@ -706,7 +706,7 @@
       "post": {
         "operationId": "searchAblation",
         "summary": "Queue a bounded native ablation search",
-        "description": "Screen fitted slop or sycophancy directions on held-out prompts against matched random controls. Run A2 and W4 on selected Pareto scratch children. Read the receipt with GET /api/jobs/{id}. No child is published or approved.",
+        "description": "Use a scratch revision ID for GGUF search, or a Library HGN v2 ID for a forward-only screen. Score reviewed held-out prompts against matched random directions. GGUF runs checks on selected Pareto scratch children. HGN scores slop, sycophancy, or the first-token continuation proxy on paired behavior and control prompts. HGN does not create scratch children or store completions. Read the receipt with GET /api/jobs/{id}.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AblationSearchRequest"}}}},
         "responses": {
@@ -2536,7 +2536,14 @@
       "AblationVariant": {"enum": ["plain", "projected", "norm_preserving"]},
       "AblationSearchRequest": {
         "type": "object", "additionalProperties": false,
-        "required": ["sha256", "direction_id", "assets_id", "seed", "trial_budget", "max_children", "disk_budget_bytes", "behavior_direction"],
+        "required": ["sha256", "direction_id", "seed"],
+        "oneOf": [
+          {"required":["assets_id","trial_budget","max_children","disk_budget_bytes","behavior_direction"],
+           "not":{"anyOf":[{"required":["targets"]},{"required":["source_layer"]},{"required":["first_layer"]},{"required":["last_layer"]}]}},
+          {"required":["targets","source_layer"],
+           "dependentRequired":{"first_layer":["last_layer"],"last_layer":["first_layer"]},
+           "not":{"anyOf":[{"required":["assets_id"]},{"required":["trial_budget"]},{"required":["max_children"]},{"required":["disk_budget_bytes"]},{"required":["behavior_direction"]}]}}
+        ],
         "properties": {
           "sha256": {"$ref": "#/components/schemas/ScratchHash"},
           "direction_id": {"type": "string", "minLength": 1},
@@ -2545,7 +2552,13 @@
           "trial_budget": {"type": "integer", "minimum": 3, "maximum": 32},
           "max_children": {"type": "integer", "minimum": 1, "maximum": 3},
           "disk_budget_bytes": {"type": "integer", "minimum": 67108864, "maximum": 68719476736},
-          "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionConfig"}
+          "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionConfig"},
+          "source_layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "first_layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "last_layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "targets":{"type":"array","minItems":1,"maxItems":4,"uniqueItems":true,
+            "description":"HGN only. Screen each target in the given order. Omit both layer endpoints to screen all layers.",
+            "items":{"$ref":"#/components/schemas/HgnProjectionTarget"}}
         }
       },
       "HgnFeedback": {
@@ -2959,7 +2972,7 @@
         "type": "object",
         "required": ["id", "kind", "host", "pool_slot", "state", "progress", "input_ids", "options", "cancel_requested", "has_result", "created_at", "updated_at"],
         "properties": {
-          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf", "scratch_checks", "scratch_locate_edit", "scratch_hgn_ablation", "weight_spectra", "search_ablation", "screen_ablation", "heretic", "heretic_reproduce"]}]},
+          "id": {"$ref": "#/components/schemas/Id"}, "kind": {"anyOf":[{"$ref":"#/components/schemas/JobKind"},{"enum":["scratch_gguf", "scratch_checks", "scratch_locate_edit", "scratch_hgn_ablation", "weight_spectra", "search_ablation", "screen_ablation", "screen_hgn_ablation", "heretic", "heretic_reproduce"]}]},
           "host": {"anyOf": [{"$ref": "#/components/schemas/HostId"}, {"const": "auto"}], "description": "Concrete worker ID, or auto before assignment of a pool conversion."},
           "requested_host": {"const": "auto", "description": "Present if auto conversion routing was requested."},
           "pool_slot": {"type": "boolean"}, "state": {"$ref": "#/components/schemas/JobState"}, "progress": {"type": "string"},
@@ -3118,7 +3131,7 @@
         }
       },
       "TraceJob": {
-        "description":"Run a CPU trace of a Library GGUF or Qwen3.8 Flash Next v2 HGN checkpoint, or a scratch revision with private GGUF, on its own opted-in worker. Supply exactly one of prompt, prompt_id, or options.prompts. HGN uses at most 512 raw prompt tokens and does not support interventions or SAE. There is no generation.",
+        "description":"Run a CPU trace of a Library GGUF or Qwen3.8 Flash Next v2 HGN checkpoint, or a scratch revision with private GGUF, on its own opted-in worker. Supply exactly one of prompt, prompt_id, or options.prompts. HGN uses at most 2048 raw prompt tokens and supports hgn_projection but not other interventions or SAE. There is no generation.",
         "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"}],
         "required":["input_ids","options"],
         "properties":{
@@ -3308,7 +3321,22 @@
           "intervention_artifact":{"$ref":"#/components/schemas/InterventionRef"},
           "activation_patches":{"type":"array","maxItems":8,"items":{"$ref":"#/components/schemas/ActivationPatch"}},
           "sae":{"$ref":"#/components/schemas/SaeSelection"},
-          "feature_steering":{"$ref":"#/components/schemas/FeatureSteering"}
+          "feature_steering":{"$ref":"#/components/schemas/FeatureSteering"},
+          "hgn_projection":{"$ref":"#/components/schemas/HgnTraceProjection"}
+        }
+      },
+      "HgnProjectionTarget": {"enum":["residual","dense","experts","all"]},
+      "HgnTraceProjection": {
+        "type":"object","additionalProperties":false,
+        "description":"Project a version 2 direction from the same HGN checkpoint. Use both layer endpoints for an inclusive interval, or omit both for all layers. Do not combine with other interventions or SAE.",
+        "required":["direction_id","source_layer","target"],
+        "dependentRequired":{"first_layer":["last_layer"],"last_layer":["first_layer"]},
+        "properties":{
+          "direction_id":{"$ref":"#/components/schemas/Id"},
+          "source_layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "target":{"$ref":"#/components/schemas/HgnProjectionTarget"},
+          "first_layer":{"$ref":"#/components/schemas/TraceLayer"},
+          "last_layer":{"$ref":"#/components/schemas/TraceLayer"}
         }
       },
       "SaeMetadata": {
@@ -3479,6 +3507,10 @@
           "runtime_sha256":{"$ref":"#/components/schemas/Sha256"},"spec":{"$ref":"#/components/schemas/TraceCapture"},
           "tokens":{"type":"array","items":{"type":"object","required":["position","token_id"],"properties":{"position":{"$ref":"#/components/schemas/TracePosition"},"token_id":{"type":"integer"}}}},
           "tensor_count":{"type":"integer"},"missing_count":{"type":"integer"},"intervention_count":{"type":"integer"},
+          "hgn_projection":{"type":"object","additionalProperties":false,
+            "required":["target","first_layer","last_layer"],
+            "properties":{"target":{"$ref":"#/components/schemas/HgnProjectionTarget"},
+              "first_layer":{"$ref":"#/components/schemas/TraceLayer"},"last_layer":{"$ref":"#/components/schemas/TraceLayer"}}},
           "logit_lens_count":{"type":"integer"},"model_logits_count":{"type":"integer"}
         }
       },
@@ -4583,16 +4615,43 @@
           {"$ref": "#/components/schemas/QuantizationDamageArtifact"},
           {"$ref": "#/components/schemas/BehaviorDirectionResult"},
           {"$ref": "#/components/schemas/AblationSearchResult"},
+          {"$ref": "#/components/schemas/HgnScreenResult"},
           {"type": "object", "not": {"anyOf": [
             {"$ref": "#/components/schemas/CompareResult"}, {"$ref": "#/components/schemas/ConversionResult"},
             {"$ref": "#/components/schemas/GenerateResult"}, {"$ref": "#/components/schemas/Gsm8kResult"},
             {"$ref": "#/components/schemas/BenchmarkResult"}, {"$ref": "#/components/schemas/TransferResult"},
              {"$ref": "#/components/schemas/CacheCleanupResult"}, {"$ref": "#/components/schemas/WeightApplyResult"},
-             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace", "weight_spectra", "quantization_damage"]}}}
+             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace", "weight_spectra", "quantization_damage", "screen_hgn_ablation"]}}}
           ]}}
         ]
       },
       "ByteCount": {"type": "integer", "minimum": 0},
+      "HgnScreenResult": {
+        "type":"object",
+        "required":["kind","schema_version","release_qualified","model_sha256","direction_id","targets","scores","pareto","selected"],
+        "properties":{
+          "kind":{"const":"screen_hgn_ablation"},"schema_version":{"const":1},"release_qualified":{"const":false},
+          "model_sha256":{"$ref":"#/components/schemas/Sha256"},"direction_id":{"$ref":"#/components/schemas/Id"},
+          "contrast_sha256":{"$ref":"#/components/schemas/Sha256"},"runtime":{"const":"hgn_cpu"},
+          "targets":{"type":"array","minItems":1,"maxItems":4,"items":{"$ref":"#/components/schemas/HgnProjectionTarget"}},
+          "scores":{"type":"object","required":["marker","marker_tokens","prompts","parent_hits","parent_mean","control_mean","trials"],
+            "properties":{
+              "marker":{"type":"string"},"marker_tokens":{"type":"array","items":{"type":"integer","minimum":0}},
+              "prompts":{"type":"integer","minimum":1,"maximum":8},"parent_hits":{"type":"integer","minimum":0,"maximum":8},
+              "parent_mean":{"type":"number"},"control_mean":{"type":"number"},
+              "trials":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"object","additionalProperties":false,
+                "required":["reduction","random_reduction","control_shift","random_control_shift","kl","random_kl","wins_over_random"],
+                "properties":{
+                  "reduction":{"type":"number"},"random_reduction":{"type":"number"},
+                  "control_shift":{"type":"number","minimum":0},"random_control_shift":{"type":"number","minimum":0},
+                  "kl":{"type":"number","minimum":0},"random_kl":{"type":"number","minimum":0},
+                  "wins_over_random":{"type":"integer","minimum":0,"maximum":8}
+                }}}
+            }},
+          "pareto":{"type":"array","items":{"type":"integer","minimum":0,"maximum":3}},
+          "selected":{"type":"array","items":{"type":"integer","minimum":0,"maximum":3}}
+        }
+      },
       "AblationSearchResult": {
         "type": "object",
         "required": ["schema_version", "kind", "release_qualified", "backend", "screen", "children", "finding"],

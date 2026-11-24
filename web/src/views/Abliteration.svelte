@@ -5,7 +5,7 @@
   import DirectionResult from '../components/abliteration/DirectionResult.svelte';
   import HereticResult from '../components/abliteration/HereticResult.svelte';
   import SearchResult from '../components/abliteration/SearchResult.svelte';
-  import { abliterationKinds as kinds, behaviorNames, type DirectionArtifact, type SearchReceipt } from '../lib/abliteration';
+  import { abliterationKinds as kinds, behaviorNames, hgnScreen, type DirectionArtifact, type HgnScreenReceipt, type SearchReceipt } from '../lib/abliteration';
   import { api, ApiError, errorText } from '../lib/api';
   import { isActive, newestFirst, stateLabel, stateTone } from '../lib/format';
   import { obj } from '../lib/reports';
@@ -27,8 +27,10 @@
   let childError = $state<string | null>(null);
   let error = $state<string | null>(null);
   let loading = $state(false);
-  const search = $derived(detail?.kind === 'search_ablation' && obj(obj(detail.result)?.screen)
-    ? detail.result as SearchReceipt : null);
+  const search = $derived(detail?.kind === 'screen_hgn_ablation' && obj(obj(detail.result)?.scores)
+    ? hgnScreen(detail.result as HgnScreenReceipt)
+    : detail?.kind === 'search_ablation' && obj(obj(detail.result)?.screen)
+      ? detail.result as SearchReceipt : null);
 
   $effect(() => {
     const id = selected;

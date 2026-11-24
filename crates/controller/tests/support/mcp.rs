@@ -75,6 +75,84 @@ fn mcp_traces_hgn_v2_on_its_non_hy4_library_worker() {
 }
 
 #[test]
+fn mcp_screens_and_traces_a_verified_hgn_direction_without_edits() {
+    use brewery_worker::{behavior_direction::Behavior, trace};
+
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts": {
+            "alpha":{"local":true,"capabilities":{"trace":true,"behavior_direction":true}}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let model = app.register("alpha", "hgn-v2", "/models/screen.hgn");
+    let other = app.register("alpha", "hgn-v2", "/models/other.hgn");
+    let sha = "a".repeat(64);
+    let receipt = json!({
+        "kind":"behavior_direction","schema_version":2,"release_qualified":false,
+        "model_id":model,"model_sha256":sha,"behavior":"response_length","position":null,"last_k":3,
+        "contrast_sha256":Behavior::ResponseLength.contrast_sha256(),
+        "runtime":trace::HGN_RUNTIME, "runtime_sha256":trace::HGN_RUNTIME_SHA256.trim_end(),
+        "executable_sha256":sha,"assets_sha256":{"sidecar":sha,"config":sha,"tokenizer":sha},
+        "fit":{"role":"l_out","train_pairs":12,"held_out_pairs":8,"selected_layer":1,
+             "layers":[{"layer":1,"norm":2.0,"unit_vector":[0.0,1.0],
+                        "held_out_margin":0.25,"held_out_cohens_d":0.5,"mean_residual_norm":1.0}]}
+    });
+    fs::write(app.path("direction-result.json"), receipt.to_string()).unwrap();
+    let dir = app.enqueue(
+        json!({"kind":"behavior_direction","input_ids":[model],"options":{
+            "behavior":"response_length","model_sha256":sha,"layers":[1],"last_k":3
+        }}),
+    );
+    app.await_job(&dir, |job| job["state"] == "succeeded");
+    let args = json!({"id":model,"idempotency_key":"hgn-screen","sha256":sha,"direction_id":dir,"source_layer":1,
+        "seed":7,"targets":["residual","dense","experts","all"],"first_layer":0,"last_layer":1});
+    let mut invalid = args.clone();
+    invalid["id"] = json!(other);
+    let wrong = call(&app, "search_ablation", invalid);
+    assert_eq!(
+        wrong["result"]["structuredContent"]["status"], 400,
+        "{wrong}"
+    );
+    let reply = call(&app, "search_ablation", args);
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let screen_id = reply["result"]["structuredContent"]["id"].as_str().unwrap();
+    let job = app.await_job(screen_id, |job| job["state"] == "succeeded");
+    assert_eq!(job["host"], "alpha");
+    let wire = &job["result"]["envelope"];
+    assert_eq!(
+        wire["options"]["targets"],
+        json!(["residual", "dense", "experts", "all"])
+    );
+    assert_eq!(wire["options"]["vector"], json!([0.0, 1.0]));
+    assert!(job["options"].get("vector").is_none());
+    assert!(
+        app.json("GET", "/api/scratch", None, 200)
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let trace_args = json!({"idempotency_key":"hgn-edit-trace","input_ids":[model],"prompt":"one two","options":{
+        "layers":[0,1],"roles":["l_out"],"positions":[0],"top_k":0,
+        "hgn_projection":{"direction_id":dir,"source_layer":1,"target":"experts",
+            "first_layer":1,"last_layer":1}
+    }});
+    let reply = call(&app, "start_trace", trace_args);
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let trace_id = reply["result"]["structuredContent"]["id"].as_str().unwrap();
+    let job = app.await_job(trace_id, |job| job["state"] == "succeeded");
+    let options = &job["result"]["envelope"]["options"];
+    assert_eq!(options["hgn_projection"]["target"], "experts");
+    assert_eq!(options["hgn_projection"]["vector"], json!([0.0, 1.0]));
+    assert_eq!(options["expected_model_sha256"], sha);
+    assert!(job["options"]["hgn_projection"].get("vector").is_none());
+}
+
+#[test]
 fn interp_benchmark_reads_the_versioned_report_without_driving_compute() {
     let mut t = Fixture::new();
     t.launch();

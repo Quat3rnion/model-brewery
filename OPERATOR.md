@@ -381,10 +381,19 @@ with 1 to 4 entries. This example shows `options` for one prompt:
 
 Layers and token positions start at zero. The CLI does not use a chat
 template or generate tokens. It accepts at most 4096 GGUF prompt tokens or
-512 HGN prompt tokens. HGN uses the raw tokenizer without special tokens. An
+2048 HGN prompt tokens. HGN uses the raw tokenizer without special tokens. An
 optional `byte_cap` can override the default within the configured maximum.
 Set `full_dump: true` to pass larger explicit selections. This flag does not
 select more data or raise the cap. Save the request to repeat the run.
+
+For HGN only, set `options.hgn_projection` to a `direction_id`,
+`source_layer`, and `target`. The controller loads version 2 of the direction
+and verifies the checkpoint and its companion asset hashes. Select `residual`
+to project all four streams, `dense` for the embedding and dense writers,
+`experts` for routed expert output, or `all` for both writer groups. Use
+inclusive `first_layer` and `last_layer`, or omit both to project all layers.
+Capture `l_out`, `final_norm`, or logits. Do not combine this option with
+GGUF interventions or SAE. This operation does not change model weights.
 
 ### HGN CPU setup
 
@@ -428,8 +437,8 @@ Keep about 16 GiB of RAM free and run one large CPU trace at a time. Use a
 narrow selection first. Each HGN `l_out` row has shape `[4,2560]` in
 `[stream,hidden]` order. Capture `final_norm` at the last layer for the
 normalized final mix. The lens uses the same mixer and head as model logits.
-Other tensor roles are reported as missing. HGN does not support interventions,
-activation patches, or SAE steering.
+Other tensor roles are reported as missing. `hgn_projection` is the only
+HGN intervention. Activation patches and SAE steering require GGUF.
 
 Use job events to follow progress. After success, use
 `GET /api/jobs/{id}/trace` for the summary. Use `/tensor` for F32 rows,
@@ -744,8 +753,8 @@ token by default. On HGN, use `l_out` and select at most 25 layers for a
 2560-wide model. The worker adds the assistant header with thinking disabled.
 Set `last_k` to 1 to 16 to use that many final template tokens. If you do not
 specify `last_k`, the job uses one token. For an explicit zero-based token
-index, set `position` instead. The HGN runtime accepts up to 512 prompt
-tokens. At each position, it sums the four streams over their shared hidden
+index below 512, set `position` instead. The HGN runtime accepts up to 2048
+prompt tokens. At each position, it sums the four streams over their shared hidden
 coordinates. The worker L2-normalizes that sum and averages the positions.
 `mean_residual_norm` uses the norm before normalization.
 
@@ -1957,6 +1966,23 @@ before you enable the capability or enqueue an edit. Keep the stock model and
 production units unchanged.
 
 ### Native ablation search
+
+For a Library HGN v2 checkpoint, use `search_ablation` or
+`POST /api/scratch/{id}/search_ablation` with the Library ID. Supply
+`sha256`, `direction_id`, `source_layer`, `seed`, and one to four unique
+`targets` from `residual`, `dense`, `experts`, and `all`. Supply both layer
+endpoints for an inclusive range, or omit them to test every layer. Use a
+non-Hy4 source worker with `trace`, `behavior_direction`, the pinned HGN CPU
+runtime, and the contrast cache. The screen has a four-hour runtime limit.
+
+The HGN screen compares the positive and negative sides of the reviewed
+held-out pairs. It reports the stock marker, matched random-direction
+scores, control-set shifts, KL, and the Pareto front. For `response_length`,
+the marker is first-token non-EOS probability. It is a continuation proxy,
+not a measure of generated length. The HGN screen generates no text and
+creates no scratch children. Read the receipt with `get_job`.
+
+#### GGUF search
 
 Use `search_ablation` or `POST /api/scratch/{id}/search_ablation` on an
 unrequested dense Qwen2.5 scratch revision with a private GGUF. Fit a

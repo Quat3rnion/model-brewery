@@ -1089,6 +1089,25 @@ pub fn manual_registration_blocker(host: &str, kind: &str) -> Option<Reason> {
 // Prefer the source host if eligible, avoiding a transfer. Selection of an
 // *idle* host occurs in the scheduler, not during POST.
 pub fn candidates<'a>(job: &Job, envelope: &Envelope, hosts: &'a [Host]) -> Vec<&'a Host> {
+    if job.kind == brewery_worker::ablation_search::hgn::JOB {
+        return hosts
+            .iter()
+            .filter(|host| {
+                !host.scheduling_paused
+                    && host.id == job.host
+                    && !host.quantization_pool
+                    && host.capabilities.get(brewery_worker::hy4::CAPABILITY) != Some(&true)
+                    && host.capabilities.get(brewery_worker::trace::JOB) == Some(&true)
+                    && host
+                        .capabilities
+                        .get(brewery_worker::behavior_direction::JOB)
+                        == Some(&true)
+                    && envelope.inputs.len() == 1
+                    && envelope.inputs[0].host == host.id
+                    && brewery_worker::trace::is_hgn(&envelope.inputs[0].kind)
+            })
+            .collect();
+    }
     if job.kind == brewery_worker::hgn_edit::JOB {
         return hosts.iter().filter(|host| {
             job.scratch_job

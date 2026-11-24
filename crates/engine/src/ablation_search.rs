@@ -12,6 +12,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod hgn;
+
 const A: usize = 4346;
 const B: usize = 5349;
 const OPENERS: [(&str, usize); 3] = [("Certainly", 95456), ("In", 641), ("It", 2132)];

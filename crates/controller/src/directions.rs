@@ -147,3 +147,49 @@ pub(crate) fn load(store: &Store, id: &str, version: u32) -> Result<Value, ApiEr
         .map_err(ApiError::storage)?;
     Ok(result)
 }
+
+pub(crate) struct HgnLayer {
+    pub sha256: String,
+    pub behavior: direction::Behavior,
+    pub vector: Vec<f32>,
+    pub assets: trace::hgn_projection::AssetPins,
+    pub held_out_pairs: usize,
+}
+
+pub(crate) fn hgn_layer(
+    store: &Store,
+    model: &crate::domain::Model,
+    direction_id: &str,
+    source_layer: usize,
+) -> Result<HgnLayer, ApiError> {
+    let artifact = artifact(store, direction_id, direction::VERSION, Some(source_layer))?;
+    let sha = artifact["model_sha256"]
+        .as_str()
+        .expect("verified artifact");
+    if !trace::is_hgn(&model.kind)
+        || artifact["runtime"] != trace::HGN_RUNTIME
+        || artifact["model_id"] != model.id
+        || model.sha256.as_deref().is_some_and(|pin| pin != sha)
+    {
+        return Err(ApiError::bad(
+            "fit the version 2 direction on the same pinned HGN Library model",
+        ));
+    }
+    let fit: direction::Fit =
+        serde_json::from_value(artifact["fit"].clone()).map_err(ApiError::storage)?;
+    let vector = fit
+        .layers
+        .into_iter()
+        .next()
+        .and_then(|layer| layer.unit_vector)
+        .ok_or_else(|| ApiError::bad("the source layer has no nonzero fitted direction"))?;
+    Ok(HgnLayer {
+        sha256: sha.into(),
+        behavior: serde_json::from_value(artifact["behavior"].clone())
+            .map_err(ApiError::storage)?,
+        vector,
+        assets: serde_json::from_value(artifact["assets_sha256"].clone())
+            .map_err(ApiError::storage)?,
+        held_out_pairs: fit.held_out_pairs,
+    })
+}

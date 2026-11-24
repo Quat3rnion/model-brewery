@@ -18,6 +18,7 @@ pub const RESERVE: u64 = EXPORT_CAP + (16 << 20);
 pub const MAX_TRIALS: usize = 32;
 pub const MAX_CHILDREN: usize = 3;
 pub const MIN_TRIALS: usize = 3;
+pub mod hgn;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -232,22 +233,7 @@ impl ScreenReport {
 /// Keep the unconstrained screen/KL frontier. Only admit points with a stock
 /// signal and a positive effect beyond their paired random control.
 pub fn frontier(trials: &[Trial], n: usize, hits: usize, limit: usize) -> (Vec<usize>, Vec<usize>) {
-    let keep = |i: usize| {
-        let t = &trials[i];
-        !trials.iter().any(|other| {
-            other.kl <= t.kl
-                && other.reduction >= t.reduction
-                && (other.kl < t.kl || other.reduction > t.reduction)
-        })
-    };
-    let mut front: Vec<_> = (0..trials.len()).filter(|&i| keep(i)).collect();
-    front.sort_by(|&a, &b| {
-        trials[b]
-            .reduction
-            .total_cmp(&trials[a].reduction)
-            .then(trials[a].kl.total_cmp(&trials[b].kl))
-            .then(a.cmp(&b))
-    });
+    let front = pareto_by(trials, |t| (t.reduction, t.kl));
     let selected = front
         .iter()
         .copied()
@@ -255,6 +241,23 @@ pub fn frontier(trials: &[Trial], n: usize, hits: usize, limit: usize) -> (Vec<u
         .take(limit)
         .collect();
     (front, selected)
+}
+
+fn pareto_by<T>(trials: &[T], scores: impl Fn(&T) -> (f64, f64)) -> Vec<usize> {
+    let keep = |i: usize| {
+        let (reduction, kl) = scores(&trials[i]);
+        !trials.iter().any(|other| {
+            let (r, k) = scores(other);
+            k <= kl && r >= reduction && (k < kl || r > reduction)
+        })
+    };
+    let mut front: Vec<_> = (0..trials.len()).filter(|&i| keep(i)).collect();
+    front.sort_by(|&a, &b| {
+        let (ra, ka) = scores(&trials[a]);
+        let (rb, kb) = scores(&trials[b]);
+        rb.total_cmp(&ra).then(ka.total_cmp(&kb)).then(a.cmp(&b))
+    });
+    front
 }
 
 pub struct Rng(u64);

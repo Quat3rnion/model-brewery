@@ -294,6 +294,8 @@ fn hosted_agent_reuses_mcp_scratch_workflow_without_approval() {
             "`ablate_direction`",
             "fit on its Library root",
             "`search_ablation`",
+            "first-token continuation proxy",
+            "`options.hgn_projection`",
             "`create_direction_intervention`",
             "`run_heretic`",
             "`reproduce_heretic`",

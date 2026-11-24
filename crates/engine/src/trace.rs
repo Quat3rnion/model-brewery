@@ -227,7 +227,14 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         let out = staging.join(i.to_string());
         id.check()?;
         let verified = if let Some(runtime) = &hgn {
-            runtime.capture(work, &input.path, prompt, &capture, &out)?
+            runtime.capture_projected(
+                work,
+                &input.path,
+                prompt,
+                &capture,
+                &out,
+                request.hgn_projection.as_ref(),
+            )?
         } else {
             runtime
                 .as_ref()
@@ -242,6 +249,9 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         };
         id.check()?;
         trace::verify_interventions(&out, &verified, &request.interventions)?;
+        if is_hgn {
+            trace::verify_hgn_projection(&out, &verified, request.hgn_projection.as_ref())?;
+        }
         capture.byte_cap -= verified.bytes;
         receipts.push(verified);
         phase.advance(1);
