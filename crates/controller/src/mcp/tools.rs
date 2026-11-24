@@ -98,6 +98,7 @@ const ROUTES: &[(&str, &str, &str)] = &[
     ("discard_scratch", "post", "/api/scratch/{id}/discard"),
     ("run_checks", "post", "/api/scratch/{id}/checks"),
     ("get_checks", "get", "/api/scratch/{id}/checks"),
+    ("list_evaluation_sets", "get", "/api/evaluation-sets"),
     ("diff_tensors", "get", "/api/diff/tensors"),
     ("diff_traces", "get", "/api/diff/traces"),
     ("diff_behavior", "get", "/api/diff/behavior"),
@@ -217,10 +218,10 @@ impl Server {
                     "Import a verified community Heretic v4 manifest using a matching pinned Library SafeTensors download. A Brewery journal is not a v4 manifest. Read get_job for the scratch child and use run_checks after conversion."
                 }
                 "run_checks" => {
-                    "Check the exact scratch child. For native HGN, pass id and sha256 without behavior_direction. The source worker audits the stored writers and compares CPU forward scores with the immediate parent. For SafeTensors, convert both revisions with identical GGUF assets. Use behavior_direction.prompt_sets to opt into held-out behavior scores on GGUF. Poll get_job if queued and read get_checks."
+                    "Check the exact scratch child. For native HGN, pass id and sha256 without behavior_direction or registered_marker. The source worker audits the stored writers and compares CPU forward scores with the immediate parent. For SafeTensors, convert both revisions with identical GGUF assets. Use behavior_direction.prompt_sets for held-out behavior scores or registered_marker to score one evaluation partition listed by list_evaluation_sets. Reserve final_gate for final evaluation. Poll get_job if queued and read get_checks."
                 }
                 "get_checks" => {
-                    "Read the current check bundle. For HGN, hgn_stored lists decoded writer metrics and per-prompt CPU forward scores without generated text."
+                    "Read the current check bundle. For HGN, hgn_stored lists decoded writer metrics and per-prompt CPU forward scores without generated text. GGUF registered_marker lists the partition pin, rates, class counts and per-row flags, not full replies."
                 }
                 "get_job" => {
                     schema["properties"]["wait_ms"] = json!({

@@ -577,6 +577,7 @@ async fn run_child(
         behavior_direction: Some(serde_json::from_value(serde_json::to_value(
             &request.behavior_direction,
         )?)?),
+        registered_marker: None,
     };
     let c_key = format!("{}-{trial}-checks", parent.id);
     let app_copy = app.clone();

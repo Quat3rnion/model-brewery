@@ -2533,6 +2533,55 @@ Before you install these settings, run `sha256sum -c SHA256SUMS` in the pin
 directory. The worker does not download data during a check. Restart the
 controller after a change to the local worker's runtime configuration.
 
+### Registered evaluation sets
+
+Use `POST /api/admin/evaluation-sets` to register an immutable set. This
+operation is not available through MCP. Set `BREWERY_EVALUATION_OPERATOR_FILE`
+to a private file owned by the controller account (mode 600). Put `operator`
+and `token` in the JSON file. Use a lower-case operator ID and a random
+64-digit lower-case hex token. Restart the controller. Send the token in the
+`Authorization: Bearer` header. Do not put the token in a saved prompt.
+
+1. Review both sources and their licenses. Save each exact file as
+   `<sha256>.<format>` in a private source directory. Do not put this directory
+   under a shared model root or in `BREWERY_CONTRAST_CACHE`.
+2. Prepare a spec with `name`, `positive`, `negative`, `sizes`, and
+   `classifier`, as in the [API contract](api/openapi.json). Give each source
+   an HTTPS URL with a full 40-digit commit in the path, the byte size, SHA-256,
+   license, format, top-level prompt field and literal system message. The
+   optional filter selects rows by a field and exact value. Use strings for
+   CSV filters. Give the `tune` and `final_gate` sizes per side, from 1 to 32.
+3. On the worker, run
+   `python3 tools/registered_evaluation.py spec.json sources eval-cache > register.json`.
+   The builder does not use the network. It checks the source sizes and hashes,
+   groups prompts by case-folded text with normalized spaces, and removes
+   groups that occur on both sides. It sorts the groups by hash and assigns
+   disjoint rows to the two partitions. It writes one digest-named file per
+   partition and adds their pins to the registration body. Send that body to
+   the admin route. The controller records the configured operator and time.
+   To change a source, classifier, or split, register a new name.
+4. Put the cache at an absolute path in the worker's
+   `BREWERY_REGISTERED_EVALUATION_CACHE`. Keep it separate from the contrast
+   cache. Use the current `scratch_checks.py` and its adjacent
+   `registered_evaluation.py`. Build the current CPU runner and set its SHA-256
+   as in [Scratch behavior checks](crates/eval/README.md#scratch-behavior-checks).
+   The older `--behavior-v1` runner pin above does not support marker checks.
+
+Call `list_evaluation_sets` or `GET /api/evaluation-sets` to read set names
+and sizes. For a GGUF pair, add
+`"registered_marker":{"name":"<set-name>","partition":"tune"}` to `run_checks`.
+Use `final_gate` only once you select the candidate. Fitting and ablation
+search cannot load either partition. Compiled-program and HGN checks do not
+accept this option.
+
+The first class whose case-insensitive prefix or substring matches wins. Put
+exclusion classes before classes that count when they could both match. The
+worker generates at most `max_tokens` per reply (1 to 128). In the check
+bundle, `registered_marker` gives parent and child rates, per-class counts
+and flags for each side. It saves no full replies. Only replies longer than
+120 characters can have a 120-character prefix. The existing `benign_refusal`
+check does not change. Registered marker scores are not release-qualified.
+
 ### Heretic jobs
 
 Heretic 2.1.0 (upstream commit `4f89482c0d63f2552a582215939910f9f45a3e5f`,

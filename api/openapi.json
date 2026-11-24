@@ -69,6 +69,34 @@
         }
       }
     },
+    "/api/evaluation-sets": {
+      "get": {
+        "operationId": "listEvaluationSets",
+        "summary": "List operator-registered evaluation sets",
+        "description": "Read set names, partition sizes and registration records. This operation does not return prompts, classifier rules or cache pins.",
+        "responses": {
+          "200": {"description":"Evaluation set summaries.","content":{"application/json":{"schema":{"type":"object","additionalProperties":false,"required":["sets"],"properties":{"sets":{"type":"array","items":{"$ref":"#/components/schemas/EvaluationSetSummary"}}}}}}},
+          "403": {"$ref":"#/components/responses/Forbidden"},
+          "500": {"$ref":"#/components/responses/StorageError"}
+        }
+      }
+    },
+    "/api/admin/evaluation-sets": {
+      "post": {
+        "operationId": "registerEvaluationSet",
+        "summary": "Register an immutable, operator-reviewed evaluation set",
+        "description": "Operator only. Prepare both partitions in the workbench worker's private cache before registration. The controller records the configured operator and time; it does not fetch the sources. Use a new name for a different pin. No MCP tool can register a set.",
+        "security": [{"EvaluationOperatorBearer":[]}],
+        "requestBody": {"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationSetRegistration"}}}},
+        "responses": {
+          "201": {"description":"Registration summary.","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvaluationSetSummary"}}}},
+          "400": {"$ref":"#/components/responses/BadRequest"},
+          "403": {"description":"Missing or invalid operator credentials, or forbidden origin."},
+          "409": {"description":"The set name is already registered."},
+          "500": {"$ref":"#/components/responses/StorageError"}
+        }
+      }
+    },
     "/api/findings": {
       "get": {
         "operationId": "listFindings",
@@ -898,12 +926,13 @@
       "post": {
         "operationId": "runScratchChecks",
         "summary": "Check a scratch revision and save the results",
-        "description": "For native HGN, the source worker checks the stored child and immediate parent. It audits the decoded writers and compares full-vocabulary CPU forward scores on fixed prompts. Send the child SHA-256 without behavior_direction. For SafeTensors, the controller verifies both files. With private GGUF files, the local worker measures behavior. Set behavior_direction to also score verified held-out chat prompts; this requires both GGUF files and passing integrity checks. Without opt-in, if either GGUF is missing or integrity fails, the controller saves an integrity-only bundle. For a compiled program, the local CPU runtime checks pinned inputs and runs all valid cases. Poll the returned job ID. Do not send measured values or job references.",
+        "description": "For native HGN, the source worker checks the stored child and immediate parent. It audits the decoded writers and compares full-vocabulary CPU forward scores on fixed prompts. Send the child SHA-256 without behavior_direction or registered_marker. For SafeTensors, the controller verifies both files. With private GGUF files, the local worker measures behavior. Optionally score reviewed holdouts with behavior_direction or one registered evaluation partition with registered_marker. Both options require two private GGUF files and passing integrity checks. Without opt-in, if either GGUF is missing or integrity fails, the controller saves an integrity-only bundle. For a compiled program, the local CPU runtime checks pinned inputs and runs all valid cases. Poll the returned job ID. Do not send measured values or job references.",
         "parameters": [{"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/ScratchKey"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {
           "type": "object", "additionalProperties": false, "required": ["sha256"], "properties": {
             "sha256": {"$ref": "#/components/schemas/ScratchHash"},
-            "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionConfig"}
+            "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionConfig"},
+            "registered_marker": {"$ref": "#/components/schemas/RegisteredMarkerRequest"}
           }
         }}}},
         "responses": {
@@ -1997,6 +2026,9 @@
     }
   },
   "components": {
+    "securitySchemes": {
+      "EvaluationOperatorBearer": {"type":"http","scheme":"bearer","description":"Operator-only token from the private evaluation operator credential file."}
+    },
     "requestBodies": {
       "SaeUpload": {
         "required":true,"content":{"multipart/form-data":{
@@ -2675,6 +2707,97 @@
           "top_tokens": {"type": "array", "maxItems": 8, "items": {"$ref": "#/components/schemas/TokenLossDiffToken"}, "description": "Tokens from the selected sentence, ranked by absolute loss change. The rank does not depend on the slice."}
         }
       },
+      "EvaluationSetName": {"type":"string","pattern":"^[a-z][a-z0-9_-]{0,63}$"},
+      "EvaluationPartition": {"enum":["tune","final_gate"]},
+      "EvaluationPartitionSizes": {
+        "type":"object","additionalProperties":false,"required":["tune","final_gate"],
+        "description":"Number of pinned rows per side.",
+        "properties":{"tune":{"type":"integer","minimum":1,"maximum":32},"final_gate":{"type":"integer","minimum":1,"maximum":32}}
+      },
+      "EvaluationSetSummary": {
+        "type":"object","additionalProperties":false,"required":["name","sizes","operator","registered_at_ms"],
+        "properties":{
+          "name":{"$ref":"#/components/schemas/EvaluationSetName"},
+          "sizes":{"$ref":"#/components/schemas/EvaluationPartitionSizes"},
+          "operator":{"$ref":"#/components/schemas/EvaluationSetName"},
+          "registered_at_ms":{"type":"integer","minimum":0}
+        }
+      },
+      "EvaluationSource": {
+        "type":"object","additionalProperties":false,"required":["url","sha256","size","license","format","field","system"],
+        "properties":{
+          "url":{"type":"string","format":"uri","pattern":"^https://[^/?#]+/(?:[^?#]*/)?[0-9a-f]{40}/[^?#]+$","maxLength":2048,"description":"HTTPS URL with a full commit path segment, without credentials, query or fragment."},
+          "sha256":{"$ref":"#/components/schemas/ScratchHash"},
+          "size":{"type":"integer","minimum":1,"maximum":50331648,"description":"Exact byte length of the source file."},
+          "license":{"type":"string","minLength":1,"maxLength":160,"x-brewery-max-utf8-bytes":160},
+          "format":{"enum":["csv","json","jsonl"]},
+          "field":{"type":"string","minLength":1,"maxLength":160,"x-brewery-max-utf8-bytes":160,"description":"Top-level key or CSV column that contains prompt text."},
+          "system":{"type":"string","maxLength":4096,"x-brewery-max-utf8-bytes":4096,"description":"Literal system message used for this side."},
+          "filter":{"type":"object","additionalProperties":false,"required":["field","equals"],"properties":{
+            "field":{"type":"string","minLength":1,"maxLength":160,"x-brewery-max-utf8-bytes":160},
+            "equals":{"type":["string","number","boolean","null"],"maxLength":512,"description":"Exact comparison. CSV filters must use strings."}
+          }}
+        }
+      },
+      "EvaluationMarkerClassifier": {
+        "type":"object","additionalProperties":false,"required":["max_tokens","classes"],
+        "properties":{
+          "max_tokens":{"type":"integer","minimum":1,"maximum":128},
+          "classes":{"type":"array","minItems":1,"maxItems":16,"description":"First case-insensitive class match wins. Names must be unique. Each class must have 1 to 16 rules total.",
+            "contains":{"type":"object","required":["kind"],"properties":{"kind":{"const":"counts"}}},
+            "items":{"type":"object","additionalProperties":false,"required":["name","kind"],"properties":{
+              "name":{"$ref":"#/components/schemas/EvaluationSetName"},"kind":{"enum":["counts","excluded"]},
+              "prefixes":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":160,"x-brewery-max-utf8-bytes":160}},
+              "substrings":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":160,"x-brewery-max-utf8-bytes":160}}
+            }}
+          }
+        }
+      },
+      "EvaluationSetRegistration": {
+        "type":"object","additionalProperties":false,"required":["name","positive","negative","sizes","pins","classifier"],
+        "properties":{
+          "name":{"$ref":"#/components/schemas/EvaluationSetName"},
+          "positive":{"$ref":"#/components/schemas/EvaluationSource"},
+          "negative":{"$ref":"#/components/schemas/EvaluationSource"},
+          "sizes":{"$ref":"#/components/schemas/EvaluationPartitionSizes"},
+          "pins":{"type":"object","additionalProperties":false,"required":["tune","final_gate"],"properties":{
+            "tune":{"$ref":"#/components/schemas/ScratchHash"},"final_gate":{"$ref":"#/components/schemas/ScratchHash"}
+          }},
+          "classifier":{"$ref":"#/components/schemas/EvaluationMarkerClassifier"}
+        }
+      },
+      "RegisteredMarkerRequest": {
+        "type":"object","additionalProperties":false,"required":["name","partition"],
+        "description":"Select one operator-registered evaluation partition for GGUF checks only.",
+        "properties":{"name":{"$ref":"#/components/schemas/EvaluationSetName"},"partition":{"$ref":"#/components/schemas/EvaluationPartition"}}
+      },
+      "RegisteredMarkerHit": {
+        "type":"object","additionalProperties":false,"required":["counts"],
+        "properties":{
+          "counts":{"type":"boolean"},"class":{"$ref":"#/components/schemas/EvaluationSetName"},
+          "prefix":{"type":"string","minLength":120,"maxLength":120,"description":"First 120 characters only if the reply was longer. No complete reply is saved."}
+        }
+      },
+      "RegisteredMarkerSide": {
+        "type":"object","additionalProperties":false,"required":["parent_rate","child_rate","parent_class_counts","child_class_counts","hits"],
+        "properties":{
+          "parent_rate":{"type":"number","minimum":0,"maximum":1},"child_rate":{"type":"number","minimum":0,"maximum":1},
+          "parent_class_counts":{"type":"object","additionalProperties":{"type":"integer","minimum":0,"maximum":32}},
+          "child_class_counts":{"type":"object","additionalProperties":{"type":"integer","minimum":0,"maximum":32}},
+          "hits":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","additionalProperties":false,
+            "required":["parent","child"],"properties":{"parent":{"$ref":"#/components/schemas/RegisteredMarkerHit"},"child":{"$ref":"#/components/schemas/RegisteredMarkerHit"}}
+          }}
+        }
+      },
+      "RegisteredMarkerReport": {
+        "type":"object","additionalProperties":false,"required":["schema","name","partition","sha256","max_tokens","positive","negative"],
+        "properties":{
+          "schema":{"const":"brewery.registered-marker-rate.v1"},
+          "name":{"$ref":"#/components/schemas/EvaluationSetName"},"partition":{"$ref":"#/components/schemas/EvaluationPartition"},
+          "sha256":{"$ref":"#/components/schemas/ScratchHash"},"max_tokens":{"type":"integer","minimum":1,"maximum":128},
+          "positive":{"$ref":"#/components/schemas/RegisteredMarkerSide"},"negative":{"$ref":"#/components/schemas/RegisteredMarkerSide"}
+        }
+      },
       "BehaviorDirectionConfig": {
         "type": "object", "additionalProperties": false, "required": ["prompt_sets"],
         "properties": {
@@ -2772,6 +2895,7 @@
           "smoke": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "behavior": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "behavior_direction": {"$ref": "#/components/schemas/BehaviorDirectionReport"},
+          "registered_marker": {"$ref": "#/components/schemas/RegisteredMarkerReport"},
           "hgn_stored": {"$ref": "#/components/schemas/HgnStoredChecksReport"},
           "program_correctness": {"$ref": "#/components/schemas/ScratchCheckStatus"},
           "program_cases": {"type": "integer", "minimum": 0, "maximum": 340},
