@@ -34,6 +34,7 @@ pub const HGN_PYTHON_SHA256: &str = "BREWERY_HGN_TRACE_PYTHON_SHA256";
 pub const HGN_ASSETS: &str = "BREWERY_HGN_TRACE_ASSETS";
 pub const HGN_RUNTIME_SHA256: &str = include_str!("../../../tools/hgn_trace/runtime.sha256");
 pub const HGN_RUNTIME: &str = "hgn_cpu";
+pub mod gguf_projection;
 pub mod hgn_projection;
 pub const HARD_BYTE_CAP: u64 = 32 << 20;
 pub const RESPONSE_CAP: usize = 4 << 20;
@@ -144,6 +145,7 @@ struct Options {
     interventions: Vec<Rule>,
     #[serde(default)]
     hgn_projection: Option<hgn_projection::Projection>,
+    gguf_projection: Option<gguf_projection::Projection>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -229,6 +231,7 @@ pub struct Request {
     pub capture: Capture,
     pub interventions: Vec<Rule>,
     pub hgn_projection: Option<hgn_projection::Projection>,
+    pub gguf_projection: Option<gguf_projection::Projection>,
     pub retain_jobs: usize,
 }
 
@@ -236,6 +239,7 @@ pub struct Request {
 pub enum LanternfishRuntime {
     Base,
     Projection,
+    ScaledProjection,
     Routing,
 }
 
@@ -248,6 +252,12 @@ impl LanternfishRuntime {
                 PROJECTION_LIB_DIR,
                 PROJECTION_SHA256,
                 PROJECTION_COMMIT,
+            ),
+            Self::ScaledProjection => (
+                crate::ablation_search::EXECUTABLE,
+                PROJECTION_LIB_DIR,
+                crate::ablation_search::SHA256,
+                crate::ablation_search::COMMIT,
             ),
             Self::Routing => (
                 ROUTING_EXECUTABLE,
@@ -265,18 +275,21 @@ impl Request {
             self.hgn_projection.is_none(),
             "hgn_projection requires HGN v2"
         );
-        let projection = self.interventions.iter().any(|rule| {
-            matches!(
-                rule.op,
-                Operation::ProjectOut { .. } | Operation::Subtract { .. }
-            )
-        });
+        let projection = self.gguf_projection.is_some()
+            || self.interventions.iter().any(|rule| {
+                matches!(
+                    rule.op,
+                    Operation::ProjectOut { .. } | Operation::Subtract { .. }
+                )
+            });
         let routing = self.routing();
         ensure!(
             !(projection && routing),
             "cannot combine MoE routing and projection in one trace"
         );
-        Ok(if projection {
+        Ok(if self.gguf_projection.is_some() {
+            LanternfishRuntime::ScaledProjection
+        } else if projection {
             LanternfishRuntime::Projection
         } else if routing {
             LanternfishRuntime::Routing
@@ -349,6 +362,15 @@ impl Request {
                 "HGN projection allows l_out, final_norm or logits, without other interventions"
             );
         }
+        if let Some(projection) = &o.gguf_projection {
+            projection.check()?;
+            ensure!(
+                o.hgn_projection.is_none()
+                    && o.interventions.is_empty()
+                    && o.roles.iter().all(|role| !role.routing()),
+                "GGUF projection cannot combine with other interventions or routing"
+            );
+        }
         Ok(Self {
             prompts,
             capture: Capture {
@@ -361,6 +383,7 @@ impl Request {
             },
             interventions: o.interventions,
             hgn_projection: o.hgn_projection,
+            gguf_projection: o.gguf_projection,
             retain_jobs: policy.retain_jobs,
         })
     }
@@ -383,8 +406,11 @@ impl Request {
             );
         }
         ensure!(
-            options.get("hgn_projection").is_none_or(Value::is_null) || expected.is_some(),
-            "HGN projection requires a pinned model SHA-256"
+            ["hgn_projection", "gguf_projection"]
+                .iter()
+                .all(|key| options.get(*key).is_none_or(Value::is_null))
+                || expected.is_some(),
+            "projection requires a pinned model SHA-256"
         );
         ensure!(
             options.get("byte_cap").is_some_and(Value::is_u64),
@@ -774,14 +800,26 @@ pub fn verify_hgn_projection(
             target: projection.target,
             first_layer: projection.first_layer.unwrap_or(0),
             last_layer,
+            alpha: projection.alpha,
+            last_k: projection.last_k,
+            rank: projection.second_vector.as_ref().map(|_| 2),
+            direction_cosine: projection
+                .second_vector
+                .as_ref()
+                .map(|v| hgn_projection::direction_cosine(&projection.vector, v))
+                .transpose()?,
         })
     } else {
         None
     };
-    ensure!(
-        m.hgn_projection == expected,
-        "unexpected or missing HGN projection"
-    );
+    let mut actual = m.hgn_projection;
+    if let (Some(actual), Some(expected)) = (&mut actual, &expected)
+        && let (Some(a), Some(b)) = (actual.direction_cosine, expected.direction_cosine)
+        && (a - b).abs() <= 1e-12
+    {
+        actual.direction_cosine = Some(b);
+    }
+    ensure!(actual == expected, "unexpected or missing HGN projection");
     Ok(())
 }
 
@@ -889,7 +927,8 @@ pub fn direction_rows(
                     && m.model["l_out_axes"] == json!(["stream", "hidden"])
                     && role == Role::LOut
             } else {
-                m.model["arch"] == "qwen2" && spec.positions.len() == 1
+                m.model["arch"] == "qwen2"
+                    && (1..=crate::behavior_direction::MAX_LAST_K).contains(&spec.positions.len())
             }
             && m.interventions.is_empty()
             && m.missing.is_empty(),
@@ -951,19 +990,24 @@ pub fn direction_rows(
                     residual_norm: total_norm / count,
                 });
             }
-            let position = *spec
-                .positions
-                .first()
-                .context("missing direction position")?;
-            let activation = read(layer, role, position)?;
-            if role == Role::LOut {
-                Ok(Observation::residual(activation))
-            } else {
-                Ok(Observation {
-                    activation,
-                    residual_norm: residual_norm(&read(layer, Role::LOut, position)?),
-                })
+            let mut aggregate = vec![0.0_f64; width as usize];
+            let mut total_norm = 0.0;
+            for &position in &spec.positions {
+                let values = read(layer, role, position)?;
+                total_norm += if role == Role::LOut {
+                    residual_norm(&values)
+                } else {
+                    residual_norm(&read(layer, Role::LOut, position)?)
+                };
+                for (sum, x) in aggregate.iter_mut().zip(values) {
+                    *sum += f64::from(x);
+                }
             }
+            let count = spec.positions.len() as f64;
+            Ok(Observation {
+                activation: aggregate.into_iter().map(|x| (x / count) as f32).collect(),
+                residual_norm: total_norm / count,
+            })
         })
         .collect::<Result<_>>()?;
     Ok((m.tokens.into_iter().map(|t| t.token_id).collect(), rows))

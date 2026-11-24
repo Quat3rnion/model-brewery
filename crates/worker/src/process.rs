@@ -1118,6 +1118,12 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 && value["model_id"] == job.inputs[0].extra["id"]
                 && value["model_sha256"].as_str().is_some_and(is_digest)
                 && value["model_sha256"] == job.inputs[0].extra["sha256"]
+                && value.get("gguf_projection")
+                    == request
+                        .gguf_projection
+                        .as_ref()
+                        .map(|p| p.receipt())
+                        .as_ref()
                 && runtime_matches,
             "trace receipt does not match resolved input and runtime"
         );
@@ -1137,7 +1143,11 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 trace::verify(&dir, &spec)? == export,
                 "trace receipt does not match export"
             );
-            trace::verify_interventions(&dir, &export, &request.interventions)?;
+            if let Some(projection) = &request.gguf_projection {
+                trace::verify_interventions(&dir, &export, &projection.applied_sites())?;
+            } else {
+                trace::verify_interventions(&dir, &export, &request.interventions)?;
+            }
             if trace::is_hgn(&job.inputs[0].kind) {
                 trace::verify_hgn_projection(&dir, &export, request.hgn_projection.as_ref())?;
                 if let Some(projection) = &request.hgn_projection {

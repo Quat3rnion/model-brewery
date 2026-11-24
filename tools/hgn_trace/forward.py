@@ -14,9 +14,10 @@ from wsp.hgn import C, H, Checkpoint
 
 
 class Projection:
-    """One direction in the hidden basis, shared by the four residual streams."""
+    """An orthonormal basis shared by the four residual streams."""
     def __init__(self, raw, config):
-        if not isinstance(raw, dict) or raw.keys() - {"target", "vector", "first_layer", "last_layer"}:
+        if not isinstance(raw, dict) or raw.keys() - {
+                "target", "vector", "second_vector", "alpha", "first_layer", "last_layer", "last_k"}:
             raise ValueError("invalid HGN projection fields")
         self.target = raw["target"]
         first, last = raw.get("first_layer"), raw.get("last_layer")
@@ -28,18 +29,40 @@ class Projection:
         self.first, self.last = first, last
         if self.target not in ("residual", "dense", "experts", "all"):
             raise ValueError("invalid HGN projection target")
-        values = raw["vector"]
-        if (not isinstance(values, list) or len(values) != config.hidden_size
-                or any(type(x) not in (int, float) or not math.isfinite(x) for x in values)):
-            raise ValueError("invalid HGN projection vector")
-        norm = math.hypot(*values)
-        if not math.isfinite(norm) or norm == 0:
-            raise ValueError("invalid HGN projection norm")
-        self.vector = torch.tensor([x / norm for x in values], dtype=torch.float32)
+        self.alpha = raw.get("alpha", 1)
+        if type(self.alpha) not in (int, float) or not 0 < self.alpha <= 4:
+            raise ValueError("HGN projection alpha must be in (0,4]")
+        self.last_k = raw.get("last_k")
+        if self.last_k is not None and (type(self.last_k) is not int or not 1 <= self.last_k <= 16):
+            raise ValueError("invalid HGN direction fit position count")
+
+        def unit(values):
+            if (not isinstance(values, list) or len(values) != config.hidden_size
+                    or any(type(x) not in (int, float) or not math.isfinite(x) for x in values)):
+                raise ValueError("invalid HGN projection vector")
+            norm = math.hypot(*values)
+            if not math.isfinite(norm) or norm == 0:
+                raise ValueError("invalid HGN projection norm")
+            return [x / norm for x in values]
+
+        first = unit(raw["vector"])
+        self.vector = torch.tensor(first, dtype=torch.float32)
+        self.second = None
+        self.cosine = None
+        if "second_vector" in raw:
+            second = unit(raw["second_vector"])
+            self.cosine = min(1, max(-1, math.fsum(a * b for a, b in zip(first, second))))
+            residual = [b - self.cosine * a for a, b in zip(first, second)]
+            if math.hypot(*residual) <= 1e-5:
+                raise ValueError("HGN projection directions are collinear")
+            self.second = torch.tensor(unit(residual), dtype=torch.float32)
 
     def project(self, value):
         v = self.vector
-        return value - (value @ v).unsqueeze(-1) * v
+        delta = (value @ v).unsqueeze(-1) * v
+        if self.second is not None:
+            delta = delta + (value @ self.second).unsqueeze(-1) * self.second
+        return value - self.alpha * delta
 
     def residual(self, hidden):
         return self.project(hidden.unflatten(-1, (-1, self.vector.numel()))).flatten(-2)

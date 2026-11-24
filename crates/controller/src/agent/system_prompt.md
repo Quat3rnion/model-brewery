@@ -40,8 +40,8 @@ Attach atlas observations to `plan_experts` as evidence for the same source
 digest. They do not replace independent calibration and held-out REAP data.
 
 Use `compute_direction` to measure slop, sycophancy, or response-length
-directions on a pinned Qwen2 GGUF or supported HGN v2. For HGN, use `l_out`
-and set `last_k` to average final template positions. Use `get_direction`
+directions on a pinned Qwen2 GGUF or supported HGN v2. Use `last_k` to
+average the last K positions. HGN requires `l_out`. Use `get_direction`
 to read version 2 by job ID. Specify a layer for a smaller response. For HGN
 cosine, supply `reference_id` and `reference_layer`. Report Cohen's d
 as a probe result, not as evidence of a change in generated behavior.
@@ -61,10 +61,17 @@ version 2 direction ID, source layer, seed, and projection targets. Compare
 the matched random direction and the reviewed control prompts. The search
 makes no scratch children and generates no text. For response length,
 report the first-token continuation proxy, not generated length.
+For either screen, use `alphas` in (0,4] and compare a single-position fit
+with an optional `last_k_direction_id` from the same reviewed contrast.
+On HGN, use `second_source_layer` for an independent second direction and
+report the cosine before orthogonalization. Use only the reviewed slop,
+sycophancy, and response-length contrasts. GGUF screens do not support
+response length or rank two.
 Use `create_direction_intervention` to remove the projection onto a
 verified direction or subtract a scaled direction. Pass the saved version
 to `start_trace` and compare with a baseline using `diff_traces`.
 `export_control_vector` can export subtraction, not projection.
+Use `options.gguf_projection` with the A5 pin for a scaled single direction.
 
 Use `run_heretic` only for a Library SafeTensors parent with an installed
 offline profile and a local GPU queue. Use `reproduce_heretic` only with a

@@ -57,10 +57,18 @@ export const behaviorNames: Record<string, string> = {
   slop: 'Slop', sycophancy: 'Sycophancy', response_length: 'Response length', benign_refusal: 'Benign refusal',
 };
 
+interface HgnConfiguration {
+  target: string;
+  last_k: number | null;
+  alpha: number;
+  rank: number;
+  direction_cosine: number | null;
+}
+
 export interface SearchReceipt {
   backend: string;
   finding: string;
-  hgn?: { targets: string[]; layerRange: string };
+  hgn?: { targets: string[]; layerRange: string; configurations?: HgnConfiguration[] };
   screen: {
     direction_id: string;
     behavior: string;
@@ -71,7 +79,7 @@ export interface SearchReceipt {
     screen_sha256?: string;
     confirmation_sha256?: string;
     trials: {
-      candidate?: { source_layer: number; first_layer: number; last_layer: number; variant: string; alpha: number };
+      candidate?: { source_layer: number; first_layer: number; last_layer: number; variant: string; alpha: number; last_k?: number };
       reduction: number; kl: number; random_reduction: number; random_kl: number; wins_over_random: number;
       control_shift?: number; random_control_shift?: number;
     }[];
@@ -94,6 +102,7 @@ export interface HgnScreenReceipt {
   first_layer: number | null;
   last_layer: number | null;
   targets: string[];
+  configurations?: HgnConfiguration[];
   pareto: number[];
   selected: number[];
   scores: Pick<SearchReceipt['screen'], 'marker' | 'prompts' | 'parent_hits' | 'parent_mean' | 'trials'>;
@@ -102,7 +111,7 @@ export interface HgnScreenReceipt {
 export function hgnScreen(receipt: HgnScreenReceipt): SearchReceipt {
   return {
     backend: 'cpu', finding: 'Forward screen only. No scratch children or generated replies.', children: [],
-    hgn: { targets: receipt.targets, layerRange: receipt.first_layer == null
+    hgn: { targets: receipt.targets, configurations: receipt.configurations, layerRange: receipt.first_layer == null
       ? 'all layers' : `layers ${receipt.first_layer} to ${receipt.last_layer}` },
     screen: { ...receipt.scores, direction_id: receipt.direction_id, behavior: receipt.behavior,
       screen_sha256: receipt.contrast_sha256, pareto: receipt.pareto, selected: receipt.selected },

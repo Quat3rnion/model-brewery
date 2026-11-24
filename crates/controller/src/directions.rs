@@ -154,6 +154,7 @@ pub(crate) struct HgnLayer {
     pub vector: Vec<f32>,
     pub assets: trace::hgn_projection::AssetPins,
     pub held_out_pairs: usize,
+    pub last_k: Option<usize>,
 }
 
 pub(crate) fn hgn_layer(
@@ -191,5 +192,6 @@ pub(crate) fn hgn_layer(
         assets: serde_json::from_value(artifact["assets_sha256"].clone())
             .map_err(ApiError::storage)?,
         held_out_pairs: fit.held_out_pairs,
+        last_k: artifact["last_k"].as_u64().map(|v| v as usize),
     })
 }

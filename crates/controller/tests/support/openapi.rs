@@ -52,6 +52,19 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         schemas["TraceOptions"]["properties"]["hgn_projection"]["$ref"],
         "#/components/schemas/HgnTraceProjection"
     );
+    assert_eq!(
+        schemas["TraceOptions"]["properties"]["gguf_projection"]["$ref"],
+        "#/components/schemas/GgufTraceProjection"
+    );
+    assert_eq!(schemas["ProjectionAlpha"]["maximum"], 4);
+    assert_eq!(
+        schemas["AblationSearchRequest"]["properties"]["alphas"]["items"]["$ref"],
+        "#/components/schemas/ProjectionAlpha"
+    );
+    assert_eq!(
+        schemas["HgnScreenResult"]["properties"]["configurations"]["maxItems"],
+        32
+    );
     let operations = contract["paths"]
         .as_object()
         .unwrap()

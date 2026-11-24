@@ -41,13 +41,13 @@ def sha(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def fixture(path):
+def fixture(path, context=64):
     writer = GGUFWriter(path, "qwen2")
     try:
         width, hidden, vocab = 256, 512, 288
         writer.add_name("synthetic-rocmfpx-cpu-smoke")
         writer.add_file_type(0)
-        writer.add_context_length(64)
+        writer.add_context_length(context)
         writer.add_embedding_length(width)
         writer.add_feed_forward_length(hidden)
         writer.add_block_count(1)

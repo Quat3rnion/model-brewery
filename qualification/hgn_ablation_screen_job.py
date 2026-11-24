@@ -87,6 +87,9 @@ def exercise(bins, cache):
                 while status["state"] in ("running", "queued") and time.monotonic() < deadline:
                     time.sleep(0.25)
                     status = call("status", job)
+                if status["state"] != "succeeded":
+                    for log in (root / "worker/jobs" / job).rglob("engine-stderr.log"):
+                        print(log.read_text()[-4096:], file=sys.stderr)
                 assert status["state"] == "succeeded", status
             finally:
                 if status["state"] in ("running", "queued"):
@@ -110,21 +113,46 @@ def exercise(bins, cache):
         assert scores["trials"][0]["control_shift"] == 0
         assert 0 in screen["selected"] and 2 not in screen["selected"], screen["selected"]
 
+        second = [0.6, 0.8] + [0] * 126
+        extended = run("synthetic-rank-two-screen", "screen_hgn_ablation", {
+            "model_sha256": sha, "direction_id": "fixture-v2", "source_layer": 1,
+            "targets": ["residual"], "behavior": "response_length", "first_layer": 1,
+            "last_layer": 1, "seed": 7, "vector": vector, "assets_sha256": pins,
+            "held_out_pairs": 8, "last_k": 1, "alphas": [1, 2],
+            "second_source_layer": 0, "second_vector": second,
+            "last_k_variant": {"direction_id": "fixture-last-3", "last_k": 3, "vector": vector,
+                               "second_vector": [0, 1] + [0] * 126},
+        })
+        configs = extended["configurations"]
+        assert [(r["last_k"], r["alpha"], r["rank"]) for r in configs] == [
+            (1, 1, 2), (1, 2, 2), (3, 1, 2), (3, 2, 2)]
+        assert abs(configs[0]["direction_cosine"] - 0.6) < 1e-7
+        assert configs[-1]["direction_cosine"] == 0
+        assert len(extended["scores"]["trials"]) == 4
+        assert "vector" not in json.dumps(extended)
+
         trace = run("synthetic-trace", "trace", {
             "layers": [1], "positions": [512], "roles": ["l_out"], "top_k": 0,
-            "retain_jobs": 4, "byte_cap": 32768, "expected_model_sha256": sha,
+            "retain_jobs": 4, "byte_cap": 65536, "expected_model_sha256": sha,
+            "prompts": [" ".join(["a"] * 513), " ".join(["b"] * 513)],
             "hgn_projection": {"target": "residual", "first_layer": 1, "last_layer": 1,
-                               "vector": vector, "assets_sha256": pins},
-        }, " ".join(["a"] * 513))
+                               "vector": vector, "second_vector": second, "alpha": 1,
+                               "assets_sha256": pins},
+        })
+        assert len(trace["prompts"]) == 2
         summary = call("trace-read", "synthetic-trace", {"view": "manifest", "prompt": 0})
         assert len(summary["data"]["tokens"]) == 513
-        assert summary["data"]["hgn_projection"] == {"target": "residual", "first_layer": 1, "last_layer": 1}
+        projection = summary["data"]["hgn_projection"]
+        assert projection["target"] == "residual" and projection["first_layer"] == projection["last_layer"] == 1
+        assert projection["alpha"] == 1 and projection["rank"] == 2
+        assert abs(projection["direction_cosine"] - 0.6) < 1e-7
         row = call("trace-read", "synthetic-trace", {
             "view": "tensor", "prompt": 0, "layer": 1, "role": "l_out", "start": 512, "end": 513,
         })["data"]["rows"][0]
         values = struct.unpack("<512f", base64.b64decode(row["data_base64"]))
-        assert values[::128] == (0.0,) * 4 and values[1::128] == (1.0,) * 4
-        return {"screen": screen, "trace_tokens": 513, "trace_stream_components": values[::128],
+        assert values[::128] == (0.0,) * 4 and values[1::128] == (0.0,) * 4
+        return {"screen": screen, "extended": extended, "trace_tokens": 513,
+                "trace_stream_components": list(zip(values[::128], values[1::128])),
                 "trace_manifest_sha256": trace["prompts"][0]["manifest_sha256"]}
 
 

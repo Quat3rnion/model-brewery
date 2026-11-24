@@ -1314,6 +1314,7 @@ impl Worker {
                                     .get(trace::HGN_PYTHON_SHA256)
                                     .is_some_and(|s| is_digest(s))
                                 && request.interventions.is_empty()
+                                && request.gguf_projection.is_none()
                         }
                         _ => false,
                     });
