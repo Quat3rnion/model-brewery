@@ -1114,13 +1114,22 @@
         "summary": "Read an immutable behavior direction artifact",
         "parameters": [
           {"$ref": "#/components/parameters/ResourceId"}, {"$ref": "#/components/parameters/InterventionVersion"},
-          {"in":"query","name":"layer","schema":{"$ref":"#/components/schemas/TraceLayer"},"description":"Return one layer. Omit to return all layers."}
+          {"in":"query","name":"layer","schema":{"$ref":"#/components/schemas/TraceLayer"},"description":"Return one layer. Omit to return all layers."},
+          {"in":"query","name":"reference_id","schema":{"$ref":"#/components/schemas/Id"},"description":"Compare with a verified version 2 HGN direction from the same checkpoint and behavior. Use with reference_layer."},
+          {"in":"query","name":"reference_layer","schema":{"$ref":"#/components/schemas/TraceLayer"},"description":"Select the reference layer with a fitted vector. Use with reference_id."}
         ],
         "responses": {
           "200": {"description": "The requested immutable version. New direction jobs write version 2; old jobs keep version 1. The artifact ID is the direction job ID.",
             "content": {"application/json": {"schema": {"type":"object","required":["id","version","direction"],"properties":{
-              "id":{"$ref":"#/components/schemas/Id"},"version":{"enum":[1,2]},"direction":{"$ref":"#/components/schemas/BehaviorDirectionResult"}
+               "id":{"$ref":"#/components/schemas/Id"},"version":{"enum":[1,2]},"direction":{"$ref":"#/components/schemas/BehaviorDirectionResult"},
+               "reference":{"type":"object","required":["id","version","layer","cosine_by_layer"],"properties":{
+                 "id":{"$ref":"#/components/schemas/Id"},"version":{"const":2},"layer":{"$ref":"#/components/schemas/TraceLayer"},
+                 "cosine_by_layer":{"type":"array","items":{"type":"object","required":["layer","cosine"],"properties":{
+                   "layer":{"$ref":"#/components/schemas/TraceLayer"},"cosine":{"type":["number","null"],"minimum":-1,"maximum":1}
+                 }}}
+               }}
             }}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
           "404": {"$ref": "#/components/responses/NotFound"},
           "500": {"$ref": "#/components/responses/StorageError"}
         }
@@ -3242,16 +3251,17 @@
           "model_sha256":{"$ref":"#/components/schemas/Sha256"},
           "layers":{"type":"array","description":"Layers in increasing order.","minItems":1,"maxItems":64,"uniqueItems":true,"items":{"$ref":"#/components/schemas/TraceLayer"}},
           "role":{"$ref":"#/components/schemas/DirectionRole"},
-          "position":{"anyOf":[{"$ref":"#/components/schemas/TracePosition"},{"type":"null"}],"description":"Zero-based position including special tokens. Omit or use null for the last user instruction token."}
+          "position":{"anyOf":[{"$ref":"#/components/schemas/TracePosition"},{"type":"null"}],"description":"Explicit zero-based token index including special tokens. Without position, GGUF uses the last user token and HGN uses the last part of the chat template."},
+          "last_k":{"type":"integer","minimum":1,"maximum":16,"description":"HGN only. Average the last K template positions. Defaults to 1 when position is not set. Do not use with an explicit position."}
         }
       },
       "BehaviorDirectionJob": {
-        "description":"Fit per-layer behavior directions from an approved contrast set. Run on one opted-in CPU worker with the Library Qwen2 GGUF.",
+        "description":"Fit per-layer directions from a reviewed contrast set. Use a Library Qwen2 GGUF or supported HGN v2 checkpoint on its CPU worker. HGN supports l_out only.",
         "allOf":[{"$ref":"#/components/schemas/JobRequestFields"},{"$ref":"#/components/schemas/DefaultInputHost"},{"$ref":"#/components/schemas/NoPrompt"}],
         "required":["input_ids","options"],
         "properties":{
           "kind":{"const":"behavior_direction"},
-          "input_ids":{"minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf"]]},
+          "input_ids":{"minItems":1,"maxItems":1,"x-brewery-input-kinds":[["gguf","hgn","hgn-v2"]]},
           "options":{"$ref":"#/components/schemas/BehaviorDirectionOptions"}
         }
       },
@@ -4587,14 +4597,17 @@
         }
       },
       "BehaviorDirectionResult": {
-        "type":"object","required":["kind","schema_version","release_qualified","model_id","model_sha256","position","behavior","contrast_sha256","lanternfish_commit","executable_sha256","fit"],
+        "type":"object","required":["kind","schema_version","release_qualified","model_id","model_sha256","position","behavior","contrast_sha256","executable_sha256","fit"],
+        "oneOf":[{"required":["lanternfish_commit"]},{"required":["runtime","runtime_sha256","assets_sha256"],"properties":{"schema_version":{"const":2}}}],
         "if":{"properties":{"schema_version":{"const":2}}},
         "then":{"properties":{"fit":{"properties":{"layers":{"items":{"required":["held_out_cohens_d","mean_residual_norm"]}}}}}},
         "properties":{
           "kind":{"const":"behavior_direction"},"schema_version":{"enum":[1,2]},"release_qualified":{"const":false},
           "model_id":{"$ref":"#/components/schemas/Id"},"model_sha256":{"$ref":"#/components/schemas/Sha256"},
-          "position":{"type":["integer","null"]},"behavior":{"$ref":"#/components/schemas/DirectionBehavior"},
+          "position":{"type":["integer","null"]},"last_k":{"type":"integer","minimum":1,"maximum":16},"behavior":{"$ref":"#/components/schemas/DirectionBehavior"},
           "contrast_sha256":{"$ref":"#/components/schemas/Sha256"},"lanternfish_commit":{"type":"string"},
+          "runtime":{"const":"hgn_cpu"},"runtime_sha256":{"$ref":"#/components/schemas/Sha256"},
+          "assets_sha256":{"type":"object","required":["sidecar","config","tokenizer"],"additionalProperties":{"$ref":"#/components/schemas/Sha256"}},
           "executable_sha256":{"$ref":"#/components/schemas/Sha256"},
           "fit":{"type":"object","required":["role","train_pairs","held_out_pairs","selected_layer","layers"],"properties":{
             "role":{"$ref":"#/components/schemas/DirectionRole"},"train_pairs":{"const":12},"held_out_pairs":{"const":8},
@@ -4603,7 +4616,7 @@
                 "layer":{"$ref":"#/components/schemas/TraceLayer"},"norm":{"type":"number","minimum":0},
                 "unit_vector":{"type":["array","null"],"items":{"type":"number"}},"held_out_margin":{"type":["number","null"]},
                 "held_out_cohens_d":{"type":["number","null"],"description":"Raw margin divided by the pooled within-class sample standard deviation of held-out projections. Null if undefined."},
-                "mean_residual_norm":{"type":"number","minimum":0,"description":"Mean L2 norm of l_out over both classes of held-out prompts, at the captured token."},
+                "mean_residual_norm":{"type":"number","minimum":0,"description":"Mean L2 norm of l_out over both held-out classes and all captured positions, after stream sum but before normalization on HGN."},
                 "negative_mean":{"type":"array","minItems":1,"maxItems":16384,"items":{"type":"number"},"description":"Mean negative-class activation over training prompts. Required for projected ablation; older artifacts omit it."}
               }}}
           }}

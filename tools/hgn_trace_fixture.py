@@ -35,9 +35,10 @@ def write_hgn(path, weights):
                      + b"".join(table + payload))
 
 
-def fixture(path):
+def fixture(path, *, embedding_rows=None, tokenizer=None):
+    vocab = len(embedding_rows) if embedding_rows is not None else 4
     raw = {"model_type": "qwen4_exp_text", "num_hidden_layers": 2, "hidden_size": 128,
-           "vocab_size": 4, "hc_count": 4, "hc_lowrank": 16,
+           "vocab_size": vocab, "hc_count": 4, "hc_lowrank": 16,
            "linear_key_head_dim": 16, "linear_value_head_dim": 16,
            "linear_num_value_heads": 2, "linear_num_key_heads": 1,
            "moe_intermediate_size": 128, "shared_expert_intermediate_size": 128,
@@ -47,13 +48,23 @@ def fixture(path):
     cfg = path / "config.json"
     cfg.write_text(json.dumps({"text_config": raw}))
     config = read_config(cfg)
-    tokenizer = Tokenizer(WordLevel({"<unk>": 0, "a": 1, "b": 2, "c": 3}, unk_token="<unk>"))
-    tokenizer.pre_tokenizer = Whitespace()
+    if tokenizer is None:
+        tokenizer = Tokenizer(WordLevel({"<unk>": 0, "a": 1, "b": 2, "c": 3}, unk_token="<unk>"))
+        tokenizer.pre_tokenizer = Whitespace()
     tokenizer.save(str(path / "tokenizer.json"))
+    if embedding_rows is None:
+        codebook = np.ones(16, "<f4")
+        packed = bytes(vocab * 64)
+    else:
+        codebook = np.array([0, 1, -1, 2, -2, 4, -4] + [0] * 9, "<f4")
+        codes = {value: index for index, value in enumerate(codebook[:7])}
+        # Put x and y in the first two coordinates. All other coordinates are zero.
+        packed = b"".join(bytes([codes[x] | codes[y] << 4]) + bytes(63)
+                          for x, y in embedding_rows)
+    embedding = codebook.tobytes() + packed + np.ones((vocab, 8), "<f2").tobytes()
     weights = {
-        "embed_tokens.weight": (5, 2, (4, 128), np.ones(16, "<f4").tobytes() + bytes(256)
-                                + np.ones((4, 8), "<f2").tobytes()),
-        "lm_head.weight": (0, 0, (4, 128), bytes(4 * 128 * 2)),
+        "embed_tokens.weight": (5, 2, (vocab, 128), embedding),
+        "lm_head.weight": (0, 0, (vocab, 128), bytes(vocab * 128 * 2)),
     }
 
     def zeros(prefix, state):

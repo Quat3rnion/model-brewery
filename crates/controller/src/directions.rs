@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, State},
     routing::get,
 };
-use brewery_worker::behavior_direction as direction;
+use brewery_worker::{behavior_direction as direction, trace};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -18,6 +18,8 @@ pub fn router() -> Router<Arc<App>> {
 #[serde(deny_unknown_fields)]
 struct Selection {
     layer: Option<usize>,
+    reference_id: Option<String>,
+    reference_layer: Option<usize>,
 }
 
 async fn get_version(
@@ -27,9 +29,72 @@ async fn get_version(
 ) -> Result<Json<Value>, ApiError> {
     let store = app.store.lock().map_err(ApiError::storage)?;
     let result = artifact(&store, &id, version, selection.layer)?;
-    Ok(Json(
-        json!({"id":id, "version":version, "direction":result}),
-    ))
+    let reference = match (selection.reference_id, selection.reference_layer) {
+        (Some(id), Some(layer)) if !id.is_empty() && id.len() <= 128 && layer < 4096 => {
+            Some(compare_reference(&store, &result, &id, layer)?)
+        }
+        (None, None) => None,
+        _ => {
+            return Err(ApiError::bad(
+                "provide both a valid reference_id and reference_layer",
+            ));
+        }
+    };
+    let mut response = json!({"id":id, "version":version, "direction":result});
+    if let Some(reference) = reference {
+        response["reference"] = reference;
+    }
+    Ok(Json(response))
+}
+
+fn compare_reference(
+    store: &Store,
+    result: &Value,
+    id: &str,
+    layer: usize,
+) -> Result<Value, ApiError> {
+    if result["runtime"] != trace::HGN_RUNTIME {
+        return Err(ApiError::bad(
+            "reference comparison requires HGN directions",
+        ));
+    }
+    let reference = artifact(store, id, direction::VERSION, Some(layer))?;
+    if reference["runtime"] != trace::HGN_RUNTIME
+        || reference["behavior"] != result["behavior"]
+        || reference["model_sha256"] != result["model_sha256"]
+        || reference["assets_sha256"] != result["assets_sha256"]
+    {
+        return Err(ApiError::bad(
+            "reference must use the same HGN checkpoint and reviewed behavior",
+        ));
+    }
+    let row = &reference["fit"]["layers"][0];
+    let target: direction::Layer =
+        serde_json::from_value(row.clone()).map_err(ApiError::storage)?;
+    let target = target
+        .unit_vector
+        .ok_or_else(|| ApiError::bad("reference layer has no direction"))?;
+    let fit: direction::Fit =
+        serde_json::from_value(result["fit"].clone()).map_err(ApiError::storage)?;
+    let target_norm = direction::residual_norm(&target);
+    let mut scores = Vec::with_capacity(fit.layers.len());
+    for row in &fit.layers {
+        let cosine = if let Some(v) = &row.unit_vector {
+            if v.len() != target.len() {
+                return Err(ApiError::bad("reference direction width mismatch"));
+            }
+            let dot = v
+                .iter()
+                .zip(&target)
+                .map(|(&a, &b)| f64::from(a) * f64::from(b))
+                .sum::<f64>();
+            Some((dot / (direction::residual_norm(v) * target_norm)).clamp(-1.0, 1.0))
+        } else {
+            None
+        };
+        scores.push(json!({"layer":row.layer,"cosine":cosine}));
+    }
+    Ok(json!({"id":id,"version":direction::VERSION,"layer":layer,"cosine_by_layer":scores}))
 }
 
 pub(crate) fn artifact(
@@ -72,7 +137,13 @@ pub(crate) fn load(store: &Store, id: &str, version: u32) -> Result<Value, ApiEr
         .first()
         .ok_or_else(|| ApiError::storage("Direction input is missing"))?;
     request
-        .verify_version(&result, &input.id, &request.model_sha256, version)
+        .verify_version(
+            &result,
+            &input.id,
+            &request.model_sha256,
+            &input.kind,
+            version,
+        )
         .map_err(ApiError::storage)?;
     Ok(result)
 }

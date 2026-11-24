@@ -32,10 +32,11 @@ def capture_spec(raw, n_layers, n_tokens, vocab):
         raise ValueError("invalid capture roles")
     spec["roles"] = sorted(set(raw["roles"]))
     k, cap = spec["top_k"], spec["byte_cap"]
+    token_probe = not spec["layers"] and not spec["roles"] and spec["positions"] == [0]
     if (type(k) is not int or not 0 <= k <= min(100, vocab)
             or type(cap) is not int or not 1 <= cap <= 32 << 20
             or not spec["positions"] or (not spec["layers"] and spec["roles"])
-            or (not k and not spec["roles"])):
+            or (not k and not spec["roles"] and not token_probe)):
         raise ValueError("invalid capture selection, top_k, or byte cap")
     return spec
 
@@ -137,11 +138,11 @@ def run(args):
     )
     if payload_bytes >= cap:
         raise ValueError("trace exceeds byte cap")
-    forward = Forward(args.model, args.sidecar, config)
+    forward = Forward(args.model, args.sidecar, config) if roles or k else None
     args.out.mkdir(mode=0o700)
     m = {
         "schema_version": 1, "kind": "trace", "spec": spec,
-        "model": {"arch": "qwen4_exp_text", "name": forward.checkpoint.ident,
+        "model": {"arch": "qwen4_exp_text", "name": forward.checkpoint.ident if forward else "",
                   "n_layers": config.num_hidden_layers, "hidden": config.hidden_size,
                   "n_experts": config.num_experts, "top_k": config.num_experts_per_tok,
                   "tied_head": False, "final_norm": "hyper_connection_mixer.hc_norm",
@@ -166,7 +167,7 @@ def run(args):
         append("tensors", dict(key, file=file, node=f"{key['role']}-{key['layer']}", shape=list(value.shape),
                                dtype="f32_le", bytes=len(data), sha256=sha256(data).hexdigest()))
 
-    for layer, hidden in forward.layers(tokens):
+    for layer, hidden in (forward.layers(tokens) if forward else ()):
         if layer not in selected and layer != last:
             continue
         rows = hidden[positions]

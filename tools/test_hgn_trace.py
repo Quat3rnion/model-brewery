@@ -12,6 +12,25 @@ ROOT = Path(__file__).parent / "hgn_trace"
 
 
 class TraceTest(unittest.TestCase):
+    def test_token_probe_does_not_open_model(self):
+        from hgn_trace_fixture import fixture
+
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            fixture(path)
+            spec = {"layers": [], "roles": [], "positions": [0], "top_k": 0, "byte_cap": 2048}
+            (path / "spec.json").write_text(json.dumps(spec))
+            subprocess.run([
+                sys.executable, str(ROOT / "trace.py"), "--model", str(path / "not-opened.hgn"),
+                "--sidecar", str(path / "sidecar.hgn"), "--config", str(path / "config.json"),
+                "--tokenizer", str(path / "tokenizer.json"), "--spec", str(path / "spec.json"),
+                "--out", str(path / "probe"), "--prompt", "a b", "--threads", "1",
+            ], check=True)
+            m = json.loads((path / "probe/manifest.json").read_text())
+            self.assertEqual([t["token_id"] for t in m["tokens"]], [1, 2])
+            self.assertEqual(m["tensors"], [])
+            self.assertEqual(m["model_logits"], [])
+
     def test_spec_selects_full_streams_and_logit_views(self):
         from hgn_trace_fixture import fixture
 

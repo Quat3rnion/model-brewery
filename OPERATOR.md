@@ -715,17 +715,19 @@ time. On 429, wait and retry.
 ### Behavior directions
 
 Use this CPU job to measure activation differences for `slop`, `sycophancy`,
-or `response_length` on a Library Qwen2 GGUF. The job does not change weights
-or run text generation.
+or `response_length` on a Library Qwen2 GGUF or supported Qwen3.8 Flash Next
+HGN v2 checkpoint (`hgn` or `hgn-v2`). The job does not change weights or
+generate text.
 
 1. Run `python3 tools/direction_prompt_cache.py /absolute/path/to/cache` on
    a machine with network access. The script checks the source size and
    SHA-256 before it reads any rows. Copy the generated digest-named `.json`
    files to a worker-owned directory. The worker can run offline.
 2. In the worker `engine_env`, set `BREWERY_CONTRAST_CACHE` to that absolute
-   directory. Set the two pinned Lanternfish trace paths as for a CPU trace.
-   Enable the `behavior_direction` capability for that worker.
-3. Send `POST /api/jobs` with `kind: "behavior_direction"`, one Library GGUF
+   directory. Configure the pinned Lanternfish runtime for GGUF or the pinned
+   HGN Python runtime and model assets for HGN, as for a CPU trace. Enable
+   `behavior_direction` on the worker that holds the model.
+3. Send `POST /api/jobs` with `kind: "behavior_direction"`, one Library model
    ID in `input_ids`, and `options` with `behavior`, `model_sha256`, and
    `layers` in increasing order. Do not send prompts. The MCP tool
    `compute_direction` supplies the job kind.
@@ -733,13 +735,27 @@ or run text generation.
    `GET /api/directions/{id}/versions/2` or MCP `get_direction` with the
    job ID and `version: 2`. This immutable artifact contains the model
    digest and the prompt and runtime pins. Each run makes a new artifact.
-   Specify `layer` to read one layer instead of all vectors.
-   For an older job, request version 1 to read its original raw-margin selection.
+    Specify `layer` to read one layer instead of all vectors.
+    For an older job, request version 1 to read its original raw-margin selection.
 
-The default role is `l_out`; you can select `attn_out` or `ffn_out`. The
-default token is the last user instruction token. Set `position` for one
-explicit zero-based index, including special tokens. The worker captures the
-prefix through the end of the user text. The fit uses 12 prompt pairs and
+On GGUF, the default role is `l_out`. You can select `attn_out` or `ffn_out`.
+The worker captures the prefix through the last user token and fits at that
+token by default. On HGN, use `l_out` and select at most 25 layers for a
+2560-wide model. The worker adds the assistant header with thinking disabled.
+Set `last_k` to 1 to 16 to use that many final template tokens. If you do not
+specify `last_k`, the job uses one token. For an explicit zero-based token
+index, set `position` instead. The HGN runtime accepts up to 512 prompt
+tokens. At each position, it sums the four streams over their shared hidden
+coordinates. The worker L2-normalizes that sum and averages the positions.
+`mean_residual_norm` uses the norm before normalization.
+
+To compare HGN results, pass `reference_id` and `reference_layer` to
+`get_direction`. The reference must be a saved version 2 direction with the
+same model and asset digests and reviewed behavior. The response gives the cosine for
+each requested layer with a fitted vector, and null for other layers.
+The comparison does not change either artifact.
+
+The fit uses 12 prompt pairs and
 scores 8 disjoint pairs. Each layer has the L2 norm of the training mean
 difference, its unit vector, and the mean held-out signed projection of
 positive minus negative rows (`held_out_margin`). The job divides this
@@ -747,9 +763,9 @@ margin by the pooled within-class sample standard deviation of the held-out
 projections to get `held_out_cohens_d`. The largest positive score selects
 the layer. Equal scores select the lower layer. Cohen's d is null if the
 pooled standard deviation is zero or the direction has zero norm. These
-layers cannot win. `mean_residual_norm` is the mean L2 norm of `l_out` at the
-same token across both classes of held-out prompts, even when the direction
-uses another role. Scores measure separation for these prompt pairs only.
+layers cannot win. `mean_residual_norm` averages the `l_out` norms across both
+classes of held-out prompts and all captured positions, even when the direction
+uses another role on GGUF. Scores measure separation for these prompt pairs only.
 They do not measure a change in generated behavior.
 Results are not release-qualified.
 

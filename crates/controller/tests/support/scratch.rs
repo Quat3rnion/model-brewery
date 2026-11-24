@@ -1334,6 +1334,15 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
                 json!(["plain", "projected", "norm_preserving"])
             );
         }
+        if tool["name"] == "compute_direction" {
+            let options = &schema["properties"]["options"]["properties"];
+            assert_eq!(options["last_k"]["minimum"], 1);
+            assert_eq!(options["last_k"]["maximum"], 16);
+            assert_eq!(
+                options["behavior"]["enum"],
+                json!(["slop", "sycophancy", "response_length"])
+            );
+        }
         if tool["name"] == "create_direction_intervention" {
             assert_eq!(schema["properties"]["direction_rules"]["maxItems"], 8);
             assert!(schema["properties"].get("interventions").is_none());

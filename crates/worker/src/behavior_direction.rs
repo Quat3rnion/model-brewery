@@ -12,6 +12,7 @@ pub const JOB: &str = "behavior_direction";
 pub const VERSION: u32 = 2;
 pub const CACHE: &str = "BREWERY_CONTRAST_CACHE";
 pub const CAP: u64 = 2 << 20;
+pub const MAX_LAST_K: usize = 16;
 const FLOAT_CAP: usize = 65536;
 const SCHEMA: &str = "brewery.contrast-prompts.v1";
 
@@ -44,6 +45,7 @@ pub struct Request {
     #[serde(default = "l_out")]
     pub role: Role,
     pub position: Option<usize>,
+    pub last_k: Option<usize>,
 }
 
 fn l_out() -> Role {
@@ -57,7 +59,9 @@ impl Request {
             crate::is_digest(&r.model_sha256)
                 && valid_selection(&r.layers, r.role)
                 && *r.layers.last().unwrap() < 4096
-                && r.position.is_none_or(|p| p < 4096),
+                && r.position.is_none_or(|p| p < 4096)
+                && r.last_k
+                    .is_none_or(|k| (1..=MAX_LAST_K).contains(&k) && r.position.is_none()),
             "invalid direction revision, layer selection or token position"
         );
         Ok(r)
@@ -65,6 +69,18 @@ impl Request {
 
     pub fn load_pairs(&self, cache: &Path) -> Result<Vec<Pair>> {
         load_pairs(cache, self.behavior, self.behavior.contrast_sha256())
+    }
+
+    pub fn check_input_kind(&self, kind: &str) -> Result<()> {
+        match kind {
+            "gguf" => ensure!(self.last_k.is_none(), "last_k requires HGN"),
+            kind if trace::is_hgn(kind) => ensure!(
+                self.role == Role::LOut && self.position.is_none_or(|pos| pos < 512),
+                "HGN directions require l_out and a position below 512"
+            ),
+            _ => anyhow::bail!("direction needs a Library GGUF or HGN checkpoint"),
+        }
+        Ok(())
     }
 }
 
@@ -109,12 +125,18 @@ pub fn load_pairs(cache: &Path, behavior: Behavior, pin: &str) -> Result<Vec<Pai
 }
 
 impl Request {
-    pub fn verify_result(&self, result: &Value, model_id: &str, sha: &str) -> Result<()> {
+    pub fn verify_result(
+        &self,
+        result: &Value,
+        model_id: &str,
+        sha: &str,
+        kind: &str,
+    ) -> Result<()> {
         ensure!(
-            current_runtime(result),
+            current_runtime(result, kind),
             "direction result does not match the current runtime pin"
         );
-        self.verify_version(result, model_id, sha, VERSION)
+        self.verify_version(result, model_id, sha, kind, VERSION)
     }
 
     pub fn verify_version(
@@ -122,8 +144,11 @@ impl Request {
         result: &Value,
         model_id: &str,
         sha: &str,
+        kind: &str,
         version: u32,
     ) -> Result<()> {
+        self.check_input_kind(kind)?;
+        let hgn = trace::is_hgn(kind);
         ensure!(
             matches!(version, 1 | VERSION)
                 && !model_id.is_empty()
@@ -137,7 +162,13 @@ impl Request {
                 && result["behavior"] == serde_json::to_value(self.behavior)?
                 && result["contrast_sha256"] == self.behavior.contrast_sha256()
                 && result["position"] == serde_json::to_value(self.position)?
-                && (current_runtime(result) || original_runtime(result)),
+                && (if hgn && self.position.is_none() {
+                    result["last_k"] == self.last_k.unwrap_or(1)
+                } else {
+                    result.get("last_k").is_none()
+                })
+                && (current_runtime(result, kind) || (!hgn && original_runtime(result)))
+                && (!hgn || version == VERSION),
             "direction result does not match the model, prompt or runtime pins"
         );
         if version == VERSION {
@@ -156,8 +187,28 @@ impl Request {
     }
 }
 
-fn current_runtime(result: &Value) -> bool {
-    result["lanternfish_commit"] == trace::COMMIT && result["executable_sha256"] == trace::SHA256
+fn current_runtime(result: &Value, kind: &str) -> bool {
+    if trace::is_hgn(kind) {
+        result.get("lanternfish_commit").is_none()
+            && result["runtime"] == trace::HGN_RUNTIME
+            && result["runtime_sha256"] == trace::HGN_RUNTIME_SHA256.trim_end()
+            && result["executable_sha256"]
+                .as_str()
+                .is_some_and(crate::is_digest)
+            && result["assets_sha256"].as_object().is_some_and(|assets| {
+                assets.len() == 3
+                    && ["sidecar", "config", "tokenizer"].into_iter().all(|name| {
+                        assets
+                            .get(name)
+                            .and_then(Value::as_str)
+                            .is_some_and(crate::is_digest)
+                    })
+            })
+    } else {
+        result.get("runtime").is_none()
+            && result["lanternfish_commit"] == trace::COMMIT
+            && result["executable_sha256"] == trace::SHA256
+    }
 }
 
 // Older direction jobs used the projection runtime even without an intervention.
@@ -206,6 +257,11 @@ impl Prompt {
             "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}",
             self.system, self.user
         )
+    }
+
+    pub fn hgn_chat_prefix(&self) -> String {
+        // Text-only chat template with enable_thinking=false and add_generation_prompt=true.
+        self.qwen_chat_prefix() + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
     }
 
     pub fn user(&self) -> &str {
