@@ -23,6 +23,7 @@ const MAGIC: &[u8; 8] = b"BWDELTA1";
 
 pub mod ablation;
 pub mod diff;
+pub mod hgn_ablation;
 pub mod merge;
 pub mod prune;
 
