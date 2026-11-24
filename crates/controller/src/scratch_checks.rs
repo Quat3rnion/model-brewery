@@ -256,6 +256,9 @@ pub(super) fn check(
             return Ok(response);
         }
         let row = visible(&store, &id)?;
+        if row.is_hgn() {
+            return Err(conflict("native HGN scratch checks are not yet supported"));
+        }
         if row.state != RevisionState::Scratch || row.sha256 != request.sha256 {
             return Err(conflict(
                 "run checks for the current hash of an unrequested scratch revision",

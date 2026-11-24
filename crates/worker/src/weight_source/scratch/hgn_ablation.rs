@@ -26,6 +26,7 @@ const MAX_STEPS: usize = 32;
 const CACHE_HEADER: u64 = 4096;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TensorReport {
     pub store: u32,
     pub variant: u32,
@@ -64,6 +65,7 @@ impl TensorReport {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Report {
     pub schema: String,
     pub encoder_sha256: String,

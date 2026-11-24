@@ -144,17 +144,20 @@ fn hgn_edit_grant_is_bound_to_job_host_path_and_parent() {
         producer: None,
         first_layer: 0,
         last_layer: 0,
-        direction: vec![1.,0.],
+        direction: vec![1., 0.],
     };
     let input = serde_json::from_value(source.clone()).unwrap();
-    let grant = edit::grant("native-edit", &input, native.clone(), &[42;32]).unwrap();
+    let grant = edit::grant("native-edit", &input, native.clone(), &[42; 32]).unwrap();
     let prepare = |id: &str, action: &str, source: &Value, grant: &str| {
         let job = json!({"kind":edit::JOB,"inputs":[source],"options":{(edit::GRANT):grant}});
-        t.rpc_raw(&serde_json::to_value(Rpc::Prepare {
-            id: id.into(),
-            action: action.into(),
-            job: serde_json::from_value(job).unwrap(),
-        }).unwrap())
+        t.rpc_raw(
+            &serde_json::to_value(Rpc::Prepare {
+                id: id.into(),
+                action: action.into(),
+                job: serde_json::from_value(job).unwrap(),
+            })
+            .unwrap(),
+        )
     };
     assert!(prepare("other-id", "start", &source, &grant)["error"].is_string());
     assert!(prepare("native-edit", "transfer", &source, &grant)["error"].is_string());
@@ -162,16 +165,34 @@ fn hgn_edit_grant_is_bound_to_job_host_path_and_parent() {
     let mut substitute = source.clone();
     substitute["path"] = json!(t.src.join("other.hgn"));
     assert!(prepare("native-edit", "start", &substitute, &grant)["error"].is_string());
-    assert_eq!(prepare("native-edit", "start", &source, &grant)["ok"]["state"], "queued");
-    let resolve = |input| serde_json::to_value(Rpc::Resolve {
-        id:"native-edit".into(), index:0, input, bundle:None,
-    }).unwrap();
+    assert_eq!(
+        prepare("native-edit", "start", &source, &grant)["ok"]["state"],
+        "queued"
+    );
+    let resolve = |input| {
+        serde_json::to_value(Rpc::Resolve {
+            id: "native-edit".into(),
+            index: 0,
+            input,
+            bundle: None,
+        })
+        .unwrap()
+    };
     assert!(t.rpc_raw(&resolve(serde_json::from_value(substitute).unwrap()))["error"].is_string());
     assert_eq!(t.rpc_raw(&resolve(input))["ok"], source);
     let mut bad_producer = native;
     bad_producer.producer = Some("native-edit".into());
-    let grant = edit::grant("descendant", &serde_json::from_value(source.clone()).unwrap(), bad_producer, &[42;32]).unwrap();
-    assert!(prepare("descendant", "start", &source, &grant)["error"].is_string());
+    let grant = edit::grant(
+        "descendant",
+        &serde_json::from_value(source.clone()).unwrap(),
+        bad_producer,
+        &[42; 32],
+    )
+    .unwrap();
+    assert_eq!(
+        prepare("descendant", "start", &source, &grant)["ok"]["state"],
+        "failed"
+    );
 }
 
 #[test]

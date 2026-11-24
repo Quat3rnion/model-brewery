@@ -687,7 +687,10 @@
           }
         }}}},
         "responses": {
-          "200": {"description": "The current SafeTensors scratch revision, or the queued HGN job ID on idempotent replay."},
+          "200": {"description": "Idempotent replay: the SafeTensors revision or the queued HGN job ID.", "content": {"application/json": {"schema": {"anyOf": [
+            {"$ref": "#/components/schemas/ScratchRevision"},
+            {"type": "object", "required": ["id"], "additionalProperties": false, "properties": {"id": {"$ref": "#/components/schemas/Id"}}}
+          ]}}}},
           "201": {"$ref": "#/components/responses/ScratchRow"},
           "202": {"description": "The queued private HGN edit job.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
           "400": {"$ref": "#/components/responses/BadRequest"},

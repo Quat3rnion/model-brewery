@@ -112,7 +112,10 @@ pub(super) fn submit(
     key().map_err(|_| conflict("private HGN edit signer is not configured"))?;
     let (model, producer, root_sha256) = source(&store, &id, &req.sha256)?;
     let result = crate::directions::load(&store, &req.direction.id, req.direction.version)?;
-    if result["model_id"] != model.id || result["model_sha256"] != root_sha256 {
+    if result["model_id"] != model.id
+        || result["model_sha256"] != root_sha256
+        || result["runtime"] != brewery_worker::trace::HGN_RUNTIME
+    {
         return Err(ApiError::bad(
             "fit the direction on the same pinned HGN Library root",
         ));
@@ -182,11 +185,15 @@ pub(crate) fn finish(
         .map_err(|_| "private HGN parent is no longer available")?;
     if root.id != bound.root_model
         || root.host != job.host
-        || envelope.inputs.first().is_none_or(|input| input.path != root.path || input.kind != root.kind)
+        || envelope
+            .inputs
+            .first()
+            .is_none_or(|input| input.path != root.path || input.kind != root.kind)
         || producer != bound.native.producer
         || sha != bound.root_sha256
         || store.scratch_count()? >= LIMIT
         || result["kind"] != native::JOB
+        || result.as_object().is_none_or(|o| o.len() != 2)
     {
         return Err("HGN parent or worker changed before receipt commit".into());
     }

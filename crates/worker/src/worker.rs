@@ -970,7 +970,14 @@ impl Worker {
                 .as_ref()
                 .context("private HGN edits are not configured")?
                 .authorize(id, &action, &job)?;
-            self.hgn_parent(&job.inputs[0], &req)?;
+            if self.hgn_parent(&job.inputs[0], &req).is_err() {
+                return self.record_prepare(
+                    id,
+                    action,
+                    job,
+                    Reply::error("Pinned private HGN parent is unavailable on the source worker"),
+                );
+            }
         } else if scratch_eval::private_output(&job.kind) || access.is_some() {
             let valid = access.is_some_and(|access| access.permits(&action, &job))
                 && (job.kind != scratch_eval::CHECKS

@@ -38,6 +38,11 @@ fn discovery_serves_json_under_the_loopback_guard() {
 fn contract_covers_the_controller_operations_and_resolves_local_refs() {
     let contract: Value = serde_json::from_str(CONTRACT).unwrap();
     assert_eq!(contract["openapi"], "3.1.0");
+    assert_eq!(
+        contract["paths"]["/api/scratch/{id}/ablate_direction"]["post"]["responses"]["202"]
+            ["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/Job"
+    );
     let operations = contract["paths"]
         .as_object()
         .unwrap()

@@ -1325,6 +1325,8 @@ fn mcp_scratch_workflow_stops_at_publish_request() {
             assert_eq!(schema["required"], json!(["id"]));
         }
         if tool["name"] == "ablate_direction" {
+            let description = tool["description"].as_str().unwrap();
+            assert!(description.contains("Poll get_job") && description.contains("HGN scratch cannot be published."));
             assert_eq!(
                 schema["properties"]["direction"]["properties"]["version"]["const"],
                 2

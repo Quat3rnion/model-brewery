@@ -554,7 +554,7 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
-            .env(hgn_edit::CACHE, w.cfg.root.join("hgn-edit-cache"))
+            .env(hgn_edit::CACHE, w.cfg.root.join(hgn_edit::CACHE_DIR))
             .env(hgn_edit::RESERVE, w.cfg.disk_reserve_bytes.to_string());
     } else if !hgn_trace
         && (scratch_job
@@ -879,7 +879,14 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         let report: hgn_edit::Report = serde_json::from_value(value["report"].clone())?;
         req.verify(&report)?;
         let private = work.join(hgn_edit::PRIVATE);
-        weight_source::open_regular(&private.join(hgn_edit::MODEL))?;
+        let file = weight_source::open_regular(&private.join(hgn_edit::MODEL))?;
+        ensure!(
+            file.metadata()?.len()
+                == weight_source::open_regular(&job.inputs[0].path)?
+                    .metadata()?
+                    .len(),
+            "native HGN edit changed the checkpoint size"
+        );
         ensure!(
             load::<Value>(&private.join(hgn_edit::REPORT))? == value["report"],
             "HGN edit report file does not match the engine receipt"
