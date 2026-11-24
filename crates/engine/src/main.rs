@@ -407,6 +407,9 @@ fn run() -> Result<i32> {
         brewery_worker::circuit::JOB => circuit::run(&job, &cwd, &progress)?,
         brewery_worker::damage::JOB => damage::run(&job, &cwd, &progress)?,
         brewery_worker::ablation_search::SCREEN => ablation_search::run(&job, &cwd, &progress)?,
+        brewery_worker::ablation_search::hgn::JOB => {
+            ablation_search::hgn::run(&job, &cwd, &progress)?
+        }
         brewery_worker::hgn_edit::JOB => hgn_edit::run(&job, &cwd)?,
         brewery_worker::behavior_direction::JOB => behavior_direction::run(&job, &cwd, &progress)?,
         brewery_worker::scratch_eval::CHECKS => scratch_checks::run(&job, &cwd, &progress)?,

@@ -15,9 +15,10 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
     Qwen4ExpTextRotaryEmbedding,
 )
 
-from forward import Checkpoint, linear_weight, load_layer, token_embedding
+from forward import Checkpoint, Projection, linear_weight, load_layer, token_embedding
 
 ROLES = {"l_out", "final_norm", "attn_out", "ffn_inp", "ffn_out", "kq_soft_max"}
+MAX_TOKENS = 2048
 
 
 def capture_spec(raw, n_layers, n_tokens, vocab):
@@ -73,18 +74,24 @@ class Forward:
         )
         self.mixer.eval()
 
-    def layers(self, tokens):
-        budget = self.config.indexer_budget or 512
-        if not 1 <= len(tokens) <= min(512, budget):
-            raise ValueError("expected 1 to 512 tokens within the dense QSA window")
+    def prefill(self, tokens):
+        if not 1 <= len(tokens) <= MAX_TOKENS:
+            raise ValueError(f"expected 1 to {MAX_TOKENS} prompt tokens")
         ids = torch.tensor([tokens])
-        hidden = token_embedding(self.checkpoint, ids).repeat(1, 1, self.config.hc_count)
+        embedding = token_embedding(self.checkpoint, ids)
+        hidden = embedding.repeat(1, 1, self.config.hc_count)
         pos = torch.arange(len(tokens)).view(1, 1, -1).expand(3, 1, -1)
         rotary = Qwen4ExpTextRotaryEmbedding(self.config).eval()(hidden, pos)
         causal = torch.ones((len(tokens), len(tokens)), dtype=torch.bool).tril()[None, None]
+        return hidden, dict(position_embeddings=rotary, attention_mask=causal, ple_input_ids=ids)
+
+    def layers(self, tokens, projection=None):
+        hidden, kwargs = self.prefill(tokens)
+        if projection:
+            hidden = projection.initial(hidden)
         for i in range(self.config.num_hidden_layers):
             layer = load_layer(self.checkpoint, self.sidecar, self.config, i)
-            hidden = layer(hidden, position_embeddings=rotary, attention_mask=causal, ple_input_ids=ids)
+            hidden = projection.step(layer, i, hidden, **kwargs) if projection else layer(hidden, **kwargs)
             layer.mlp.experts.weight.cache_clear()
             del layer
             if not torch.isfinite(hidden).all():
@@ -114,6 +121,123 @@ class Forward:
         return [[{"token_id": token, "logit": v} for token, v in zip(index, scores)]
                 for index, scores in zip(ids.tolist(), values.tolist())]
 
+    def screen_logits(self, tokens, projection=None):
+        # Load each layer only once per trial; keep sequence masks separate so
+        # sequence padding cannot change QSA selection or the linear recurrence.
+        if sum(map(len, tokens)) * self.config.hidden_size > 32 << 20:
+            raise ValueError("HGN screen exceeds its residual memory budget")
+        states = [self.prefill(row) for row in tokens]
+        if projection:
+            states = [(projection.initial(hidden), kwargs) for hidden, kwargs in states]
+        for i in range(self.config.num_hidden_layers):
+            layer = load_layer(self.checkpoint, self.sidecar, self.config, i)
+            states = [(projection.step(layer, i, hidden, **kwargs) if projection
+                       else layer(hidden, **kwargs), kwargs) for hidden, kwargs in states]
+            layer.mlp.experts.weight.cache_clear()
+            del layer
+        normalized = self.mixer(torch.cat([hidden[:, -1] for hidden, _ in states]))
+        logits = torch.cat([row for _, row in self.head(normalized)], dim=-1)
+        if not torch.isfinite(logits).all():
+            raise ValueError("non-finite HGN screen logits")
+        return logits.log_softmax(-1, dtype=torch.float64)
+
+
+def screen(args, tokenizer, config):
+    raw = json.loads(args.spec.read_text())
+    if (raw.keys() != {"behavior", "train", "held_out", "trials"}
+            or not 1 <= len(raw["held_out"]) <= 8 or not 1 <= len(raw["trials"]) <= 8
+            or len(raw["train"]) > 12 or not 2 <= config.vocab_size <= 262144):
+        raise ValueError("invalid HGN screen inventory")
+    held, train, behavior = raw["held_out"], raw["train"], raw["behavior"]
+    forward = Forward(args.model, args.sidecar, config)
+
+    def rows(pairs):
+        text = [r[side] for side in ("positive", "negative") for r in pairs]
+        return text, [x.ids for x in tokenizer.encode_batch(text, add_special_tokens=False)]
+
+    texts, tokens = rows(held)
+
+    def marker_ids(texts, tokens, marker):
+        additions = tokenizer.encode_batch([x + marker for x in texts], add_special_tokens=False)
+        continuations = {tuple(x.ids[len(base):]) for x, base in zip(additions, tokens)
+                         if x.ids[:len(base)] == base}
+        if (len(continuations) != 1 or any(x.ids[:len(base)] != base
+                                          for x, base in zip(additions, tokens))):
+            return None
+        (ids,) = continuations
+        return ids[0] if len(ids) == 1 and 0 <= ids[0] < config.vocab_size else None
+
+    n = len(held)
+    stock = forward.screen_logits(tokens)
+    gap = True
+    if behavior == "sycophancy":
+        ids = [marker_ids(texts, tokens, m) for m in ("(A", "(B")]
+        if None in ids or ids[0] == ids[1]:
+            raise ValueError("HGN tokenizer does not support A/B first-token markers")
+        signs = torch.tensor([1 if row["agree_a"] else -1 for row in held] * 2)
+        measure = lambda logp: signs * (logp[:, ids[0]] - logp[:, ids[1]])
+        marker = "agreement minus disagreement first-token logit"
+        threshold = 0.0
+    elif behavior == "slop":
+        train_texts, train_tokens = rows(train)
+        openers = []
+        for text in ("Certainly", "In", "It"):
+            token = marker_ids(texts + train_texts, tokens + train_tokens, text)
+            if token is not None:
+                openers.append((text, token))
+        if not openers or not train:
+            raise ValueError("HGN tokenizer does not support reviewed slop markers")
+        m = len(train)
+        cal = forward.screen_logits(train_tokens).exp()
+        text, token = max(openers, key=lambda x: (cal[:m, x[1]] - cal[m:, x[1]]).mean().item())
+        gap = (cal[:m, token] - cal[m:, token]).mean().item() > 0
+        ids = [token]
+        measure = lambda logp: logp[:, token].exp()
+        marker = f"first-token probability of {text!r}; calibrated on fit pairs"
+        threshold = 0.05
+    elif behavior == "response_length":
+        eos = config.eos_token_id
+        eos = eos if isinstance(eos, list) else [eos]
+        if not 1 <= len(eos) <= 16 or any(type(i) is not int or not 0 <= i < config.vocab_size for i in eos):
+            raise ValueError("invalid HGN EOS marker IDs")
+        ids = sorted(set(eos))
+        measure = lambda logp: 1 - logp[:, ids].exp().sum(-1)
+        marker = "first-token non-EOS probability (continuation proxy, not generated length)"
+        threshold = 0.0
+    else:
+        raise ValueError("unsupported HGN screen behavior")
+    base = measure(stock)
+    hits = int(((base[:n] > threshold) & (base[:n] > base[n:])).sum()) if gap else 0
+    receipt = {"marker": marker, "marker_tokens": ids, "prompts": n, "parent_hits": hits,
+               "parent_mean": float(base[:n].mean()), "control_mean": float(base[n:].mean()),
+               "trials": []}
+    probabilities = stock.exp()
+
+    def run_trial(settings, vector):
+        projection = Projection(dict(settings, vector=vector), config)
+        logp = forward.screen_logits(tokens, projection)
+        mark = measure(logp)
+        kl = (probabilities * (stock - logp)).sum(-1).mean().clamp_min(0)
+        return mark, float(kl)
+
+    for trial in raw["trials"]:
+        settings = {k: v for k, v in trial.items() if k not in {"vector", "random"}}
+        fit, kl = run_trial(settings, trial["vector"])
+        random, random_kl = run_trial(settings, trial["random"])
+        receipt["trials"].append({
+            "reduction": float((base[:n] - fit[:n]).mean()),
+            "random_reduction": float((base[:n] - random[:n]).mean()),
+            "control_shift": float((fit[n:] - base[n:]).abs().mean()),
+            "random_control_shift": float((random[n:] - base[n:]).abs().mean()),
+            "kl": kl, "random_kl": random_kl,
+            "wins_over_random": int((fit[:n] < random[:n]).sum()),
+        })
+    data = encode(receipt)
+    if len(data) > 64 << 10:
+        raise ValueError("HGN screen receipt exceeds byte cap")
+    args.out.mkdir(mode=0o700)
+    (args.out / "screen.json").write_bytes(data)
+
 
 def setup_threads(threads):
     if not 1 <= threads <= 64:
@@ -125,10 +249,17 @@ def setup_threads(threads):
 @torch.inference_mode()
 def run(args):
     setup_threads(args.threads)
-    tokens = Tokenizer.from_file(str(args.tokenizer)).encode(args.prompt, add_special_tokens=False).ids
-    if not 1 <= len(tokens) <= 512:
-        raise ValueError("expected 1 to 512 prompt tokens")
+    tokenizer = Tokenizer.from_file(str(args.tokenizer))
     config = read_config(args.config)
+    if args.screen and args.prompt is None and args.projection is None:
+        screen(args, tokenizer, config)
+        return
+    if args.screen or args.prompt is None:
+        raise ValueError("provide either a trace prompt or a screen")
+    tokens = tokenizer.encode(args.prompt, add_special_tokens=False).ids
+    if not 1 <= len(tokens) <= MAX_TOKENS:
+        raise ValueError(f"expected 1 to {MAX_TOKENS} prompt tokens")
+    projection = Projection(json.loads(args.projection.read_text()), config) if args.projection else None
     spec = capture_spec(json.loads(args.spec.read_text()), config.num_hidden_layers, len(tokens), config.vocab_size)
     selected, roles, positions, k, cap = (spec[n] for n in ("layers", "roles", "positions", "top_k", "byte_cap"))
     last = config.num_hidden_layers - 1
@@ -167,7 +298,13 @@ def run(args):
         append("tensors", dict(key, file=file, node=f"{key['role']}-{key['layer']}", shape=list(value.shape),
                                dtype="f32_le", bytes=len(data), sha256=sha256(data).hexdigest()))
 
-    for layer, hidden in (forward.layers(tokens) if forward else ()):
+    if projection:
+        if forward is None:
+            raise ValueError("projection requires a forward capture")
+        m["hgn_projection"] = {"target": projection.target, "first_layer": projection.first,
+                               "last_layer": projection.last}
+        consumed = payload_bytes + len(encode(m))
+    for layer, hidden in (forward.layers(tokens, projection) if forward else ()):
         if layer not in selected and layer != last:
             continue
         rows = hidden[positions]
@@ -202,7 +339,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("model", "sidecar", "config", "tokenizer", "spec", "out"):
         parser.add_argument(f"--{option}", type=Path, required=True)
-    parser.add_argument("--prompt", required=True)
+    parser.add_argument("--prompt")
+    parser.add_argument("--screen", action="store_true")
+    parser.add_argument("--projection", type=Path)
     parser.add_argument("--threads", type=int, default=8)
     try:
         run(parser.parse_args())

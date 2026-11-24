@@ -1,5 +1,6 @@
 """HGN CPU codec and layers, adapted from model-install-and-ablite (t_9afc1ddb)."""
 from functools import lru_cache
+import math
 import mmap
 import types
 
@@ -10,6 +11,68 @@ from torch.nn import functional as F
 from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextDecoderLayer
 
 from wsp.hgn import C, H, Checkpoint
+
+
+class Projection:
+    """One direction in the hidden basis, shared by the four residual streams."""
+    def __init__(self, raw, config):
+        if not isinstance(raw, dict) or raw.keys() - {"target", "vector", "first_layer", "last_layer"}:
+            raise ValueError("invalid HGN projection fields")
+        self.target = raw["target"]
+        first, last = raw.get("first_layer"), raw.get("last_layer")
+        if first is None and last is None:
+            first, last = 0, config.num_hidden_layers - 1
+        if (type(first) is not int or type(last) is not int
+                or not 0 <= first <= last < config.num_hidden_layers):
+            raise ValueError("invalid HGN projection layer range")
+        self.first, self.last = first, last
+        if self.target not in ("residual", "dense", "experts", "all"):
+            raise ValueError("invalid HGN projection target")
+        values = raw["vector"]
+        if (not isinstance(values, list) or len(values) != config.hidden_size
+                or any(type(x) not in (int, float) or not math.isfinite(x) for x in values)):
+            raise ValueError("invalid HGN projection vector")
+        norm = math.hypot(*values)
+        if not math.isfinite(norm) or norm == 0:
+            raise ValueError("invalid HGN projection norm")
+        self.vector = torch.tensor([x / norm for x in values], dtype=torch.float32)
+
+    def project(self, value):
+        v = self.vector
+        return value - (value @ v).unsqueeze(-1) * v
+
+    def residual(self, hidden):
+        return self.project(hidden.unflatten(-1, (-1, self.vector.numel()))).flatten(-2)
+
+    def initial(self, hidden):
+        # The token embedding is a dense writer at layer zero.
+        return self.residual(hidden) if self.first == 0 and self.target != "experts" else hidden
+
+    def hook(self, _module, _args, output):
+        return self.project(output)
+
+    def step(self, layer, index, hidden, **kwargs):
+        if not self.first <= index <= self.last:
+            return layer(hidden, **kwargs)
+        if self.target == "residual":
+            return self.residual(layer(hidden, **kwargs))
+        writers = []
+        if self.target in ("dense", "all"):
+            writers.extend((layer.mlp.shared_expert.down_proj,
+                            layer.self_attn.o_proj if hasattr(layer, "self_attn")
+                            else layer.linear_attn.out_proj))
+            if layer.ple is not None:
+                writers.append(layer.ple.value_proj)
+        if self.target in ("experts", "all"):
+            # Routing is a weighted sum, so projecting the sum is equivalent
+            # to projecting each selected expert's down output before weighting.
+            writers.append(layer.mlp.experts)
+        handles = [writer.register_forward_hook(self.hook) for writer in writers]
+        try:
+            return layer(hidden, **kwargs)
+        finally:
+            for handle in handles:
+                handle.remove()
 
 
 def q6g64(raw, shape):
@@ -149,12 +212,14 @@ def load_layer(checkpoint, sidecar, config, index):
     state = {name: linear_weight(checkpoint, root + name) for name in layer.state_dict()}
     layer.load_state_dict(state, strict=True, assign=True)
     if hasattr(layer, "self_attn"):
-        # Short sequences do not exhaust the QSA budget. Every visible key is
-        # selected, so the indexer returns the original causal mask.
-        def retain_all(_self, hidden_states, position_embeddings, attention_mask, past_key_values):
-            return attention_mask
+        # Below the QSA budget every visible key is selected. Above it, use
+        # the pinned model's actual indexer instead of substituting dense attention.
+        index = layer.self_attn.indexer.forward
 
-        layer.self_attn.indexer.forward = types.MethodType(retain_all, layer.self_attn.indexer)
+        def select(_self, hidden_states, position_embeddings, attention_mask, cache):
+            if cache is None and hidden_states.shape[1] <= config.indexer_budget:
+                return attention_mask
+            return index(hidden_states, position_embeddings, attention_mask, cache)
+
+        layer.self_attn.indexer.forward = types.MethodType(select, layer.self_attn.indexer)
     return layer.eval()
-
-

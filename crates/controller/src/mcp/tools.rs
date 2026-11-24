@@ -177,7 +177,7 @@ impl Server {
             let mut schema = route.schema.clone();
             let description = match name {
                 "start_trace" => {
-                    "Queue a CPU trace. Enter one Library GGUF or Qwen3.8 Flash Next v2 HGN ID (hgn or hgn-v2 on a non-Hy4 trace worker), or one scratch revision ID with private GGUF in input_ids. HGN is limited to 512 tokens and does not support interventions. Poll its ID with get_job."
+                    "Queue a CPU trace. Enter one Library GGUF or Qwen3.8 Flash Next v2 HGN ID (hgn or hgn-v2 on a non-Hy4 trace worker), or one scratch revision ID with private GGUF in input_ids. HGN accepts up to 2048 tokens and supports options.hgn_projection from a version 2 direction. Poll with get_job."
                 }
                 "steer_feature" => {
                     schema["properties"]["options"]["required"] = json!(["feature_steering"]);
@@ -208,7 +208,7 @@ impl Server {
                     "Apply selected tensor operations to a private SafeTensors scratch child. For native HGN projection, use ablate_direction."
                 }
                 "search_ablation" => {
-                    "Fit the direction on the exact private parent GGUF before searching. Use disjoint confirmation pins in behavior_direction.prompt_sets. Read get_job for the fitted and matched random screen results, then get_checks for the selected children."
+                    "For GGUF, fit on the exact private scratch GGUF, use disjoint confirmation pins, and check selected children. For HGN, enter the exact Library checkpoint ID and SHA-256, a version 2 direction ID and source_layer, seed, targets, and optional inclusive first_layer and last_layer. HGN returns scores and a Pareto front only; response_length is a first-token continuation proxy, not generated length. Read the receipt with get_job."
                 }
                 "run_heretic" => {
                     "Queue an offline Heretic GPU job on the original Library SafeTensors parent, not its scratch copy. Read get_job for scratch_id and get_scratch for the journal. Convert the byte-identical baseline and imported child with the same assets, then call run_checks."

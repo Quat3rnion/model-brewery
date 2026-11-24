@@ -69,7 +69,9 @@ fn stage(kind: &str) -> &'static str {
         "compare" => "Comparing models",
         brewery_worker::trace::JOB => "Preparing CPU trace",
         brewery_worker::behavior_direction::JOB => "Fitting CPU behavior directions",
-        brewery_worker::ablation_search::SCREEN => "Preparing CPU ablation screen",
+        brewery_worker::ablation_search::SCREEN | brewery_worker::ablation_search::hgn::JOB => {
+            "Preparing CPU ablation screen"
+        }
         brewery_worker::scratch_eval::GGUF => "Converting private BF16 GGUF",
         brewery_worker::scratch_eval::CHECKS => "Preparing CPU scratch checks",
         brewery_worker::locate_edit::JOB => "Computing locate-then-edit factors",

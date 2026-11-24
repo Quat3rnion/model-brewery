@@ -33,6 +33,16 @@ struct ArtifactRef {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct HgnProjection {
+    direction_id: String,
+    source_layer: usize,
+    target: trace::hgn_projection::Target,
+    first_layer: Option<usize>,
+    last_layer: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Patch {
     source_job_id: String,
     #[serde(default)]
@@ -59,6 +69,7 @@ impl TracePlan {
         let patches: Vec<Patch> = take(options, "activation_patches")?.unwrap_or_default();
         let sae: Option<crate::sae::Selection> = take(options, "sae")?;
         let steering: Option<crate::sae::Steering> = take(options, "feature_steering")?;
+        let hgn_projection: Option<HgnProjection> = take(options, "hgn_projection")?;
         let request = trace::Request::controller(
             &Value::Object(options.clone()),
             envelope.prompt.as_deref(),
@@ -74,8 +85,31 @@ impl TracePlan {
                 || !request.interventions.is_empty())
         {
             return Err(ApiError::bad(
-                "HGN traces do not support interventions or SAE",
+                "HGN traces do not support interventions or SAE other than hgn_projection",
             ));
+        }
+        if let Some(p) = hgn_projection {
+            if !trace::is_hgn(&model.kind) {
+                return Err(ApiError::bad(
+                    "hgn_projection requires a Library HGN v2 checkpoint",
+                ));
+            }
+            let dir = crate::directions::hgn_layer(store, model, &p.direction_id, p.source_layer)?;
+            let resolved = trace::hgn_projection::Projection {
+                target: p.target,
+                first_layer: p.first_layer,
+                last_layer: p.last_layer,
+                vector: dir.vector,
+                assets_sha256: dir.assets,
+            };
+            options.insert("hgn_projection".into(), json!(resolved));
+            trace::Request::controller(
+                &Value::Object(options.clone()),
+                envelope.prompt.as_deref(),
+                policy,
+            )
+            .map_err(|e| ApiError::bad(e.to_string()))?;
+            options.insert("expected_model_sha256".into(), json!(dir.sha256));
         }
         let mut rules = request.interventions;
         job.options

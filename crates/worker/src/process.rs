@@ -431,7 +431,10 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .context("direction disk reserve overflow")?,
         )?;
     }
-    if job.kind == ablation_search::SCREEN {
+    if matches!(
+        job.kind.as_str(),
+        ablation_search::SCREEN | ablation_search::hgn::JOB
+    ) {
         resources::disk_check(
             &w.cfg.root,
             w.disk_floor(job.resources.disk_reserve_bytes)
@@ -538,8 +541,10 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     } else if let Some(wrapper) = w.cfg.admission.as_ref().filter(|_| {
         gradient_backend.map_or(
             gpu_edit
-                || (!matches!(job.kind.as_str(), trace::JOB | behavior_direction::JOB)
-                    && !scratch_job),
+                || (!matches!(
+                    job.kind.as_str(),
+                    trace::JOB | behavior_direction::JOB | ablation_search::hgn::JOB
+                ) && !scratch_job),
             |b| b.is_gpu(),
         )
     }) {
@@ -559,7 +564,10 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     } else if !hgn_trace
         && (scratch_job
             || gradient_backend.is_some()
-            || matches!(job.kind.as_str(), trace::JOB | behavior_direction::JOB))
+            || matches!(
+                job.kind.as_str(),
+                trace::JOB | behavior_direction::JOB | ablation_search::hgn::JOB
+            ))
     {
         let trace_keys = if job.kind == trace::JOB {
             let (executable, libraries, _, _) =
@@ -596,6 +604,12 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
             circuit::JOB => &[sensitivity::PIN, sensitivity::MANIFEST_SHA],
             kind if heretic::job(kind) => &[heretic::RUNTIME],
             behavior_direction::JOB if hgn_direction => &[
+                trace::HGN_PYTHON,
+                trace::HGN_PYTHON_SHA256,
+                trace::HGN_ASSETS,
+                behavior_direction::CACHE,
+            ],
+            ablation_search::hgn::JOB => &[
                 trace::HGN_PYTHON,
                 trace::HGN_PYTHON_SHA256,
                 trace::HGN_ASSETS,
@@ -922,6 +936,21 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         serde_json::from_value::<ablation_search::ScreenReport>(value.clone())?.verify(&req)?;
         return Ok(value);
     }
+    if job.kind == ablation_search::hgn::JOB {
+        let req = ablation_search::hgn::Request::parse(&job.options)?;
+        ensure!(
+            job.inputs[0].extra["sha256"] == req.model_sha256,
+            "screen HGN input hash mismatch"
+        );
+        let executable = w
+            .cfg
+            .engine_env
+            .get(trace::HGN_PYTHON_SHA256)
+            .context("missing worker HGN Python pin")?;
+        serde_json::from_value::<ablation_search::hgn::Report>(value.clone())?
+            .verify(&req, Some(executable))?;
+        return Ok(value);
+    }
     if job.kind == scratch_eval::CHECKS {
         let hashes = std::array::from_fn(|i| {
             job.inputs[i]
@@ -1031,6 +1060,15 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 "trace receipt does not match export"
             );
             trace::verify_interventions(&dir, &export, &request.interventions)?;
+            if trace::is_hgn(&job.inputs[0].kind) {
+                trace::verify_hgn_projection(&dir, &export, request.hgn_projection.as_ref())?;
+                if let Some(projection) = &request.hgn_projection {
+                    ensure!(
+                        value["assets_sha256"] == serde_json::to_value(&projection.assets_sha256)?,
+                        "trace used different HGN direction assets"
+                    );
+                }
+            }
             spec.byte_cap -= export.bytes;
         }
         ensure!(

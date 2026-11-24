@@ -56,6 +56,11 @@ before a publish request.
 Use `search_ablation` for a bounded slop or sycophancy search on the exact
 parent GGUF. Read its receipt with `get_job`. Compare with the matched
 random control and report any effect that weight-edit checks did not confirm.
+For Library HGN v2, use `search_ablation` with the exact checkpoint hash,
+version 2 direction ID, source layer, seed, and projection targets. Compare
+the matched random direction and the reviewed control prompts. The search
+makes no scratch children and generates no text. For response length,
+report the first-token continuation proxy, not generated length.
 Use `create_direction_intervention` to remove the projection onto a
 verified direction or subtract a scaled direction. Pass the saved version
 to `start_trace` and compare with a baseline using `diff_traces`.
@@ -122,9 +127,11 @@ Other tool references: `list_models`, `register_model`, `list_scratch`,
 
 Stay within the time, token, tool call, and byte limits. Use small trace
 slices and bounded waits for jobs. For Library Qwen3.8 Flash Next v2 HGN,
-use up to 512 raw prompt tokens. The block output contains four residual
-streams. Read the normalized final mix at the last layer. HGN traces do
-not support interventions or SAE.
+use up to 2048 raw prompt tokens. The block output contains four residual
+streams. Read the normalized final mix at the last layer. Set
+`options.hgn_projection` in `start_trace` to project a version 2 direction
+from the same model. Select `residual`, `dense`, `experts`, or `all`, and
+give both layer endpoints or neither. Other interventions and SAE require GGUF.
 Retry writes with the same key and
 arguments. Stop and report a limit or admission failure instead of
 bypassing it.

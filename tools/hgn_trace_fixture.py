@@ -15,7 +15,7 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
 
 sys.path.insert(0, str(Path(__file__).parent / "hgn_trace"))
 from trace import read_config
-from wsp.hgn import H
+from wsp.hgn import C, H
 
 
 def write_hgn(path, weights):
@@ -35,7 +35,7 @@ def write_hgn(path, weights):
                      + b"".join(table + payload))
 
 
-def fixture(path, *, embedding_rows=None, tokenizer=None):
+def fixture(path, *, embedding_rows=None, tokenizer=None, writers=False, qsa=False, marker=False):
     vocab = len(embedding_rows) if embedding_rows is not None else 4
     raw = {"model_type": "qwen4_exp_text", "num_hidden_layers": 2, "hidden_size": 128,
            "vocab_size": vocab, "hc_count": 4, "hc_lowrank": 16,
@@ -45,6 +45,12 @@ def fixture(path, *, embedding_rows=None, tokenizer=None):
            "num_experts": 2, "num_experts_per_tok": 1,
            "layer_types": ["linear_attention", "linear_attention"], "ple_layer_ids": [],
            "head_dim": 16, "num_attention_heads": 2, "num_key_value_heads": 1}
+    if qsa:
+        raw.update(layer_types=["linear_attention", "full_attention"], indexer_n_heads=2,
+                   indexer_kv_heads=1, indexer_head_dim=16, indexer_budget=512,
+                   indexer_compress_ratio=4)
+    if marker:
+        raw["eos_token_id"] = 3
     cfg = path / "config.json"
     cfg.write_text(json.dumps({"text_config": raw}))
     config = read_config(cfg)
@@ -84,5 +90,28 @@ def fixture(path, *, embedding_rows=None, tokenizer=None):
                 weights[experts + name + ".weight"] = (23, 128, shape, bytes(2 * outputs * 66))
                 for suffix, width in ((".suh", 128), (".svh", outputs)):
                     weights[experts + name + suffix] = (99, 0, (width,), np.ones(width, "<f2").tobytes())
+    if writers:
+        def f32(name, values):
+            weights[name] = (99, 0, values.shape, values.astype("<f4").tobytes())
+
+        root = "layers.1."
+        f32(root + "mlp_hyper_connection.hc_norm.weight", np.ones(512))
+        for name, coefficient in (("gate_proj", 1), ("up_proj", 1), ("down_proj", 2)):
+            matrix = np.zeros((128, 128))
+            matrix[0, 0] = coefficient
+            f32(root + f"mlp.shared_expert.{name}.weight", matrix)
+        for name, outputs in (("gate_up_proj", 256), ("down_proj", 128)):
+            matrix = np.zeros((2, outputs, 128), dtype=np.float32)
+            matrix[:, 0, 0] = 1 if outputs == 256 else 3
+            if outputs == 256:
+                matrix[:, 128, 0] = 1
+            codes, scales = C.i4r_encode_rot(C.i4r_rotate(matrix, np.ones(128, "f"), np.ones(outputs, "f")))
+            weights[root + f"mlp.experts.{name}.weight"] = (
+                23, 128, matrix.shape, codes.tobytes() + scales.astype("<f2").tobytes())
+    if marker:
+        model_head = np.zeros((vocab, 128), "<f4")
+        model_head[3, 0] = -3
+        weights["lm_head.weight"] = (99, 0, model_head.shape, model_head.tobytes())
+        weights["hyper_connection_mixer.hc_norm.weight"] = (99, 0, (512,), np.ones(512, "<f4").tobytes())
     write_hgn(path / "model.hgn", weights)
     write_hgn(path / "sidecar.hgn", {})

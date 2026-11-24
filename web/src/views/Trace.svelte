@@ -31,7 +31,8 @@
   import TraceResults from '../components/trace/TraceResults.svelte';
   import type { JobDetail } from '../lib/types';
 
-  const TRACE_KINDS = ['gguf', 'hgn'];
+  const HGN_KINDS = ['hgn', 'hgn-v2'];
+  const TRACE_KINDS = ['gguf', ...HGN_KINDS];
   const HGN_ROLES: TraceRole[] = ['l_out', 'final_norm'];
   const MIB = 1 << 20;
   const models = $derived(brewery.state?.models ?? []);
@@ -66,7 +67,7 @@
 
   // ---- Form ----
   let model = $state('');
-  const hgn = $derived(models.find((m) => m.id === model)?.kind === 'hgn');
+  const hgn = $derived(HGN_KINDS.includes(models.find((m) => m.id === model)?.kind ?? ''));
   let host = $state('');
   let prompts = $state<string[]>(['']);
   let layers = $state('0-3');
@@ -232,7 +233,7 @@
         {/each}
         <div class="row">
           <button type="button" class="btn small" disabled={prompts.length >= MAX_PROMPTS} onclick={() => (prompts = [...prompts, ''])}>Add prompt</button>
-          <span class="xs muted">1 to {MAX_PROMPTS} raw prompts with no chat template. {hgn ? 'Use at most 512 tokens per prompt. HGN adds no special tokens.' : 'Positions include special tokens such as BOS.'}</span>
+          <span class="xs muted">1 to {MAX_PROMPTS} raw prompts with no chat template. {hgn ? 'Use at most 2048 tokens per prompt. HGN adds no special tokens.' : 'Positions include special tokens such as BOS.'}</span>
         </div>
       </fieldset>
 
@@ -321,7 +322,7 @@
             {#if !model}
               <p class="xs muted">Select a model to see its saved interventions and source traces.</p>
             {:else if hgn}
-              <p class="xs muted">HGN traces do not support interventions.</p>
+              <p class="xs muted">To project a fitted HGN direction, use <code>start_trace</code> with <code>options.hgn_projection</code> in MCP or REST.</p>
             {:else}
               <div class="grid-2">
                 <div class="field">

@@ -1224,6 +1224,34 @@ impl Worker {
                 Reply::error("Configure the pinned CPU ablation runtime and contrast cache"),
             );
         }
+        if job.kind == ablation_search::hgn::JOB {
+            let absolute = |key| {
+                self.cfg
+                    .engine_env
+                    .get(key)
+                    .is_some_and(|p| Path::new(p).is_absolute())
+            };
+            let allowed = action == "start"
+                && access.is_none()
+                && job.prompt.is_none()
+                && job.inputs.len() == 1
+                && trace::is_hgn(&job.inputs[0].kind)
+                && job.inputs[0].path.extension().is_some_and(|e| e == "hgn")
+                && ablation_search::hgn::Request::parse(&job.options).is_ok()
+                && absolute(trace::HGN_PYTHON)
+                && absolute(trace::HGN_ASSETS)
+                && absolute(behavior_direction::CACHE)
+                && self
+                    .cfg
+                    .engine_env
+                    .get(trace::HGN_PYTHON_SHA256)
+                    .is_some_and(|s| is_digest(s));
+            if !allowed {
+                return self.record_prepare(id, action, job, Reply::error(
+                    "Invalid HGN screen request or unavailable pinned CPU trace runtime or cache",
+                ));
+            }
+        }
         if job.kind == trace::JOB {
             let absolute = |var| {
                 self.cfg

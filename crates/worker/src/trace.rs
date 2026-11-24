@@ -34,6 +34,7 @@ pub const HGN_PYTHON_SHA256: &str = "BREWERY_HGN_TRACE_PYTHON_SHA256";
 pub const HGN_ASSETS: &str = "BREWERY_HGN_TRACE_ASSETS";
 pub const HGN_RUNTIME_SHA256: &str = include_str!("../../../tools/hgn_trace/runtime.sha256");
 pub const HGN_RUNTIME: &str = "hgn_cpu";
+pub mod hgn_projection;
 pub const HARD_BYTE_CAP: u64 = 32 << 20;
 pub const RESPONSE_CAP: usize = 4 << 20;
 const MAX_POSITIONS: usize = 4096;
@@ -141,6 +142,8 @@ struct Options {
     full_dump: bool,
     #[serde(default)]
     interventions: Vec<Rule>,
+    #[serde(default)]
+    hgn_projection: Option<hgn_projection::Projection>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -225,6 +228,7 @@ pub struct Request {
     pub prompts: Vec<String>,
     pub capture: Capture,
     pub interventions: Vec<Rule>,
+    pub hgn_projection: Option<hgn_projection::Projection>,
     pub retain_jobs: usize,
 }
 
@@ -257,6 +261,10 @@ impl LanternfishRuntime {
 
 impl Request {
     pub fn lanternfish_runtime(&self) -> Result<LanternfishRuntime> {
+        ensure!(
+            self.hgn_projection.is_none(),
+            "hgn_projection requires HGN v2"
+        );
         let projection = self.interventions.iter().any(|rule| {
             matches!(
                 rule.op,
@@ -331,6 +339,16 @@ impl Request {
             "trace selection cannot fit byte_cap"
         );
         Rule::check_all(&o.interventions)?;
+        if let Some(projection) = &o.hgn_projection {
+            projection.check()?;
+            ensure!(
+                o.interventions.is_empty()
+                    && o.roles
+                        .iter()
+                        .all(|r| matches!(r, Role::LOut | Role::FinalNorm)),
+                "HGN projection allows l_out, final_norm or logits, without other interventions"
+            );
+        }
         Ok(Self {
             prompts,
             capture: Capture {
@@ -342,6 +360,7 @@ impl Request {
                 all_logits: false,
             },
             interventions: o.interventions,
+            hgn_projection: o.hgn_projection,
             retain_jobs: policy.retain_jobs,
         })
     }
@@ -356,12 +375,17 @@ impl Request {
                 .remove("retain_jobs")
                 .context("missing trace retention")?,
         )?;
-        if let Some(expected) = options.remove("expected_model_sha256") {
+        let expected = options.remove("expected_model_sha256");
+        if let Some(expected) = &expected {
             ensure!(
                 expected.as_str().is_some_and(crate::is_digest),
                 "invalid expected trace model SHA-256"
             );
         }
+        ensure!(
+            options.get("hgn_projection").is_none_or(Value::is_null) || expected.is_some(),
+            "HGN projection requires a pinned model SHA-256"
+        );
         ensure!(
             options.get("byte_cap").is_some_and(Value::is_u64),
             "missing trace byte cap"
@@ -417,6 +441,8 @@ struct Manifest {
     tensors: Vec<Tensor>,
     missing: Vec<Key>,
     interventions: Vec<Applied>,
+    #[serde(default)]
+    hgn_projection: Option<hgn_projection::Applied>,
     model_logits: Vec<Logits>,
     logit_lens: Vec<Logits>,
 }
@@ -726,6 +752,39 @@ pub fn verify_interventions(dir: &Path, export: &Export, rules: &[Rule]) -> Resu
     Ok(())
 }
 
+pub fn verify_hgn_projection(
+    dir: &Path,
+    export: &Export,
+    projection: Option<&hgn_projection::Projection>,
+) -> Result<()> {
+    let (m, fingerprint) = manifest(dir, export.bytes)?;
+    ensure!(
+        fingerprint.manifest_sha256 == export.manifest_sha256,
+        "trace manifest changed"
+    );
+    let expected = if let Some(projection) = projection {
+        let last = m.model["n_layers"]
+            .as_u64()
+            .filter(|n| (1..=4096).contains(n))
+            .context("invalid HGN layer inventory")? as usize
+            - 1;
+        let last_layer = projection.last_layer.unwrap_or(last);
+        ensure!(last_layer <= last, "HGN projection exceeds model layers");
+        Some(hgn_projection::Applied {
+            target: projection.target,
+            first_layer: projection.first_layer.unwrap_or(0),
+            last_layer,
+        })
+    } else {
+        None
+    };
+    ensure!(
+        m.hgn_projection == expected,
+        "unexpected or missing HGN projection"
+    );
+    Ok(())
+}
+
 pub fn direction_probe() -> Capture {
     Capture {
         layers: BTreeSet::new(),
@@ -1023,6 +1082,9 @@ pub fn read(root: &Path, slice: &Slice, result: &Value) -> Result<ReadReply> {
             if result["runtime"] == HGN_RUNTIME {
                 summary["runtime"] = json!(HGN_RUNTIME);
                 summary["runtime_sha256"] = result["runtime_sha256"].clone();
+                if let Some(projection) = m.hgn_projection {
+                    summary["hgn_projection"] = json!(projection);
+                }
             } else {
                 summary["lanternfish_commit"] = json!(COMMIT);
             }

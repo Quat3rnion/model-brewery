@@ -43,6 +43,15 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
             ["content"]["application/json"]["schema"]["$ref"],
         "#/components/schemas/Job"
     );
+    let schemas = &contract["components"]["schemas"];
+    assert_eq!(
+        schemas["AblationSearchRequest"]["oneOf"][1]["required"],
+        json!(["targets", "source_layer"])
+    );
+    assert_eq!(
+        schemas["TraceOptions"]["properties"]["hgn_projection"]["$ref"],
+        "#/components/schemas/HgnTraceProjection"
+    );
     let operations = contract["paths"]
         .as_object()
         .unwrap()
