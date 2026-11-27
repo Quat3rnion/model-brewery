@@ -5126,9 +5126,9 @@
         "type": "object", "required": ["capture", "kl", "queries", "capture_queries"],
         "properties": {
           "capture": {"type": ["number", "null"], "minimum": 0, "maximum": 1}, "kl": {"type": "number"},
-          "queries": {"type": "integer", "minimum": 1},
+          "queries": {"type": "integer", "minimum": 80, "multipleOf": 16, "description": "Scoreable queries summed across the 16 full-attention layers."},
           "capture_unavailable_reason": {"const": "No held-out query has more fully observed blocks than the capture budget."},
-          "capture_queries": {"type": "integer", "minimum": 0, "description": "Number of queries whose visible block count exceeds the indexer budget."}
+          "capture_queries": {"type": "integer", "minimum": 0, "multipleOf": 16, "description": "Scoreable queries whose visible block count exceeds the indexer budget, summed across all 16 layers. The count is zero for sequence lengths at most 2051."}
         },
         "if": {"properties": {"capture_queries": {"const": 0}}},
         "then": {"required": ["capture_unavailable_reason"], "properties": {"capture": {"type": "null"}}},

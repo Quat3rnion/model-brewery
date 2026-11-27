@@ -17,6 +17,8 @@ pub const METRICS_LIMIT: u64 = 64 << 10;
 pub const INDEXER_LIMIT: u64 = 256 << 20;
 const REFERENCE_REVISION: &str = "9eb7192828ebc6234a892d718fc775b3df648596";
 const LAYERS: [u64; 16] = [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63];
+const BLOCK: u64 = 4;
+const CAPTURE_BUDGET: u64 = 2048;
 const NO_CAPTURE: &str =
     "No held-out query has more fully observed blocks than the capture budget.";
 
@@ -75,6 +77,24 @@ fn metric(value: &Value, limit: f64) -> bool {
         .is_some_and(|value| value >= 0.0 && value <= limit)
 }
 
+fn feasible_counts(seq_len: u32, queries: u64, capture_queries: u64) -> bool {
+    let layers = LAYERS.len() as u64;
+    if queries == 0 || queries % layers != 0 || capture_queries % layers != 0 {
+        return false;
+    }
+    // The trainer scores positions from the first completed block onward,
+    // identically at every layer. Its corpus iterator yields full sequences
+    // followed by at most one tail of at least two blocks.
+    let rows = queries / layers;
+    let full_rows = u64::from(seq_len) - BLOCK + 1;
+    let tail_rows = rows % full_rows;
+    if tail_rows != 0 && tail_rows < BLOCK + 1 {
+        return false;
+    }
+    let competitive = |scored: u64| scored.saturating_sub(CAPTURE_BUDGET.div_ceil(BLOCK) * BLOCK);
+    capture_queries / layers == (rows / full_rows) * competitive(full_rows) + competitive(tail_rows)
+}
+
 pub fn check_metrics(
     spec: &Spec,
     metrics: &Value,
@@ -93,7 +113,7 @@ pub fn check_metrics(
             && metrics["train_data_sha256"] == train
             && metrics["eval_data_sha256"] == eval
             && metrics["full_attention_layers"] == json!(LAYERS)
-            && metrics["budget"] == 2048
+            && metrics["budget"] == CAPTURE_BUDGET
             && metrics["train_loss"].as_f64().is_some_and(f64::is_finite)
             && metrics["heldout_loss"] == metrics["after"]["kl"]
             && metrics["indexer_update_l2"]
@@ -113,9 +133,9 @@ pub fn check_metrics(
                     }
                     None => false,
                 }) && row["kl"].as_f64().is_some_and(f64::is_finite)
-                    && capture_queries
-                        .zip(row["queries"].as_u64())
-                        .is_some_and(|(capture, queries)| queries > 0 && capture <= queries)
+                    && capture_queries.zip(row["queries"].as_u64()).is_some_and(
+                        |(capture, queries)| feasible_counts(spec.seq_len, queries, capture),
+                    )
             })
             && metrics["before"]["queries"] == metrics["after"]["queries"]
             && metrics["before"]["capture_queries"] == metrics["after"]["capture_queries"],

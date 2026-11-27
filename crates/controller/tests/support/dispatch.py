@@ -380,7 +380,7 @@ else:
         for i in (1, 2):
             inputs[i]["sha256"] = files[i][0]["sha256"]
         base = f"/worker/jobs/{job_id}/work/qsa"
-        score = dict(capture=None, kl=0.05, queries=3, capture_queries=0,
+        score = dict(capture=None, kl=0.05, queries=16 * 5, capture_queries=0,
                      capture_unavailable_reason="No held-out query has more fully observed blocks than the capture budget.")
         metrics = dict(
             envelope["options"], status="passed", train_loss=0.04, heldout_loss=0.05,
@@ -400,6 +400,13 @@ else:
             result["teacher"]["sha256"] = "0" * 64
         if (root / "qsa-fake-capture").exists():
             result["metrics"]["after"]["capture"] = 1
+        count_fixture = root / "qsa-counts.json"
+        if count_fixture.exists():
+            queries, capture_queries = json.loads(count_fixture.read_text())
+            score.update(queries=queries, capture_queries=capture_queries)
+            if capture_queries:
+                score["capture"] = 0.5
+                del score["capture_unavailable_reason"]
     if action == "start" and envelope["kind"] == "hf_download":
         assert envelope["inputs"] == [] and "prompt" not in envelope
         options = envelope["options"]

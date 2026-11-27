@@ -1,14 +1,108 @@
-use crate::{Job, check_inputs, integrity, progress::Progress};
-use anyhow::{Context, Result, ensure};
+use crate::{check_inputs, integrity, progress::Progress, Job};
+use anyhow::{ensure, Context, Result};
 use brewery_worker::qsa as contract;
-use serde_json::{Value, json};
+use serde::{de, Deserialize, Deserializer};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
-    env,
+    collections::BTreeSet,
+    env, fmt,
     fs::{self, File},
+    io::Read,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+
+const MONO: &str = "model.safetensors";
+const INDEX: &str = "model.safetensors.index.json";
+const INDEX_LIMIT: u64 = 16 << 20;
+
+#[derive(Deserialize)]
+struct Index {
+    #[serde(deserialize_with = "unique_shards")]
+    weight_map: BTreeSet<String>,
+}
+
+fn unique_shards<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BTreeSet<String>, D::Error> {
+    struct Shards;
+    impl<'de> de::Visitor<'de> for Shards {
+        type Value = BTreeSet<String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a map from unique weight names to shard filenames")
+        }
+
+        fn visit_map<M: de::MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+            let mut names = BTreeSet::new();
+            let mut shards = BTreeSet::new();
+            while let Some((weight, shard)) = map.next_entry::<String, String>()? {
+                if !names.insert(weight) {
+                    return Err(de::Error::custom("duplicate weight mapping"));
+                }
+                shards.insert(shard);
+            }
+            Ok(shards)
+        }
+    }
+    deserializer.deserialize_map(Shards)
+}
+
+fn verify_teacher_weights(path: &Path, members: &[integrity::Member]) -> Result<()> {
+    let verified_member = |name: &str| {
+        members
+            .iter()
+            .find(|entry| entry.path == name && entry.bytes > 0)
+    };
+    // Look at both selector paths, so a directory with a selector name cannot
+    // be absent from the file manifest yet influence the loader's choice.
+    let exists = |name| match fs::symlink_metadata(path.join(name)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    };
+    match (exists(MONO)?, exists(INDEX)?) {
+        (true, false) => {
+            ensure!(
+                verified_member(MONO).is_some(),
+                "QSA teacher file is not a verified bundle member"
+            );
+        }
+        (false, true) => {
+            let index = verified_member(INDEX)
+                .context("QSA teacher index is not a verified bundle member")?;
+            ensure!(
+                index.bytes <= INDEX_LIMIT,
+                "QSA teacher index exceeds the size limit"
+            );
+            let file = brewery_worker::weight_source::open_regular(&path.join(INDEX))?;
+            let mut bytes = Vec::new();
+            file.take(INDEX_LIMIT + 1).read_to_end(&mut bytes)?;
+            ensure!(
+                bytes.len() as u64 == index.bytes
+                    && format!("{:x}", Sha256::digest(&bytes)) == index.sha256,
+                "QSA teacher index differs from the verified bundle"
+            );
+            let index: Index =
+                serde_json::from_slice(&bytes).context("Invalid QSA teacher index")?;
+            ensure!(
+                !index.weight_map.is_empty(),
+                "QSA teacher weight map is empty"
+            );
+            ensure!(
+                index
+                    .weight_map
+                    .iter()
+                    .all(|name| brewery_worker::valid_basename(name)
+                        && name.ends_with(".safetensors")
+                        && verified_member(name).is_some()),
+                "QSA teacher shard is not a verified bundle member"
+            );
+        }
+        _ => anyhow::bail!("QSA teacher needs exactly one SafeTensors file or index"),
+    }
+    Ok(())
+}
 
 fn trainer() -> Result<Command> {
     let path = |key| -> Result<PathBuf> {
@@ -72,6 +166,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         "QSA inputs lack resolved direct identities"
     );
     let identities = check_inputs(&job.inputs, progress)?;
+    verify_teacher_weights(&source.path, &identities[0].files)?;
     let config = identities[0]
         .files
         .iter()
@@ -83,6 +178,9 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     );
     let out = cwd.join(contract::OUTPUT);
     probe()?;
+    for identity in &identities {
+        identity.check()?;
+    }
     let phase = progress.start("qsa_training", "items", None);
     let status = trainer()?
         .args(["--source"])
@@ -136,4 +234,46 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     });
     contract::check_receipt(&spec, &source.host, &result)?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn teacher_index_requires_each_shard_in_the_verified_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap();
+        let first = "model-00001-of-00002.safetensors";
+        let second = "model-00002-of-00002.safetensors";
+        fs::write(
+            path.join(INDEX),
+            json!({"weight_map":{"weight_a":first,"weight_b":second}}).to_string(),
+        )
+        .unwrap();
+        fs::write(path.join(first), b"first fixture shard").unwrap();
+        let missing = integrity::identify(&path, false).unwrap();
+        assert!(verify_teacher_weights(&path, &missing.files)
+            .unwrap_err()
+            .to_string()
+            .contains("shard"));
+        fs::write(path.join(second), b"second fixture shard").unwrap();
+        assert!(verify_teacher_weights(&path, &missing.files).is_err());
+        let complete = integrity::identify(&path, false).unwrap();
+        verify_teacher_weights(&path, &complete.files).unwrap();
+        fs::write(
+            path.join(INDEX),
+            format!(r#"{{"weight_map":{{"weight_a":"{first}","weight_a":"{second}"}}}}"#),
+        )
+        .unwrap();
+        let duplicate = integrity::identify(&path, false).unwrap();
+        assert!(verify_teacher_weights(&path, &duplicate.files).is_err());
+        assert!(verify_teacher_weights(&path, &complete.files).is_err());
+        fs::write(path.join(MONO), b"ambiguous fixture").unwrap();
+        let ambiguous = integrity::identify(&path, false).unwrap();
+        assert!(verify_teacher_weights(&path, &ambiguous.files).is_err());
+        fs::remove_file(path.join(INDEX)).unwrap();
+        let monolithic = integrity::identify(&path, false).unwrap();
+        verify_teacher_weights(&path, &monolithic.files).unwrap();
+    }
 }

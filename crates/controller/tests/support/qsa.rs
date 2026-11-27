@@ -1,6 +1,57 @@
 use super::*;
 
 #[test]
+fn qsa_receipt_requires_feasible_heldout_query_counts() {
+    let mut fx = Fixture::new();
+    let mut config: Value =
+        serde_json::from_str(&fs::read_to_string(fx.path("dispatch.json")).unwrap()).unwrap();
+    config["hosts"]["alpha"]["capabilities"]["qsa_train"] = json!(true);
+    fs::write(fx.path("dispatch.json"), config.to_string()).unwrap();
+    fs::write(fx.path("qsa-runtime-ready"), "").unwrap();
+    fx.launch();
+    let teacher = fx.register("alpha", "hf", "/models/qwen");
+    let train = fx.register("alpha", "qsa-corpus", "/models/train.txt");
+    let eval = fx.register("alpha", "qsa-corpus", "/models/eval.txt");
+    for (length, queries, capture_queries, expected) in [
+        (2051, 16 * 2048, 16, "failed"), // No query has more than 512 visible blocks.
+        (2052, 16 * 2049 + 1, 16, "failed"), // Scoreable rows must repeat in every layer.
+        (2052, 16 * 2049, 1, "failed"),  // The same holds for competitive rows.
+        (8, 16 * 6, 0, "failed"),        // An 8-token batch contributes exactly five rows.
+        (2052, 16 * (2049 + 4), 16, "failed"), // A seven-token remainder is not scored.
+        (2052, 16 * (2049 + 5), 16, "succeeded"), // One full batch and one eight-token tail.
+        (2051, 16 * 2048, 0, "succeeded"),
+    ] {
+        fs::write(
+            fx.path("qsa-counts.json"),
+            json!([queries, capture_queries]).to_string(),
+        )
+        .unwrap();
+        let id = fx.enqueue(json!({
+            "kind":"qsa_train","input_ids":[teacher, train, eval],
+            "options":{"steps":2,"seq_len":length,"seed":42,"lr":0.001}
+        }));
+        let row = fx.await_job(&id, |row| {
+            matches!(row["state"].as_str(), Some("failed" | "succeeded"))
+        });
+        assert_eq!(
+            row["state"], expected,
+            "length={length}, queries={queries}, capture_queries={capture_queries}: {row}"
+        );
+        assert_eq!(row["has_result"], expected == "succeeded");
+    }
+    let state = fx.json("GET", "/api/state", None, 200);
+    assert_eq!(
+        state["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["kind"] == "qsa-indexer")
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn qsa_training_requires_separate_inputs_and_verified_publication() {
     let mut fx = Fixture::new();
     let mut config: Value =
