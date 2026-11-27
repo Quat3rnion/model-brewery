@@ -14,6 +14,7 @@ mod hgn_recipe;
 mod integrity;
 mod native_progress;
 mod progress;
+mod qsa;
 mod recipe;
 mod scratch_checks;
 mod scratch_locate;
@@ -434,6 +435,7 @@ fn run() -> Result<i32> {
             gguf_conversion::run(&job, &cwd, &progress)?
         }
         "hf_download" => hf_download::run(&job, &cwd, &progress)?,
+        brewery_worker::qsa::JOB => qsa::run(&job, &cwd, &progress)?,
         brewery_worker::exl3_layer::JOB => exl3_layer::run(&job, &cwd, &progress)?,
         "weight_inspect" | "weight_propose" | "weight_tune" | "weight_apply" => {
             weight::run(&job, &cwd, &progress)?
@@ -456,7 +458,15 @@ fn run() -> Result<i32> {
 }
 
 fn main() {
-    let code = match run() {
+    let result = if env::args().skip(1).eq(["--qsa-probe"]) {
+        qsa::probe().map(|value| {
+            println!("{value}");
+            0
+        })
+    } else {
+        run()
+    };
+    let code = match result {
         Ok(code) => code,
         Err(e) => {
             eprintln!("brewery-engine: {e:#}");

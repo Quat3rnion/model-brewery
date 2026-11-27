@@ -84,6 +84,7 @@ fn stage(kind: &str) -> &'static str {
         "evaluate" => "Evaluating model",
         "baseline" => "Running baseline",
         "hf_download" => "Preparing Hugging Face download",
+        brewery_worker::qsa::JOB => "Training QSA indexers",
         _ => "Running engine",
     }
 }

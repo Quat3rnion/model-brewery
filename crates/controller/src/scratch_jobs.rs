@@ -117,6 +117,7 @@ pub(crate) fn input(store: &Store, row: &Revision, name: &str, kind: &str) -> Mo
         available: None,
         reason: None,
         job_id: None,
+        qsa_provenance: None,
     }
 }
 

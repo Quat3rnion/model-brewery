@@ -73,6 +73,39 @@ install -m 755 target/release/brewery-dispatch "$release/bin/brewery-dispatch"
 cp -a web/dist "$release/web/dist"
 ```
 
+### Stage the optional QSA trainer on a GPU worker
+
+Stage the worker and engine binaries from the same release as the controller.
+Keep the trainer, the Python environment and the `resource-queue` executable
+outside the worker state and all source roots. Only the worker operator must
+be able to change these files.
+
+```sh
+install -d -m 755 "$release/bin"
+install -m 755 target/release/brewery-worker target/release/brewery-engine "$release/bin"
+install -m 644 tools/qsa_train.py tools/qsa_train_requirements.txt "$release/bin"
+```
+
+Use a Python 3.11 or later virtual environment on that worker. Install a
+GPU-enabled PyTorch build (2.6 or later) for the worker's ROCm or CUDA driver
+from the PyTorch installation selector. Then install the other Python
+dependencies with the virtual environment's
+`python -m pip install -r "$release/bin/qsa_train_requirements.txt"`.
+The controller does not install these packages or download a teacher or a
+corpus for training. Do not substitute a CPU-only PyTorch wheel.
+
+The worker config's `qsa_training` object takes three absolute paths: `python`
+to the virtual environment's Python executable, `trainer` to the installed
+`qsa_train.py`, and `gpu_queue` to the worker's `resource-queue` executable.
+For an explicitly configured dispatch host, set `capabilities.qsa_train: true`.
+For an enrolled SSH host, a worker operator can stage the matching binaries and
+set `qsa_training` in the existing installed `worker.json`; no second dispatch
+host is necessary. The default SSH package does not contain this runtime.
+The controller probes configured runtimes at startup, including already
+enrolled SSH workers. The worker runs the probe and the training job under
+the GPU queue. See [OPERATOR.md](OPERATOR.md) for the model and dataset
+requirements.
+
 ### Stage an optional SSH editor package
 
 Build on Linux with the same architecture, Python ABI, and compatible system

@@ -47,6 +47,33 @@ struct Config {
     resource_bounds: Option<resources::Bounds>,
     hy4_plan: Option<Hy4Plan>,
     weight_editor_host: Option<String>,
+    qsa_training: Option<QsaTraining>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QsaTraining {
+    python: PathBuf,
+    trainer: PathBuf,
+    gpu_queue: PathBuf,
+}
+
+impl QsaTraining {
+    fn command(&self, holder: &str, purpose: &str, wait: &str, lease: &str) -> Command {
+        let mut command = Command::new(&self.gpu_queue);
+        command
+            .args(["run", "--resource", "gpu", "--exclusive", "--flock", "gpu"])
+            .args([
+                "--holder", holder, "--purpose", purpose, "--wait", wait, "--max-hold", lease, "--",
+            ]);
+        command
+    }
+
+    fn configure(&self, command: &mut Command) {
+        command
+            .env(qsa::PYTHON, &self.python)
+            .env(qsa::TRAINER, &self.trainer);
+    }
 }
 
 #[derive(Deserialize)]
@@ -314,6 +341,32 @@ impl Config {
         }
         absolute(&cfg.root)?;
         absolute(&cfg.engine)?;
+        if let Some(qsa) = &cfg.qsa_training {
+            let metadata = fs::symlink_metadata(&path)?;
+            ensure!(
+                metadata.is_file()
+                    && metadata.uid() == unsafe { libc::geteuid() }
+                    && metadata.mode() & 0o022 == 0,
+                "QSA runtime requires a worker-owned configuration without public write access"
+            );
+            for path in [&qsa.python, &qsa.trainer, &qsa.gpu_queue] {
+                absolute(path)?;
+                ensure!(
+                    !path.starts_with(&cfg.root)
+                        && !cfg.source_roots.iter().any(|root| path.starts_with(root)),
+                    "QSA runtime must be outside worker state and input roots"
+                );
+            }
+            ensure!(
+                cfg.source_grants.is_empty()
+                    && cfg.pinned_publication.is_none()
+                    && cfg.hy4_plan.is_none()
+                    && cfg.hf_download.is_none()
+                    && cfg.backend_weight_download_root.is_none()
+                    && cfg.weight_editor_host.is_none(),
+                "QSA training requires a regular worker with direct input roots"
+            );
+        }
         if let Some(host) = &cfg.weight_editor_host {
             token(host)?;
             ensure!(
@@ -1396,6 +1449,32 @@ impl Worker {
                 );
             }
         }
+        if job.kind == qsa::JOB
+            && (self.cfg.qsa_training.is_none()
+                || action != "start"
+                || job.prompt.is_some()
+                || qsa::Spec::parse(&job.options).is_err()
+                || !qsa::layout(job.inputs.iter().map(|i| {
+                    (i.kind.as_str(), i.host.as_str(), i.path.as_path())
+                })))
+        {
+            return self.record_prepare(
+                id, action, job,
+                Reply::error("QSA training requires the configured runtime and direct teacher, training and held-out inputs"),
+            );
+        }
+        if job.kind != qsa::JOB
+            && !matches!(action.as_str(), "transfer" | "preview_transfer")
+            && job
+                .inputs
+                .iter()
+                .any(|i| matches!(i.kind.as_str(), qsa::CORPUS | qsa::INDEXER))
+        {
+            return self.record_prepare(
+                id, action, job,
+                Reply::error("QSA artifacts and corpora are not conversion or inference inputs"),
+            );
+        }
         if job.options["output_format"] == hgn_recipe::FORMAT {
             if self.cfg.pinned_publication.is_some()
                 || self
@@ -1819,6 +1898,20 @@ impl Worker {
         }
         let standalone = standalone_gguf(job);
         let native_hgn = job.options["output_format"] == hgn_recipe::FORMAT;
+        let qsa_job = job.kind == qsa::JOB;
+        ensure!(
+            !qsa_job || provided.is_none(),
+            "QSA training requires direct inputs"
+        );
+        if qsa_job {
+            ensure!(
+                input.path == original.path && input.host == original.host && r.action == "start",
+                "invalid direct QSA input"
+            );
+            if let Some(pinned) = r.inputs.get(&index) {
+                return Ok(to_value(pinned)?);
+            }
+        }
         ensure!(
             !standalone || provided.is_none(),
             "standalone SafeTensors GGUF requires direct inputs"
@@ -1948,6 +2041,17 @@ impl Worker {
                 } else {
                     bail!("Source input unavailable");
                 };
+                if qsa_job {
+                    let metadata = fs::symlink_metadata(&p)?;
+                    ensure!(
+                        if index == 0 {
+                            metadata.is_dir()
+                        } else {
+                            metadata.is_file() && (1..=qsa::CORPUS_LIMIT).contains(&metadata.len())
+                        },
+                        "QSA training requires an HF directory and bounded regular corpus files"
+                    );
+                }
                 if weight_hgn {
                     ensure!(
                         fs::symlink_metadata(&p)?.is_file()
@@ -2034,6 +2138,8 @@ impl Worker {
                         } else {
                             64 << 20
                         }
+                    } else if qsa_job && index != 0 {
+                        qsa::CORPUS_LIMIT
                     } else if expected.is_some() {
                         match input.kind.as_str() {
                             "weight-calibration" => 256 << 10,
@@ -2095,6 +2201,35 @@ impl Worker {
                     && bundle.files[0].sha256 == spec.source_sha256,
                 "EXL3 source SHA-256 does not match the selected fingerprint"
             );
+        }
+        if qsa_job
+            && index == 0
+            && let Some(attested) = original.extra.get("sha256").and_then(Value::as_str)
+        {
+            ensure!(
+                attested == bundle.digest,
+                "QSA teacher checksum does not match its Library receipt"
+            );
+        }
+        if qsa_job && index != 0 {
+            ensure!(
+                bundle.files.len() == 1 && bundle.files[0].bytes != 0,
+                "QSA corpus is not a regular nonempty file"
+            );
+            let other = if index == 1 { 2 } else { 1 };
+            ensure!(
+                r.inputs
+                    .get(&other)
+                    .is_none_or(|input| input.extra["sha256"] != bundle.files[0].sha256),
+                "QSA training and held-out corpus must have different content"
+            );
+        }
+        if qsa_job && let Some(pinned) = r.inputs.get(&index) {
+            ensure!(
+                pinned.extra["bundle_sha256"] == bundle.digest,
+                "QSA source changed while resolving"
+            );
+            return Ok(to_value(pinned)?);
         }
         input.extra = original.extra.clone();
         for k in [
@@ -2578,6 +2713,7 @@ impl Worker {
             | Rpc::TraceRead { .. }
             | Rpc::Stat(_)
             | Rpc::DirectionModel(_)
+            | Rpc::QsaProbe
             | Rpc::DescribeProgress { .. }
             | Rpc::StageProgress { .. } => unreachable!(),
         }
@@ -2598,6 +2734,33 @@ fn main() {
                 let request = decode(std::io::stdin().lock())?;
                 let value = match request {
                     // Do not initialize or lock worker state for this read-only RPC.
+                    Rpc::QsaProbe => {
+                        let (cfg, _) = Config::load()?;
+                        let qsa = cfg
+                            .qsa_training
+                            .as_ref()
+                            .context("QSA runtime is not configured")?;
+                        let mut command = qsa.command(
+                            &format!("brewery-qsa-probe-{}", std::process::id()),
+                            "QSA runtime readiness",
+                            "1",
+                            "18",
+                        );
+                        command
+                            .arg(&cfg.engine)
+                            .arg("--qsa-probe")
+                            .envs(&cfg.engine_env)
+                            .stdin(Stdio::null())
+                            .stderr(Stdio::null());
+                        qsa.configure(&mut command);
+                        let output = command.output()?;
+                        let receipt: Value = decode_limited(output.stdout.as_slice(), 4096)?;
+                        ensure!(
+                            output.status.success() && qsa::probe_receipt(&receipt),
+                            "QSA GPU runtime probe did not pass"
+                        );
+                        receipt
+                    }
                     Rpc::SuggestPaths(SuggestRequest { prefix }) => {
                         to_value(suggestions::run(prefix)?)?
                     }

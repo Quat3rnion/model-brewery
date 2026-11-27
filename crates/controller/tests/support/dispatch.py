@@ -30,6 +30,11 @@ if sys.argv[1] == "stat":
     }.get(path, {"state":"outside_roots"})))
     sys.exit(0)
 
+if sys.argv[1] == "qsa-probe":
+    if (root / "qsa-runtime-ready").exists():
+        print('{"schema":"brewery.qsa-probe.v1","ready":true}')
+        sys.exit(0)
+    sys.exit(1)
 if sys.argv[1] == "suggest-paths":
     action, host = sys.argv[1:]
     payload = json.load(sys.stdin)
@@ -208,6 +213,8 @@ elif action == "cancel":
         out(write(state("succeeded", "published before worker saw cancellation", result=prior["payload"])))
     elif (root / "weight-apply-races-cancel").exists() and prior and prior.get("payload", {}).get("kind") == "weight_apply":
         out(write(state("succeeded", "published", result=prior["payload"])))
+    elif (root / "qsa-races-cancel").exists() and prior and prior.get("payload", {}).get("kind") == "qsa_train":
+        out(write(state("succeeded", "published", result=prior["payload"])))
     else:
         out(write(state("cancelled", "confirmed cancelled", result=partial)))
 else:
@@ -356,6 +363,43 @@ else:
                     row["parent_mean_abs_component"] = 1e-7
         if (root / "hgn-audit-high-error").exists():
             result["report"]["tensors"][f"layers.{layer}.linear_attn.out_proj.weight"]["rel_error"] = .101
+    if action == "start" and envelope["kind"] == "qsa_train":
+        source, train, eval_data = envelope["inputs"]
+        source_files = [
+            {"path": "config.json", "bytes": 7, "sha256": "a" * 64},
+            {"path": "model.safetensors", "bytes": 17, "sha256": "b" * 64},
+        ]
+        files = [source_files] + [
+            [{"path": Path(row["path"]).name, "bytes": 20, "sha256": ch * 64}]
+            for row, ch in [(train, "c"), (eval_data, "d")]
+        ]
+        inputs = [
+            dict(row, **hf_manifest(entries), source_host=host)
+            for row, entries in zip((source, train, eval_data), files, strict=True)
+        ]
+        for i in (1, 2):
+            inputs[i]["sha256"] = files[i][0]["sha256"]
+        base = f"/worker/jobs/{job_id}/work/qsa"
+        score = dict(capture=None, kl=0.05, queries=3, capture_queries=0,
+                     capture_unavailable_reason="No held-out query has more fully observed blocks than the capture budget.")
+        metrics = dict(
+            envelope["options"], status="passed", train_loss=0.04, heldout_loss=0.05,
+            before=score, after=score, full_attention_layers=list(range(3, 64, 4)),
+            budget=2048, indexer_update_l2=0.1, source_config_sha256="a" * 64, train_data_sha256="c" * 64,
+            eval_data_sha256="d" * 64,
+        )
+        result = dict(
+            kind="qsa_train", host=host, verified=True, release_qualified=False, inputs=inputs,
+            teacher={"id": source["id"], "sha256": inputs[0]["bundle_sha256"]},
+            metrics=metrics,
+            artifact=dict(kind="qsa-indexer", path=f"{base}/qsa-indexers.safetensors",
+                          sha256="e" * 64, bytes=210000000),
+            metrics_file=dict(kind="json", path=f"{base}/metrics.json", sha256="f" * 64, bytes=137),
+        )
+        if (root / "qsa-wrong-teacher").exists():
+            result["teacher"]["sha256"] = "0" * 64
+        if (root / "qsa-fake-capture").exists():
+            result["metrics"]["after"]["capture"] = 1
     if action == "start" and envelope["kind"] == "hf_download":
         assert envelope["inputs"] == [] and "prompt" not in envelope
         options = envelope["options"]

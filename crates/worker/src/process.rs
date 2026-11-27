@@ -107,14 +107,18 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
     let mut r = w.require(id)?;
     // The state lock orders cancellation against the durable terminal reply.
     // A failed create_dir never gives this run ownership of existing output.
-    if job.kind == brewery_worker::exl3_layer::JOB
+    if matches!(job.kind.as_str(), exl3_layer::JOB | qsa::JOB)
         && created_work
         && (r.cancel || result.is_err())
         && let Err(error) =
             fs::remove_dir_all(base.join("work")).and_then(|()| File::open(&base)?.sync_all())
     {
-        eprintln!("EXL3 work directory cleanup failed: {error}");
-        r.reply = Reply::error("EXL3 work directory cleanup failed");
+        eprintln!("{} work directory cleanup failed: {error}", job.kind);
+        r.reply = Reply::error(if job.kind == qsa::JOB {
+            "QSA work directory cleanup failed"
+        } else {
+            "EXL3 work directory cleanup failed"
+        });
         return w.put(id, &r);
     }
     if hy4_encode && held.is_ok() && (r.cancel || result.is_err()) {
@@ -553,7 +557,17 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         let r = w.require(id)?;
         ensure!(!r.cancel, "cancel requested");
     }
-    let mut command = if let Some(edit) = w
+    let mut command = if job.kind == qsa::JOB {
+        let qsa = w.cfg.qsa_training.as_ref().context("QSA runtime is not configured")?;
+        let mut command = qsa.command(
+            &format!("brewery-qsa-{}-{id}", std::process::id()),
+            "QSA indexer training",
+            "30",
+            "21600",
+        );
+        command.arg(&w.cfg.engine);
+        command
+    } else if let Some(edit) = w
         .cfg
         .hgn_edit
         .as_ref()
@@ -746,6 +760,15 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         .stdin(File::open(jobfile)?)
         .stdout(File::create(&output)?)
         .stderr(File::create(stderr)?);
+    if job.kind == qsa::JOB {
+        w.cfg.qsa_training.as_ref().expect("configured QSA runtime").configure(&mut command);
+        resources::disk_check(
+            &work,
+            w.disk_floor(job.resources.disk_reserve_bytes)
+                .checked_add(qsa::INDEXER_LIMIT + qsa::METRICS_LIMIT)
+                .context("QSA disk reserve overflow")?,
+        )?;
+    }
     if w.resource_enabled() && resources::engine_job(&job.kind) {
         let bounds = w.cfg.resource_bounds.unwrap_or_default();
         if let Some(requested) = job
@@ -1318,6 +1341,45 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 && value["inputs"][0]["bundle_sha256"] == source.extra["bundle_sha256"],
             "EXL3 artifact is not the verified layer from the resolved source"
         );
+    }
+    if job.kind == qsa::JOB {
+        qsa::check_receipt(&qsa::Spec::parse(&job.options)?, &job.inputs[0].host, &value)?;
+        for (index, input) in job.inputs.iter().enumerate() {
+            let receipt = &value["inputs"][index];
+            ensure!(
+                receipt["id"] == input.extra["id"]
+                    && receipt["path"].as_str().map(Path::new) == Some(&input.path)
+                    && receipt["bundle_sha256"] == input.extra["bundle_sha256"],
+                "QSA receipt does not match the resolved input identity"
+            );
+        }
+        let output = work.join(qsa::OUTPUT);
+        let mut emit = w.progress_callback(id)?;
+        let mut reporter = progress::Reporter::new(
+            &mut emit as &mut dyn FnMut(&ProgressDetail) -> Result<()>,
+            None,
+        );
+        ensure!(fs::read_dir(&output)?.count() == 2, "unexpected QSA outputs");
+        for (key, leaf) in [("artifact", qsa::FILE), ("metrics_file", qsa::METRICS)] {
+            let path = output.join(leaf);
+            let metadata = fs::symlink_metadata(&path)?;
+            ensure!(
+                value[key]["path"].as_str().map(Path::new) == Some(&path)
+                    && metadata.is_file() && metadata.nlink() == 1
+                    && Some(metadata.len()) == value[key]["bytes"].as_u64(),
+                "invalid QSA output file"
+            );
+            verify_artifact(&work, &json!({"artifact":value[key]}), &mut reporter)?;
+        }
+        ensure!(
+            decode_limited::<Value>(File::open(output.join(qsa::METRICS))?, qsa::METRICS_LIMIT)? == value["metrics"],
+            "QSA metrics file does not match the result"
+        );
+        qsa::check_indexer(
+            &mut File::open(output.join(qsa::FILE))?,
+            value["metrics"]["source_config_sha256"].as_str().context("QSA config SHA-256 missing")?,
+        )?;
+        return Ok(value);
     }
     if job.kind == "weight_apply" {
         let source = job.inputs.first().context("weight apply has no source")?;

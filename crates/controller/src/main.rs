@@ -25,6 +25,7 @@ mod local_edit;
 mod mcp;
 mod model_availability;
 mod profiles;
+mod qsa;
 mod remote_edit;
 mod registered_evaluation;
 mod routing_atlas;
@@ -43,6 +44,7 @@ use dispatch::Dispatcher;
 use domain::Host;
 use serde_json::Value;
 use std::{
+    collections::BTreeMap,
     env, fs,
     net::SocketAddr,
     path::PathBuf,
@@ -57,6 +59,7 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 struct App {
     store: Mutex<Store>,
     hosts: Vec<Host>,
+    qsa_managed_hosts: BTreeMap<String, String>,
     settings: settings::Managed,
     trace_policy: brewery_worker::trace::Policy,
     dispatcher: Arc<Dispatcher>,
@@ -82,7 +85,18 @@ struct App {
 impl App {
     fn defined_hosts(&self) -> Result<Vec<Host>, Error> {
         let mut hosts = self.hosts.clone();
-        hosts.extend(self.ssh_hosts.defined_hosts()?);
+        hosts.extend(self.ssh_hosts.defined_hosts()?.into_iter().map(|mut host| {
+            if host
+                .provision_binding
+                .as_ref()
+                .zip(self.qsa_managed_hosts.get(&host.id))
+                .is_some_and(|(current, verified)| current == verified)
+            {
+                host.capabilities.insert(brewery_worker::qsa::JOB.into(), true);
+                host.reasons.remove(brewery_worker::qsa::JOB);
+            }
+            host
+        }));
         Ok(hosts)
     }
 
@@ -146,6 +160,9 @@ async fn main() -> Result<(), Error> {
         launch_timeout: Duration::from_secs(env_num("BREWERY_DISPATCH_TIMEOUT_SECS", 21600)?),
         poll: Duration::from_millis(env_num("BREWERY_POLL_MS", 1000)?.max(25)),
     };
+    let qsa_managed_hosts = dispatcher
+        .probe_qsa_hosts(&mut hosts, ssh_hosts.defined_hosts()?)
+        .await;
     let admin = admin::Admin::from_env(&data, &hosts, config.as_deref(), &dispatcher.command)?;
     let mut hf_tokens = hf_tokens::Store::from_config(config_value.as_ref(), &dist);
     match backend_hf::Lane::prepare(&data, &dist).await {
@@ -161,6 +178,7 @@ async fn main() -> Result<(), Error> {
     let app = Arc::new(App {
         store: Mutex::new(store),
         hosts,
+        qsa_managed_hosts,
         settings: settings::Managed::from_config(config_value.as_ref()),
         trace_policy: settings::trace_policy(config_value.as_ref())?,
         dispatcher: dispatcher.clone(),

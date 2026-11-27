@@ -3069,14 +3069,14 @@
         "x-brewery-max-utf8-bytes": 4096,
         "description": "Absolute worker path, at most 4096 UTF-8 bytes, without '..' segments or control characters. Registration also requires a filename component."
       },
-      "ModelKind": {"type": "string", "enum": ["gguf", "hf", "safetensors", "hgn", "hgn-archive", "brewery-bundle", "hgn-v2", "ht43", "gsm8k-baseline", "gsm8k-predictions", "gsm8k-evaluation", "assets", "imatrix", "ngram", "vision", "mtp", "weight-calibration"], "description": "hgn-archive is a structural native HGN archive, not an inference input."},
+      "ModelKind": {"type": "string", "enum": ["gguf", "hf", "safetensors", "hgn", "hgn-archive", "brewery-bundle", "hgn-v2", "ht43", "gsm8k-baseline", "gsm8k-predictions", "gsm8k-evaluation", "assets", "imatrix", "ngram", "vision", "mtp", "weight-calibration", "qsa-corpus", "qsa-indexer"], "description": "hgn-archive is a structural native HGN archive. qsa-corpus is a training or held-out corpus. qsa-indexer contains trained indexer weights only. These kinds are not inference models."},
       "NewModel": {
         "type": "object", "required": ["host", "path", "kind"], "additionalProperties": false,
         "properties": {
           "name": {"description": "If null or omitted, use the path's filename.", "anyOf": [{"$ref": "#/components/schemas/Name"}, {"type": "null"}]},
           "host": {"$ref": "#/components/schemas/HostId"},
           "path": {"$ref": "#/components/schemas/AbsoluteWorkerPath", "pattern": "/(?!\\.(?:/|$))[^/]+(?:/+\\.)*/*$"},
-          "kind": {"anyOf": [{"$ref": "#/components/schemas/ModelKind"}, {"const": "bf16-checkpoint"}], "not": {"const": "hgn-archive"}}
+          "kind": {"anyOf": [{"$ref": "#/components/schemas/ModelKind"}, {"const": "bf16-checkpoint"}], "not": {"enum": ["hgn-archive", "qsa-indexer"]}}
         }
       },
       "Model": {
@@ -3088,7 +3088,16 @@
           "bytes": {"type": "integer", "minimum": 0, "description": "Size in bytes from the same receipt, or from the worker's file check if no receipt is available."},
           "available": {"type": ["boolean", "null"], "description": "Cached path availability on the owning worker. False means the worker is disabled or not configured, or the path is missing or outside its allowed model roots. Null means the controller has no current answer, including when the ordinary worker cannot check access on a separate weight editor. Availability does not verify the current file hash."},
           "reason": {"type": "string", "description": "Why availability is unknown or false."},
-          "job_id": {"$ref": "#/components/schemas/Id", "description": "Job that produced the registered output."}
+          "job_id": {"$ref": "#/components/schemas/Id", "description": "Job that produced the registered output."},
+          "qsa_provenance": {
+            "description": "Present only on a managed QSA indexer. The teacher digest identifies the verified HF file manifest, not just its config.",
+            "type": "object", "additionalProperties": false, "required": ["training_job_id", "teacher_model_id", "teacher_sha256"],
+            "properties": {
+              "training_job_id": {"$ref": "#/components/schemas/Id"},
+              "teacher_model_id": {"$ref": "#/components/schemas/Id"},
+              "teacher_sha256": {"$ref": "#/components/schemas/Sha256"}
+            }
+          }
         }
       },
       "NewPrompt": {
@@ -3120,7 +3129,7 @@
           "truncated": {"type": "boolean"}
         }
       },
-      "JobKind": {"type": "string", "enum": ["compare", "trace", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer", "sensitivity", "circuit", "quantization_damage", "behavior_direction"]},
+      "JobKind": {"type": "string", "enum": ["compare", "trace", "inspect", "plan", "convert", "verify", "generate", "evaluate", "baseline", "benchmark", "transfer", "transfer_preview", "cache_cleanup", "hf_download", "weight_inspect", "weight_propose", "weight_tune", "weight_apply", "exl3_layer", "sensitivity", "circuit", "quantization_damage", "behavior_direction", "qsa_train"]},
       "JobState": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled"]},
       "CapabilityMap": {
         "type": "object", "description": "Map from each known job kind to its availability.",
@@ -3297,7 +3306,8 @@
           {"$ref": "#/components/schemas/Exl3LayerJob"}, {"$ref": "#/components/schemas/TraceJob"},
           {"$ref": "#/components/schemas/SensitivityJob"}, {"$ref": "#/components/schemas/CircuitJob"},
           {"$ref": "#/components/schemas/QuantizationDamageJob"},
-          {"$ref": "#/components/schemas/BehaviorDirectionJob"}
+          {"$ref": "#/components/schemas/BehaviorDirectionJob"},
+          {"$ref": "#/components/schemas/QsaTrainJob"}
         ],
         "discriminator": {
           "propertyName": "kind",
@@ -3312,7 +3322,8 @@
             "exl3_layer": "#/components/schemas/Exl3LayerJob", "trace": "#/components/schemas/TraceJob",
             "sensitivity": "#/components/schemas/SensitivityJob", "circuit": "#/components/schemas/CircuitJob",
             "quantization_damage": "#/components/schemas/QuantizationDamageJob",
-            "behavior_direction": "#/components/schemas/BehaviorDirectionJob"
+            "behavior_direction": "#/components/schemas/BehaviorDirectionJob",
+            "qsa_train": "#/components/schemas/QsaTrainJob"
           }
         }
       },
@@ -4618,6 +4629,25 @@
         "required": ["options"],
         "properties": {"kind": {"const": "hf_download"}, "input_ids": {"maxItems": 0}, "options": {"$ref": "#/components/schemas/HfDownloadOptions"}}
       },
+      "QsaTrainJob": {
+        "description": "Train Qwen QSA indexers offline. In order, provide one registered hf teacher, one qsa-corpus for training and a separate qsa-corpus for held-out evaluation. All inputs must be on the same worker. Omit host to use that worker. Requires a ready QSA GPU runtime; no transfer, prompt, conversion or application.",
+        "allOf": [{"$ref": "#/components/schemas/JobRequestFields"}, {"$ref": "#/components/schemas/DefaultInputHost"}, {"$ref": "#/components/schemas/NoPrompt"}],
+        "required": ["input_ids", "options"],
+        "properties": {
+          "kind": {"const": "qsa_train"},
+          "input_ids": {"minItems": 3, "maxItems": 3, "uniqueItems": true},
+          "options": {"$ref": "#/components/schemas/QsaTrainOptions"}
+        }
+      },
+      "QsaTrainOptions": {
+        "type": "object", "additionalProperties": false, "required": ["steps", "seq_len", "seed", "lr"],
+        "properties": {
+          "steps": {"type":"integer","minimum":1,"maximum":10000},
+          "seq_len": {"type":"integer","minimum":8,"maximum":16384},
+          "seed": {"type":"integer","minimum":0,"maximum":4294967295},
+          "lr": {"type":"number","exclusiveMinimum":0,"maximum":1}
+        }
+      },
       "HfRepoId": {
         "type": "string", "maxLength": 193,
         "pattern": "^(?:(?![^/]*(?:\\.\\.|--))(?![^/]*(?:\\.git|[-.])(?:/|$))[A-Za-z0-9][A-Za-z0-9._-]{0,95}/)?(?![^/]*(?:\\.\\.|--))(?![^/]*(?:\\.git|[-.])$)[A-Za-z0-9][A-Za-z0-9._-]{0,95}(?![\\s\\S])",
@@ -4877,7 +4907,7 @@
         }
       },
       "JobResult": {
-        "description": "Worker result. Weight apply and Hugging Face download check output identity and register a Library model only on verified success. A job result is not a release verdict.",
+        "description": "Worker result. Weight apply, QSA training and Hugging Face download register a Library model only on verified success. A job result is not a release verdict.",
         "oneOf": [
           {"$ref": "#/components/schemas/CompareResult"},
           {"$ref": "#/components/schemas/ConversionResult"},
@@ -4896,13 +4926,14 @@
           {"$ref": "#/components/schemas/ImportedDirectionResult"},
           {"$ref": "#/components/schemas/AblationSearchResult"},
           {"$ref": "#/components/schemas/HgnScreenResult"},
+          {"$ref": "#/components/schemas/QsaTrainResult"},
           {"type": "object", "not": {"anyOf": [
             {"$ref": "#/components/schemas/CompareResult"}, {"$ref": "#/components/schemas/ConversionResult"},
             {"$ref": "#/components/schemas/GenerateResult"}, {"$ref": "#/components/schemas/Gsm8kResult"},
             {"$ref": "#/components/schemas/BenchmarkResult"}, {"$ref": "#/components/schemas/TransferResult"},
              {"$ref": "#/components/schemas/CacheCleanupResult"}, {"$ref": "#/components/schemas/WeightApplyResult"},
              {"$ref": "#/components/schemas/ImportedDirectionResult"},
-             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace", "weight_spectra", "quantization_damage", "screen_hgn_ablation"]}}}
+             {"required": ["kind"], "properties": {"kind": {"enum": ["hf_download", "exl3_layer", "trace", "weight_spectra", "quantization_damage", "screen_hgn_ablation", "qsa_train"]}}}
           ]}}
         ]
       },
@@ -5060,6 +5091,48 @@
           "executable_sha256":{"$ref":"#/components/schemas/Sha256"},"bytes":{"$ref":"#/components/schemas/ByteCount"},
           "prompts":{"type":"array","minItems":1,"maxItems":4,"items":{"$ref":"#/components/schemas/TraceExport"}}
         }
+      },
+      "QsaTrainResult": {
+        "description": "Verified training output. Verification covers identity and output structure, not model quality, conversion or runtime inference.",
+        "type": "object", "additionalProperties": false,
+        "required": ["kind", "host", "teacher", "inputs", "verified", "release_qualified", "artifact", "metrics_file", "metrics", "library_model_id"],
+        "properties": {
+          "kind": {"const": "qsa_train"}, "host": {"$ref": "#/components/schemas/HostId"},
+          "verified": {"const": true}, "release_qualified": {"const": false},
+          "teacher": {
+            "type": "object", "additionalProperties": false, "required": ["id", "sha256"],
+            "properties": {"id": {"$ref": "#/components/schemas/Id"}, "sha256": {"$ref": "#/components/schemas/Sha256"}}
+          },
+          "inputs": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "object"}},
+          "artifact": {"allOf": [{"$ref": "#/components/schemas/Artifact"}], "properties": {"kind": {"const": "qsa-indexer"}}},
+          "metrics_file": {"allOf": [{"$ref": "#/components/schemas/Artifact"}], "properties": {"kind": {"const": "json"}}},
+          "metrics": {
+            "type": "object",
+            "required": ["status", "steps", "seq_len", "seed", "lr", "before", "after", "train_loss", "heldout_loss", "indexer_update_l2", "source_config_sha256", "train_data_sha256", "eval_data_sha256", "full_attention_layers", "budget"],
+            "properties": {
+              "status": {"const": "passed"},
+              "before": {"$ref": "#/components/schemas/QsaHeldoutMetrics"}, "after": {"$ref": "#/components/schemas/QsaHeldoutMetrics"},
+              "train_loss": {"type": "number"}, "heldout_loss": {"type": "number"},
+              "indexer_update_l2": {"type": "number", "exclusiveMinimum": 0},
+              "budget": {"const": 2048},
+              "full_attention_layers": {"const": [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63]},
+              "source_config_sha256": {"$ref": "#/components/schemas/Sha256"}, "train_data_sha256": {"$ref": "#/components/schemas/Sha256"}, "eval_data_sha256": {"$ref": "#/components/schemas/Sha256"}
+            }
+          },
+          "library_model_id": {"$ref": "#/components/schemas/Id"}
+        }
+      },
+      "QsaHeldoutMetrics": {
+        "type": "object", "required": ["capture", "kl", "queries", "capture_queries"],
+        "properties": {
+          "capture": {"type": ["number", "null"], "minimum": 0, "maximum": 1}, "kl": {"type": "number"},
+          "queries": {"type": "integer", "minimum": 1},
+          "capture_unavailable_reason": {"const": "No held-out query has more fully observed blocks than the capture budget."},
+          "capture_queries": {"type": "integer", "minimum": 0, "description": "Number of queries whose visible block count exceeds the indexer budget."}
+        },
+        "if": {"properties": {"capture_queries": {"const": 0}}},
+        "then": {"required": ["capture_unavailable_reason"], "properties": {"capture": {"type": "null"}}},
+        "else": {"not": {"required": ["capture_unavailable_reason"]}, "properties": {"capture": {"type": "number"}}}
       },
       "Exl3LayerResult": {
         "type": "object", "required": ["kind", "host", "source_sha256", "source_format", "verified", "release_qualified", "artifact", "report"],

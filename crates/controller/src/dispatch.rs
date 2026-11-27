@@ -4,7 +4,7 @@ use crate::{
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, value::RawValue};
-use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _},
     process::Command,
@@ -60,6 +60,74 @@ impl Dispatcher {
             2048,
         )
         .await
+    }
+
+    pub async fn probe_qsa_hosts(
+        &self,
+        hosts: &mut [crate::domain::Host],
+        enrolled: Vec<crate::domain::Host>,
+    ) -> BTreeMap<String, String> {
+        use brewery_worker::qsa::{JOB, probe_receipt};
+        let mut probes = JoinSet::new();
+        for (index, host) in hosts.iter().chain(&enrolled).enumerate() {
+            let enrolled_host = index >= hosts.len();
+            if !enrolled_host && host.capabilities.get(JOB) != Some(&true) {
+                continue;
+            }
+            let config = if enrolled_host {
+                match self.ssh_hosts.config_for(&[&host.id]) {
+                    Ok(Some(config)) => Some(config),
+                    _ => continue,
+                }
+            } else {
+                None
+            };
+            let host = host.id.clone();
+            let dispatch = self.command.clone();
+            probes.spawn(async move {
+                let ready = async {
+                    let mut command = Command::new(dispatch);
+                    if let Some(config) = config {
+                        command.env("BREWERY_DISPATCH_CONFIG", config);
+                    }
+                    let mut child = command
+                        .args(["qsa-probe", &host])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::null())
+                        .kill_on_drop(true)
+                        .spawn()?;
+                    let stdout = child.stdout.take().expect("piped stdout");
+                    let (bytes, status) =
+                        tokio::try_join!(read_limited(stdout, 4096), child.wait())?;
+                    Ok::<_, std::io::Error>(
+                        status.success()
+                            && serde_json::from_slice(&bytes)
+                                .is_ok_and(|receipt| probe_receipt(&receipt)),
+                    )
+                };
+                let ready = matches!(timeout(SHORT_RPC, ready).await, Ok(Ok(true)));
+                (index, ready)
+            });
+        }
+        let mut verified = BTreeMap::new();
+        while let Some(Ok((index, ready))) = probes.join_next().await {
+            if let Some(host) = hosts.get_mut(index) {
+                if !ready {
+                    host.capabilities.insert(JOB.into(), false);
+                    host.reasons.insert(
+                        JOB.into(),
+                        "QSA GPU runtime probe failed; check the worker configuration, GPU availability, and Python dependencies".into(),
+                    );
+                }
+            } else if ready {
+                let host = &enrolled[index - hosts.len()];
+                if let Some(binding) = &host.provision_binding {
+                    verified.insert(host.id.clone(), binding.clone());
+                }
+            }
+        }
+        verified
     }
 
     async fn call(
@@ -544,12 +612,19 @@ async fn drive(
                 use WorkerState::*;
                 match reply.state {
                     Succeeded => {
-                        if interrupt && !current.cancel_requested && job.kind == "hf_download" {
+                        if interrupt
+                            && !current.cancel_requested
+                            && matches!(job.kind.as_str(), "hf_download" | brewery_worker::qsa::JOB)
+                        {
                             update(
                                 app,
                                 &job,
                                 State::Failed,
-                                "Interrupted Hugging Face download was not registered",
+                                if job.kind == "hf_download" {
+                                    "Interrupted Hugging Face download was not registered"
+                                } else {
+                                    "Interrupted QSA indexer was not registered"
+                                },
                                 Some("The controller interrupted this job; not restarted automatically".into()),
                                 None,
                             )?;

@@ -11,6 +11,7 @@ pub mod hgn_recipe;
 pub mod hy4;
 pub mod locate_edit;
 pub mod operational;
+pub mod qsa;
 pub mod resources;
 pub mod scratch_eval;
 pub mod sensitivity;
@@ -308,6 +309,7 @@ pub struct Bundle {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Rpc {
+    QsaProbe,
     Prepare {
         id: String,
         action: String,
@@ -483,6 +485,14 @@ pub fn staging_error(detail: &str) -> &'static str {
         "SafeTensors weight jobs require a direct local source"
     } else if detail.contains("Pinned publication manifest unavailable") {
         "Pinned publication manifest unavailable; check the configured receipt and source inventory"
+    } else if detail.contains("QSA training and held-out corpus must have different content") {
+        "QSA training and held-out corpus must have different content"
+    } else if detail.contains("QSA training requires an HF directory and bounded regular corpus files") {
+        "QSA training requires an HF directory and nonempty regular corpus files, at most 64 MiB each"
+    } else if detail.contains("QSA source changed while resolving") {
+        "QSA source changed while resolving; submit a new job with a stable checkpoint"
+    } else if detail.contains("QSA teacher checksum does not match its Library receipt") {
+        "QSA teacher checksum does not match its Library receipt"
     } else if detail.contains("Source input unavailable")
         || detail.contains("outside allowed source roots")
     {

@@ -565,6 +565,7 @@ fn config(dest: &str) -> Wire<Config> {
 fn run() -> Wire<Value> {
     let args: Vec<_> = env::args().skip(1).collect();
     match args.as_slice() {
+        [action, dest] if action == "qsa-probe" => config(dest)?.rpc(dest, Rpc::QsaProbe),
         [action, dest] if action == "suggest-paths" => {
             let cfg = config(dest)?;
             let request: SuggestRequest =

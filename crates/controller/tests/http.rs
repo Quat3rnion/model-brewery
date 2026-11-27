@@ -63,6 +63,9 @@ mod eligibility;
 #[path = "support/exl3_layer.rs"]
 mod exl3_layer;
 
+#[path = "support/qsa.rs"]
+mod qsa;
+
 struct Fixture {
     root: tempfile::TempDir,
     addr: Option<SocketAddr>,

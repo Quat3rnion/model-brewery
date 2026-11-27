@@ -82,6 +82,7 @@ pub fn engine(base: &Path, since: u64) -> Option<ProgressDetail> {
             | "hf_download_resolve"
             | "hf_download_transfer"
             | "hf_download_verify"
+            | "qsa_training"
     )
     .then_some(detail)
 }

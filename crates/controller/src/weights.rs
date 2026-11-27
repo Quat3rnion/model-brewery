@@ -359,6 +359,7 @@ pub fn apply_inputs(
         available: None,
         reason: None,
         job_id: None,
+        qsa_provenance: None,
     };
     let mut checks = json!({
         "source_sha256":source_sha,"proposal_sha256":artifact["sha256"],

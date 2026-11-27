@@ -30,6 +30,7 @@ pub const KINDS: &[&str] = &[
     "weight_tune",
     "weight_apply",
     brewery_worker::exl3_layer::JOB,
+    brewery_worker::qsa::JOB,
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,6 +53,15 @@ pub struct Model {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qsa_provenance: Option<QsaProvenance>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct QsaProvenance {
+    pub training_job_id: String,
+    pub teacher_model_id: String,
+    pub teacher_sha256: String,
 }
 
 fn unknown_availability_reason() -> Option<String> {
@@ -118,6 +128,8 @@ impl NewModel {
                 | "ngram"
                 | "vision"
                 | "mtp"
+                | brewery_worker::qsa::CORPUS
+                | brewery_worker::qsa::INDEXER
         ) {
             return Err("unknown model or input kind".into());
         }
@@ -136,6 +148,7 @@ impl NewModel {
             available: None,
             reason: unknown_availability_reason(),
             job_id: None,
+            qsa_provenance: None,
         })
     }
 }
@@ -690,6 +703,7 @@ impl Host {
                     | brewery_worker::damage::JOB
                     | brewery_worker::behavior_direction::JOB
                     | brewery_worker::exl3_layer::JOB
+                    | brewery_worker::qsa::JOB
             ) || crate::weights::is_kind(kind);
             let enabled = options.remove(kind).unwrap_or(!opt_in)
                 && (kind != "benchmark" || benchmark_configured);
@@ -710,6 +724,8 @@ impl Host {
                         "Configure the verified contrast cache and a pinned CPU trace runtime"
                     } else if kind == brewery_worker::exl3_layer::JOB {
                         "Configure a native EXL3 helper and opt in on this worker"
+                    } else if kind == brewery_worker::qsa::JOB {
+                        "Configure and verify the QSA GPU runtime and opt in on this worker"
                     } else if crate::weights::is_kind(kind) {
                         "Weight editing is not configured on this worker"
                     } else if opt_in {
@@ -1057,6 +1073,7 @@ pub const SIMPLE_WORKFLOWS: &[&str] = &[
     "benchmark",
     "transfer",
     "transfer_preview",
+    brewery_worker::qsa::JOB,
 ];
 
 pub fn standard_job_host_blocker(host: &Host, kind: &str) -> Option<Reason> {
@@ -1082,6 +1099,11 @@ pub fn manual_registration_blocker(host: &str, kind: &str) -> Option<Reason> {
         Some(Reason::link(
             "Run a verified recipe to register a native HGN archive.",
             "#/convert",
+        ))
+    } else if kind == brewery_worker::qsa::INDEXER {
+        Some(Reason::link(
+            "Run a verified QSA training job to register a QSA indexer.",
+            "#/calibration",
         ))
     } else if host == crate::backend_hf::ID {
         Some(Reason::link(
@@ -1280,6 +1302,17 @@ impl NewJob {
         let main = inputs.first().map_or("", |m| &m.kind);
         let second = inputs.get(1).map_or("", |m| &m.kind);
         let n = inputs.len();
+        if self.kind != brewery_worker::qsa::JOB
+            && !matches!(self.kind.as_str(), "transfer" | "transfer_preview")
+            && inputs.iter().any(|input| {
+                matches!(
+                    input.kind.as_str(),
+                    brewery_worker::qsa::CORPUS | brewery_worker::qsa::INDEXER
+                )
+            })
+        {
+            return Err("QSA artifacts and corpora are not conversion or inference inputs".into());
+        }
         let hgn = |kind| matches!(kind, "hgn" | "brewery-bundle" | "hgn-v2" | "ht43");
         let reference = |kind| {
             matches!(
@@ -1349,6 +1382,15 @@ impl NewJob {
                 brewery_worker::exl3_layer::JOB => {
                     n == 1 && main == "safetensors" && host == inputs[0].host && host != "auto"
                 }
+                brewery_worker::qsa::JOB => {
+                    brewery_worker::qsa::layout(inputs.iter().map(|input| {
+                        (
+                            input.kind.as_str(),
+                            input.host.as_str(),
+                            Path::new(&input.path),
+                        )
+                    })) && inputs[0].host == host
+                }
                 "weight_tune" => {
                     weight_source
                         && n == 3
@@ -1387,6 +1429,9 @@ impl NewJob {
         } else if format.is_hgn() && !hgn_recipe {
             if self.kind == brewery_worker::exl3_layer::JOB {
                 brewery_worker::exl3_layer::Spec::parse(&Value::Object(self.options.clone()))
+                    .map_err(|e| format!("{e:#}"))?;
+            } else if self.kind == brewery_worker::qsa::JOB {
+                brewery_worker::qsa::Spec::parse(&Value::Object(self.options.clone()))
                     .map_err(|e| format!("{e:#}"))?;
             } else if crate::weights::is_kind(&self.kind) {
                 if inputs.iter().any(|input| input.host != host) {

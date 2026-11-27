@@ -1222,6 +1222,30 @@ impl Store {
                 job.has_result = false;
             }
             checked
+        } else if job.kind == brewery_worker::qsa::JOB && job.state == State::Succeeded {
+            let envelope = self.envelope(&job.id)?;
+            match crate::qsa::verified_artifact(
+                job,
+                &envelope,
+                result.as_ref().unwrap_or(&Value::Null),
+            ) {
+                Ok(model) if !job.cancel_requested => {
+                    result.as_mut().expect("validated receipt")["library_model_id"] = json!(model.id);
+                    Some(model)
+                }
+                outcome => {
+                    job.state = if job.cancel_requested {
+                        State::Cancelled
+                    } else {
+                        State::Failed
+                    };
+                    job.progress = "QSA indexer was not registered".into();
+                    job.error = outcome.err();
+                    job.has_result = false;
+                    result = None;
+                    None
+                }
+            }
         } else if job.kind == "weight_apply" && job.state == State::Succeeded {
             let envelope = self.envelope(&job.id)?;
             match crate::weights::verified_artifact(
