@@ -1,0 +1,6 @@
+# Provision the host's CUDA or ROCm torch build first; do not install at job time.
+torch>=2.6
+transformers==5.22.1
+accelerate==1.16.0
+safetensors==0.8.0
+pillow==13.0.0
