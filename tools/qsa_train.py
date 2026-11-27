@@ -11,6 +11,7 @@ training corpus. This does not detect partial, shifted, or fuzzy matches.
 """
 
 import argparse
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 import hashlib
 import itertools
@@ -18,9 +19,11 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import stat
 import struct
 import sys
+from tempfile import TemporaryDirectory
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -31,6 +34,9 @@ TEACHER = "dense_causal_qwen3_5"
 BLOCK, HEADS, WIDTH, ROPE = 4, 4, 128, 64
 ATTENTION = "brewery_qsa_dense"
 MAX_HELDOUT_EXAMPLE_HASHES = 250_000
+DISTRIBUTED_SHARD = re.compile(r"shard-[0-9]{5}-model-[0-9]{5}-of-[0-9]{5}\.safetensors")
+TOKENIZER_CLASSES = (None, "Qwen2Tokenizer", "Qwen2TokenizerFast", "Qwen3_5Tokenizer",
+                     "Qwen3_5TokenizerFast", "TokenizersBackend", "PreTrainedTokenizerFast")
 
 
 def digest(path):
@@ -49,24 +55,68 @@ def unique_json_object(pairs):
     result = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError("Duplicate object key in teacher SafeTensors index")
+            raise ValueError("Duplicate object key in teacher JSON")
         result[key] = value
     return result
 
 
-def check_teacher_weights(source):
+@contextmanager
+def open_teacher_member(path):
+    # The source is local. Never follow a member symlink or block opening a FIFO.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError("Teacher files must be regular local members")
+        yield stream
+
+
+@dataclass(frozen=True)
+class TeacherSource:
+    config: dict
+    config_sha256: str
+    shards: tuple[str, ...]
+    index: dict | None
+
+
+def teacher_source(source):
+    """Select the standard dense Qwen config and the exact SafeTensors members."""
+    if not source.is_dir():
+        raise ValueError("--source must be a local Hugging Face directory")
+    if os.path.lexists(source / "adapter_config.json"):
+        raise ValueError("Teacher must not specify an adapter")
+    if any(DISTRIBUTED_SHARD.fullmatch(path.name) for path in source.iterdir()):
+        raise ValueError("Teacher must not specify a distributed checkpoint")
+    with open_teacher_member(source / "config.json") as stream:
+        config_bytes = stream.read()
+    config = json.loads(config_bytes, object_pairs_hook=unique_json_object)
+    if not isinstance(config, dict) or config.get("model_type") != "qwen3_5":
+        raise ValueError("Teacher config must describe the full Qwen3.5/3.8 architecture")
+    for selector in ("configuration_files", "transformers_weights"):
+        if selector in config:
+            raise ValueError(f"Teacher config must not specify {selector}")
+    if config.get("tokenizer_class") not in TOKENIZER_CLASSES:
+        raise ValueError("Teacher config must use a supported Qwen tokenizer class")
+    for subconfig, types in ((config, ("qwen3_5",)),
+                             (config.get("text_config"), (None, "qwen3_5_text")),
+                             (config.get("vision_config"), (None, "qwen3_5", "qwen3_5_vision"))):
+        if not isinstance(subconfig, dict) or subconfig.get("quantization_config") is not None:
+            raise ValueError("Teacher config must describe an unquantized Qwen text and vision model")
+        if subconfig.get("model_type") not in types or subconfig.get("fusion_config") is not None:
+            raise ValueError("Teacher config must use the built-in Qwen components without fusions")
+    config_hash = hashlib.sha256(config_bytes).hexdigest()
+
     mono = source / "model.safetensors"
     index = source / "model.safetensors.index.json"
     selected = [path for path in (mono, index) if os.path.lexists(path)]
     if len(selected) != 1 or not regular_member(selected[0]):
         raise ValueError("Teacher must supply one regular model.safetensors or model.safetensors.index.json")
     if selected[0] == mono:
-        return
-    with index.open(encoding="utf-8") as stream:
+        return TeacherSource(config, config_hash, (mono.name,), None)
+    with open_teacher_member(index) as stream:
         manifest = json.load(stream, object_pairs_hook=unique_json_object)
     weight_map = manifest.get("weight_map") if isinstance(manifest, dict) else None
-    if not isinstance(weight_map, dict) or not weight_map:
-        raise ValueError("Teacher SafeTensors index must contain a nonempty weight_map")
+    if not isinstance(weight_map, dict) or not weight_map or not isinstance(manifest.get("metadata"), dict):
+        raise ValueError("Teacher SafeTensors index must contain metadata and a nonempty weight_map")
     checked = set()
     for name in weight_map.values():
         if (not isinstance(name, str) or not name.endswith(".safetensors")
@@ -76,6 +126,63 @@ def check_teacher_weights(source):
             if not regular_member(source / name):
                 raise ValueError("Teacher SafeTensors shard is not a regular local member")
             checked.add(name)
+    return TeacherSource(config, config_hash, tuple(sorted(checked)), manifest)
+
+
+@contextmanager
+def teacher_file_view(source, names, output):
+    # Present only validated members and hold their descriptors until the
+    # loader finishes. /proc/self/fd works across filesystems without copying.
+    with ExitStack() as stack:
+        view = Path(stack.enter_context(TemporaryDirectory(prefix=".teacher-", dir=output)))
+        for name in names:
+            stream = stack.enter_context(open_teacher_member(source / name))
+            (view / name).symlink_to(f"/proc/self/fd/{stream.fileno()}")
+        yield view
+
+
+@contextmanager
+def teacher_weight_view(source, teacher, output):
+    # Transformers has no public checkpoint-file-list API. Snapshot the
+    # validated index in the view so its resolver sees the same shard list.
+    with teacher_file_view(source, teacher.shards, output) as view:
+        if teacher.index is not None:
+            index = view / "model.safetensors.index.json"
+            index.write_text(json.dumps(teacher.index), encoding="utf-8")
+        yield view
+
+
+def tokenizer_source(source):
+    """Read only canonical Qwen tokenizer assets; do not redirect via config."""
+    with open_teacher_member(source / "tokenizer_config.json") as stream:
+        config = json.load(stream, object_pairs_hook=unique_json_object)
+    if not isinstance(config, dict):
+        raise ValueError("Teacher tokenizer_config.json must contain an object")
+    for selector in ("fast_tokenizer_files", "auto_map", "init_inputs", "tokenizer_object", "vocab", "merges"):
+        if selector in config:
+            raise ValueError(f"Teacher tokenizer config must not specify {selector}")
+    if config.get("tokenizer_class") not in TOKENIZER_CLASSES:
+        raise ValueError("Teacher tokenizer config must use a supported Qwen tokenizer class")
+    if any(key.endswith(("_file", "_files", "_path")) and key != "name_or_path" for key in config):
+        raise ValueError("Teacher tokenizer config must not select files")
+    if not regular_member(source / "tokenizer.json"):
+        raise ValueError("Teacher must supply a regular tokenizer.json")
+    names = ["tokenizer.json"]
+    for name in ("added_tokens.json", "special_tokens_map.json", "vocab.json", "merges.txt"):
+        if os.path.lexists(source / name):
+            names.append(name)
+    return config, names
+
+
+def load_teacher_tokenizer(source, model_config, output):
+    from transformers import AutoTokenizer
+
+    config, names = tokenizer_source(source)
+    with teacher_file_view(source, names, output) as view:
+        (view / "tokenizer_config.json").write_text(json.dumps(config), encoding="utf-8")
+        return AutoTokenizer.from_pretrained(
+            view, config=model_config, local_files_only=True, trust_remote_code=False,
+        )
 
 
 def arguments():
@@ -111,10 +218,9 @@ def arguments():
 def main():
     args = arguments()
     if not args.probe:
-        if not args.source.is_dir():
-            raise ValueError("--source must be a local Hugging Face directory")
-        check_teacher_weights(args.source)
-        source_config_hash = digest(args.source / "config.json")
+        source = args.source.resolve(strict=True)
+        teacher = teacher_source(source)
+        source_config_hash = teacher.config_sha256
         train_hash, eval_hash = digest(args.train_data), digest(args.eval_data)
         if train_hash == eval_hash:
             raise ValueError("The training and held-out corpora must be different")
@@ -129,14 +235,15 @@ def main():
     import torch
     import torch.nn.functional as F
     from safetensors.torch import save_file
-    from transformers import AutoTokenizer, Qwen3_5Config, Qwen3_5ForConditionalGeneration
+    from transformers import GenerationConfig, Qwen3_5Config, Qwen3_5ForConditionalGeneration
     from transformers.models.qwen3_5.modeling_qwen3_5 import ALL_ATTENTION_FUNCTIONS, Qwen3_5Attention
 
     if args.probe:
         probe(torch, F)
         return
 
-    tokenizer = AutoTokenizer.from_pretrained(args.source, local_files_only=True, trust_remote_code=False)
+    config = Qwen3_5Config.from_dict(teacher.config)
+    tokenizer = load_teacher_tokenizer(source, config, output)
 
     def chunks(path):
         return corpus(tokenizer, path, args.seq_len)
@@ -147,7 +254,6 @@ def main():
     cpu = args.device == "cpu"
     if not cpu and not torch.cuda.is_available():
         raise RuntimeError("QSA training requires a local CUDA or ROCm device")
-    config = Qwen3_5Config.from_pretrained(args.source, local_files_only=True)
     text_config = config.text_config
     expected = [i for i, kind in enumerate(text_config.layer_types) if kind == "full_attention"]
     if not expected:
@@ -166,10 +272,12 @@ def main():
         if sum(gpu_capacity.values()) < 50 * 1024**3:
             raise RuntimeError("Not enough free GPU memory for the BF16 27B checkpoint and training")
         load = {"device_map": "auto", "max_memory": {**gpu_capacity, "cpu": 0}, "dtype": torch.bfloat16}
-    model, loading = Qwen3_5ForConditionalGeneration.from_pretrained(
-        args.source, config=config, local_files_only=True, use_safetensors=True, attn_implementation="sdpa",
-        output_loading_info=True, use_kernels=False, **load,
-    )
+    with teacher_weight_view(source, teacher, output) as weight_view:
+        model, loading = Qwen3_5ForConditionalGeneration.from_pretrained(
+            weight_view, config=config, generation_config=GenerationConfig.from_model_config(config),
+            local_files_only=True, trust_remote_code=False, use_safetensors=True, attn_implementation="sdpa",
+            output_loading_info=True, use_kernels=False, **load,
+        )
     if any(loading.get(key) for key in ("missing_keys", "mismatched_keys", "error_msgs")):
         raise ValueError("The teacher checkpoint did not supply every required backbone tensor")
     if not cpu and any(not isinstance(device, int) for device in model.hf_device_map.values()):

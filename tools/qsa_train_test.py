@@ -11,10 +11,60 @@ import unittest
 
 import torch
 from safetensors import safe_open
+from safetensors.torch import save_file
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import PreTrainedTokenizerFast, Qwen3_5Config, Qwen3_5ForConditionalGeneration
+
+from qsa_train import load_teacher_tokenizer, teacher_source, teacher_weight_view, tokenizer_source
+
+
+class TeacherSourcePolicyTest(unittest.TestCase):
+    def test_standard_dense_qwen_source(self):
+        with tempfile.TemporaryDirectory(dir="/arboretum") as directory:
+            root = Path(directory)
+            config = {"model_type": "qwen3_5", "text_config": {}, "vision_config": {}}
+            payload = json.dumps(config).encode("utf-8")
+            (root / "config.json").write_bytes(payload)
+            save_file({"example": torch.tensor([1, 2, 3])}, root / "model.safetensors")
+            validated = teacher_source(root)
+            self.assertEqual(validated.config, config)
+            self.assertEqual(validated.config_sha256, hashlib.sha256(payload).hexdigest())
+            self.assertEqual(validated.shards, ("model.safetensors",))
+            with teacher_weight_view(root, validated, root) as view:
+                self.assertEqual({p.name for p in view.iterdir()}, {"model.safetensors"})
+                with safe_open(view / "model.safetensors", framework="pt") as file:
+                    tensor = file.get_slice("example")[:]
+            self.assertFalse(view.exists())
+            self.assertEqual(tensor.tolist(), [1, 2, 3])
+
+    def test_rejects_alternate_checkpoint_or_config_selectors(self):
+        config = {"model_type": "qwen3_5", "text_config": {}, "vision_config": {}}
+        for changes, marker, reason in (
+            ({"configuration_files": ["config.5.22.0.json"]}, None, "configuration_files"),
+            ({"transformers_weights": "alternate.safetensors"}, None, "transformers_weights"),
+            ({}, "adapter_config.json", "adapter"),
+            ({}, "shard-00001-model-00001-of-00001.safetensors", "distributed checkpoint"),
+        ):
+            with self.subTest(changes=changes, marker=marker), tempfile.TemporaryDirectory(dir="/arboretum") as directory:
+                root = Path(directory)
+                (root / "config.json").write_text(json.dumps(config | changes), encoding="utf-8")
+                (root / "model.safetensors").touch()
+                if marker:
+                    (root / marker).touch()
+                with self.assertRaisesRegex(ValueError, reason):
+                    teacher_source(root)
+
+    def test_disallows_versioned_tokenizer_selector(self):
+        with tempfile.TemporaryDirectory(dir="/arboretum") as directory:
+            root = Path(directory)
+            (root / "tokenizer.json").write_text("{}", encoding="utf-8")
+            (root / "tokenizer_config.json").write_text(
+                json.dumps({"fast_tokenizer_files": ["tokenizer.5.22.0.json"]}), encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "fast_tokenizer_files"):
+                tokenizer_source(root)
 
 
 class OfflineQsaTrainingTest(unittest.TestCase):
@@ -26,9 +76,10 @@ class OfflineQsaTrainingTest(unittest.TestCase):
                 "[UNK]": 0, "[EOS]": 1, "a": 2, "b": 3, "c": 4, "d": 5,
             }, unk_token="[UNK]"))
             tokenizer.pre_tokenizer = Whitespace()
-            PreTrainedTokenizerFast(
+            direct_tokenizer = PreTrainedTokenizerFast(
                 tokenizer_object=tokenizer, unk_token="[UNK]", eos_token="[EOS]",
-            ).save_pretrained(teacher)
+            )
+            direct_tokenizer.save_pretrained(teacher)
             config = Qwen3_5Config(
                 text_config={
                     "vocab_size": 16, "hidden_size": 32, "intermediate_size": 48,
@@ -47,6 +98,11 @@ class OfflineQsaTrainingTest(unittest.TestCase):
             )
             torch.manual_seed(42)
             Qwen3_5ForConditionalGeneration(config).save_pretrained(teacher, max_shard_size="64KB")
+            loaded_tokenizer = load_teacher_tokenizer(teacher, config, root)
+            self.assertEqual(loaded_tokenizer.encode("a d c", add_special_tokens=False),
+                             direct_tokenizer.encode("a d c", add_special_tokens=False))
+            self.assertEqual(loaded_tokenizer.eos_token_id, direct_tokenizer.eos_token_id)
+            self.assertEqual(list(root.iterdir()), [teacher])
             digests = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in teacher.iterdir()}
             train, heldout, output = root / "train.txt", root / "heldout.txt", root / "output"
             train.write_text("a a a a b b b b c c c c d d d d\n", encoding="utf-8")
