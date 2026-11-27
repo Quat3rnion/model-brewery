@@ -15,12 +15,24 @@ import urllib.request
 
 TRAINER = r'''
 import argparse
+import fcntl
 import hashlib
 import json
 from math import prod
+import os
 from pathlib import Path
 import struct
 import sys
+
+# Check the actual outer reservation from both probe invocations and the
+# training subprocess, without opening a GPU or using the shared host queue.
+with open(os.environ["GPU_FLOCK"], "rb") as lock:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        pass
+    else:
+        raise AssertionError("QSA trainer or probe ran outside the GPU lock")
 
 if sys.argv[1:] == ["--probe"]:
     print(json.dumps({"schema": "brewery.qsa-probe.v1", "ready": True}))

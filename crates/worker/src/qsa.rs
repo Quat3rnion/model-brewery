@@ -12,6 +12,7 @@ pub const METRICS: &str = "metrics.json";
 pub const PROBE: &str = "brewery.qsa-probe.v1";
 pub const PYTHON: &str = "BREWERY_QSA_PYTHON";
 pub const TRAINER: &str = "BREWERY_QSA_TRAINER";
+pub const TEACHER_PIN: &str = "qsa_teacher_sha256";
 pub const CORPUS_LIMIT: u64 = 64 << 20;
 pub const METRICS_LIMIT: u64 = 64 << 10;
 pub const INDEXER_LIMIT: u64 = 256 << 20;
@@ -69,6 +70,43 @@ pub fn layout<'a>(inputs: impl IntoIterator<Item = (&'a str, &'a str, &'a Path)>
 
 pub fn probe_receipt(value: &Value) -> bool {
     *value == json!({"schema":PROBE,"ready":true})
+}
+
+pub fn check_teacher_digest(input: &crate::Input, digest: &str) -> Result<()> {
+    if let Some(pin) = input.extra.get(TEACHER_PIN) {
+        ensure!(
+            pin.as_str()
+                .is_some_and(|expected| crate::is_digest(expected) && expected == digest),
+            "QSA teacher checksum does not match its Library receipt"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod teacher_tests {
+    use super::*;
+
+    #[test]
+    fn verified_teacher_pin_must_match_the_resolved_manifest() {
+        let mut teacher: crate::Input = serde_json::from_value(json!({
+            "kind": "hf", "host": "worker", "path": "/models/teacher",
+        }))
+        .unwrap();
+        let entries = [crate::Entry {
+            path: "model.safetensors".into(),
+            bytes: 32,
+            sha256: "a".repeat(64),
+        }];
+        let digest = crate::tree_digest(&entries);
+        assert!(check_teacher_digest(&teacher, &digest).is_ok());
+        teacher
+            .extra
+            .insert(TEACHER_PIN.into(), json!(entries[0].sha256));
+        assert!(check_teacher_digest(&teacher, &digest).is_err());
+        teacher.extra.insert(TEACHER_PIN.into(), json!(digest));
+        assert!(check_teacher_digest(&teacher, &digest).is_ok());
+    }
 }
 
 fn metric(value: &Value, limit: f64) -> bool {

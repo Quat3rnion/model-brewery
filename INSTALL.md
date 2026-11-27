@@ -99,12 +99,20 @@ to the virtual environment's Python executable, `trainer` to the installed
 `qsa_train.py`, and `gpu_queue` to the worker's `resource-queue` executable.
 For an explicitly configured dispatch host, set `capabilities.qsa_train: true`.
 For an enrolled SSH host, a worker operator can stage the matching binaries and
-set `qsa_training` in the existing installed `worker.json`; no second dispatch
-host is necessary. The default SSH package does not contain this runtime.
-The controller probes configured runtimes at startup, including already
-enrolled SSH workers. The worker runs the probe and the training job under
-the GPU queue. See [OPERATOR.md](OPERATOR.md) for the model and dataset
-requirements.
+set `qsa_training` in the existing installed `worker.json`. In the controller
+dispatch JSON, add that installed host ID to the top-level
+`"qsa_ssh_hosts": ["your-enrolled-host-id"]` array next to `hosts`. Do not add
+a second host definition to `hosts`. The default SSH package does not contain
+this runtime. An absent or empty list does not contact any enrolled host for
+QSA discovery.
+
+The controller checks opted-in hosts at startup. A successful GPU probe
+enables QSA until the next restart or a change to the enrollment. A failed
+probe, including when the shared GPU queue is busy, leaves QSA unavailable.
+Startup uses the shared GPU queue. The pre-training probe runs inside the
+same reservation as the training job. Both use the worker's `resource-queue`
+with the shared `gpu` resource and configured GPU flock. See [OPERATOR.md](OPERATOR.md)
+for the model and dataset requirements.
 
 ### Stage an optional SSH editor package
 

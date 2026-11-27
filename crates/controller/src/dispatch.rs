@@ -4,7 +4,13 @@ use crate::{
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, value::RawValue};
-use std::{collections::BTreeMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _},
     process::Command,
@@ -66,12 +72,18 @@ impl Dispatcher {
         &self,
         hosts: &mut [crate::domain::Host],
         enrolled: Vec<crate::domain::Host>,
+        enrolled_opt_ins: &BTreeSet<String>,
     ) -> BTreeMap<String, String> {
         use brewery_worker::qsa::{JOB, probe_receipt};
         let mut probes = JoinSet::new();
         for (index, host) in hosts.iter().chain(&enrolled).enumerate() {
             let enrolled_host = index >= hosts.len();
-            if !enrolled_host && host.capabilities.get(JOB) != Some(&true) {
+            let opted_in = if enrolled_host {
+                enrolled_opt_ins.contains(&host.id)
+            } else {
+                host.capabilities.get(JOB) == Some(&true)
+            };
+            if !opted_in {
                 continue;
             }
             let config = if enrolled_host {
@@ -149,12 +161,23 @@ impl Dispatcher {
                 if job.kind == brewery_worker::hgn_checks::JOB {
                     return crate::scratch::hgn_checks::wire(job, envelope);
                 }
-                if job.dispatch_resources.is_empty() && !job.scratch_job {
+                if job.dispatch_resources.is_empty()
+                    && !job.scratch_job
+                    && envelope.qsa_teacher_sha256.is_none()
+                {
                     Ok(serde_json::to_vec(envelope)?)
                 } else {
                     let mut wire = serde_json::to_value(envelope)?;
                     wire.as_object_mut().unwrap().remove("scratch_pins");
                     wire.as_object_mut().unwrap().remove("heretic_runs");
+                    if let Some(pin) = wire.as_object_mut().unwrap().remove("qsa_teacher_sha256") {
+                        if job.kind != brewery_worker::qsa::JOB || envelope.inputs.is_empty() {
+                            return Err(
+                                "QSA teacher attestation is not bound to a training input".into()
+                            );
+                        }
+                        wire["inputs"][0][brewery_worker::qsa::TEACHER_PIN] = pin;
+                    }
                     if !job.dispatch_resources.is_empty() {
                         wire["resources"] = serde_json::to_value(job.dispatch_resources)?;
                     }

@@ -31,7 +31,12 @@ if sys.argv[1] == "stat":
     sys.exit(0)
 
 if sys.argv[1] == "qsa-probe":
+    with (root / "qsa-probe-calls").open("a") as f:
+        print(sys.argv[2], file=f)
     if (root / "qsa-runtime-ready").exists():
+        if sys.argv[2] in {"qsa-picked", "qsa-skipped"}:
+            config = json.loads(Path(os.environ["BREWERY_DISPATCH_CONFIG"]).read_text())
+            assert config["hosts"][sys.argv[2]]["remote_worker"].startswith("/home/brewery/")
         print('{"schema":"brewery.qsa-probe.v1","ready":true}')
         sys.exit(0)
     sys.exit(1)
@@ -379,6 +384,10 @@ else:
         ]
         for i in (1, 2):
             inputs[i]["sha256"] = files[i][0]["sha256"]
+        if (root / "qsa-record-pin").exists():
+            (root / f"{job_id}.qsa-pin").write_text(
+                json.dumps(source.get("qsa_teacher_sha256"))
+            )
         base = f"/worker/jobs/{job_id}/work/qsa"
         score = dict(capture=None, kl=0.05, queries=16 * 5, capture_queries=0,
                      capture_unavailable_reason="No held-out query has more fully observed blocks than the capture budget.")

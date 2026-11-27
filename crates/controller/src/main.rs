@@ -44,7 +44,7 @@ use dispatch::Dispatcher;
 use domain::Host;
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     net::SocketAddr,
     path::PathBuf,
@@ -139,6 +139,7 @@ async fn main() -> Result<(), Error> {
         .map(load_hosts)
         .transpose()?
         .unwrap_or_default();
+    let qsa_ssh_hosts = qsa_ssh_opt_ins(config_value.as_ref())?;
     let dist = env_path("BREWERY_WEB_DIST", "web/dist");
     let store = Store::open(&data)?;
     let local_edit = Arc::new(
@@ -161,7 +162,7 @@ async fn main() -> Result<(), Error> {
         poll: Duration::from_millis(env_num("BREWERY_POLL_MS", 1000)?.max(25)),
     };
     let qsa_managed_hosts = dispatcher
-        .probe_qsa_hosts(&mut hosts, ssh_hosts.defined_hosts()?)
+        .probe_qsa_hosts(&mut hosts, ssh_hosts.defined_hosts()?, &qsa_ssh_hosts)
         .await;
     let admin = admin::Admin::from_env(&data, &hosts, config.as_deref(), &dispatcher.command)?;
     let mut hf_tokens = hf_tokens::Store::from_config(config_value.as_ref(), &dist);
@@ -249,4 +250,23 @@ fn load_hosts(config: &Value) -> Result<Vec<Host>, Error> {
             Ok(Host::from_config(id, entry)?)
         })
         .collect()
+}
+
+fn qsa_ssh_opt_ins(config: Option<&Value>) -> Result<BTreeSet<String>, Error> {
+    let mut ids = BTreeSet::new();
+    if let Some(entries) = config.and_then(|value| value.get("qsa_ssh_hosts")) {
+        let entries = entries
+            .as_array()
+            .ok_or("qsa_ssh_hosts must be an array of enrolled SSH host IDs")?;
+        for entry in entries {
+            let id = entry
+                .as_str()
+                .filter(|id| *id != "auto" && infra_hosts::id_valid(id))
+                .ok_or("invalid enrolled SSH host ID in qsa_ssh_hosts")?;
+            if !ids.insert(id.to_owned()) {
+                return Err("duplicate enrolled SSH host ID in qsa_ssh_hosts".into());
+            }
+        }
+    }
+    Ok(ids)
 }

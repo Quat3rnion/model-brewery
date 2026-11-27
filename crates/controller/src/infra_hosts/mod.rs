@@ -433,7 +433,7 @@ pub(crate) fn same_hostname(left: &str, right: &str) -> bool {
     }
 }
 
-fn id_valid(id: &str) -> bool {
+pub(super) fn id_valid(id: &str) -> bool {
     id.len() <= 64
         && id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
         && id

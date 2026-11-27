@@ -1,6 +1,50 @@
 use super::*;
 
 #[test]
+fn qsa_persists_verified_teacher_digest_and_rejects_inconsistent_result() {
+    let mut fx = Fixture::new();
+    let mut config: Value =
+        serde_json::from_str(&fs::read_to_string(fx.path("dispatch.json")).unwrap()).unwrap();
+    config["hosts"]["alpha"]["capabilities"] = json!({"qsa_train":true,"hf_download":true});
+    fs::write(fx.path("dispatch.json"), config.to_string()).unwrap();
+    for marker in ["qsa-runtime-ready", "qsa-record-pin"] {
+        fs::write(fx.path(marker), "").unwrap();
+    }
+    fx.launch();
+    // The downloaded snapshot's accepted manifest fingerprint is 'a' * 64
+    // in this fixture, whereas the structurally consistent trainer receipt
+    // describes different bytes.
+    let download = fx.enqueue(json!({
+        "kind":"hf_download","host":"alpha","options":{"repo_id":"example/teacher"}
+    }));
+    let download = fx.await_job(&download, |row| row["state"] == "succeeded");
+    let teacher = &download["result"]["library_model_id"];
+    let pinned_sha = &download["result"]["artifact"]["sha256"];
+    let train = fx.register("alpha", "qsa-corpus", "/models/train.txt");
+    let eval = fx.register("alpha", "qsa-corpus", "/models/eval.txt");
+    let request = json!({
+        "kind":"qsa_train","input_ids":[teacher, train, eval],
+        "options":{"steps":2,"seq_len":32,"seed":42,"lr":0.001}
+    });
+    let mut override_request = request.clone();
+    override_request["options"]["qsa_teacher_sha256"] = pinned_sha.clone();
+    fx.json("POST", "/api/jobs", Some(override_request), 400);
+    let id = fx.enqueue(request);
+    let row = fx.await_job(&id, |row| {
+        matches!(row["state"].as_str(), Some("failed" | "succeeded"))
+    });
+    let observed: Value =
+        serde_json::from_str(&fs::read_to_string(fx.path(&format!("{id}.qsa-pin"))).unwrap())
+            .unwrap();
+    assert_eq!(
+        observed, *pinned_sha,
+        "the queued teacher attestation did not reach dispatch"
+    );
+    assert_eq!(row["state"], "failed", "{row}");
+    assert!(row.get("result").is_none());
+}
+
+#[test]
 fn qsa_receipt_requires_feasible_heldout_query_counts() {
     let mut fx = Fixture::new();
     let mut config: Value =

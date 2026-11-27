@@ -2202,14 +2202,8 @@ impl Worker {
                 "EXL3 source SHA-256 does not match the selected fingerprint"
             );
         }
-        if qsa_job
-            && index == 0
-            && let Some(attested) = original.extra.get("sha256").and_then(Value::as_str)
-        {
-            ensure!(
-                attested == bundle.digest,
-                "QSA teacher checksum does not match its Library receipt"
-            );
+        if qsa_job && index == 0 {
+            qsa::check_teacher_digest(&original, &bundle.digest)?;
         }
         if qsa_job && index != 0 {
             ensure!(
@@ -2246,6 +2240,8 @@ impl Worker {
         }
         if let Some(f) = bundle.files.iter().find(|f| f.path == bundle.entry) {
             input.extra.insert("sha256".into(), json!(f.sha256));
+        } else if qsa_job && index == 0 {
+            input.extra.insert("sha256".into(), json!(bundle.digest));
         }
         let job = r.job.as_ref().unwrap();
         if job.kind == trace::JOB {

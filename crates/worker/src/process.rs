@@ -1344,6 +1344,12 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
     }
     if job.kind == qsa::JOB {
         qsa::check_receipt(&qsa::Spec::parse(&job.options)?, &job.inputs[0].host, &value)?;
+        qsa::check_teacher_digest(
+            &job.inputs[0],
+            value["teacher"]["sha256"]
+                .as_str()
+                .context("QSA teacher digest missing")?,
+        )?;
         for (index, input) in job.inputs.iter().enumerate() {
             let receipt = &value["inputs"][index];
             ensure!(

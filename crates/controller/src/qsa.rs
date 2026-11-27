@@ -33,8 +33,8 @@ pub fn verified_artifact(job: &Job, envelope: &Envelope, result: &Value) -> Resu
     if Path::new(path).parent() != Path::new(metrics).parent() {
         return Err(INVALID.into());
     }
-    if envelope.inputs[0]
-        .sha256
+    if envelope
+        .qsa_teacher_sha256
         .as_deref()
         .is_some_and(|expected| expected != teacher_sha256)
     {

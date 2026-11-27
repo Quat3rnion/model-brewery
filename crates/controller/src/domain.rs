@@ -359,6 +359,10 @@ pub struct Envelope {
     pub scratch_pins: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heretic_runs: Option<std::path::PathBuf>,
+    // Pin a previously verified HF publication without forwarding unrelated
+    // Library metadata or letting job options supply the pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qsa_teacher_sha256: Option<String>,
 }
 
 fn serialize_worker_inputs<S: serde::Serializer>(
@@ -1466,6 +1470,11 @@ impl NewJob {
         } else {
             self.kind.clone()
         };
+        let qsa_teacher_sha256 = if self.kind == brewery_worker::qsa::JOB {
+            inputs.first().and_then(|input| input.sha256.clone())
+        } else {
+            None
+        };
         let envelope = Envelope {
             kind: envelope_kind,
             inputs,
@@ -1473,6 +1482,7 @@ impl NewJob {
             prompt,
             scratch_pins: Default::default(),
             heretic_runs: None,
+            qsa_teacher_sha256,
         };
         let requested_host = (host == "auto").then(|| host.clone());
         let job = Job {

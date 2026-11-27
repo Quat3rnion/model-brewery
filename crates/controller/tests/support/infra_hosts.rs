@@ -367,6 +367,80 @@ fn definition_edits_are_local_durable_and_revision_guarded() {
 }
 
 #[test]
+fn qsa_probes_only_explicitly_selected_enrolled_hosts() {
+    let mut app = Fixture::new();
+    let helper = app.path("provision");
+    fs::write(&helper, HELPER).unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    let identity = app.path("default-client");
+    generate_identity(&identity);
+    let env = [
+        ("BREWERY_SSH_PROVISION", helper),
+        ("BREWERY_PROVISION_IDENTITY", identity),
+    ];
+    app.launch_with(&env);
+    for id in ["qsa-picked", "qsa-skipped"] {
+        app.json(
+            "POST",
+            ROUTE,
+            Some(json!({
+                "id":id,"name":id,"host":format!("{id}.invalid"),"user":"brewery","port":2222,
+                "fingerprint":"SHA256:ZkAslGjFiUHdGf/WUL8rQvkib4PTvQatUV0OUQSncCA"
+            })),
+            201,
+        );
+        let action = format!("{ROUTE}/{id}/action");
+        app.json(
+            "POST",
+            &action,
+            Some(json!({"revision":1,"action":"test"})),
+            200,
+        );
+        let plan = app.json(
+            "POST",
+            &action,
+            Some(json!({"revision":2,"action":"plan"})),
+            200,
+        );
+        app.json(
+            "POST",
+            &action,
+            Some(json!({
+                "revision":3,"action":"install","confirmation":plan["confirmation"]
+            })),
+            200,
+        );
+    }
+    app.stop();
+    fs::write(app.path("qsa-runtime-ready"), "").unwrap();
+    let calls = app.path("qsa-probe-calls");
+    app.launch_with(&env);
+    assert!(
+        !calls.exists(),
+        "QSA startup contacted an unselected enrolled worker"
+    );
+    app.stop();
+
+    let file = app.path("dispatch.json");
+    let mut config: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    config["qsa_ssh_hosts"] = json!(["qsa-picked"]);
+    fs::write(&file, config.to_string()).unwrap();
+    app.launch_with(&env);
+    assert_eq!(fs::read_to_string(&calls).unwrap(), "qsa-picked\n");
+    let state = app.json("GET", "/api/state", None, 200);
+    for (id, ready) in [("qsa-picked", true), ("qsa-skipped", false)] {
+        let worker = state["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|host| host["id"] == id)
+            .unwrap();
+        assert_eq!(worker["capabilities"]["qsa_train"], ready);
+    }
+    assert_eq!(fs::read_to_string(&calls).unwrap(), "qsa-picked\n");
+}
+
+#[test]
 fn provisioning_requires_verified_key_confirmed_plan_and_busy_checks() {
     let mut app = Fixture::new();
     let helper = app.path("provision");
