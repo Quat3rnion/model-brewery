@@ -5,6 +5,9 @@ Reference: kuraneko1/qsa-indexer-forge, see REFERENCE_REVISION.
 The Transformers decoder retains its original Q/K projections, GQA, output
 gating and GDN layers. Only its full-attention backend is substituted so the
 trainer can consume the same causal Q/K that the frozen forward pass uses.
+
+The held-out corpus must not share any exact packed token sequence with the
+training corpus. This does not detect partial, shifted, or fuzzy matches.
 """
 
 import argparse
@@ -16,6 +19,7 @@ import math
 import os
 from pathlib import Path
 import stat
+import struct
 import sys
 
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -26,11 +30,52 @@ REFERENCE_REVISION = "9eb7192828ebc6234a892d718fc775b3df648596"
 TEACHER = "dense_causal_qwen3_5"
 BLOCK, HEADS, WIDTH, ROPE = 4, 4, 128, 64
 ATTENTION = "brewery_qsa_dense"
+MAX_HELDOUT_EXAMPLE_HASHES = 250_000
 
 
 def digest(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def regular_member(path):
+    try:
+        return stat.S_ISREG(path.lstat().st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate object key in teacher SafeTensors index")
+        result[key] = value
+    return result
+
+
+def check_teacher_weights(source):
+    mono = source / "model.safetensors"
+    index = source / "model.safetensors.index.json"
+    selected = [path for path in (mono, index) if os.path.lexists(path)]
+    if len(selected) != 1 or not regular_member(selected[0]):
+        raise ValueError("Teacher must supply one regular model.safetensors or model.safetensors.index.json")
+    if selected[0] == mono:
+        return
+    with index.open(encoding="utf-8") as stream:
+        manifest = json.load(stream, object_pairs_hook=unique_json_object)
+    weight_map = manifest.get("weight_map") if isinstance(manifest, dict) else None
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise ValueError("Teacher SafeTensors index must contain a nonempty weight_map")
+    checked = set()
+    for name in weight_map.values():
+        if (not isinstance(name, str) or not name.endswith(".safetensors")
+                or any(ch in name for ch in ("/", "\\", "\0"))):
+            raise ValueError("Teacher SafeTensors shard is not a regular local member")
+        if name not in checked:
+            if not regular_member(source / name):
+                raise ValueError("Teacher SafeTensors shard is not a regular local member")
+            checked.add(name)
 
 
 def arguments():
@@ -68,6 +113,7 @@ def main():
     if not args.probe:
         if not args.source.is_dir():
             raise ValueError("--source must be a local Hugging Face directory")
+        check_teacher_weights(args.source)
         source_config_hash = digest(args.source / "config.json")
         train_hash, eval_hash = digest(args.train_data), digest(args.eval_data)
         if train_hash == eval_hash:
@@ -89,6 +135,13 @@ def main():
     if args.probe:
         probe(torch, F)
         return
+
+    tokenizer = AutoTokenizer.from_pretrained(args.source, local_files_only=True, trust_remote_code=False)
+
+    def chunks(path):
+        return corpus(tokenizer, path, args.seq_len)
+
+    reject_packed_overlap(chunks(args.train_data), chunks(args.eval_data))
 
     torch.manual_seed(args.seed)
     cpu = args.device == "cpu"
@@ -113,7 +166,6 @@ def main():
         if sum(gpu_capacity.values()) < 50 * 1024**3:
             raise RuntimeError("Not enough free GPU memory for the BF16 27B checkpoint and training")
         load = {"device_map": "auto", "max_memory": {**gpu_capacity, "cpu": 0}, "dtype": torch.bfloat16}
-    tokenizer = AutoTokenizer.from_pretrained(args.source, local_files_only=True, trust_remote_code=False)
     model, loading = Qwen3_5ForConditionalGeneration.from_pretrained(
         args.source, config=config, local_files_only=True, use_safetensors=True, attn_implementation="sdpa",
         output_loading_info=True, use_kernels=False, **load,
@@ -147,9 +199,6 @@ def main():
 
     def run(ids, training):
         return attention_backend.run(text, ids, training)
-
-    def chunks(path):
-        return corpus(tokenizer, path, args.seq_len)
 
     before = evaluate(run, chunks(args.eval_data))
     train_iterator = iter(chunks(args.train_data))
@@ -254,6 +303,23 @@ def corpus(tokenizer, path, length):
                     ids = []
     if len(ids) >= 2 * BLOCK:
         yield ids
+
+
+def reject_packed_overlap(train, heldout):
+    """Keep only fixed-size held-out identities, and stream all training batches."""
+    def token_identity(ids):
+        return hashlib.sha256(struct.pack(f"<{len(ids)}I", *ids)).digest()
+
+    identities = set()
+    for ids in heldout:
+        identities.add(token_identity(ids))
+        if len(identities) > MAX_HELDOUT_EXAMPLE_HASHES:
+            raise ValueError(f"Held-out corpus exceeds {MAX_HELDOUT_EXAMPLE_HASHES} unique packed token sequences")
+    if not identities:
+        raise ValueError("Held-out corpus has fewer than eight tokens")
+    for ids in train:
+        if token_identity(ids) in identities:
+            raise ValueError("The training and held-out corpora share a packed token sequence")
 
 
 @dataclass

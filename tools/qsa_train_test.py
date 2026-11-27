@@ -46,7 +46,7 @@ class OfflineQsaTrainingTest(unittest.TestCase):
                 },
             )
             torch.manual_seed(42)
-            Qwen3_5ForConditionalGeneration(config).save_pretrained(teacher)
+            Qwen3_5ForConditionalGeneration(config).save_pretrained(teacher, max_shard_size="64KB")
             digests = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in teacher.iterdir()}
             train, heldout, output = root / "train.txt", root / "heldout.txt", root / "output"
             train.write_text("a a a a b b b b c c c c d d d d\n", encoding="utf-8")
@@ -105,6 +105,40 @@ class OfflineQsaTrainingTest(unittest.TestCase):
                 self.assertIn("capture_unavailable_reason", other[phase])
                 self.assertEqual(other[phase]["queries"], metrics[phase]["queries"])
                 self.assertAlmostEqual(other[phase]["kl"], metrics[phase]["kl"], places=5)
+
+            train_line = train.read_text(encoding="utf-8").rstrip("\n")
+            eval_line = heldout.read_text(encoding="utf-8").rstrip("\n")
+            for name, train_bytes, eval_bytes in (
+                ("reserialized", f"{train_line}\n", f"\r\n{train_line}\r\n \r\n"),
+                # Share only the second of two full batches.
+                ("shared-full-batch", f"{train_line} {eval_line}\n",
+                 f"d {train_line.split(' ', 1)[1]} {eval_line}\n"),
+            ):
+                with self.subTest(name=name):
+                    rejected = root / name
+                    train.write_bytes(train_bytes.encode("utf-8"))
+                    heldout.write_bytes(eval_bytes.encode("utf-8"))
+                    args[args.index("--output-dir") + 1] = str(rejected)
+                    result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=40)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("share a packed token sequence", result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertFalse((rejected / "metrics.json").exists())
+                    self.assertFalse((rejected / "qsa-indexers.safetensors").exists())
+
+            train.write_text(f"{train_line}\n", encoding="utf-8")
+            heldout.write_text(f"{eval_line}\n", encoding="utf-8")
+            shard_index = teacher / "model.safetensors.index.json"
+            manifest = json.loads(shard_index.read_text())
+            first_tensor = next(iter(manifest["weight_map"]))
+            manifest["weight_map"][first_tensor] = "missing.safetensors"
+            shard_index.write_text(json.dumps(manifest))
+            rejected = root / "missing-shard"
+            args[args.index("--output-dir") + 1] = str(rejected)
+            result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=40)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Teacher SafeTensors shard is not a regular local member", result.stderr)
+            self.assertFalse((rejected / "metrics.json").exists())
 
 
 if __name__ == "__main__":

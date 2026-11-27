@@ -12,8 +12,9 @@ The workbench does these tasks:
   the bf16-to-hgn converter.
 - Verify the output, generate text, and score the pinned GSM8K protocol.
 - Move verified model bundles between hosts.
+- Train QSA indexers from a local Qwen3.8-27B checkpoint on a configured GPU worker.
 
-HGN tracing, dataset preparation, and fine-tuning are not in v1.
+HGN tracing, dataset preparation, and base-model fine-tuning are not in v1.
 
 > **Release status: not qualified.** The workbench runs, but native trace parity,
 > full-size conversion, and model quality have not passed the release gates.
@@ -1174,6 +1175,90 @@ enter an absolute path. The worker checks it when a job uses it.
 6. Read the result. `GET /api/jobs/{id}` returns the full result and the
    controller event log.
 
+### QSA indexer training
+
+This optional offline job trains new QSA indexer weights from a frozen local
+Qwen3.8-27B teacher. It does not change the teacher weights.
+
+Use a regular GPU worker with direct source roots. Install its worker and
+engine from the same release as the controller. Keep the Python environment,
+trainer, and `resource-queue` outside the worker `root` and `source_roots`.
+Configure the worker:
+
+```json
+{
+  "qsa_training": {
+    "python": "/absolute/venv/bin/python",
+    "trainer": "/absolute/release/bin/qsa_train.py",
+    "gpu_queue": "/absolute/resource-queue"
+  }
+}
+```
+
+For an explicit dispatch host, set `capabilities.qsa_train` to `true`. The
+controller probes the configured runtime at startup and disables this
+capability if the probe fails. The probe checks small GPU operations. It does
+not load the teacher or test its memory fit.
+
+Install Python 3.11 or later and a CUDA or ROCm PyTorch build, version 2.6 or
+later. Do not use a CPU-only PyTorch build. Install the other packages from
+`tools/qsa_train_requirements.txt`: `transformers==5.22.1`,
+`accelerate==1.16.0`, `safetensors==0.8.0`, and `pillow==13.0.0`. The engine
+sets `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, and
+`HF_DATASETS_OFFLINE=1`. The job does not download the teacher, corpora, or
+packages. Follow
+[INSTALL.md](INSTALL.md#stage-the-optional-qsa-trainer-on-a-gpu-worker) to
+stage the runtime.
+
+Stage the full local SafeTensors snapshot `Qwen/Qwen3.8-27B` at commit
+`1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0`. Register its directory as `hf`.
+The worker binds the resolved files by their full manifest digest. The
+GPU job enforces the Qwen3.8-27B text architecture. The result binds
+`config.json` by SHA-256. The code does not check the Hugging Face revision
+string.
+
+Use separate regular UTF-8 text files for training and held-out evaluation.
+Put one sample on each nonblank line. The trainer tokenizes each line as-is
+and adds an EOS token. Register each file as `qsa-corpus` on the teacher's
+worker. Keep each file at or below 64 MiB. The files must have different
+bytes. Keep the full teacher on the GPUs. The trainer needs at least 50 GiB
+of aggregate free GPU memory after a 3 GiB reserve on each GPU. CPU and disk
+offload are not supported.
+
+Submit `POST /api/jobs` with the teacher, training, and held-out IDs in this
+order. Set all four required options. Omit `host` to use the input host, or
+set it to that same worker. Do not send a prompt.
+
+```json
+{
+  "kind": "qsa_train",
+  "input_ids": ["<teacher-id>", "<train-id>", "<held-out-id>"],
+  "options": {"steps": 100, "seq_len": 4096, "seed": 42, "lr": 0.001}
+}
+```
+
+`steps` must be from 1 to 10000. `seq_len` must be from 8 to 16384 and must
+not exceed the teacher context length. `seed` must be from 0 to 4294967295.
+`lr` must be greater than 0 and at most 1. All inputs must use the same
+worker. The worker does not transfer them.
+
+The trainer writes `qsa-indexers.safetensors` and `metrics.json`. After the
+worker verifies both files, the controller registers a Library model of kind
+`qsa-indexer` and returns its ID as `library_model_id`. This kind contains
+indexer weights only. It is not an inference model and is not accepted by
+`convert` or `generate`.
+
+Metrics report held-out KL and competitive-query capture. The capture budget
+is fixed at 2048 tokens. A packed held-out sequence needs at least 2052
+tokens to produce one competitive query. If `capture_queries` is zero,
+`capture` is `null`; no capture measurement exists. This is not a capture
+score of zero.
+
+The regression test uses a tiny CPU Qwen fixture. No Qwen3.8-27B GPU run has
+been completed. A `passed` result validates the job receipt and files; it
+does not prove application support, model quality, speed, or release
+qualification.
+
 For jobs that the workbench can submit, open the job's view and enter the
 inputs again. To repeat a failed `hf_download` on a named remote worker,
 submit it through `POST /api/jobs` with the same `host`. The Library form
@@ -1644,13 +1729,14 @@ pairing remain pending.
 ### Job kinds
 
 `transfer`, `transfer_preview`, `cache_cleanup`, `compare`, `inspect`,
-`plan`, `convert`, `verify`, `generate`, `evaluate`, `baseline`, `benchmark`.
+`plan`, `convert`, `verify`, `generate`, `evaluate`, `baseline`, `benchmark`,
+`qsa_train`.
 
 ### Model kinds
 
 `gguf`, `hf` (alias `bf16-checkpoint`), `hgn`, `brewery-bundle`, `hgn-v2`,
 `ht43`, `gsm8k-baseline`, `gsm8k-evaluation`, `gsm8k-predictions`, `assets`, `imatrix`, `ngram`,
-`vision`, `mtp`.
+`vision`, `mtp`, `qsa-corpus`, `qsa-indexer`.
 
 ### Job rules
 
