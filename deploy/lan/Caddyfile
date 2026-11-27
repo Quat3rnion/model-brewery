@@ -38,10 +38,6 @@ https://:8443 {
 		respond @bad_origin 403
 		respond @bad_fetch_site 403
 		respond @hop_by_hop_signal 403
-		basic_auth bcrypt "Model Brewery" {
-			import basic-auth.caddy
-		}
-
 		# The private relay identifies the current controller's loopback port.
 		# Capture it once so Host and Origin agree even across controller restarts.
 		vars controller_port {file.{$BREWERY_UPSTREAM_SOCKET}.port}

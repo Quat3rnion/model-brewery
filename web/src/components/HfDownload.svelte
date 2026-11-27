@@ -1,14 +1,23 @@
 <script lang="ts">
   import { brewery } from '../lib/store.svelte';
   import { Submitter } from '../lib/submit.svelte';
+  import { route } from '../lib/route.svelte';
+  import SubmitStatus from './SubmitStatus.svelte';
+  import { unsavedChanges } from '../lib/unsaved-changes.svelte';
+  import { hostName } from '../lib/format';
   import Submit from './Submit.svelte';
+  import type { NewJob } from '../lib/types';
 
-  const submitter = new Submitter();
-  const available = $derived(brewery.state?.hosts.some((h) => h.id === 'backend-hf' && h.capabilities?.hf_download === true));
+  const submitter = new Submitter('library.hf-download');
+  const hosts = $derived(brewery.state?.hosts ?? []);
+  const target = $derived(hosts.find((h) => h.id === 'backend-hf'));
   let repo = $state('');
   let revision = $state('');
   let scope = $state('file');
   let filename = $state('');
+  const draft = () => JSON.stringify({ repo, revision, scope, filename });
+  let savedDraft = $state(draft());
+  unsavedChanges(() => draft() !== savedDraft);
   const safePart = (s: string) => /^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(s) && !s.includes('..');
   const blockers = $derived.by(() => {
     const errors: string[] = [];
@@ -17,16 +26,23 @@
     if (revision.trim() && !revision.trim().split('/').every(safePart)) errors.push('Enter a branch, tag or commit, not a URL.');
     if (scope === 'file' && (!filename.trim().split('/').every(safePart) || !/\.(gguf|safetensors)$/i.test(filename.trim())))
       errors.push('Enter the exact .gguf or .safetensors filename from the repository.');
-    if (!available) errors.push('The built-in downloader is unavailable.');
+    if (target?.capabilities?.hf_download !== true || target.scheduling_paused)
+      errors.push(`Downloads are not available on ${hostName(hosts, 'backend-hf')}.`);
     return errors;
   });
-  async function start() {
+  const request = $derived<NewJob>({
+    kind: 'hf_download', input_ids: [],
+    options: { repo_id: repo.trim(), revision: revision.trim(), filename: scope === 'file' ? filename.trim() : undefined },
+  });
+  async function start(event: MouseEvent) {
     if (submitter.busy || blockers.length) return;
-    const job = await submitter.submit({
-      kind: 'hf_download', input_ids: [],
-      options: { repo_id: repo.trim(), revision: revision.trim(), filename: scope === 'file' ? filename.trim() : undefined },
-    });
-    if (job) location.hash = `#/jobs/${encodeURIComponent(job.id)}`;
+    const visit = route.capture();
+    const submitted = draft();
+    const job = await submitter.submit(request, event);
+    if (job && visit.current()) {
+      savedDraft = submitted;
+      if (!submitter.replayed && visit.canPresent()) location.hash = `#/jobs/${encodeURIComponent(job.id)}`;
+    }
   }
 </script>
 
@@ -47,7 +63,7 @@
         <label for="hf-scope">Download scope</label>
         <select id="hf-scope" class="input" bind:value={scope}>
           <option value="file">One model file</option>
-          <option value="repo">Whole Hugging Face repository</option>
+          <option value="repo">Whole repository</option>
         </select>
       </div>
       {#if scope === 'file'}
@@ -58,9 +74,9 @@
         </div>
       {/if}
     </div>
-    <p class="hint">Track progress or cancel in Jobs. The Library entry appears after the download is verified.</p>
+    <p class="hint">Track progress or cancel in Jobs. The download service verifies the files before it adds the entry to Library.</p>
     <Submit {blockers} busy={submitter.busy} onclick={start}>Start download</Submit>
-    {#if submitter.error}<p class="note bad" role="alert">{submitter.error}</p>{/if}
+    <SubmitStatus s={submitter} />
   </div>
 </details>
 

@@ -1,0 +1,577 @@
+use super::*;
+
+const ACCEPT: &str = "Accept: application/json, text/event-stream\r\n";
+const VERSION: &str = "MCP-Protocol-Version: 2025-06-18\r\n";
+
+#[test]
+fn mcp_traces_hgn_v2_on_its_non_hy4_library_worker() {
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts": {
+            "frame-hy4-plan": {"local":true,"capabilities":{"hy4_plan":true,"trace":true}},
+            "frame-hgn-trace": {"local":true,"capabilities":{"trace":true}}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let contract = app.json("GET", "/api/openapi.json", None, 200);
+    assert_eq!(
+        contract["components"]["schemas"]["TraceJob"]["properties"]["input_ids"]["x-brewery-input-kinds"],
+        json!([["gguf", "hgn", "hgn-v2"]])
+    );
+    let path = "/models/checkpoint.hgn";
+    let original = app.register("frame-hy4-plan", "hgn-v2", path);
+    let model = app.register("frame-hgn-trace", "hgn-v2", path);
+    let mut args = json!({"idempotency_key":"hgn-v2-trace","input_ids":[model],"prompt":"one two",
+        "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":1}});
+    let reply = call(&app, "start_trace", args.clone());
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let queued = &reply["result"]["structuredContent"];
+    assert_eq!(queued["host"], "frame-hgn-trace");
+    let job = app.await_job(queued["id"].as_str().unwrap(), |job| {
+        job["state"] == "succeeded"
+    });
+    assert_eq!(job["result"]["envelope"]["inputs"][0]["kind"], "hgn-v2");
+
+    args["options"]["interventions"] =
+        json!([{"op":"zero","layer":0,"role":"l_out","positions":[0]}]);
+    args["idempotency_key"] = json!("hgn-v2-intervention");
+    let reply = call(&app, "start_trace", args.clone());
+    assert_eq!(
+        reply["result"]["structuredContent"]["status"], 400,
+        "{reply}"
+    );
+    assert!(
+        reply
+            .to_string()
+            .contains("HGN traces do not support interventions")
+    );
+
+    args["options"]
+        .as_object_mut()
+        .unwrap()
+        .remove("interventions");
+    args["input_ids"] = json!([original]);
+    args["idempotency_key"] = json!("hgn-v2-hy4");
+    let reply = call(&app, "start_trace", args.clone());
+    assert_eq!(
+        reply["result"]["structuredContent"]["status"], 409,
+        "{reply}"
+    );
+    assert!(
+        reply
+            .to_string()
+            .contains("Dedicated Hy4 worker does not support this operation")
+    );
+    args["host"] = json!("frame-hgn-trace");
+    args["idempotency_key"] = json!("hgn-v2-cross-host");
+    let reply = call(&app, "start_trace", args);
+    assert_eq!(
+        reply["result"]["structuredContent"]["status"], 400,
+        "{reply}"
+    );
+}
+
+#[test]
+fn mcp_screens_and_traces_a_verified_hgn_direction_without_edits() {
+    use brewery_worker::{behavior_direction::Behavior, trace};
+
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts": {
+            "alpha":{"local":true,"capabilities":{"trace":true,"behavior_direction":true}}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let model = app.register("alpha", "hgn-v2", "/models/screen.hgn");
+    let other = app.register("alpha", "hgn-v2", "/models/other.hgn");
+    let sha = "a".repeat(64);
+    let mut receipt = json!({
+        "kind":"behavior_direction","schema_version":2,"release_qualified":false,
+        "model_id":model,"model_sha256":sha,"behavior":"response_length","position":null,"last_k":3,
+        "contrast_sha256":Behavior::ResponseLength.contrast_sha256(),
+        "runtime":trace::HGN_RUNTIME, "runtime_sha256":"1ac8e30b17ccd7b96ff84f840c3c6d911cb2cbded57d6a5cfec86217c417aef7",
+        "executable_sha256":sha,"assets_sha256":{"sidecar":sha,"config":sha,"tokenizer":sha},
+        "fit":{"role":"l_out","train_pairs":12,"held_out_pairs":8,"selected_layer":1,
+             "layers":[{"layer":0,"norm":2.0,"unit_vector":[0.6,0.8],
+                        "held_out_margin":0.2,"held_out_cohens_d":0.4,"mean_residual_norm":1.0},
+                       {"layer":1,"norm":2.0,"unit_vector":[0.0,1.0],
+                        "held_out_margin":0.25,"held_out_cohens_d":0.5,"mean_residual_norm":1.0}]}
+    });
+    fs::write(app.path("direction-result.json"), receipt.to_string()).unwrap();
+    let dir = app.enqueue(
+        json!({"kind":"behavior_direction","input_ids":[model],"options":{
+            "behavior":"response_length","model_sha256":sha,"layers":[0,1],"last_k":3
+        }}),
+    );
+    app.await_job(&dir, |job| job["state"] == "succeeded");
+    receipt["last_k"] = json!(1);
+    receipt["runtime_sha256"] = json!(trace::HGN_RUNTIME_SHA256.trim_end());
+    fs::write(app.path("direction-result.json"), receipt.to_string()).unwrap();
+    let primary = app.enqueue(
+        json!({"kind":"behavior_direction","input_ids":[model],"options":{
+                "behavior":"response_length","model_sha256":sha,"layers":[0,1]
+        }}),
+    );
+    app.await_job(&primary, |job| job["state"] == "succeeded");
+    let args = json!({"id":model,"idempotency_key":"hgn-screen","sha256":sha,"direction_id":primary,"source_layer":1,
+        "seed":7,"targets":["residual","dense","experts","all"],"first_layer":0,"last_layer":1,
+        "alphas":[1,2],"second_source_layer":0,"last_k_direction_id":dir});
+    let mut invalid = args.clone();
+    invalid["id"] = json!(other);
+    let wrong = call(&app, "search_ablation", invalid);
+    assert_eq!(
+        wrong["result"]["structuredContent"]["status"], 400,
+        "{wrong}"
+    );
+    for (field, value) in [
+        ("alphas", json!([4.01])),
+        ("second_source_layer", json!(1)),
+        ("contrast_set_id", json!("unreviewed")),
+    ] {
+        let mut invalid = args.clone();
+        invalid.as_object_mut().unwrap().remove("id");
+        invalid.as_object_mut().unwrap().remove("idempotency_key");
+        invalid[field] = value;
+        app.json(
+            "POST",
+            &format!("/api/scratch/{model}/search_ablation"),
+            Some(invalid),
+            if field == "contrast_set_id" { 422 } else { 400 },
+        );
+    }
+    let reply = call(&app, "search_ablation", args);
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let screen_id = reply["result"]["structuredContent"]["id"].as_str().unwrap();
+    let job = app.await_job(screen_id, |job| job["state"] == "succeeded");
+    assert_eq!(job["host"], "alpha");
+    let wire = &job["result"]["envelope"];
+    assert_eq!(
+        wire["options"]["targets"],
+        json!(["residual", "dense", "experts", "all"])
+    );
+    assert_eq!(wire["options"]["vector"], json!([0.0, 1.0]));
+    assert_eq!(wire["options"]["second_vector"], json!([0.6_f32, 0.8_f32]));
+    assert_eq!(wire["options"]["last_k_variant"]["last_k"], 3);
+    assert!(job["options"].get("vector").is_none());
+    assert!(
+        app.json("GET", "/api/scratch", None, 200)
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let trace_args = json!({"idempotency_key":"hgn-edit-trace","input_ids":[model],"prompt":"one two","options":{
+        "layers":[0,1],"roles":["l_out"],"positions":[0],"top_k":0,
+        "hgn_projection":{"direction_id":dir,"source_layer":1,"target":"experts",
+            "first_layer":1,"last_layer":1,"alpha":2,"second_source_layer":0}
+    }});
+    let reply = call(&app, "start_trace", trace_args);
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let trace_id = reply["result"]["structuredContent"]["id"].as_str().unwrap();
+    let job = app.await_job(trace_id, |job| job["state"] == "succeeded");
+    let options = &job["result"]["envelope"]["options"];
+    assert_eq!(options["hgn_projection"]["target"], "experts");
+    assert_eq!(options["hgn_projection"]["vector"], json!([0.0, 1.0]));
+    assert_eq!(
+        options["hgn_projection"]["second_vector"],
+        json!([0.6_f32, 0.8_f32])
+    );
+    assert_eq!(options["hgn_projection"]["alpha"], 2.0);
+    assert_eq!(options["expected_model_sha256"], sha);
+    assert!(job["options"]["hgn_projection"].get("vector").is_none());
+}
+
+#[test]
+fn mcp_traces_a_verified_gguf_last_k_direction_with_scale() {
+    use brewery_worker::{behavior_direction::Behavior, trace};
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts": {
+            "alpha":{"local":true,"capabilities":{"trace":true,"behavior_direction":true}}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let model = app.register("alpha", "gguf", "/models/screen.gguf");
+    let sha = "a".repeat(64);
+    fs::write(app.path("direction-result.json"), json!({
+        "kind":"behavior_direction","schema_version":2,"release_qualified":false,
+        "model_id":model,"model_sha256":sha,"behavior":"slop","position":null,"last_k":3,
+        "contrast_sha256":Behavior::Slop.contrast_sha256(),
+        "lanternfish_commit":trace::COMMIT,"executable_sha256":trace::SHA256,
+        "fit":{"role":"l_out","train_pairs":12,"held_out_pairs":8,"selected_layer":1,
+            "layers":[{"layer":1,"norm":2.0,"unit_vector":[0.0,1.0],
+                       "held_out_margin":0.25,"held_out_cohens_d":0.5,"mean_residual_norm":1.0}]}
+    }).to_string()).unwrap();
+    let dir = app.enqueue(
+        json!({"kind":"behavior_direction","input_ids":[model],"options":{
+            "behavior":"slop","model_sha256":sha,"layers":[1],"last_k":3
+        }}),
+    );
+    app.await_job(&dir, |job| job["state"] == "succeeded");
+    let args = json!({"idempotency_key":"gguf-scaled-trace","input_ids":[model],"prompt":"one two","options":{
+        "layers":[1],"roles":["l_out"],"positions":[0],"top_k":0,
+        "gguf_projection":{"direction_id":dir,"source_layer":1,"layer":1,"positions":[0],"alpha":2}
+    }});
+    let reply = call(&app, "start_trace", args);
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let trace_id = reply["result"]["structuredContent"]["id"].as_str().unwrap();
+    let job = app.await_job(trace_id, |job| job["state"] == "succeeded");
+    let options = &job["result"]["envelope"]["options"];
+    assert_eq!(options["gguf_projection"]["vector"], json!([0.0, 1.0]));
+    assert_eq!(options["gguf_projection"]["alpha"], 2.0);
+    assert_eq!(options["gguf_projection"]["last_k"], 3);
+    assert_eq!(options["expected_model_sha256"], sha);
+    assert!(job["options"]["gguf_projection"].get("vector").is_none());
+}
+
+#[test]
+fn interp_benchmark_reads_the_versioned_report_without_driving_compute() {
+    let mut t = Fixture::new();
+    t.launch();
+    let report = t.json("GET", "/api/interp/benchmark", None, 200);
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["qualification"], "not release-qualified");
+    let circuit_rows = report["methods"]["x5"].as_array().unwrap();
+    for method in ["attribution_patching", "activation_patching"] {
+        let histogram = circuit_rows
+            .iter()
+            .find(|row| row["method"] == method && row["program"] == "histogram")
+            .unwrap();
+        assert_eq!(histogram["evaluation"], "recall_only");
+        assert_eq!(histogram["precision"], Value::Null);
+        assert_eq!(histogram["roc_auc"], Value::Null);
+    }
+    for method in ["x5", "w11"] {
+        for program in ["sort", "histogram"] {
+            assert!(
+                report["methods"][method]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["program"] == program)
+            );
+        }
+    }
+    let reply = call(&t, "interp_benchmark", json!({}));
+    assert_eq!(reply["result"]["structuredContent"], report);
+    assert_eq!(
+        call(&t, "interp_benchmark", json!({"program":"sort"}))["error"]["code"],
+        -32602
+    );
+    assert!(!t.path("launches").exists());
+}
+
+#[test]
+fn routing_atlas_pairs_matching_traces_over_rest_and_mcp() {
+    let mut t = Fixture::new();
+    fs::write(
+        t.path("dispatch.json"),
+        r#"{"hosts":{"alpha":{"local":true,"capabilities":{"trace":true}}}}"#,
+    )
+    .unwrap();
+    t.launch();
+    let model = t.register("alpha", "gguf", "/models/moe.gguf");
+    let run = |key: &str, prompt: &str, edited: bool| {
+        let mut args = json!({"idempotency_key":key,"input_ids":[model],"prompt":prompt,
+            "options":{"layers":[0],"positions":[0],"top_k":1,
+            "roles":["ffn_moe_logits","ffn_moe_topk","ffn_moe_route_weights","l_out"]}});
+        if edited {
+            args["options"]["interventions"] = json!([
+                {"layer":0,"role":"ffn_out","positions":[0],"op":"zero_expert","expert":0}
+            ]);
+        }
+        let result = call(&t, "start_trace", args);
+        assert_eq!(result["result"]["isError"], false, "{result}");
+        let id = result["result"]["structuredContent"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            call(&t, "get_job", json!({"id":id,"wait_ms":4000}))["result"]["structuredContent"]["state"],
+            "succeeded"
+        );
+        id
+    };
+    let baseline = run("routing-baseline", "one", false);
+    let edit = run("routing-edit", "one", true);
+    let mismatch = run("routing-wrong-source", "other", true);
+    let path = format!("/api/jobs/{baseline}/trace/routing-atlas?layer=0&start=0&end=1");
+    let data = t.json("GET", &path, None, 200);
+    assert_eq!(data["experts"][0]["load"], 1.);
+    assert_eq!(data["ablation"], Value::Null);
+    t.touch("routing-digest-mismatch");
+    t.json("GET", &format!("{path}&ablation_job_id={edit}"), None, 422);
+    fs::remove_file(t.path("routing-digest-mismatch")).unwrap();
+    t.json(
+        "GET",
+        &format!("{path}&ablation_job_id={mismatch}"),
+        None,
+        422,
+    );
+    let response = call(
+        &t,
+        "routing_atlas",
+        json!({
+            "id":baseline,"layer":0,"start":0,"end":1,"ablation_job_id":edit
+        }),
+    );
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let data = &response["result"]["structuredContent"];
+    assert_eq!(data["ablation"]["rows"][0]["residual_l2"], 1.);
+    assert_eq!(data["ablation"]["rows"][0]["top_token_changed"], true);
+}
+
+#[test]
+fn search_ablation_rejects_unbounded_budget_and_requires_a_scratch_parent() {
+    let mut t = Fixture::new();
+    t.launch();
+    let sha = "a".repeat(64);
+    let mut request = json!({
+        "sha256": sha, "direction_id":"fit", "assets_id":"assets", "seed":7,
+        "trial_budget":33, "max_children":1, "disk_budget_bytes":8589934592_u64,
+        "behavior_direction":{"prompt_sets":{"sycophancy":sha,"slop":sha,"response_length":sha}}
+    });
+    let (status, body) = t.request(
+        "POST",
+        "/api/scratch/missing/search_ablation",
+        Some(request.clone()),
+        "",
+    );
+    assert_eq!(status, 400, "{body}");
+    request["trial_budget"] = json!(6);
+    let (status, body) = t.request(
+        "POST",
+        "/api/scratch/missing/search_ablation",
+        Some(request.clone()),
+        "",
+    );
+    assert_eq!(status, 404, "{body}");
+    request["id"] = json!("00000000-0000-0000-0000-000000000001");
+    request["idempotency_key"] = json!("a5-test");
+    let reply = call(&t, "search_ablation", request);
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+}
+
+pub(super) fn call(t: &Fixture, name: &str, arguments: Value) -> Value {
+    let (status, body) = t.request(
+        "POST",
+        "/mcp",
+        Some(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":name,"arguments":arguments}})),
+        &format!("{ACCEPT}{VERSION}"),
+    );
+    assert_eq!(status, 200, "{name}: {body}");
+    serde_json::from_str(&body).unwrap()
+}
+
+#[test]
+fn mcp_queue_duplicate_requires_explicit_opt_out() {
+    let mut t = Fixture::new();
+    fs::write(
+        t.path("dispatch.json"),
+        r#"{"hosts":{"alpha":{"local":true,"capabilities":{"trace":true}}}}"#,
+    )
+    .unwrap();
+    t.touch("hold");
+    t.launch();
+    let model = t.register("alpha", "gguf", "/models/trace.gguf");
+    let mut args = json!({"idempotency_key":"trace-first","input_ids":[model],"prompt":"one two",
+        "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":3}});
+    let queue = |args: Value| {
+        let reply = call(&t, "start_trace", args);
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+        reply["result"]["structuredContent"].clone()
+    };
+    let original = queue(args.clone());
+    assert_eq!(original["kind"], "trace");
+    args["idempotency_key"] = json!("trace-match");
+    let duplicate = json!({"id":original["id"],"duplicate_of":true});
+    assert_eq!(queue(args.clone()), duplicate);
+
+    args["idempotency_key"] = json!("trace-false");
+    args["allow_duplicate"] = json!(false);
+    assert_eq!(queue(args.clone()), duplicate);
+    args["idempotency_key"] = json!("trace-repeat");
+    args["allow_duplicate"] = json!(true);
+    let repeat = queue(args.clone());
+    assert_eq!(repeat["kind"], "trace");
+    assert_ne!(repeat["id"], original["id"]);
+    assert_eq!(queue(args.clone()), json!({"id":repeat["id"]}));
+    assert_eq!(
+        t.json("GET", "/api/state", None, 200)["jobs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    args["allow_duplicate"] = json!("true");
+    assert_eq!(call(&t, "start_trace", args)["error"]["code"], -32602);
+}
+
+#[test]
+fn mcp_stateless_transport_uses_workbench_guards() {
+    let mut t = Fixture::new();
+    t.launch();
+    let ping = json!({"jsonrpc":"2.0","method":"ping","id":"probe"});
+    let headers = format!(
+        "{ACCEPT}{VERSION}Origin: http://{}\r\nSec-Fetch-Site: same-origin\r\n",
+        t.addr.unwrap()
+    );
+    let (status, body) = t.request("POST", "/mcp", Some(ping.clone()), &headers);
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        json!({"jsonrpc":"2.0","id":"probe","result":{}})
+    );
+    for bad in [
+        "Origin: http://other.invalid\r\n",
+        "Origin: null\r\n",
+        "Host: other.invalid\r\n",
+        "Sec-Fetch-Site: cross-site\r\n",
+        "Sec-Fetch-Site: same-site\r\n",
+        "Sec-Fetch-Site: same-origin\r\nSec-Fetch-Site: none\r\n",
+    ] {
+        assert_eq!(
+            t.request(
+                "POST",
+                "/mcp",
+                Some(ping.clone()),
+                &format!("{ACCEPT}{bad}")
+            )
+            .0,
+            403,
+            "{bad}"
+        );
+        assert_eq!(t.request("GET", "/mcp", None, bad).0, 403, "{bad}");
+    }
+    assert_eq!(
+        t.request("GET", "/mcp", None, "Accept: text/event-stream\r\n")
+            .0,
+        405
+    );
+    assert_eq!(t.request("POST", "/mcp", None, ACCEPT).0, 415);
+    assert_eq!(
+        t.request("POST", "/mcp", Some(ping.clone()), "Accept: text/plain\r\n")
+            .0,
+        406
+    );
+    let bad_version = format!("{ACCEPT}MCP-Protocol-Version: 1900-01-01\r\n");
+    assert_eq!(t.request("POST", "/mcp", Some(ping), &bad_version).0, 400);
+    let notification = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+    assert_eq!(
+        t.request("POST", "/mcp", Some(notification), ACCEPT),
+        (202, String::new())
+    );
+    let (status, body) = t.request("POST", "/mcp", Some(json!([{}])), ACCEPT);
+    assert_eq!(status, 400);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["error"]["code"],
+        -32600
+    );
+}
+
+#[test]
+fn mcp_routes_trace_and_intervention_tools_without_allowing_route_selection() {
+    let mut t = Fixture::new();
+    fs::write(
+        t.path("dispatch.json"),
+        json!({
+            "hosts":{"alpha":{"local":true,"capabilities":{"trace":true}}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    t.launch();
+    let model = t.register("alpha", "gguf", "/models/trace.gguf");
+    let ok = |name, args| {
+        let reply = call(&t, name, args);
+        assert_eq!(reply["result"]["isError"], false, "{name}: {reply}");
+        reply["result"]["structuredContent"].clone()
+    };
+    let saved = ok(
+        "create_intervention",
+        json!({"idempotency_key":"mcp-steer","name":"Direction",
+        "model_id":model,"model_sha256":"a".repeat(64),
+        "interventions":[{"op":"add","layer":1,"role":"l_out","positions":[0],"vector":[1.,2.]}]}),
+    );
+    let second = ok(
+        "new_intervention_version",
+        json!({"id":saved["id"],"idempotency_key":"mcp-steer-2",
+        "interventions":[{"op":"zero","layer":0,"role":"l_out","positions":[0]}]}),
+    );
+    assert_eq!(second["version"], 2);
+    assert_eq!(
+        ok("list_interventions", json!({}))["interventions"][0]["latest_version"],
+        2
+    );
+    let first = json!({"id":saved["id"],"version":1});
+    assert_eq!(ok("get_intervention", first.clone()), saved);
+    let url = ok("export_control_vector", first);
+    let (status, gguf) = t.bytes("GET", url["url"].as_str().unwrap());
+    assert_eq!(status, 200);
+    assert!(gguf.starts_with(b"GGUF"));
+    let invalid = call(
+        &t,
+        "export_control_vector",
+        json!({"id":saved["id"],"version":2}),
+    );
+    assert_eq!(invalid["result"]["isError"], true, "{invalid}");
+    assert_eq!(invalid["result"]["structuredContent"]["status"], 400);
+
+    let mut start = json!({"idempotency_key":"mcp-trace","input_ids":[model],"prompt":"one two",
+        "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":3}});
+    start["kind"] = json!("convert");
+    assert_eq!(
+        call(&t, "start_trace", start.clone())["error"]["code"],
+        -32602
+    );
+    start.as_object_mut().unwrap().remove("kind");
+    let queued = ok("start_trace", start.clone());
+    assert_eq!(queued["kind"], "trace");
+    assert_eq!(ok("start_trace", start.clone())["id"], queued["id"]);
+    let wait = |id: &Value| ok("get_job", json!({"id":id,"wait_ms":4000}));
+    assert_eq!(wait(&queued["id"])["state"], "succeeded");
+    let manifest = json!({"id":queued["id"],"view":"manifest","prompt":0});
+    assert_eq!(ok("read_trace", manifest)["schema_version"], 1);
+    let lens = json!({"id":queued["id"],"view":"logit_lens","layer":0,"start":0,"end":1});
+    assert_eq!(ok("read_trace", lens)["rows"][0]["layer"], 0);
+    let logits = json!({"id":queued["id"],"view":"model_logits","start":0,"end":1});
+    assert_eq!(ok("read_trace", logits)["rows"][0]["top"][0]["token_id"], 1);
+    let mut slice = json!({"id":queued["id"],"view":"tensor","layer":0,"role":"l_out"});
+    let too_large = call(&t, "read_trace", slice.clone());
+    assert_eq!(too_large["result"]["isError"], true, "{too_large}");
+    assert_eq!(too_large["result"]["structuredContent"]["status"], 413);
+    slice["start"] = json!(0);
+    slice["end"] = json!(1);
+    assert_eq!(
+        ok("read_trace", slice.clone())["rows"][0]["data_base64"],
+        "AACAPw=="
+    );
+    slice["role"] = json!("l_out&prompt=1");
+    assert_eq!(call(&t, "read_trace", slice)["error"]["code"], -32602);
+    assert_eq!(
+        call(&t, "get_job", json!({"id":"../admin/state"}))["error"]["code"],
+        -32602
+    );
+
+    start["idempotency_key"] = json!("mcp-trace-edit");
+    start["options"]["interventions"] = second["interventions"].clone();
+    let edited = ok("start_trace", start);
+    assert_eq!(wait(&edited["id"])["state"], "succeeded");
+    let diff = ok(
+        "diff_traces",
+        json!({"a":queued["id"],"b":edited["id"],"layer":0,"start":0,"end":1}),
+    );
+    assert_eq!(diff["activations"][0]["l2"], 1.);
+    assert_eq!(diff["qualification"], "not release-qualified");
+    assert_eq!(t.launches().len(), 2);
+}

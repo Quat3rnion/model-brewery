@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { buildConversion, parseConversion, parseConversions, stageRows, isActiveConversion, ConversionSubmitter, STAGES } from './conversion';
+import { buildConversion, parseConversion, parseConversions, stageRows, isActiveConversion, newerConversion, STAGES } from './conversion';
+import { ConversionSubmitter } from './conversions.svelte';
+
 import type { ConvertForm } from './convert';
 import type { Model } from './types';
 
@@ -15,6 +17,15 @@ const form = (over: Partial<ConvertForm> = {}): ConvertForm => ({
 const wf = (over: Record<string, unknown> = {}) => ({
   id: 'c1', host: 'frame', state: 'running', stage: 'plan', job_ids: { inspect: 'j-i', plan: 'j-p' }, cancel_requested: false,
   created_at: 1, updated_at: 2, input_ids: ['src'], options: { profile: 'ht43' }, ...over,
+});
+
+it('never replaces newer conversion progress with a delayed match', () => {
+  const old = parseConversion(wf({ stage: 'inspect', updated_at: 10 }))!;
+  const active = parseConversion(wf({ stage: 'verify', updated_at: 11 }))!;
+  const done = parseConversion(wf({ state: 'succeeded', stage: 'verify', updated_at: 11 }))!;
+  expect(newerConversion(active, old)).toBe(active);
+  expect(newerConversion(done, { ...active, updatedAt: 11 })).toBe(done);
+  expect(newerConversion(active, done)).toBe(done);
 });
 
 describe('conversion request', () => {
@@ -68,14 +79,14 @@ describe('single submission', () => {
   it('sends exactly one POST per click even when clicked twice, and reuses the key on retry', async () => {
     const calls: { key: string; body: unknown }[] = [];
     let fail = true;
-    const s = new ConversionSubmitter(async (body, key) => {
+    const s = new ConversionSubmitter('convert.managed', async (body, key) => {
       calls.push({ key, body });
       await Promise.resolve();
       if (fail) {
         fail = false;
         throw new Error('network');
       }
-      return wf();
+      return { data: wf(), status: 201 };
     });
     const body = { input_ids: ['src'], options: { profile: 'ht43' } };
     const [a, b] = await Promise.all([s.submit(body), s.submit(body)]);
@@ -94,18 +105,18 @@ describe('single submission', () => {
 });
 
 describe('repeat start after success', () => {
-  it('an identical second Start replays the same key (no second workflow); a changed body gets a new key', async () => {
+  it('a second plain Start gets a fresh key even with the same accepted body', async () => {
     const keys: string[] = [];
-    const s = new ConversionSubmitter(async (_b, key) => {
+    const s = new ConversionSubmitter('convert.managed', async (_b, key) => {
       keys.push(key);
-      return wf();
+      return { data: wf(), status: 201 };
     });
     const body = { input_ids: ['src'], options: { profile: 'ht43' } };
     await s.submit(body);
-    await s.submit(body);
-    await s.submit({ ...body, options: { profile: 'v2' } });
-    expect(keys[1]).toBe(keys[0]);
-    expect(keys[2]).not.toBe(keys[0]);
+    expect((await s.submit(body))?.id).toBe('c1');
+    expect(s.replayed).toBe(false);
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).not.toBe(keys[0]);
   });
 });
 
@@ -118,6 +129,15 @@ describe('saved profile revision', () => {
   });
   it('rejects a malformed revision value', () => {
     expect(buildConversion(form({ profile: 'rev:xyz' }), models).problems.join()).toMatch(/revision/);
+  });
+  it('requires HF and CPU backends for a custom profile', () => {
+    const forced = buildConversion(form({ profile: `rev:${rev}`, q4cp_backend: 'hip' }), models);
+    const gguf = buildConversion(form({ profile: `rev:${rev}` }), [{ ...models[0], kind: 'gguf' }]);
+    expect(forced).toEqual({ body: null, problems: ['Select an HF source and CPU backends to use a custom profile.'] });
+    expect(gguf).toEqual(forced);
+  });
+  it('does not build a request for an unavailable registered checkpoint', () => {
+    expect(buildConversion(form(), [{ ...models[0], available: false }]).body).toBeNull();
   });
   it('workflow echoes profile identity', () => {
     const c = parseConversion(wf({ profile_revision: rev, profile_name: 'Fast attn', options: {} }))!;

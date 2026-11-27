@@ -38,6 +38,11 @@ pub(crate) fn read(path: &Path, command: &str, started_ms: u64) -> Option<Counte
         ("convert", "prepare_rotations_values") => (1, "prepare_rotations_values"),
         ("convert", "convert_passes_values") => (2, "convert_passes_values"),
         ("verify", "verify_payloads_values") => (1, "verify_payloads_values"),
+        (brewery_worker::scratch_eval::CHECKS, brewery_worker::scratch_eval::CHECKS)
+            if wire.total == 4 =>
+        {
+            (1, brewery_worker::scratch_eval::CHECKS)
+        }
         _ => return None,
     };
     (wire.unit == "items"

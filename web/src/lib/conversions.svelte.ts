@@ -3,7 +3,9 @@
 // reloads because it lives in the controller.
 
 import { api, errorText } from './api';
-import { ConversionSubmitter, isActiveConversion, parseConversions, type Conversion, type ConversionBody } from './conversion';
+import { isActiveConversion, newerConversion, parseConversion, parseConversions, type Conversion, type ConversionBody } from './conversion';
+import { Submission } from './submit.svelte';
+import { captureResultFocus } from './focus';
 
 const ACTIVE_MS = 2_000;
 const IDLE_MS = 10_000;
@@ -16,6 +18,7 @@ class Conversions {
   error = $state<string | null>(null);
   #timer: ReturnType<typeof setTimeout> | null = null;
   #users = 0;
+  #inflight: Promise<void> | null = null;
 
   /** Start polling while a view is mounted; returns the stop function. */
   watch(): () => void {
@@ -30,7 +33,12 @@ class Conversions {
     };
   }
 
-  async refresh() {
+  refresh(): Promise<void> {
+    this.#inflight ??= this.#load().finally(() => { this.#inflight = null; });
+    return this.#inflight;
+  }
+
+  async #load() {
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = null;
     try {
@@ -52,33 +60,55 @@ class Conversions {
   /** Merge a record returned by POST or cancel without waiting for the next poll. */
   upsert(c: Conversion) {
     const i = this.list.findIndex((x) => x.id === c.id);
-    this.list = i >= 0 ? this.list.map((x, j) => (j === i ? c : x)) : [c, ...this.list];
+    this.list = i >= 0 ? this.list.map((x, j) => (j === i ? newerConversion(x, c) : x)) : [c, ...this.list];
   }
 }
 
 export const conversions = new Conversions();
 
-/** Svelte-reactive wrapper of the single-submission logic. */
-export class ConversionStarter {
-  busy = $state(false);
-  error = $state<string | null>(null);
-  last = $state<Conversion | null>(null);
-  /** True when the last click replayed an earlier identical request instead of starting a new workflow. */
-  replayed = $state(false);
-  #inner = new ConversionSubmitter((body, key) => api.startConversion(body, key));
+type PostConversion = (body: ConversionBody, key: string, allowDuplicate?: boolean) => Promise<{ data: unknown; status: number }>;
 
-  async start(body: ConversionBody): Promise<Conversion | null> {
-    if (this.busy) return null;
-    this.busy = true;
-    this.error = null;
-    const c = await this.#inner.submit(body);
-    this.busy = false;
-    this.error = this.#inner.error;
+export class ConversionSubmitter extends Submission {
+  replayed = $state(false);
+  matched = $state(false);
+
+  constructor(private launcher: string, private post: PostConversion) { super(); }
+
+  async submit(body: ConversionBody, event?: MouseEvent, allowDuplicate = false): Promise<Conversion | null> {
+    const snapshot: ConversionBody = JSON.parse(JSON.stringify(body));
+    const result = await this.send(this.launcher, snapshot, async (request, key) => {
+      const { data, status } = await this.post(request, key, allowDuplicate);
+      const c = parseConversion(data);
+      if (!c?.id) throw new Error('The controller answered without a conversion record.');
+      return { c, status, matched: (data as { duplicate_of?: unknown }).duplicate_of === true };
+    }, event, undefined, allowDuplicate);
+    if (!result) return null;
+    this.replayed = result.status === 200;
+    this.matched = result.matched;
+    return result.c;
+  }
+}
+
+/** Present the accepted workflow and update the shared run list. */
+export class ConversionStarter extends ConversionSubmitter {
+  last = $state<Conversion | null>(null);
+  repeat = $state<((event: MouseEvent) => void) | null>(null);
+
+  constructor(launcher: string) { super(launcher, api.startConversion); }
+
+  async start(body: ConversionBody, event: MouseEvent, result: () => HTMLElement | undefined, allowDuplicate = false): Promise<Conversion | null> {
+    const focus = captureResultFocus(event);
+    const trigger = event.currentTarget;
+    const snapshot: ConversionBody = JSON.parse(JSON.stringify(body));
+    const c = await this.submit(snapshot, event, allowDuplicate);
     if (c) {
-      this.replayed = this.last?.id === c.id;
       this.last = c;
+      this.repeat = this.matched ? event => { void this.start(snapshot, event, result, true); } : null;
+      void focus?.(result);
       conversions.upsert(c);
       void conversions.refresh();
+    } else if (this.error && trigger instanceof HTMLElement) {
+      void focus?.(() => trigger);
     }
     return c;
   }

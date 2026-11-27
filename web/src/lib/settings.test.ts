@@ -83,9 +83,10 @@ describe('effective readiness vs saved', () => {
     const h = parseSettings(raw)[0];
     const r = effectiveReadiness(h, { id: 'frame', capabilities: { benchmark: false, evaluate: true }, reasons: { benchmark: 'Target not applied yet' } });
     expect(r).toEqual([
-      { what: 'Benchmarks', allowed: false, reason: 'Target not applied yet' },
-      { what: 'GSM8K evaluation', allowed: true, reason: null },
-      { what: 'Source baseline', allowed: false, reason: expect.stringMatching(/did not report/) },
+      { kind: 'benchmark', what: 'Benchmarks', allowed: false, reason: 'Target not applied yet' },
+      { kind: 'evaluate', what: 'GSM8K evaluation', allowed: true, reason: null },
+      { kind: 'baseline', what: 'Prepare reference results', allowed: false, reason: expect.stringMatching(/did not report/) },
+      { kind: 'generate', what: 'Generation', allowed: false, reason: expect.stringMatching(/did not report/) },
     ]);
   });
 });

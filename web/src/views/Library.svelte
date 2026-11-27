@@ -1,17 +1,23 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { api, errorText } from '../lib/api';
   import { brewery } from '../lib/store.svelte';
-  import { WEIGHT_SOURCES, isSafeSource, MODEL_KINDS, basename, formatBytes, hostName, isActive, kindLabel, modelLabel, shortHash } from '../lib/format';
+  import { WEIGHT_SOURCES, MODEL_KINDS, basename, formatBytes, hostName, isActive, kindLabel, modelLabel } from '../lib/format';
+  import { weightAccess } from '../lib/weight-access';
   import HostSelect from '../components/HostSelect.svelte';
   import HfDownload from '../components/HfDownload.svelte';
-  import { hashParam } from '../lib/route.svelte';
+  import Lineage from '../components/Lineage.svelte';
+  import { hashParam, route } from '../lib/route.svelte';
   import Combobox from '../components/Combobox.svelte';
   import { hostOptions, nameSuggestions } from '../lib/pickers';
   import { completionText, IDLE, PathSuggester, type PathState } from '../lib/paths';
   import type { ComboOption } from '../lib/combobox';
   import Badge from '../components/Badge.svelte';
-  import type { Model } from '../lib/types';
+  import WorkflowGate from '../components/WorkflowGate.svelte';
+  import { hostWorkflowEligibility } from '../lib/eligibility';
+  import { focusAfterRemoval } from '../lib/focus';
+  import { unsavedChanges } from '../lib/unsaved-changes.svelte';
+  import type { Model, Prompt } from '../lib/types';
 
   const models = $derived(brewery.state?.models ?? []);
   const prompts = $derived(brewery.state?.prompts ?? []);
@@ -54,7 +60,13 @@
   const nameOptions = $derived(nameSuggestions(path, models));
   const nameInUse = $derived(name.trim() !== '' && models.some((m) => m.name === name.trim()));
 
-  const regBlockers = $derived([...(host ? [] : ['Select a host.']), ...(path.trim() ? [] : ['Enter the path on that host.']), ...(pathProblem ? [pathProblem] : [])]);
+  const registration = $derived(hostWorkflowEligibility(brewery.state?.eligibility, host, 'register_manual'));
+  const regBlockers = $derived([
+    ...(!host ? ['Select a host.'] : registration?.eligible === false
+      ? [...registration.reasons.map((reason) => reason.text), 'Select a different host.'] : []),
+    ...(path.trim() ? [] : ['Enter the path on that host.']),
+    ...(pathProblem ? [pathProblem] : []),
+  ]);
 
   async function register(e: SubmitEvent) {
     e.preventDefault();
@@ -76,13 +88,19 @@
   }
 
   // Filter
-  let filter = $state(hashParam(location.hash, 'entry') ?? '');
+  let filter = $state('');
   let hostFilter = $state('');
+  $effect(() => {
+    const entry = hashParam(route.hash, 'entry');
+    filter = entry ?? '';
+    if (entry) hostFilter = '';
+  });
+  const exactEntry = $derived(models.some((m) => m.id === filter));
   const shown = $derived(
     models.filter(
       (m) =>
         (!hostFilter || m.host === hostFilter) &&
-        (!filter || m.id === filter || `${m.name ?? ''} ${m.path} ${m.kind}`.toLowerCase().includes(filter.toLowerCase())),
+        (!filter || (exactEntry ? m.id === filter : `${m.name ?? ''} ${m.path} ${m.kind}`.toLowerCase().includes(filter.toLowerCase()))),
     ),
   );
 
@@ -90,15 +108,17 @@
   let removing = $state<string | null>(null);
   let removeBusy = $state(false);
   let removeError = $state<string | null>(null);
+  const removeButtonId = (id: string) => `remove-${encodeURIComponent(id)}`;
   function usedBy(m: Model) {
     return jobs.filter((j) => isActive(j.state) && j.input_ids.includes(m.id));
   }
   async function remove(m: Model) {
+    if (removeBusy || usedBy(m).length) return;
     removeBusy = true;
     removeError = null;
     try {
       await api.removeModel(m.id);
-      removing = null;
+      await focusAfterRemoval(() => { removing = null; }, () => document.getElementById('lib-filter'));
       await brewery.refresh();
     } catch (err) {
       removeError = errorText(err);
@@ -113,15 +133,65 @@
   let pBusy = $state(false);
   let pError = $state<string | null>(null);
   let openPrompt = $state<string | null>(null);
+  let editing = $state<Prompt | null>(null);
+  let deleting = $state<string | null>(null);
+  let deleteBusy = $state(false);
+  let deleteError = $state<string | null>(null);
+  const promptToggleId = (id: string) => `prompt-${encodeURIComponent(id)}`;
+  const promptGuard = unsavedChanges(() => (editing?.name ?? '') !== pName || (editing?.text ?? '') !== pText);
+  async function editPrompt(p: Prompt) {
+    if (pBusy || !promptGuard.confirm()) return;
+    editing = p;
+    pName = p.name;
+    pText = p.text;
+    pError = null;
+    await tick();
+    document.getElementById('p-name')?.focus();
+  }
+  function resetPrompt() {
+    editing = null;
+    pName = '';
+    pText = '';
+    pError = null;
+  }
+  function cancelPromptEdit() {
+    if (!editing || !promptGuard.confirm()) return;
+    const id = editing.id;
+    void focusAfterRemoval(resetPrompt, () => document.getElementById(promptToggleId(id)));
+  }
+  async function deletePrompt(id: string) {
+    if (deleteBusy) return;
+    deleteBusy = true;
+    deleteError = null;
+    try {
+      await api.deletePrompt(id);
+      await focusAfterRemoval(() => {
+        deleting = null;
+        openPrompt = null;
+      }, () => document.getElementById('prompts-h'));
+      await brewery.refresh();
+    } catch (err) {
+      deleteError = errorText(err);
+    } finally {
+      deleteBusy = false;
+    }
+  }
   async function savePrompt(e: SubmitEvent) {
     e.preventDefault();
-    if (!pName.trim() || !pText) return;
+    if (pBusy || !pName.trim() || !pText) return;
     pBusy = true;
     pError = null;
     try {
-      await api.addPrompt({ name: pName.trim(), text: pText });
-      pName = '';
-      pText = '';
+      const input = { name: pName.trim(), text: pText };
+      if (editing) {
+        const id = editing.id;
+        await api.updatePrompt(id, input);
+        openPrompt = id;
+        await focusAfterRemoval(resetPrompt, () => document.getElementById(promptToggleId(id)));
+      } else {
+        await api.addPrompt(input);
+        resetPrompt();
+      }
       await brewery.refresh();
     } catch (err) {
       pError = errorText(err);
@@ -144,11 +214,13 @@
   </div>
 
   <HfDownload />
+  <Lineage {models} />
   <section class="panel" aria-labelledby="reg-h">
-    <header><h2 id="reg-h">Register a source</h2></header>
+    <header><h2 id="reg-h">Register an entry</h2></header>
+    <WorkflowGate workflow="register_manual">
     <form class="body stack" onsubmit={register} novalidate>
       <div class="reg">
-        <HostSelect bind:value={host} id="reg-host" />
+        <HostSelect bind:value={host} id="reg-host" workflow="register_manual" hideIneligible />
         <div class="field grow">
           <Combobox
             bind:value={path}
@@ -197,18 +269,19 @@
         <button type="submit" class="btn primary" disabled={regBusy || regBlockers.length > 0} aria-describedby={regBlockers.length ? 'reg-why' : undefined}>
           {regBusy ? 'Registering…' : 'Register'}
         </button>
-        {#if regBlockers.length && (host || path)}<span class="xs muted" id="reg-why">{regBlockers.join(' ')}</span>{/if}
+        {#if regBlockers.length}<span class="xs muted" id="reg-why">{regBlockers.join(' ')}</span>{/if}
       </div>
       <div aria-live="polite">
         {#if regError}<p class="note bad" role="alert">{regError}</p>{/if}
         {#if regDone}<p class="note info">{regDone}</p>{/if}
       </div>
     </form>
+    </WorkflowGate>
   </section>
 
   <section class="panel" aria-labelledby="models-h">
     <header>
-      <h2 id="models-h">Entries <span class="muted num small">({models.length})</span></h2>
+      <h2 id="models-h">Library entries <span class="muted num small">({models.length})</span></h2>
       <div class="filters">
         <label class="sr-only" for="lib-filter">Filter entries</label>
         <input id="lib-filter" class="input" type="search" bind:value={filter} placeholder="Filter…" autocomplete="off" />
@@ -237,47 +310,66 @@
           <tbody>
             {#each shown as m (m.id)}
               {@const busyJobs = usedBy(m)}
+              {@const edit = WEIGHT_SOURCES.includes(m.kind) ? weightAccess(m, hosts.find((host) => host.id === m.host)) : null}
               <tr>
                 <td>
                   <div class="name break">{modelLabel(m)}</div>
-                  {#if m.available === false}
-                    <Badge tone="warn" label="Unavailable" title={m.reason ?? ''} />
-                    {#if m.reason}<div class="xs muted break">{m.reason}</div>{/if}
-                  {/if}
-                  {#if m.job_id}<div class="xs muted">Output of <a class="mono" href="#/jobs/{encodeURIComponent(m.job_id)}">{m.job_id}</a></div>{/if}
                 </td>
                 <td class="nowrap" data-label="Kind">{kindLabel(m.kind)}</td>
                 <td class="nowrap" data-label="Host">{hostName(hosts, m.host)}</td>
                 <td class="mono xs break path" data-label="Path">{m.path}</td>
-                <td class="xs" data-label="Identity">
-                  {#if m.sha256}<span class="mono" title={m.sha256}>{shortHash(m.sha256)}</span>{:else}<span class="muted">Not yet hashed</span>{/if}
-                  {#if typeof m.bytes === 'number'}<div class="num muted">{formatBytes(m.bytes)}</div>{/if}
+                <td class="xs identity" data-label="Identity">
+                  <Badge tone={m.available === true ? 'ok' : m.available === false ? 'warn' : 'muted'} label={m.available === true ? 'Available' : m.available === false ? 'Unavailable' : 'Unknown'} />
+                  {#if m.reason || m.available !== true}<div class="muted break">{m.reason || (m.available === false ? 'The source file is not available.' : 'The controller has not checked this file.')}</div>{/if}
+                  {#if m.sha256}<div class="break">SHA-256 <span class="mono">{m.sha256}</span></div>{:else}<div class="muted">Not yet hashed</div>{/if}
+                  {#if typeof m.bytes === 'number'}<div class="num muted" title={`${m.bytes} bytes`}>{formatBytes(m.bytes)}</div>{/if}
+                  {#if m.job_id}<a class="break" href="#/jobs/{encodeURIComponent(m.job_id)}">Output of job <span class="mono">{m.job_id}</span></a>{/if}
                 </td>
-                <td class="nowrap actions">
+                <td class="actions">
                   {#if removing === m.id}
                     <div class="confirm" role="group" aria-label="Confirm removal">
-                      <span class="xs">Remove entry only; files stay on the host.</span>
+                      <span class="xs">
+                        This removes only the entry. The files stay on the host.
+                        {#if m.host === 'backend-hf'}
+                          You cannot register it again by hand.
+                          {#if m.kind === 'weight-calibration'}
+                            Upload the calibration batch again in Weights.
+                          {:else if jobs.some((j) => j.id === m.job_id && j.kind === 'weight_apply')}
+                            You cannot restore this revision. A new Apply needs the input files and creates a new entry.
+                          {:else}
+                            Download the source again to add the entry.
+                          {/if}
+                        {/if}
+                      </span>
                       <div class="row">
-                        <button type="button" class="btn danger small" disabled={removeBusy} onclick={() => remove(m)}>{removeBusy ? 'Removing…' : 'Remove entry'}</button>
-                        <button type="button" class="btn ghost small" disabled={removeBusy} onclick={() => (removing = null)}>Keep</button>
+                        <button type="button" class="btn danger small" aria-disabled={removeBusy || busyJobs.length > 0} onclick={() => remove(m)}>{removeBusy ? 'Removing…' : 'Remove entry'}</button>
+                        <button id="keep-entry" type="button" class="btn ghost small" aria-disabled={removeBusy} onclick={() => {
+                          if (!removeBusy) void focusAfterRemoval(() => { removing = null; }, () => document.getElementById(removeButtonId(m.id)));
+                        }}>Keep</button>
                       </div>
                     </div>
                   {:else}
-                    {#if WEIGHT_SOURCES.includes(m.kind)}<a class="btn ghost small" href="#/weights?source={encodeURIComponent(m.id)}" aria-label="Edit weights of {modelLabel(m)}">Edit weights</a>{/if}
-                    {#if WEIGHT_SOURCES.includes(m.kind)}
-                      {@const worker = hosts.find(h => h.id === m.host)}
-                      {#if isSafeSource(m.kind) && !worker?.capabilities?.weight_safetensors}<div class="muted xs">SafeTensors editing is not enabled here.</div>{/if}
-                      <a class="xs" href="#/settings/infrastructure?host={encodeURIComponent(m.host)}">Settings for {hostName(hosts, m.host)}</a>
+                    {#if edit?.allowed}
+                      <a class="btn ghost small" href="#/weights?source={encodeURIComponent(m.id)}" aria-label="Edit weights of {modelLabel(m)}">Edit weights</a>
+                    {:else if edit}
+                      <div class="xs muted edit-reason">
+                        <button type="button" class="btn ghost small" disabled aria-describedby="edit-why-{m.id}">Edit weights</button>
+                        <div id="edit-why-{m.id}">{edit.reason}</div>
+                        {#if m.available !== false}<a class="btn ghost small" href={edit.fixAnchor}>Host settings</a>{/if}
+                      </div>
                     {/if}
                     <button
+                      id={removeButtonId(m.id)}
                       type="button"
                       class="btn ghost small"
-                      disabled={busyJobs.length > 0}
+                      disabled={busyJobs.length > 0 || removeBusy}
                       title={busyJobs.length ? `Used by active job ${busyJobs[0].id}` : undefined}
                       aria-label="Remove {modelLabel(m)} from library"
                       onclick={() => {
-                        removing = m.id;
-                        removeError = null;
+                        void focusAfterRemoval(() => {
+                          removing = m.id;
+                          removeError = null;
+                        }, () => document.getElementById('keep-entry'));
                       }}>Remove…</button
                     >
                     {#if busyJobs.length}<div class="xs muted">In use by an active job</div>{/if}
@@ -293,8 +385,8 @@
 
   <div class="grid-2">
     <section class="panel" aria-labelledby="prompt-h">
-      <header><h2 id="prompt-h">Save a prompt</h2></header>
-      <form class="body stack" onsubmit={savePrompt}>
+      <header><h2 id="prompt-h">{editing ? 'Edit prompt' : 'Save a prompt'}</h2></header>
+      <form class="body stack" onsubmit={savePrompt} aria-busy={pBusy}>
         <div class="field">
           <label for="p-name">Name</label>
           <input id="p-name" class="input" bind:value={pName} autocomplete="off" required />
@@ -305,25 +397,58 @@
           <span class="hint num">{pText.length.toLocaleString()} characters. Saved exactly as typed.</span>
         </div>
         <div class="row">
-          <button type="submit" class="btn primary" disabled={pBusy || !pName.trim() || !pText}>{pBusy ? 'Saving…' : 'Save prompt'}</button>
+          {#if editing}
+            <button type="submit" class="btn primary" aria-disabled={pBusy || !pName.trim() || !pText}>{pBusy ? 'Saving…' : 'Save changes'}</button>
+            <button type="button" class="btn ghost" disabled={pBusy} onclick={cancelPromptEdit}>Cancel edit</button>
+          {:else}
+            <button type="submit" class="btn primary" disabled={pBusy || !pName.trim() || !pText}>{pBusy ? 'Saving…' : 'Save prompt'}</button>
+          {/if}
         </div>
         <div aria-live="polite">{#if pError}<p class="note bad" role="alert">{pError}</p>{/if}</div>
       </form>
     </section>
 
     <section class="panel" aria-labelledby="prompts-h">
-      <header><h2 id="prompts-h">Saved prompts <span class="muted num small">({prompts.length})</span></h2></header>
+      <header><h2 id="prompts-h" tabindex="-1">Saved prompts <span class="muted num small">({prompts.length})</span></h2></header>
       {#if prompts.length === 0}
         <p class="empty">No saved prompts.</p>
       {:else}
         <ul class="prompts">
           {#each prompts as p (p.id)}
             <li>
-              <button type="button" class="ptoggle" aria-expanded={openPrompt === p.id} onclick={() => (openPrompt = openPrompt === p.id ? null : p.id)}>
+              <button id={promptToggleId(p.id)} type="button" class="ptoggle" aria-expanded={openPrompt === p.id} aria-disabled={deleteBusy} onclick={() => {
+                if (deleteBusy) return;
+                openPrompt = openPrompt === p.id ? null : p.id;
+                deleting = null;
+                deleteError = null;
+              }}>
                 <span class="truncate">{p.name}</span>
                 <span class="xs muted truncate">{p.text.slice(0, 80)}</span>
               </button>
-              {#if openPrompt === p.id}<pre class="block">{p.text}</pre>{/if}
+              {#if openPrompt === p.id}
+                <div class="body stack">
+                  <pre class="block">{p.text}</pre>
+                  {#if deleting === p.id}
+                    <div class="stack" role="group" aria-label="Confirm prompt deletion">
+                      <p class="small">Delete this saved prompt? You cannot undo this action.</p>
+                      {#if deleteError}<p class="note bad" role="alert">{deleteError}</p>{/if}
+                      <div class="row">
+                        <button type="button" class="btn danger small" aria-disabled={deleteBusy} onclick={() => deletePrompt(p.id)}>{deleteBusy ? 'Deleting…' : 'Delete prompt'}</button>
+                        <button id="keep-prompt" type="button" class="btn ghost small" aria-disabled={deleteBusy} onclick={() => {
+                          if (!deleteBusy) void focusAfterRemoval(() => { deleting = null; }, () => document.getElementById('delete-prompt'));
+                        }}>Keep prompt</button>
+                      </div>
+                    </div>
+                  {:else}
+                    <div class="row">
+                      <button type="button" class="btn small" disabled={pBusy} onclick={() => editPrompt(p)}>Edit prompt</button>
+                      <button id="delete-prompt" type="button" class="btn ghost small" disabled={editing?.id === p.id} onclick={() => {
+                        void focusAfterRemoval(() => { deleting = p.id; deleteError = null; }, () => document.getElementById('keep-prompt'));
+                      }}>Delete prompt</button>
+                    </div>
+                  {/if}
+                </div>
+              {/if}
             </li>
           {/each}
         </ul>
@@ -376,9 +501,17 @@
   .actions {
     text-align: right;
   }
+  .edit-reason {
+    max-width: 220px;
+    margin-left: auto;
+  }
+  .identity {
+    min-width: 125px;
+  }
   @media (max-width: 640px) {
-    .actions {
+    .actions, .edit-reason {
       text-align: left;
+      margin-left: 0;
     }
     .confirm {
       align-items: flex-start;
@@ -421,7 +554,8 @@
     background: var(--surface-2);
   }
   .prompts pre {
-    margin: 0 var(--s-4) var(--s-3);
+    margin: 0;
+    overflow-wrap: anywhere;
   }
   @media (max-width: 760px) {
     header {

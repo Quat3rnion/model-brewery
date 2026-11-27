@@ -52,6 +52,16 @@ pub fn engine(base: &Path, since: u64) -> Option<ProgressDetail> {
             | "identify_output"
             | "publish_output"
             | "compare_left"
+            | "trace_prompts"
+            | "damage_gradients"
+            | "damage_swaps"
+            | "sensitivity_gradients"
+            | "circuit_attribution"
+            | "circuit_patches"
+            | "prepare_screen"
+            | "screen_trials"
+            | scratch_eval::CHECKS
+            | "locate_edit"
             | "compare_right"
             | "benchmark"
             | "admission"
@@ -185,6 +195,16 @@ pub fn apply(reply: &mut Reply, detail: ProgressDetail) {
         "verify_cache" => "Verifying cached bundle",
         "verify_staged" => "Verifying staged bundle checksums",
         "verify_output" => "Verifying engine output",
+        "trace_prompts" => "Capturing and checking prompts",
+        "damage_gradients" => "Measuring quantization damage",
+        "damage_swaps" => "Checking single-tensor swaps",
+        "sensitivity_gradients" => "Measuring and checking gradients",
+        "circuit_attribution" => "Measuring activation attribution",
+        "circuit_patches" => "Checking the top activation patches",
+        "prepare_screen" => "Measuring stock screen logits",
+        "screen_trials" => "Screening edited and matched random directions",
+        scratch_eval::CHECKS => "Checking scratch model behavior",
+        "locate_edit" => "Computing locate-then-edit factors",
         "hf_download_transfer" => "Downloading complete files",
         "hf_download_verify" => "Checking download checksums",
         "hy4_encode_gate" => "Encoding Hy4 gate",

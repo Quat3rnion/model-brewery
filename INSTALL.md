@@ -4,6 +4,10 @@ This guide installs the controller and web page from a Linux clone. It uses a
 user-level systemd service, keeps state outside the clone, and adds no worker
 hosts by default.
 
+The controller listens on loopback by default. For network access, use the
+[HTTPS gateway](OPERATOR.md#run-the-controller). The gateway does not ask for
+a login. Allow only trusted client networks.
+
 ## Get the source
 
 Clone the repository, then run the remaining commands from its root:
@@ -218,10 +222,11 @@ Settings page and current API contract before you make an authorized change.
 
 ## OpenCode skills
 
-The three project skills are already in `.opencode/skills/`. OpenCode can load
+The project skills are already in `.opencode/skills/`. OpenCode can load
 them by ID when it uses this clone:
 
 - `brewery-agent-operator`
+- `brewery-weight-space`
 - `brewery-calibration-benchmarks`
 - `brewery-release-qualification`
 
@@ -233,6 +238,7 @@ mkdir -p "$HOME/.config/opencode/skills"
 
 for skill in \
   brewery-agent-operator \
+  brewery-weight-space \
   brewery-calibration-benchmarks \
   brewery-release-qualification
 do

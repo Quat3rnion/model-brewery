@@ -1,19 +1,39 @@
 mod admin;
+mod agent;
 mod backend_calibration;
 mod backend_hf;
+mod circuit;
 mod conversion;
+mod crosscoder;
+mod damage;
+mod dedupe;
+mod diff;
+mod directions;
 mod dispatch;
 mod domain;
+mod eligibility;
 mod feed;
+mod findings;
 mod gguf;
 mod hf_download;
 mod hf_tokens;
 mod idempotency;
 mod infra_hosts;
+mod interventions;
+mod lineage;
 mod local_edit;
+mod mcp;
+mod model_availability;
 mod profiles;
 mod remote_edit;
+mod registered_evaluation;
+mod routing_atlas;
+mod sae;
+mod scratch;
+mod scratch_token_loss;
+mod sensitivity;
 mod settings;
+mod spectra;
 mod store;
 mod suggestions;
 mod web;
@@ -38,16 +58,25 @@ struct App {
     store: Mutex<Store>,
     hosts: Vec<Host>,
     settings: settings::Managed,
+    trace_policy: brewery_worker::trace::Policy,
+    dispatcher: Arc<Dispatcher>,
     hf_tokens: hf_tokens::Store,
+    agent: agent::Service,
     backend_download: bool,
     backend_calibration: Option<PathBuf>,
     backend_edit_formats: std::collections::BTreeSet<String>,
     pub admin: Option<admin::Admin>,
+    evaluation_operator: Option<registered_evaluation::Operator>,
+    direction_operator: Option<registered_evaluation::Operator>,
+    direction_import_slot: tokio::sync::Semaphore,
     local_edit: Arc<local_edit::Lanes>,
     ssh_hosts: Arc<infra_hosts::Registry>,
     remote_edit: Arc<remote_edit::Installer>,
     suggestions: suggestions::PathSuggestions,
+    model_availability: Arc<model_availability::ModelAvailability>,
     feed_subscribers: Arc<tokio::sync::Semaphore>,
+    scratch_slots: Arc<tokio::sync::Semaphore>,
+    diffs: diff::Service,
 }
 
 impl App {
@@ -128,11 +157,15 @@ async fn main() -> Result<(), Error> {
         Ok(None) => {}
         Err(_) => eprintln!("Backend download storage is unavailable"),
     }
+    let dispatcher = Arc::new(dispatcher);
     let app = Arc::new(App {
         store: Mutex::new(store),
         hosts,
         settings: settings::Managed::from_config(config_value.as_ref()),
+        trace_policy: settings::trace_policy(config_value.as_ref())?,
+        dispatcher: dispatcher.clone(),
         hf_tokens,
+        agent: agent::Service::new(&data, &dist)?,
         backend_download: dispatcher.backend.is_some(),
         backend_calibration: dispatcher
             .backend
@@ -144,11 +177,21 @@ async fn main() -> Result<(), Error> {
             .map(|lane| lane.edit_formats.clone())
             .unwrap_or_default(),
         admin,
+        evaluation_operator: registered_evaluation::Operator::from_env(
+            "BREWERY_EVALUATION_OPERATOR_FILE",
+        )?,
+        direction_operator: registered_evaluation::Operator::from_env(
+            "BREWERY_DIRECTION_OPERATOR_FILE",
+        )?,
+        direction_import_slot: tokio::sync::Semaphore::new(1),
         local_edit,
         ssh_hosts,
         remote_edit,
         suggestions: suggestions::PathSuggestions::new(dispatcher.command.clone()),
+        model_availability: Arc::new(model_availability::ModelAvailability::new(&dispatcher)),
         feed_subscribers: Arc::new(tokio::sync::Semaphore::new(feed::SUBSCRIBERS)),
+        scratch_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+        diffs: diff::Service::default(),
     });
     let listener = TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;

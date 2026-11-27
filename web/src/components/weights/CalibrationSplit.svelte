@@ -5,7 +5,7 @@
   import { uploadBatch } from '../../lib/weightCalibration';
   import type { Host } from '../../lib/types';
 
-  let { label, host, other, value = $bindable('') }: { label: string; host: Host | undefined; other: string; value?: string } = $props();
+  let { label, uploadLabel, host, other, value = $bindable('') }: { label: string; uploadLabel: string; host: Host | undefined; other: string; value?: string } = $props();
   const options = $derived((brewery.state?.models ?? []).filter(m => host && m.host === host.id && m.available !== false && m.kind === 'weight-calibration' && m.id !== other));
   const uploadable = $derived(host?.id === 'backend-hf' && host.capabilities?.weight_tune === true && !host.scheduling_paused);
   let busy = $state(false);
@@ -34,7 +34,7 @@
     </select>
   </label>
   {#if uploadable}
-    <label class="small">Upload {label.toLowerCase()} JSON
+    <label class="small">{uploadLabel}
       <input class="input" type="file" accept=".json,application/json" disabled={busy} onchange={e => upload(e.currentTarget)} />
     </label>
     {#if busy}<span role="status">Registering split…</span>{/if}

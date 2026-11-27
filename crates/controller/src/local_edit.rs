@@ -1,5 +1,7 @@
 //! A controller-owned CPU worker per configured local source host.
 use crate::{Error, dispatch::read_limited, domain::Host};
+use brewery_worker::locate_edit::{self, Backend};
+use brewery_worker::{scratch_eval, sensitivity, trace};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -40,6 +42,9 @@ pub struct Lane {
     pub root: PathBuf,
     worker: PathBuf,
     worker_config: Value,
+    scratch_env: BTreeMap<String, Value>,
+    scratch_gpu_admission: Option<PathBuf>,
+    scratch_gpu_env: BTreeMap<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -107,6 +112,7 @@ impl Lanes {
             None
         };
         let dir = data.canonicalize()?.join("local-edit");
+        let state = dir.parent().ok_or("local editor has no state directory")?;
         let assets = dist.canonicalize().or_else(|_| std::path::absolute(dist))?;
         result.protected = vec![
             data.canonicalize()?,
@@ -182,7 +188,7 @@ impl Lanes {
                 );
                 continue;
             };
-            let Some(roots) = source_roots(&original, &dir) else {
+            let Some(roots) = source_roots(&original, state) else {
                 let reason = if original["source_roots"].is_null()
                     || original["source_roots"]
                         .as_array()
@@ -259,6 +265,57 @@ impl Lanes {
                 "root":root,"engine":engine,"source_roots":roots,"engine_env":engine_env,
                 "disk_reserve_bytes":original["disk_reserve_bytes"].as_u64().unwrap_or(1 << 30)
             });
+            let scratch_env = [
+                "BREWERY_GGUF_SAFETENSORS",
+                "BREWERY_GGUF_QUANTIZER",
+                "BREWERY_GGUF_HF_EXPORTER",
+                "BREWERY_GGUF_PYTHON",
+                "BREWERY_LLAMA_CPP",
+                "BREWERY_CONVERTER_DISK_RESERVE_BYTES",
+                scratch_eval::SCRIPT,
+                scratch_eval::RUNNER,
+                scratch_eval::RUNNER_SHA,
+                scratch_eval::RUNNER_LIB_DIR,
+                scratch_eval::CACHE,
+                scratch_eval::CONTRAST_CACHE,
+                scratch_eval::registered::CACHE,
+                brewery_worker::heretic::RUNTIME,
+                trace::EXECUTABLE,
+                trace::LIB_DIR,
+                sensitivity::PIN,
+                sensitivity::MANIFEST_SHA,
+                trace::ROUTING_EXECUTABLE,
+                trace::ROUTING_LIB_DIR,
+                trace::PROJECTION_EXECUTABLE,
+                trace::PROJECTION_LIB_DIR,
+                brewery_worker::ablation_search::EXECUTABLE,
+                locate_edit::EXECUTABLE,
+                locate_edit::LIB_DIR,
+                "BREWERY_CPU_THREADS",
+            ]
+            .into_iter()
+            .filter_map(|name| {
+                original["engine_env"][name]
+                    .as_str()
+                    .map(|v| (name.into(), json!(v)))
+            })
+            .collect();
+            let scratch_gpu_admission =
+                original["admission"]
+                    .as_str()
+                    .map(PathBuf::from)
+                    .filter(|path| {
+                        path.is_absolute() && original["engine_env"][locate_edit::GPU_GATE] == "1"
+                    });
+            let scratch_gpu_env = [Backend::Cuda, Backend::Rocm]
+                .into_iter()
+                .flat_map(Backend::env_keys)
+                .filter_map(|key| {
+                    original["engine_env"][key]
+                        .as_str()
+                        .map(|value| (key.into(), json!(value)))
+                })
+                .collect();
             brewery_worker::atomic(&config, &worker_config)?;
             let dispatch = lane_dir.join("dispatch.json");
             brewery_worker::atomic(
@@ -292,6 +349,9 @@ impl Lanes {
                     root,
                     worker: worker.clone(),
                     worker_config,
+                    scratch_env,
+                    scratch_gpu_admission,
+                    scratch_gpu_env,
                 },
             );
         }
@@ -300,6 +360,20 @@ impl Lanes {
 
     pub fn get(&self, id: &str) -> Option<&Lane> {
         self.lanes.get(id)
+    }
+
+    pub fn private_heretic_path(&self, path: &Path) -> bool {
+        let canonical = path.canonicalize().ok();
+        self.lanes
+            .values()
+            .filter_map(Lane::heretic_runs)
+            .any(|root| {
+                path.starts_with(&root)
+                    || root.starts_with(path)
+                    || canonical
+                        .as_ref()
+                        .is_some_and(|p| p.starts_with(&root) || root.starts_with(p))
+            })
     }
 
     pub fn unavailable_reason(&self, id: &str) -> &'static str {
@@ -313,6 +387,47 @@ impl Lanes {
 }
 
 impl Lane {
+    pub fn heretic_runs(&self) -> Option<PathBuf> {
+        let root = Path::new(
+            self.scratch_env
+                .get(brewery_worker::heretic::RUNTIME)?
+                .as_str()?,
+        );
+        if !root.is_absolute() {
+            return None;
+        }
+        let root = root.canonicalize().ok()?;
+        (root.join("identity.json").is_file()
+            && root.join("venv/bin/heretic").is_file()
+            && root.join("run.py").is_file()
+            && root.join("runs").is_dir())
+        .then(|| root.join("runs"))
+    }
+
+    pub fn locate_edit_configured(&self, backend: Backend) -> bool {
+        let pin = backend.pin();
+        let env = if backend.is_gpu() {
+            &self.scratch_gpu_env
+        } else {
+            &self.scratch_env
+        };
+        [pin.executable, pin.lib_dir].iter().all(|k| {
+            env.get(*k)
+                .and_then(Value::as_str)
+                .is_some_and(|p| Path::new(p).is_absolute())
+        })
+    }
+
+    pub fn scratch_gpu_allowed(&self) -> bool {
+        self.scratch_gpu_admission.is_some()
+    }
+
+    pub fn scratch_disk_reserve(&self) -> u64 {
+        self.worker_config["disk_reserve_bytes"]
+            .as_u64()
+            .unwrap_or(1 << 30)
+    }
+
     pub fn job_config(&self, id: &str) -> PathBuf {
         self.config
             .with_file_name(format!("grant-{id}-dispatch.json"))
@@ -338,6 +453,56 @@ impl Lane {
             &json!({
                 "hosts":{host:{"local":true,"worker":self.worker,"config":config}}
             }),
+        )?;
+        Ok(())
+    }
+
+    pub fn scratch_config(&self, id: &str) -> PathBuf {
+        self.config
+            .with_file_name(format!("scratch-{id}-dispatch.json"))
+    }
+
+    pub fn snapshot_scratch(
+        &self,
+        host: &str,
+        id: &str,
+        pins: &BTreeMap<String, String>,
+        backend: Backend,
+    ) -> Result<(), Error> {
+        use std::io::Write as _;
+        let config = self
+            .config
+            .with_file_name(format!("scratch-{id}-worker.json"));
+        let mut worker_config = self.worker_config.clone();
+        let env = worker_config["engine_env"].as_object_mut().unwrap();
+        env.extend(self.scratch_env.clone());
+        if backend.is_gpu() {
+            for key in backend.visibility_vars() {
+                env.remove(*key);
+            }
+            env.extend(backend.env_keys().filter_map(|key| {
+                self.scratch_gpu_env
+                    .get(key)
+                    .map(|value| (key.into(), value.clone()))
+            }));
+            worker_config["admission"] = json!(
+                self.scratch_gpu_admission
+                    .as_ref()
+                    .ok_or("Missing scratch GPU admission")?
+            );
+        }
+        worker_config["scratch_access"] = json!({"job_id":id,"paths":pins});
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&config)?;
+        serde_json::to_writer(&mut file, &worker_config)?;
+        file.flush()?;
+        file.sync_all()?;
+        brewery_worker::atomic(
+            &self.scratch_config(id),
+            &json!({"hosts":{host:{"local":true,"worker":self.worker,"config":config}}}),
         )?;
         Ok(())
     }

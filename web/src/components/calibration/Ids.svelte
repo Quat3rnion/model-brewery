@@ -1,18 +1,18 @@
 <script lang="ts">
   import { shortHash } from '../../lib/format';
-  let { title, items }: { title: string; items: [string, string][] } = $props();
+  let { title, items, compact = true }: { title: string; items: [string, string][]; compact?: boolean } = $props();
   const isHash = (v: string) => /^[0-9a-f]{40,}$/i.test(v);
 </script>
 
 <div class="ids">
-  <h4 class="h">{title}</h4>
+  <h3 class="h">{title}</h3>
   {#if items.length === 0}
     <p class="xs muted">Not stated.</p>
   {:else}
     <dl class="xs">
-      {#each items as [k, v] (k)}
-        <dt>{k.replace(/_/g, ' ')}</dt>
-        <dd class:mono={isHash(v)} class="break" title={isHash(v) ? v : undefined}>{isHash(v) ? shortHash(v) : v}</dd>
+      {#each items as [k, v]}
+        <dt class="break">{k.replace(/_/g, ' ')}</dt>
+        <dd class:mono={isHash(v)} class="break" title={compact && isHash(v) ? v : undefined}>{compact && isHash(v) ? shortHash(v) : v}</dd>
       {/each}
     </dl>
   {/if}
@@ -31,7 +31,7 @@
   }
   dl {
     display: grid;
-    grid-template-columns: max-content minmax(0, 1fr);
+    grid-template-columns: minmax(0, max-content) minmax(50%, 1fr);
     gap: 2px var(--s-3);
     margin: 0;
   }

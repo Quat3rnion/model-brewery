@@ -1,0 +1,473 @@
+use super::{Result, artifact};
+use crate::{
+    App,
+    domain::{Envelope, Job, State},
+    store::Store,
+    web::ApiError,
+};
+use axum::http::StatusCode;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use brewery_worker::{
+    is_digest,
+    trace::{self, Operation, ReadReply, Role, Rule, Slice, View},
+};
+use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::{Map, Value, json};
+use sha2::{Digest as _, Sha256};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
+
+const MAX_PATCHES: usize = 8;
+// Bound the resolved job envelope before it crosses the worker RPC limit,
+// including when short source selectors expand to many vectors.
+pub(super) const MAX_VALUES: usize = 1 << 18;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactRef {
+    id: String,
+    version: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HgnProjection {
+    direction_id: String,
+    source_layer: usize,
+    target: trace::hgn_projection::Target,
+    first_layer: Option<usize>,
+    last_layer: Option<usize>,
+    second_source_layer: Option<usize>,
+    alpha: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GgufProjection {
+    direction_id: String,
+    source_layer: usize,
+    layer: usize,
+    positions: BTreeSet<usize>,
+    alpha: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Patch {
+    source_job_id: String,
+    #[serde(default)]
+    source_prompt: usize,
+    layer: usize,
+    role: Role,
+    positions: BTreeSet<usize>,
+}
+
+pub struct TracePlan {
+    rules: Vec<Rule>,
+    sources: Vec<(Job, Patch)>,
+}
+
+impl TracePlan {
+    pub fn prepare(
+        store: &Store,
+        job: &mut Job,
+        envelope: &mut Envelope,
+        policy: trace::Policy,
+    ) -> Result<Option<Self>> {
+        let options = &mut envelope.options;
+        let saved: Option<ArtifactRef> = take(options, "intervention_artifact")?;
+        let patches: Vec<Patch> = take(options, "activation_patches")?.unwrap_or_default();
+        let sae: Option<crate::sae::Selection> = take(options, "sae")?;
+        let steering: Option<crate::sae::Steering> = take(options, "feature_steering")?;
+        let hgn_projection: Option<HgnProjection> = take(options, "hgn_projection")?;
+        let gguf_projection: Option<GgufProjection> = take(options, "gguf_projection")?;
+        let request = trace::Request::controller(
+            &Value::Object(options.clone()),
+            envelope.prompt.as_deref(),
+            policy,
+        )
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+        let model = &envelope.inputs[0];
+        if let Some(p) = gguf_projection {
+            if model.kind != "gguf"
+                || hgn_projection.is_some()
+                || saved.is_some()
+                || !patches.is_empty()
+                || sae.is_some()
+                || steering.is_some()
+                || !request.interventions.is_empty()
+            {
+                return Err(ApiError::bad(
+                    "gguf_projection requires one GGUF and no other interventions or SAE",
+                ));
+            }
+            let artifact = crate::directions::artifact(
+                store,
+                &p.direction_id,
+                brewery_worker::behavior_direction::VERSION,
+                Some(p.source_layer),
+            )?;
+            let sha = artifact["model_sha256"]
+                .as_str()
+                .expect("verified direction");
+            let scratch = envelope.scratch_pins.get(&model.path);
+            if artifact.get("lanternfish_commit").is_none()
+                || artifact["fit"]["role"] != "l_out"
+                || (scratch.is_none() && artifact["model_id"] != model.id)
+                || scratch
+                    .or(model.sha256.as_ref())
+                    .is_some_and(|pin| pin != sha)
+            {
+                return Err(ApiError::bad(
+                    "fit the version 2 l_out direction on the exact GGUF",
+                ));
+            }
+            let layer: brewery_worker::behavior_direction::Layer =
+                serde_json::from_value(artifact["fit"]["layers"][0].clone())
+                    .map_err(ApiError::storage)?;
+            let resolved = trace::gguf_projection::Projection {
+                direction_id: p.direction_id,
+                source_layer: p.source_layer,
+                layer: p.layer,
+                positions: p.positions,
+                alpha: p.alpha.unwrap_or(1.0),
+                last_k: artifact["last_k"]
+                    .as_u64()
+                    .map(|k| k as usize)
+                    .or_else(|| artifact["position"].is_null().then_some(1)),
+                vector: layer
+                    .unit_vector
+                    .ok_or_else(|| ApiError::bad("source layer has no direction"))?,
+            };
+            options.insert("gguf_projection".into(), json!(resolved));
+            trace::Request::controller(
+                &Value::Object(options.clone()),
+                envelope.prompt.as_deref(),
+                policy,
+            )
+            .map_err(|e| ApiError::bad(e.to_string()))?;
+            options.insert("expected_model_sha256".into(), json!(sha));
+        }
+        if trace::is_hgn(&model.kind)
+            && (saved.is_some()
+                || !patches.is_empty()
+                || sae.is_some()
+                || steering.is_some()
+                || !request.interventions.is_empty())
+        {
+            return Err(ApiError::bad(
+                "HGN traces do not support interventions or SAE other than hgn_projection",
+            ));
+        }
+        if let Some(p) = hgn_projection {
+            if !trace::is_hgn(&model.kind) {
+                return Err(ApiError::bad(
+                    "hgn_projection requires a Library HGN v2 checkpoint",
+                ));
+            }
+            let dir = crate::directions::hgn_layer(store, model, &p.direction_id, p.source_layer)?;
+            if p.second_source_layer == Some(p.source_layer) {
+                return Err(ApiError::bad(
+                    "second_source_layer must differ from source_layer",
+                ));
+            }
+            let second_vector = p
+                .second_source_layer
+                .map(|layer| crate::directions::hgn_layer(store, model, &p.direction_id, layer))
+                .transpose()?
+                .map(|d| d.vector);
+            let resolved = trace::hgn_projection::Projection {
+                target: p.target,
+                first_layer: p.first_layer,
+                last_layer: p.last_layer,
+                vector: dir.vector,
+                second_vector,
+                alpha: p.alpha,
+                last_k: dir.last_k,
+                assets_sha256: dir.assets,
+            };
+            options.insert("hgn_projection".into(), json!(resolved));
+            trace::Request::controller(
+                &Value::Object(options.clone()),
+                envelope.prompt.as_deref(),
+                policy,
+            )
+            .map_err(|e| ApiError::bad(e.to_string()))?;
+            options.insert("expected_model_sha256".into(), json!(dir.sha256));
+        }
+        let mut rules = request.interventions;
+        job.options
+            .insert("byte_cap".into(), json!(request.capture.byte_cap));
+        options.insert("byte_cap".into(), json!(request.capture.byte_cap));
+        options.insert("retain_jobs".into(), json!(request.retain_jobs));
+        if patches.len() > MAX_PATCHES
+            || patches
+                .iter()
+                .any(|patch| patch.positions.is_empty() || patch.positions.len() > 64)
+        {
+            return Err(ApiError::bad(
+                "Expected at most 8 patch selectors and 1 to 64 positions per selector",
+            ));
+        }
+        let mut digest = envelope.scratch_pins.get(&model.path).cloned();
+        if let Some(saved) = saved {
+            let saved = artifact(store, &saved.id, saved.version)?;
+            if saved.binding.model_id != model.id {
+                return Err(ApiError::bad(
+                    "Intervention artifact is bound to a different model",
+                ));
+            }
+            if digest
+                .as_ref()
+                .is_some_and(|sha| sha != &saved.binding.model_sha256)
+            {
+                return Err(ApiError::bad(
+                    "Intervention artifact is bound to a different GGUF hash",
+                ));
+            }
+            digest = Some(saved.binding.model_sha256);
+            rules.extend(saved.interventions);
+        }
+        if let Some(sae) = sae {
+            sae.prepare(store, &model.id, &mut digest, options)?;
+        }
+        if let Some(steering) = steering {
+            rules.push(steering.rule(store, &model.id, &mut digest)?);
+        }
+        let fixed = rules.len();
+        let fixed_values = value_count(&rules);
+        let mut sources = Vec::new();
+        for patch in patches {
+            let prior = store
+                .job(&patch.source_job_id)
+                .map_err(ApiError::storage)?
+                .filter(|job| job.kind == trace::JOB && job.state == State::Succeeded)
+                .ok_or_else(|| ApiError::not_found("patch source trace"))?;
+            let receipt = store
+                .job_result(&prior.id)
+                .map_err(ApiError::storage)?
+                .filter(|receipt| receipt["kind"] == trace::JOB && receipt["schema_version"] == 1)
+                .ok_or_else(|| ApiError::not_found("patch source receipt"))?;
+            if receipt["model_id"].as_str() != Some(model.id.as_str()) {
+                return Err(ApiError::bad("Patch source is bound to a different model"));
+            }
+            let source_digest = receipt["model_sha256"]
+                .as_str()
+                .filter(|s| is_digest(s))
+                .ok_or_else(|| ApiError::bad("Patch source has no verified model SHA-256"))?;
+            if digest
+                .as_deref()
+                .is_some_and(|expected| expected != source_digest)
+            {
+                return Err(ApiError::bad(
+                    "Interventions require the same model SHA-256",
+                ));
+            }
+            digest = Some(source_digest.to_owned());
+            patch
+                .slice()?
+                .check()
+                .map_err(|e| ApiError::bad(e.to_string()))?;
+            if receipt["prompts"].get(patch.source_prompt).is_none() {
+                return Err(ApiError::not_found("patch source prompt"));
+            }
+            // Check overlap and the expanded rule count before reading any payload.
+            rules.extend(
+                patch
+                    .positions
+                    .iter()
+                    .map(|&p| patch.rule(p, Operation::Zero)),
+            );
+            sources.push((prior, patch));
+        }
+        Rule::check_all(&rules).map_err(|e| ApiError::bad(e.to_string()))?;
+        if fixed_values > MAX_VALUES {
+            return Err(ApiError::bad("Trace intervention vectors are too large"));
+        }
+        rules.truncate(fixed);
+        if let Some(digest) = digest {
+            options.insert("expected_model_sha256".into(), json!(digest));
+        }
+        if sources.is_empty() {
+            set_rules(options, rules);
+            Ok(None)
+        } else {
+            Ok(Some(Self { rules, sources }))
+        }
+    }
+
+    pub async fn resolve(mut self, app: &App, envelope: &mut Envelope) -> Result<()> {
+        let mut values = value_count(&self.rules);
+        tokio::time::timeout(Duration::from_secs(30), async {
+            for (prior, patch) in self.sources {
+                let reply = app
+                    .dispatcher
+                    .trace_read(&prior, &patch.slice()?)
+                    .await
+                    .map_err(|e| {
+                        eprintln!("Patch source trace read failed for {}: {e}", prior.id);
+                        invalid_payload()
+                    })?;
+                let data = match reply {
+                    ReadReply::Ok(data) => data,
+                    ReadReply::Missing => {
+                        return Err(ApiError::not_found("patch source trace slice"));
+                    }
+                    ReadReply::TooLarge => {
+                        return Err(ApiError(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "Select a smaller patch source range".into(),
+                        ));
+                    }
+                };
+                let Rows {
+                    prompt,
+                    layer,
+                    role,
+                    dtype,
+                    rows,
+                    ..
+                } = serde_json::from_value(data).map_err(|_| invalid_payload())?;
+                if (prompt, layer, role, dtype.as_str())
+                    != (patch.source_prompt, patch.layer, patch.role, "f32_le")
+                {
+                    return Err(invalid_payload());
+                }
+                let mut vectors = BTreeMap::new();
+                for row in rows
+                    .into_iter()
+                    .filter(|r| patch.positions.contains(&r.position))
+                {
+                    let vector = row.vector()?;
+                    values += vector.len();
+                    if values > MAX_VALUES {
+                        return Err(ApiError::bad("Trace intervention vectors are too large"));
+                    }
+                    if vectors.insert(row.position, vector).is_some() {
+                        return Err(invalid_payload());
+                    }
+                }
+                if vectors.len() != patch.positions.len() {
+                    return Err(ApiError::not_found("patch source activation position"));
+                }
+                self.rules.extend(
+                    vectors
+                        .into_iter()
+                        .map(|(p, vector)| patch.rule(p, Operation::Replace { vector })),
+                );
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::GATEWAY_TIMEOUT,
+                "Patch source reads timed out".into(),
+            )
+        })??;
+        set_rules(&mut envelope.options, self.rules);
+        Ok(())
+    }
+}
+
+impl Patch {
+    fn slice(&self) -> Result<Slice> {
+        let start = self.positions.first().copied();
+        let end = self.positions.last().and_then(|p| p.checked_add(1));
+        if start.is_none() || end.is_none() {
+            return Err(ApiError::bad("Invalid patch positions"));
+        }
+        Ok(Slice {
+            view: View::Tensor,
+            prompt: self.source_prompt,
+            layer: Some(self.layer),
+            role: Some(self.role),
+            start,
+            end,
+        })
+    }
+
+    fn rule(&self, p: usize, op: Operation) -> Rule {
+        Rule {
+            layer: self.layer,
+            role: self.role,
+            positions: BTreeSet::from([p]),
+            op,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct Rows {
+    pub prompt: usize,
+    pub layer: usize,
+    pub role: Role,
+    pub dtype: String,
+    pub rows: Vec<Row>,
+    #[serde(default)]
+    pub missing_positions: Vec<usize>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct Row {
+    pub position: usize,
+    shape: Vec<usize>,
+    sha256: String,
+    data_base64: String,
+}
+
+impl Row {
+    pub fn vector(&self) -> Result<Vec<f32>> {
+        let [width] = self.shape.as_slice() else {
+            return Err(invalid_payload());
+        };
+        if !(1..=16384).contains(width) || self.data_base64.len() != (width * 4).div_ceil(3) * 4 {
+            return Err(invalid_payload());
+        }
+        let bytes = STANDARD
+            .decode(&self.data_base64)
+            .map_err(|_| invalid_payload())?;
+        if bytes.len() != width * 4 || format!("{:x}", Sha256::digest(&bytes)) != self.sha256 {
+            return Err(invalid_payload());
+        }
+        let vector: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four bytes")))
+            .collect();
+        if !vector.iter().all(|v| v.is_finite()) {
+            return Err(invalid_payload());
+        }
+        Ok(vector)
+    }
+}
+
+fn take<T: DeserializeOwned>(options: &mut Map<String, Value>, name: &str) -> Result<Option<T>> {
+    options
+        .remove(name)
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| ApiError::bad(format!("Invalid {name}")))
+}
+
+fn set_rules(options: &mut Map<String, Value>, rules: Vec<Rule>) {
+    if !rules.is_empty() {
+        options.insert("interventions".into(), json!(rules));
+    }
+}
+
+pub(super) fn value_count(rules: &[Rule]) -> usize {
+    rules
+        .iter()
+        .filter_map(|rule| rule.op.vector())
+        .map(<[f32]>::len)
+        .sum()
+}
+
+fn invalid_payload() -> ApiError {
+    ApiError(
+        StatusCode::BAD_GATEWAY,
+        "Cannot verify patch source activation".into(),
+    )
+}

@@ -3,18 +3,46 @@
   import { Submitter } from '../lib/submit.svelte';
   import { capability, hostName, kindLabel, modelLabel } from '../lib/format';
   import HostSelect from '../components/HostSelect.svelte';
-  import { visibleChecklist } from '../lib/pickers';
-  import Submit from '../components/Submit.svelte';
+  import Combobox from '../components/Combobox.svelte';
+  import Blockers from '../components/Blockers.svelte';
+  import WorkflowGate from '../components/WorkflowGate.svelte';
+  import { hostOptions, visibleChecklist } from '../lib/pickers';
+  import { Checklist } from '../lib/checklist';
+  import SelectionReview from '../components/SelectionReview.svelte';
+  import { globalJobEligibility, hostWorkflowEligibility } from '../lib/eligibility';
+  import type { Blocker } from '../lib/blockers';
+  import type { Host, NewJob } from '../lib/types';
   import SubmitStatus from '../components/SubmitStatus.svelte';
   import RecentJobs from '../components/RecentJobs.svelte';
+  import { tick } from 'svelte';
+  import { route } from '../lib/route.svelte';
+  import { focusAfterRemoval } from '../lib/focus';
 
   const models = $derived(brewery.state?.models ?? []);
   const hosts = $derived(brewery.state?.hosts ?? []);
+  type CopyKind = 'transfer_preview' | 'transfer';
+  const MAX_COPY_INPUTS = 32; // Controller limit for POST /api/jobs inputs.
+  const decision = (h: Host, kind: CopyKind) => hostWorkflowEligibility(brewery.state?.eligibility, h.id, kind);
+  const allows = (h: Host, kind: CopyKind) => decision(h, kind)?.eligible ?? capability(h, kind).allowed;
+  const destinationOptions = $derived(hostOptions(hosts.filter((h) => allows(h, 'transfer') || allows(h, 'transfer_preview'))));
+  const setup = $derived.by(() => {
+    const copy = globalJobEligibility(brewery.state, 'transfer');
+    const preview = globalJobEligibility(brewery.state, 'transfer_preview');
+    // Preview and copy share the form; either action can make it useful.
+    if (copy?.eligible === false && preview?.eligible === false) {
+      const reasons = [...copy.reasons, ...preview.reasons];
+      return { eligible: false, reasons: [...new Map(reasons.map((r) => [`${r.text}\n${r.fix_anchor}`, r])).values()] };
+    }
+    return { eligible: true, reasons: [] };
+  });
 
   let dest = $state('');
-  let selected = $state<string[]>([]);
+  const selection = new Checklist();
   const destHost = $derived(hosts.find((h) => h.id === dest));
-  const candidates = $derived(models.filter((m) => m.host !== dest));
+  const candidates = $derived(models.filter((m) => m.host !== dest && m.available !== false));
+  const missing = $derived(selection.missing(candidates));
+  const selected = $derived(selection.ids.filter(id => !missing.some(item => item.id === id)));
+  let checklist: HTMLFieldSetElement | undefined = $state();
   let txFilter = $state('');
   const listed = $derived(
     visibleChecklist(
@@ -24,51 +52,90 @@
     ),
   );
 
-  // Drop selections that are no longer in the library or are already on the destination.
-  $effect(() => {
-    const ok = new Set(candidates.map((m) => m.id));
-    if (selected.some((id) => !ok.has(id))) selected = selected.filter((id) => ok.has(id));
-  });
-
-  function blockers(kind: 'transfer_preview' | 'transfer') {
-    const out: string[] = [];
-    if (!dest) out.push('Select a destination host.');
-    else {
-      const c = capability(destHost, kind);
-      if (!c.allowed && c.reason) out.push(c.reason);
+  function blockers(): Blocker[] {
+    const out: Blocker[] = [];
+    if (!destHost) out.push({ text: 'Select a destination host.' });
+    if (selected.length === 0) out.push({ text: 'Select at least one entry to copy.' });
+    if (missing.length) out.push({ text: 'Review the change to the selection.' });
+    if (selected.length > MAX_COPY_INPUTS) out.push({ text: `Select at most ${MAX_COPY_INPUTS} entries to copy.` });
+    if (candidates.some(m => m.host === 'backend-hf' && selection.has(m.id))) {
+      out.push({ text: 'Backend files are only available for local weight jobs.' });
     }
-    if (selected.length === 0) out.push('Select at least one entry to copy.');
     return out;
   }
 
-  const preview = new Submitter();
-  const transfer = new Submitter();
+  function hostBlockers(kind: CopyKind): Blocker[] {
+    if (!destHost || allows(destHost, kind)) return [];
+    const name = hostName(hosts, destHost.id);
+    const reasons = decision(destHost, kind)?.reasons ?? [];
+    const action = kind === 'transfer' ? 'Transfer' : 'Preview';
+    if (reasons.length) {
+      return reasons.map((r) => ({ host: name, text: `${action}: ${r.text}`, fixAnchor: r.fix_anchor }));
+    }
+    const reason = destHost.capability_reasons?.[kind];
+    return [{ host: name, text: `${action}: ${reason?.text ?? capability(destHost, kind).reason ?? 'This action is not available.'}`, fixAnchor: reason?.fix_anchor }];
+  }
+
+  const copyBlockers = $derived(blockers());
+  const previewHostBlockers = $derived(hostBlockers('transfer_preview'));
+  const transferHostBlockers = $derived(hostBlockers('transfer'));
+  const preview = new Submitter('transfers.preview');
+  const transfer = new Submitter('transfers.transfer');
 
   // Cleanup
   let cleanHost = $state('');
   let digest = $state('');
   let confirmClean = $state(false);
-  const cleaner = new Submitter();
+  let confirmation: HTMLElement | undefined = $state();
+  let cleanButton: HTMLButtonElement | undefined = $state();
+  const cleaner = new Submitter('transfers.cleanup');
   const digestProblem = $derived(digest.trim() && !/^[0-9a-f]{64}$/.test(digest.trim()) ? 'Use a 64-character lowercase SHA-256 hex digest.' : null);
   const cleanBlockers = $derived.by(() => {
-    const out: string[] = [];
-    if (!cleanHost) out.push('Select a host.');
+    const out: Blocker[] = [];
+    if (!cleanHost) out.push({ text: 'Select a host.' });
     else {
       const c = capability(hosts.find((h) => h.id === cleanHost), 'cache_cleanup');
-      if (!c.allowed && c.reason) out.push(c.reason);
+      if (!c.allowed && c.reason) out.push({ text: c.reason });
     }
-    if (digestProblem) out.push(digestProblem);
+    if (digestProblem) out.push({ text: digestProblem });
     return out;
   });
 
-  async function runCleanup() {
-    const job = await cleaner.submit({
-      kind: 'cache_cleanup',
-      host: cleanHost,
-      input_ids: [],
-      options: digest.trim() ? { bundle_sha256: digest.trim() } : undefined,
-    });
-    if (job) confirmClean = false;
+  const previewJob = $derived<NewJob>({ kind: 'transfer_preview', host: dest, input_ids: selected });
+  const transferJob = $derived<NewJob>({ kind: 'transfer', host: dest, input_ids: selected });
+  const cleanupJob = $derived<NewJob>({
+    kind: 'cache_cleanup', host: cleanHost, input_ids: [],
+    options: digest.trim() ? { bundle_sha256: digest.trim() } : undefined,
+  });
+
+  function queueCopy(kind: CopyKind, event: MouseEvent) {
+    if (copyBlockers.length) return;
+    if (kind === 'transfer_preview' && !previewHostBlockers.length) void preview.submit(previewJob, event);
+    if (kind === 'transfer' && !transferHostBlockers.length) void transfer.submit(transferJob, event);
+  }
+
+  async function closeCleanup(visit: ReturnType<typeof route.capture>, restoreFocus: boolean) {
+    confirmClean = false;
+    await tick();
+    if (restoreFocus && visit.current() && document.activeElement === document.body) {
+      const resultLink = cleanButton?.closest('section')?.querySelector<HTMLElement>('a[href^="#/jobs/"]');
+      (cleanButton?.disabled ? resultLink : cleanButton)?.focus();
+    }
+  }
+
+  async function runCleanup(event: MouseEvent) {
+    const visit = route.capture();
+    const group = confirmation;
+    let stayed = group?.contains(document.activeElement) ?? false;
+    const observe = (event: Event) => {
+      if (event.target instanceof Node && !group?.contains(event.target)) stayed = false;
+    };
+    document.addEventListener('focusin', observe);
+    document.addEventListener('pointerdown', observe);
+    const job = await cleaner.submit(cleanupJob, event, false);
+    document.removeEventListener('focusin', observe);
+    document.removeEventListener('pointerdown', observe);
+    if (job && visit.current() && confirmation === group) await closeCleanup(visit, stayed);
   }
 </script>
 
@@ -82,13 +149,13 @@
 
   <section class="panel" aria-labelledby="tx-h">
     <header><h2 id="tx-h">Copy to a host</h2></header>
+    <WorkflowGate workflow="transfer" decision={setup}>
     <div class="body stack">
       <div class="grid-2">
-        <HostSelect bind:value={dest} kind="transfer" label="Destination host" />
-        <div></div>
+        <Combobox id="tx-host" bind:value={dest} options={destinationOptions} label="Destination host" placeholder="Select or type a host" emptyText="No eligible destination matches." />
       </div>
-      <fieldset class="pick">
-        <legend class="small">Entries to copy</legend>
+      <fieldset class="pick" bind:this={checklist}>
+        <legend class="small" tabindex="-1">Entries to copy</legend>
         {#if !dest}
           <p class="xs muted">Select a destination first.</p>
         {:else if candidates.length === 0}
@@ -97,15 +164,19 @@
           <div class="tx-filter">
             <label class="sr-only" for="tx-filter">Filter entries to copy</label>
             <input id="tx-filter" class="input" type="search" bind:value={txFilter} placeholder="Filter by name, host or path…" autocomplete="off" spellcheck="false" aria-describedby="tx-filter-hint" />
-            <span class="xs muted" id="tx-filter-hint" aria-live="polite">{selected.length} selected{txFilter.trim() ? ` · ${listed.length} of ${candidates.length} shown; selected entries stay listed` : ''}</span>
+            <span class="xs muted" id="tx-filter-hint" aria-live="polite">{selected.length} selected (maximum {MAX_COPY_INPUTS}){txFilter.trim() ? ` · ${listed.length} of ${candidates.length} shown; selected entries stay listed` : ''}</span>
           </div>
           <ul>
             {#each listed as { m } (m.id)}
               <li>
                 <label>
-                  <input type="checkbox" value={m.id} bind:group={selected} />
-                  <span class="truncate">{modelLabel(m)}</span>
-                  <span class="xs muted nowrap">{kindLabel(m.kind)} · from {hostName(hosts, m.host)}</span>
+                  <input type="checkbox" checked={selection.has(m.id)}
+                    onchange={(event) => selection.set(m.id, modelLabel(m), event.currentTarget.checked)} />
+                  <span class="entry">
+                    <span>{modelLabel(m)}</span>
+                    <span class="xs muted">{kindLabel(m.kind)} · from {hostName(hosts, m.host)}</span>
+                    {#if m.host === 'backend-hf'}<span class="xs muted">Local weight jobs only</span>{/if}
+                  </span>
                 </label>
               </li>
             {/each}
@@ -113,14 +184,25 @@
           {#if listed.length === 0}<p class="xs muted">No entry matches the filter.</p>{/if}
         {/if}
       </fieldset>
+      <SelectionReview {missing} acknowledge={(shown) => selection.remove(shown)}
+        focusRestored={() => checklist?.querySelector('legend')}
+        focusRemaining={() => checklist?.querySelector<HTMLElement>('input:checked') ?? checklist?.querySelector('legend')} />
       <div class="row actions">
-        <Submit variant="secondary" blockers={blockers('transfer_preview')} busy={preview.busy} onclick={() => preview.submit({ kind: 'transfer_preview', host: dest, input_ids: selected })}>Preview</Submit>
-        <Submit blockers={blockers('transfer')} busy={transfer.busy} onclick={() => transfer.submit({ kind: 'transfer', host: dest, input_ids: selected })}>Transfer</Submit>
+        <button type="button" class="btn" aria-describedby={copyBlockers.length || previewHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={preview.busy}
+          disabled={preview.busy || copyBlockers.length > 0 || previewHostBlockers.length > 0}
+          onclick={(event) => queueCopy('transfer_preview', event)}>{preview.busy ? 'Submitting…' : 'Preview'}</button>
+        <button type="button" class="btn primary" aria-describedby={copyBlockers.length || transferHostBlockers.length ? 'copy-blockers' : undefined} aria-busy={transfer.busy}
+          disabled={transfer.busy || copyBlockers.length > 0 || transferHostBlockers.length > 0}
+          onclick={(event) => queueCopy('transfer', event)}>{transfer.busy ? 'Submitting…' : 'Transfer'}</button>
       </div>
+      {#if copyBlockers.length || previewHostBlockers.length || transferHostBlockers.length}
+        <Blockers id="copy-blockers" blockers={[...copyBlockers, ...previewHostBlockers, ...transferHostBlockers]} />
+      {/if}
       <SubmitStatus s={preview} />
       <SubmitStatus s={transfer} />
       <p class="xs muted">Preview and transfer are queued jobs. Open a job to see the preview result, progress and cancel.</p>
     </div>
+    </WorkflowGate>
   </section>
 
   <RecentJobs kinds={['transfer_preview', 'transfer']} title="Recent previews and transfers" />
@@ -130,7 +212,7 @@
     <div class="body stack">
       <p class="small muted">Removes worker-owned cached copies only. Registered originals and produced bundles in the library are not touched.</p>
       <div class="grid-2">
-        <HostSelect bind:value={cleanHost} kind="cache_cleanup" />
+        <HostSelect id="cl-host" bind:value={cleanHost} kind="cache_cleanup" />
         <div class="field">
           <label for="cl-digest">Bundle SHA-256 <span class="muted">(optional)</span></label>
           <input id="cl-digest" class="input mono" bind:value={digest} autocomplete="off" spellcheck="false" aria-invalid={digestProblem ? 'true' : undefined} aria-describedby="cl-digest-h" />
@@ -138,16 +220,22 @@
         </div>
       </div>
       {#if confirmClean}
-        <div class="note warn" role="group" aria-label="Confirm cleanup">
+        <div class="note warn" role="group" aria-label="Confirm cleanup" bind:this={confirmation}>
           <p class="small">Remove {digest.trim() ? 'this cached bundle' : 'all unused cached copies'} on {hostName(hosts, cleanHost)}? Later jobs copy the files again.</p>
           <div class="row" style="margin-top:8px">
+            <button type="button" class="btn ghost" data-keep-cache onclick={() => closeCleanup(route.capture(), !!confirmation?.contains(document.activeElement))}>Keep cache</button>
             <button type="button" class="btn danger" disabled={cleaner.busy || cleanBlockers.length > 0} onclick={runCleanup}>{cleaner.busy ? 'Submitting…' : 'Queue cleanup'}</button>
-            <button type="button" class="btn ghost" onclick={() => (confirmClean = false)}>Keep cache</button>
           </div>
         </div>
       {:else}
-        <Submit variant="secondary" blockers={cleanBlockers} onclick={() => (confirmClean = true)}>Clean cache…</Submit>
+        <div class="row">
+          <button type="button" class="btn" bind:this={cleanButton} aria-describedby={cleanBlockers.length ? 'cleanup-blockers' : undefined}
+            disabled={cleanBlockers.length > 0} onclick={() => focusAfterRemoval(
+              () => { confirmClean = true; }, () => confirmation?.querySelector<HTMLElement>('[data-keep-cache]'),
+            )}>Clean cache…</button>
+        </div>
       {/if}
+      <Blockers id="cleanup-blockers" blockers={cleanBlockers} />
       <SubmitStatus s={cleaner} />
     </div>
   </section>
@@ -191,28 +279,26 @@
     max-height: 280px;
     overflow: auto;
   }
-  .pick label {
-    display: flex;
-    align-items: center;
+  .pick li label {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
     gap: 10px;
     padding: 6px 4px;
     min-height: 36px;
     cursor: pointer;
     border-radius: var(--r-sm);
   }
-  .pick label:hover {
+  .pick li label:hover {
     background: var(--surface-2);
   }
-  .pick .truncate {
-    flex: 1;
+  .entry {
+    display: flex;
+    flex-direction: column;
+    overflow-wrap: anywhere;
   }
   .actions {
     align-items: flex-start;
     gap: var(--s-3);
-  }
-  @media (max-width: 560px) {
-    .pick label {
-      flex-wrap: wrap;
-    }
   }
 </style>

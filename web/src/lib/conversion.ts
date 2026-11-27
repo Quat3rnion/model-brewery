@@ -28,6 +28,12 @@ export interface ConversionBody {
 
 /** Form value prefix for a saved profile revision in the profile select. */
 export const REV_PREFIX = 'rev:';
+export const DEFAULT_PROFILE = 'converter-default';
+
+export function conversionRunHref(id: string, mode = 'hgn'): string {
+  const params = new URLSearchParams(mode === 'hgn' ? { run: id } : { format: mode, run: id });
+  return `#/convert?${params}`;
+}
 
 export interface Conversion {
   id: string;
@@ -49,14 +55,19 @@ export interface Conversion {
   format: string | null;
 }
 
-/** The single POST body. Profile is required; host is explicit, 'auto', or omitted (source host). */
+/** The form requires a profile choice, which may delegate to the converter. */
 export function buildConversion(f: ConvertForm, models: Model[]): { body: ConversionBody | null; problems: string[] } {
   const rev = f.profile.startsWith(REV_PREFIX) ? f.profile.slice(REV_PREFIX.length) : null;
+  const source = models.find((m) => m.id === f.source);
   // Reuse the converter step validation for inputs, extras and numeric options.
-  const r = buildConvertJob('convert', rev !== null ? { ...f, profile: '' } : f, models);
+  const r = buildConvertJob('convert', rev !== null || f.profile === DEFAULT_PROFILE ? { ...f, profile: '' } : f, models);
   const problems = [...r.problems];
   if (!f.profile) problems.unshift('Choose the output profile.');
   if (rev !== null && !/^[0-9a-f]{64}$/.test(rev)) problems.unshift('The saved profile revision is not valid. Choose it again.');
+  if (rev !== null && ((source && source.kind !== 'hf') ||
+      [f.ht_backend, f.i4r_backend, f.q4cp_backend, f.decode_backend].some((backend) => backend && backend !== 'cpu'))) {
+    problems.push('Select an HF source and CPU backends to use a custom profile.');
+  }
   if (problems.length || !r.job) return { body: null, problems };
   const body: ConversionBody = { input_ids: r.job.input_ids, options: r.job.options };
   if (r.job.host) body.host = r.job.host;
@@ -103,6 +114,15 @@ export function isActiveConversion(c: Conversion): boolean {
   return c.state === 'running';
 }
 
+export function newerConversion(current: Conversion, received: Conversion): Conversion {
+  if (!isActiveConversion(current) && isActiveConversion(received)) return current;
+  if (current.updatedAt !== null && (received.updatedAt === null || current.updatedAt > received.updatedAt)) return current;
+  if (isActiveConversion(current) && isActiveConversion(received) && current.stage &&
+      STAGES.indexOf(current.stage) > (received.stage ? STAGES.indexOf(received.stage) : -1)) return current;
+  if (current.cancelRequested && !received.cancelRequested && isActiveConversion(received)) return current;
+  return received;
+}
+
 export type StageStatus = 'pending' | 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'skipped' | 'unknown';
 
 /**
@@ -126,54 +146,4 @@ export function stageRows(c: Conversion, jobStates: Record<string, string | unde
     }
     return { stage, status, jobId };
   });
-}
-
-/** Fresh random idempotency key (ASCII, within the controller's [A-Za-z0-9._-]{1,128}). */
-export function newKey(): string {
-  const b = new Uint8Array(16);
-  crypto.getRandomValues(b);
-  return `conv-${[...b].map((x) => x.toString(16).padStart(2, '0')).join('')}`;
-}
-
-export type PostConversion = (body: ConversionBody, key: string) => Promise<unknown>;
-
-/**
- * One submission at a time. A retry of the same body reuses the key, so a
- * lost response cannot start a second workflow; a different body gets a new key.
- */
-export class ConversionSubmitter {
-  busy = false;
-  error: string | null = null;
-  #key: string | null = null;
-  #bodyJson: string | null = null;
-  #inflight: Promise<Conversion | null> | null = null;
-
-  constructor(private post: PostConversion) {}
-
-  submit(body: ConversionBody): Promise<Conversion | null> {
-    if (this.#inflight) return this.#inflight.then(() => null);
-    const json = JSON.stringify(body);
-    if (json !== this.#bodyJson || !this.#key) {
-      this.#bodyJson = json;
-      this.#key = newKey();
-    }
-    const key = this.#key;
-    this.busy = true;
-    this.error = null;
-    this.#inflight = (async () => {
-      try {
-        const c = parseConversion(await this.post(body, key));
-        if (!c) throw new Error('The controller answered without a conversion record.');
-        // Success: the next different request gets a new key; the same body replays this one.
-        return c;
-      } catch (e) {
-        this.error = e instanceof Error ? e.message : String(e);
-        return null;
-      } finally {
-        this.busy = false;
-        this.#inflight = null;
-      }
-    })();
-    return this.#inflight;
-  }
 }

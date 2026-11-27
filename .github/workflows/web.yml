@@ -1,0 +1,46 @@
+name: Workbench CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:flows
+        env:
+          TMPDIR: ${{ runner.temp }}
+      - run: npm run test:browser
+        env:
+          TMPDIR: ${{ runner.temp }}
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-failures
+          path: ${{ runner.temp }}/brewery-flow-results
+          if-no-files-found: ignore
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
+      - run: rustup toolchain install stable --profile minimal
+      # The runtime tests that need native tools or hardware are ignored by default.
+      - run: cargo +stable test --workspace --locked

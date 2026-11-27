@@ -354,6 +354,11 @@ pub fn apply_inputs(
         kind: "weight-edit-proposal".into(),
         path: path.into(),
         name: "Reviewed weight proposal".into(),
+        sha256: None,
+        bytes: None,
+        available: None,
+        reason: None,
+        job_id: None,
     };
     let mut checks = json!({
         "source_sha256":source_sha,"proposal_sha256":artifact["sha256"],

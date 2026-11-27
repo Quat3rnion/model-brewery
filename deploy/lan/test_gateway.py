@@ -1,13 +1,11 @@
 """Isolated HTTPS smoke and regression tests; run with Python and CADDY set."""
 
-import base64
 import contextlib
 import http.client
 import http.server
 import json
 import os
 from pathlib import Path
-import secrets
 import socket
 import socketserver
 import ssl
@@ -96,16 +94,6 @@ class GatewayTest(unittest.TestCase):
         )
         cls.tls = ssl.create_default_context(cafile=state / "tls/server.crt")
         caddy = os.environ.get("CADDY", "caddy")
-        password = secrets.token_urlsafe(24)
-        digest = subprocess.run(
-            [caddy, "hash-password", "--algorithm", "bcrypt"],
-            input=f"{password}\n", text=True, check=True, capture_output=True,
-        ).stdout.strip()
-        (state / "basic-auth.caddy").touch(mode=0o600)
-        (state / "basic-auth.caddy").write_text(f"brewery {digest}\n")
-        cls.authorization = "Basic " + base64.b64encode(
-            f"brewery:{password}".encode(),
-        ).decode()
         log = resources.enter_context((state / "gateway.log").open("w+"))
         # Use the shipped endpoint and TLS defaults, not the operator's environment.
         env = {key: value for key, value in os.environ.items() if not key.startswith("BREWERY_")}
@@ -140,15 +128,13 @@ class GatewayTest(unittest.TestCase):
 
     @contextlib.contextmanager
     def request(self, method="GET", path="/", headers=(), body=b"", *,
-                auth=True, host=None, source_ip="127.0.0.1"):
+                host=None, source_ip="127.0.0.1"):
         with contextlib.closing(http.client.HTTPSConnection(
             "127.0.0.1", self.port, context=self.tls, timeout=3,
             source_address=(source_ip, 0),
         )) as conn:
             conn.putrequest(method, path, skip_host=True)
             conn.putheader("Host", self.host if host is None else host)
-            if auth:
-                conn.putheader("Authorization", self.authorization)
             for name, value in headers:
                 conn.putheader(name, value)
             if body:
@@ -157,16 +143,11 @@ class GatewayTest(unittest.TestCase):
             with conn.getresponse() as response:
                 yield response
 
-    def test_login(self):
-        with self.request(auth=False) as response:
-            self.assertEqual(response.status, 401)
-            self.assertTrue(response.headers["WWW-Authenticate"].startswith("Basic "))
-        with self.request(auth=False, headers=[
-            ("Authorization", "Basic " + base64.b64encode(b"brewery:wrong").decode()),
-        ]) as response:
-            self.assertEqual(response.status, 401)
-        with self.request() as response:
-            self.assertEqual(response.status, 200)
+    def test_access_without_credentials(self):
+        for path in ("/", "/api/state"):
+            with self.subTest(path=path), self.request(path=path) as response:
+                self.assertEqual(response.status, 200)
+                self.assertIsNone(response.headers.get("WWW-Authenticate"))
 
     def test_direct_peer_and_exact_host(self):
         with self.request(source_ip="127.0.0.2", headers=[
@@ -227,8 +208,10 @@ class GatewayTest(unittest.TestCase):
             ("Origin", f"https://{self.host}"),
             ("Sec-Fetch-Site", "same-origin"),
             ("Content-Type", "application/json; charset=utf-8"),
+            ("Authorization", "Bearer client-supplied"),
             ("Proxy-Authorization", "Basic x"),
             ("Cookie", "credential=x"),
+            ("Cookie2", "credential=x"),
             ("Forwarded", "for=192.0.2.1"),
             ("X-Forwarded-For", "192.0.2.1"),
             ("X-Forwarded-Extra", "client-supplied"),
@@ -241,7 +224,7 @@ class GatewayTest(unittest.TestCase):
 
             self.assertEqual(headers["sec-fetch-site"], "same-origin")
             self.assertEqual(headers["content-type"], "application/json; charset=utf-8")
-            for name in ("authorization", "proxy-authorization", "cookie", "forwarded",
+            for name in ("authorization", "proxy-authorization", "cookie", "cookie2", "forwarded",
                          "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
                          "x-forwarded-extra", "x-real-ip"):
                 self.assertNotIn(name, headers)
@@ -251,7 +234,7 @@ class GatewayTest(unittest.TestCase):
             for name in ("origin", "sec-fetch-site", "content-type"):
                 self.assertNotIn(name, names)
 
-    def test_infrastructure_uses_same_gateway_auth_and_origin_checks(self):
+    def test_infrastructure_uses_same_gateway_origin_checks(self):
         for method, path in (
             ("GET", "/api/admin/state"),
             ("POST", "/api/admin/actions"),
@@ -262,8 +245,6 @@ class GatewayTest(unittest.TestCase):
                     self.assertEqual(reply.status, 200)
                     upstream = {k.lower() for k in json.loads(reply.read())}
                     self.assertNotIn("authorization", upstream)
-                with self.request(method, path, auth=False, headers=headers) as reply:
-                    self.assertEqual(reply.status, 401)
                 with self.request(method, path, headers=headers + [
                     ("Origin", "https://other.invalid"),
                 ]) as reply:

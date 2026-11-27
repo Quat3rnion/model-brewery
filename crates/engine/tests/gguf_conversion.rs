@@ -29,6 +29,13 @@ fn stage(root: &Path, kind: &str, options: Value, inputs: Vec<Value>, exe: &Path
     child.wait_with_output().unwrap()
 }
 
+fn private_quantizer(root: &Path) -> std::path::PathBuf {
+    let quantizer = root.join("quantizer");
+    fs::write(&quantizer, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&quantizer, fs::Permissions::from_mode(0o700)).unwrap();
+    quantizer
+}
+
 #[test]
 fn gguf_route_requires_a_dedicated_quantizer_before_reading_the_model() {
     let tmp = tempfile::tempdir().unwrap();
@@ -48,6 +55,58 @@ fn gguf_route_requires_a_dedicated_quantizer_before_reading_the_model() {
 }
 
 #[test]
+fn scratch_conversion_routes_to_the_standalone_gguf_converter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let weights = tmp.path().join("scratch.safetensors");
+    let assets = tmp.path().join("assets");
+    fs::write(&weights, b"weights").unwrap();
+    fs::create_dir(&assets).unwrap();
+    let out = stage(
+        tmp.path(),
+        "scratch_gguf",
+        json!({"output_format":"gguf","gguf_type":"BF16"}),
+        vec![
+            json!({"kind":"safetensors","host":"fixture","path":weights,"sha256":"0".repeat(64)}),
+            json!({"kind":"assets","host":"fixture","path":assets}),
+        ],
+        &private_quantizer(tmp.path()),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(stderr.contains("SHA-256 mismatch"), "{stderr}");
+}
+
+#[test]
+fn scratch_conversion_enables_private_exporter_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let weights = tmp.path().join("scratch.safetensors");
+    let assets = tmp.path().join("assets");
+    fs::write(&weights, b"abc").unwrap();
+    fs::create_dir(&assets).unwrap();
+    fs::write(assets.join("config.json"), b"{}").unwrap();
+    let exporter = tmp.path().join("exporter");
+    fs::write(
+        &exporter,
+        "#!/bin/sh\nfor arg; do\n if [ \"$arg\" = --scratch-private ]; then\n echo 'private mode selected' >&2\n fi\ndone\nexit 1\n",
+    ).unwrap();
+    fs::set_permissions(&exporter, fs::Permissions::from_mode(0o700)).unwrap();
+    let out = stage(
+        tmp.path(),
+        "scratch_gguf",
+        json!({"output_format":"gguf","gguf_type":"BF16"}),
+        vec![
+            json!({"kind":"safetensors","host":"fixture","path":weights,
+                "sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}),
+            json!({"kind":"assets","host":"fixture","path":assets}),
+        ],
+        &private_quantizer(tmp.path()),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(stderr.contains("private mode selected"), "{stderr}");
+}
+
+#[test]
 fn standalone_inspect_passes_explicit_assets_and_attests_their_bytes() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
@@ -59,6 +118,9 @@ fn standalone_inspect_passes_explicit_assets_and_attests_their_bytes() {
     fs::write(&source, b"fixture weights").unwrap();
     fs::write(weights.join("config.json"), b"not selected").unwrap();
     fs::write(assets.join("config.json"), b"selected").unwrap();
+    let quantizer = root.join("quantizer");
+    fs::write(&quantizer, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&quantizer, fs::Permissions::from_mode(0o700)).unwrap();
     let exporter = root.join("exporter");
     fs::write(
         &exporter,
@@ -87,7 +149,7 @@ printf '%s\n' '{"source_format":"safetensors","export_supported":true,"expected_
             "inspect",
             json!({"output_format":"gguf","gguf_type":"Q8_0"}),
             inputs,
-            Path::new("/usr/bin/false"),
+            &quantizer,
         );
         fs::remove_dir_all(root.join("inspect")).unwrap();
         output

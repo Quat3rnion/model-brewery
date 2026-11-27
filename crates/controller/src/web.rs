@@ -1,8 +1,13 @@
 use crate::{
     App,
-    conversion::{Conversion, NewConversion},
-    domain::{KINDS, NewJob, NewModel, NewPrompt, candidates},
-    feed, hf_tokens,
+    conversion::{Conversion, NewConversion, StartError},
+    dedupe,
+    domain::{
+        Envelope, Job, KINDS, NewJob, NewModel, NewPrompt, Reason, SIMPLE_WORKFLOWS,
+        State as JobState, candidates, input_blocker, manual_registration_blocker,
+        standard_job_host_blocker,
+    },
+    eligibility, feed, hf_tokens,
     idempotency::{self, Replay, Submission},
     store::Store,
     suggestions::{self, SuggestError, Suggestions},
@@ -14,6 +19,10 @@ use axum::{
     middleware::{self, Next},
     response::{IntoResponse, Response, Sse, sse::KeepAlive},
     routing::{delete, get, post},
+};
+use brewery_worker::{
+    sensitivity,
+    trace::{self, ReadReply, Slice, View},
 };
 use serde_json::{Value, json, value::RawValue};
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc};
@@ -33,7 +42,17 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
                 )
             }),
         )
+        .route(
+            "/interp/benchmark",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "application/json")],
+                    include_str!("../../../qualification/interp_benchmark.v1.json"),
+                )
+            }),
+        )
         .route("/state", get(state))
+        .route("/conversions/eligibility", post(conversion_eligibility))
         .route("/settings", get(get_settings))
         .route(
             "/settings/{host}",
@@ -51,15 +70,27 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
             "/suggestions/paths",
             post(suggest_paths).layer(DefaultBodyLimit::max(32 * 1024)),
         )
-        .route("/models", post(add_model))
+        .route("/models", get(list_models).post(add_model))
         .route(
             "/models/weight-calibration",
             post(crate::backend_calibration::register),
         )
         .route("/models/{id}", delete(delete_model))
         .route("/prompts", post(add_prompt))
+        .route("/prompts/{id}", delete(delete_prompt).put(update_prompt))
         .route("/jobs", post(add_job))
         .route("/jobs/{id}", get(job))
+        .route("/jobs/{id}/trace", get(trace_manifest))
+        .route("/jobs/{id}/sensitivity", get(crate::sensitivity::get))
+        .route("/jobs/{id}/circuit", get(crate::circuit::get))
+        .route("/jobs/{id}/quantization-damage", get(crate::damage::get))
+        .route("/jobs/{id}/trace/tensor", get(trace_tensor))
+        .route("/jobs/{id}/trace/logit-lens", get(trace_logit_lens))
+        .route("/jobs/{id}/trace/model-logits", get(trace_model_logits))
+        .route(
+            "/jobs/{id}/trace/routing-atlas",
+            get(crate::routing_atlas::get),
+        )
         .route("/jobs/{id}/cancel", post(cancel))
         .route("/conversions", get(list_conversions).post(add_conversion))
         .route("/conversions/{id}", get(get_conversion))
@@ -93,6 +124,16 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
             }),
         )
         .merge(crate::admin::router())
+        .merge(crate::registered_evaluation::router())
+        .merge(crate::interventions::router())
+        .merge(crate::sae::router())
+        .merge(crate::crosscoder::router())
+        .merge(crate::findings::router())
+        .merge(crate::directions::router())
+        .merge(crate::scratch::router())
+        .merge(crate::diff::router())
+        .merge(crate::spectra::router())
+        .merge(crate::lineage::router())
         .merge(crate::infra_hosts::router())
         .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "API endpoint not found".into()) })
         .method_not_allowed_fallback(|| async {
@@ -101,11 +142,13 @@ pub fn router(app: Shared, listen: SocketAddr, dist: PathBuf) -> Router {
                 "HTTP method not allowed".into(),
             )
         })
-        .layer(DefaultBodyLimit::max(256 * 1024));
+        .layer(DefaultBodyLimit::max(256 * 1024))
+        .with_state(app.clone());
+    let mcp = Arc::new(crate::mcp::Server::new(api.clone()));
     Router::new()
-        .nest("/api", api)
+        .nest("/api", api.merge(crate::agent::router(app, mcp.clone())))
+        .merge(crate::mcp::router(mcp))
         .fallback_service(ServeDir::new(dist))
-        .with_state(app)
         .layer(middleware::from_fn_with_state(listen, guard))
 }
 
@@ -136,7 +179,8 @@ async fn guard(State(listen): State<SocketAddr>, req: Request, next: Next) -> Re
         Ok(value) if value.is_none_or(|value| value.strip_prefix("http://") == Some(host)) => value,
         _ => return rejected(),
     };
-    let api = req.uri().path() == "/api" || req.uri().path().starts_with("/api/");
+    let path = req.uri().path();
+    let api = path == "/mcp" || path == "/api" || path.starts_with("/api/");
     if api {
         let fetch = match single(headers, "sec-fetch-site") {
             Ok(value @ (Some("same-origin" | "none") | None)) => value,
@@ -148,6 +192,10 @@ async fn guard(State(listen): State<SocketAddr>, req: Request, next: Next) -> Re
             && origin.is_none()
             && fetch != Some("same-origin")
             && !has_json(headers)
+            // The import accepts multipart from CLI clients. It still requires
+            // an explicit operator bearer (never a cookie or ambient credential).
+            && !(path == "/api/admin/directions/import"
+                && has_media_type(headers, "multipart/form-data"))
         {
             return ApiError(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -177,7 +225,10 @@ async fn guard(State(listen): State<SocketAddr>, req: Request, next: Next) -> Re
     response
 }
 
-fn single<'a>(headers: &'a HeaderMap, name: &str) -> std::result::Result<Option<&'a str>, ()> {
+pub(crate) fn single<'a>(
+    headers: &'a HeaderMap,
+    name: &str,
+) -> std::result::Result<Option<&'a str>, ()> {
     let all = headers.get_all(name);
     let mut values = all.iter();
     let value = values
@@ -190,12 +241,21 @@ fn single<'a>(headers: &'a HeaderMap, name: &str) -> std::result::Result<Option<
     Ok(value)
 }
 
-fn has_json(headers: &HeaderMap) -> bool {
+pub(crate) fn has_json(headers: &HeaderMap) -> bool {
+    has_media_type(headers, "application/json")
+}
+
+fn has_media_type(headers: &HeaderMap, media_type: &str) -> bool {
     single(headers, "content-type")
         .ok()
         .flatten()
         .and_then(|s| s.split(';').next())
-        .is_some_and(|s| s.trim().eq_ignore_ascii_case("application/json"))
+        .is_some_and(|s| s.trim().eq_ignore_ascii_case(media_type))
+}
+
+async fn list_models(State(app): State<Shared>) -> Result<Json<Vec<crate::domain::Model>>> {
+    let store = app.store.lock().map_err(ApiError::storage)?;
+    Ok(Json(store.models().map_err(ApiError::storage)?))
 }
 
 async fn suggest_paths(
@@ -240,17 +300,24 @@ async fn state(State(app): State<Shared>) -> Result<Json<Value>> {
     // Every controller mutation takes this mutex, and its feed entry commits
     // in the same SQLite transaction. Read the cursor while still holding it.
     let store = app.store.lock().map_err(ApiError::storage)?;
-    let hosts = app.effective_hosts().map_err(ApiError::storage)?;
+    let mut hosts = app.effective_hosts().map_err(ApiError::storage)?;
+    for host in &mut hosts {
+        host.refresh_capability_reasons();
+    }
+    let mut models = store.models().map_err(ApiError::storage)?;
+    let jobs = store.jobs().map_err(ApiError::storage)?;
+    app.model_availability.refresh(&hosts, &jobs, &mut models);
     let capabilities: BTreeMap<_, _> = KINDS
         .iter()
         .map(|&kind| (kind, hosts.iter().any(|host| host.capabilities[kind])))
         .collect();
     Ok(Json(json!({
         "hosts": hosts,
-        "models": store.models().map_err(ApiError::storage)?,
+        "models": models,
         "prompts": store.prompts().map_err(ApiError::storage)?,
-        "jobs": store.jobs().map_err(ApiError::storage)?,
+        "jobs": jobs,
         "capabilities": capabilities,
+        "eligibility": eligibility::snapshot(&hosts),
         "event_cursor": store.feed_cursor().map_err(ApiError::storage)?,
     })))
 }
@@ -258,12 +325,20 @@ async fn state(State(app): State<Shared>) -> Result<Json<Value>> {
 async fn get_settings(State(app): State<Shared>) -> Result<Json<Value>> {
     let store = app.store.lock().map_err(ApiError::storage)?;
     let hosts = app.defined_hosts().map_err(ApiError::storage)?;
+    let effective = app.effective_hosts().map_err(ApiError::storage)?;
     let views: Vec<_> = hosts
         .iter()
-        .map(|host| app.settings.view(&store, host, app.admin.is_some()))
+        .map(|host| {
+            app.settings.view(
+                &store,
+                host,
+                effective.iter().find(|entry| entry.id == host.id),
+                app.admin.is_some(),
+            )
+        })
         .collect::<std::result::Result<_, _>>()
         .map_err(ApiError::storage)?;
-    Ok(Json(json!({"hosts": views})))
+    Ok(Json(json!({"hosts": views, "trace":app.trace_policy})))
 }
 
 async fn put_settings(
@@ -318,9 +393,8 @@ async fn put_settings(
             "worker has queued or running jobs".into(),
         ));
     }
-    let view = app
-        .settings
-        .put(&store, host, native, settings, binding, app.admin.is_some())
+    app.settings
+        .put(&store, host, native, settings, binding)
         .map_err(|err| match err {
             PutError::NotReady(reason) => ApiError(StatusCode::SERVICE_UNAVAILABLE, reason.into()),
             PutError::Storage(error) => ApiError::storage(error),
@@ -329,6 +403,16 @@ async fn put_settings(
             }
             PutError::Invalid(error) => ApiError::bad(error),
         })?;
+    let effective = app.effective_hosts().map_err(ApiError::storage)?;
+    let view = app
+        .settings
+        .view(
+            &store,
+            host,
+            effective.iter().find(|entry| entry.id == id),
+            app.admin.is_some(),
+        )
+        .map_err(ApiError::storage)?;
     Ok(Json(json!(view)))
 }
 
@@ -372,7 +456,7 @@ async fn remove_hf_token(
     change_hf_token(&app, &id, None)
 }
 
-fn read_hf_token_request<T: serde::de::DeserializeOwned>(
+pub(crate) fn read_hf_token_request<T: serde::de::DeserializeOwned>(
     payload: std::result::Result<Json<Box<RawValue>>, JsonRejection>,
 ) -> Result<T> {
     let invalid = |status| ApiError(status, "invalid token request".into());
@@ -482,15 +566,31 @@ async fn add_model(
         return Ok(response);
     }
     let model = request.validate().map_err(ApiError::bad)?;
-    if model.kind == brewery_worker::hgn_recipe::ARCHIVE {
+    let path = std::path::Path::new(&model.path);
+    if brewery_worker::hgn_edit::private_path(path) {
         return Err(ApiError::bad(
-            "native HGN archives are registered only by verified recipes",
+            "private scratch job output cannot enter the Library",
         ));
     }
-    if model.host == crate::backend_hf::ID {
+    if store.is_scratch_path(path) {
+        return Err(ApiError::bad("scratch files require operator approval"));
+    }
+    if app.agent.protected_path(path) {
         return Err(ApiError::bad(
-            "backend files are registered only by verified jobs",
+            "private credential storage cannot enter the Library",
         ));
+    }
+    if app.local_edit.private_heretic_path(path)
+        || store
+            .is_private_editor_path(path)
+            .map_err(ApiError::storage)?
+    {
+        return Err(ApiError::bad(
+            "private scratch job output cannot enter the Library",
+        ));
+    }
+    if let Some(reason) = manual_registration_blocker(&model.host, &model.kind) {
+        return Err(ApiError::bad(reason.text));
     }
     if !app
         .effective_hosts()
@@ -536,27 +636,153 @@ async fn add_prompt(
     Ok((StatusCode::CREATED, Json(prompt)).into_response())
 }
 
-async fn add_job(
+async fn update_prompt(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    payload: std::result::Result<Json<NewPrompt>, JsonRejection>,
+) -> Result<Json<crate::domain::Prompt>> {
+    let prompt = read(payload)?.validate_with_id(id).map_err(ApiError::bad)?;
+    if !app
+        .store
+        .lock()
+        .map_err(ApiError::storage)?
+        .update_prompt(&prompt)
+        .map_err(ApiError::storage)?
+    {
+        return Err(ApiError::not_found("prompt"));
+    }
+    Ok(Json(prompt))
+}
+
+async fn delete_prompt(State(app): State<Shared>, Path(id): Path<String>) -> Result<StatusCode> {
+    use crate::store::PromptDeletion;
+    match app
+        .store
+        .lock()
+        .map_err(ApiError::storage)?
+        .delete_prompt(&id)
+        .map_err(ApiError::storage)?
+    {
+        PromptDeletion::Deleted => Ok(StatusCode::NO_CONTENT),
+        PromptDeletion::Missing => Err(ApiError::not_found("prompt")),
+        PromptDeletion::InUse(job) => Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("Job {job} uses this prompt."),
+        )),
+    }
+}
+
+pub(crate) async fn add_job(
     State(app): State<Shared>,
     headers: HeaderMap,
     payload: std::result::Result<Json<NewJob>, JsonRejection>,
 ) -> Result<Response> {
     let (request, submission) = read_submission(&headers, "jobs", payload)?;
-    let mut store = app.store.lock().map_err(ApiError::storage)?;
+    let fingerprint = dedupe::Request::new("jobs", &request).map_err(ApiError::storage)?;
+    let (job, mut envelope, intervention) = {
+        let store = app.store.lock().map_err(ApiError::storage)?;
+        if let Some(response) = replay(&store, submission.as_ref())? {
+            return Ok(response);
+        }
+        let tx = store.submission_transaction().map_err(ApiError::storage)?;
+        if let Some(id) = find_duplicate(&headers, &tx, &fingerprint, submission.as_ref())? {
+            tx.commit().map_err(ApiError::storage)?;
+            return Ok(duplicate_reply(&id, json!({"id": id})));
+        }
+        let (mut job, mut envelope) = prepare_job(&app, &store, request)?;
+        let intervention = if job.kind == trace::JOB {
+            crate::interventions::TracePlan::prepare(
+                &store,
+                &mut job,
+                &mut envelope,
+                app.trace_policy,
+            )?
+        } else {
+            None
+        };
+        let Some(intervention) = intervention else {
+            return enqueue_job(
+                &app,
+                &store,
+                tx,
+                &fingerprint,
+                job,
+                envelope,
+                submission.as_ref(),
+            );
+        };
+        (job, envelope, intervention)
+    };
+    // A patch read can wait on a remote worker. Release the transaction and lock.
+    let resolved = intervention.resolve(&app, &mut envelope).await;
+    let store = app.store.lock().map_err(ApiError::storage)?;
     if let Some(response) = replay(&store, submission.as_ref())? {
         return Ok(response);
     }
+    let tx = store.submission_transaction().map_err(ApiError::storage)?;
+    if let Some(id) = find_duplicate(&headers, &tx, &fingerprint, submission.as_ref())? {
+        tx.commit().map_err(ApiError::storage)?;
+        return Ok(duplicate_reply(&id, json!({"id": id})));
+    }
+    resolved?;
+    let input = &envelope.inputs[0];
+    if let Some(digest) = envelope.scratch_pins.get(&input.path) {
+        let (_, current) = crate::scratch::jobs::trace_input(&store, &input.id)?;
+        if digest != &current {
+            return Err(ApiError::bad("scratch GGUF changed during admission"));
+        }
+    } else if store.model(&input.id).map_err(ApiError::storage)?.is_none() {
+        return Err(ApiError::bad("unknown model ID"));
+    }
+    enqueue_job(
+        &app,
+        &store,
+        tx,
+        &fingerprint,
+        job,
+        envelope,
+        submission.as_ref(),
+    )
+}
+
+fn prepare_job(app: &App, store: &Store, request: NewJob) -> Result<(Job, Envelope)> {
     if request.input_ids.len() > 32 || !KINDS.contains(&request.kind.as_str()) {
         return Err(ApiError::bad("unknown job kind or too many inputs"));
     }
+    let mut scratch_pins = BTreeMap::new();
+    let mut sensitivity_revision = None;
     let inputs = request
         .input_ids
         .iter()
         .map(|id| {
-            let model = store
-                .model(id)
-                .map_err(ApiError::storage)?
-                .ok_or_else(|| ApiError::bad("unknown model ID"))?;
+            let model = if let Some(model) = store.model(id).map_err(ApiError::storage)? {
+                model
+            } else if matches!(
+                request.kind.as_str(),
+                trace::JOB | sensitivity::JOB | brewery_worker::circuit::JOB
+            ) && request.input_ids.len() == 1
+                && store.scratch(id).map_err(ApiError::storage)?.is_some()
+            {
+                let (model, sha) = crate::scratch::jobs::trace_input(store, id)?;
+                if request.kind == brewery_worker::circuit::JOB
+                    && request.options.get("model_sha256").and_then(Value::as_str)
+                        != Some(sha.as_str())
+                {
+                    return Err(ApiError::bad(
+                        "circuit SHA-256 does not match the private GGUF",
+                    ));
+                }
+                scratch_pins.insert(model.path.clone(), sha);
+                if request.kind == sensitivity::JOB {
+                    sensitivity_revision = store
+                        .scratch(id)
+                        .map_err(ApiError::storage)?
+                        .map(|r| r.sha256);
+                }
+                model
+            } else {
+                return Err(ApiError::bad("unknown model ID"));
+            };
             if !app
                 .effective_hosts()
                 .map_err(ApiError::storage)?
@@ -648,10 +874,12 @@ async fn add_job(
             .find(|effective| effective.id == host)
             .ok_or_else(|| ApiError(StatusCode::CONFLICT, "worker unavailable".into()))?;
         if !entry.capabilities[&request.kind] {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                entry.reasons[&request.kind].clone(),
-            ));
+            let message = if SIMPLE_WORKFLOWS.contains(&request.kind.as_str()) {
+                entry.capability_reason(&request.kind).text
+            } else {
+                entry.reasons[&request.kind].clone()
+            };
+            return Err(ApiError(StatusCode::CONFLICT, message));
         }
         if request.kind == "benchmark" {
             entry
@@ -680,7 +908,55 @@ async fn add_job(
         ),
         (None, prompt) => prompt.clone(),
     };
-    let (mut job, mut envelope) = request.build(host, inputs, prompt).map_err(ApiError::bad)?;
+    // A registered contrast arrives as a name only; the controller pins the
+    // tune digest from its own store before validation so callers cannot choose it.
+    let request = if request.kind == brewery_worker::behavior_direction::JOB
+        && request.options.get("registered").is_some()
+    {
+        let options = crate::registered_evaluation::resolve_registered_pin(
+            &store,
+            request.options.clone(),
+        )
+        .map_err(ApiError::bad)?;
+        request.with_options(options)
+    } else {
+        request
+    };
+    let (job, mut envelope) = request.build(host, inputs, prompt).map_err(ApiError::bad)?;
+    envelope.scratch_pins = scratch_pins;
+    if job.kind == sensitivity::JOB {
+        crate::sensitivity::prepare(&mut envelope, sensitivity_revision.as_deref())?;
+    }
+    Ok((job, envelope))
+}
+
+fn enqueue_job(
+    app: &App,
+    store: &Store,
+    tx: rusqlite::Transaction<'_>,
+    fingerprint: &dedupe::Request,
+    job: Job,
+    mut envelope: Envelope,
+    submission: Option<&Submission<'_>>,
+) -> Result<Response> {
+    let job = if matches!(
+        job.kind.as_str(),
+        trace::JOB | sensitivity::JOB | brewery_worker::circuit::JOB
+    ) && !envelope.scratch_pins.is_empty()
+    {
+        crate::scratch::jobs::prepare_enqueue(app, job, &envelope)?
+    } else {
+        admit_job(app, store, job, &mut envelope)?
+    };
+    Store::enqueue(&tx, &job, &envelope, submission).map_err(ApiError::storage)?;
+    fingerprint
+        .record(&tx, &job.id)
+        .map_err(ApiError::storage)?;
+    tx.commit().map_err(ApiError::storage)?;
+    Ok((StatusCode::CREATED, Json(job)).into_response())
+}
+
+fn admit_job(app: &App, store: &Store, mut job: Job, envelope: &mut Envelope) -> Result<Job> {
     let hosts = app.effective_hosts().map_err(ApiError::storage)?;
     if crate::weights::is_kind(&job.kind)
         && let Some(entry) = hosts.iter().find(|entry| entry.id == job.host)
@@ -712,15 +988,27 @@ async fn add_job(
         envelope.inputs.push(proposal);
         envelope.options = checks.as_object().expect("apply checks").clone();
     }
-    if candidates(&job, &envelope, &hosts).is_empty() {
+    if candidates(&job, envelope, &hosts).is_empty() {
+        let reason = if SIMPLE_WORKFLOWS.contains(&job.kind.as_str()) {
+            hosts
+                .iter()
+                .find(|host| host.id == job.host)
+                .and_then(|host| standard_job_host_blocker(host, &job.kind))
+                .or_else(|| input_blocker(&job, envelope, &hosts))
+        } else {
+            None
+        };
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "no eligible worker for the requested job options".into(),
+            reason.map_or_else(
+                || "no eligible worker for the requested job options".into(),
+                |reason| reason.text,
+            ),
         ));
     }
     if job.local_edit {
         job.directory_revision = app
-            .editor_grants(&job, &envelope)
+            .editor_grants(&job, envelope)
             .map_err(ApiError::storage)?
             .ok_or(ApiError(
                 StatusCode::CONFLICT,
@@ -728,13 +1016,33 @@ async fn add_job(
             ))?
             .revision;
     }
-    store
-        .enqueue(&job, &envelope, submission.as_ref())
-        .map_err(ApiError::storage)?;
-    Ok((StatusCode::CREATED, Json(job)).into_response())
+    Ok(job)
 }
 
-fn read_submission<'a, T: serde::Serialize>(
+fn find_duplicate(
+    headers: &HeaderMap,
+    tx: &rusqlite::Transaction<'_>,
+    fingerprint: &dedupe::Request,
+    submission: Option<&Submission<'_>>,
+) -> Result<Option<String>> {
+    if single(headers, "brewery-allow-duplicate") == Ok(Some("1")) {
+        return Ok(None);
+    }
+    let matched = fingerprint.find(tx).map_err(ApiError::storage)?;
+    if let Some(id) = &matched {
+        // Bind a fresh key even when no new work is queued. A lost match
+        // response can then replay the same ID after the duplicate window.
+        idempotency::record(tx, submission, id).map_err(ApiError::storage)?;
+    }
+    Ok(matched)
+}
+
+fn duplicate_reply(id: &str, mut body: Value) -> Response {
+    body["duplicate_of"] = json!(true);
+    ([("brewery-duplicate", id)], Json(body)).into_response()
+}
+
+pub(crate) fn read_submission<'a, T: serde::Serialize>(
     headers: &'a HeaderMap,
     scope: &'static str,
     payload: std::result::Result<Json<T>, JsonRejection>,
@@ -752,7 +1060,10 @@ fn read_submission<'a, T: serde::Serialize>(
     Ok((request, submission))
 }
 
-fn replay(store: &Store, submission: Option<&Submission<'_>>) -> Result<Option<Response>> {
+pub(crate) fn replay(
+    store: &Store,
+    submission: Option<&Submission<'_>>,
+) -> Result<Option<Response>> {
     let Some(submission) = submission else {
         return Ok(None);
     };
@@ -774,6 +1085,98 @@ async fn job(State(app): State<Shared>, Path(id): Path<String>) -> Result<Json<V
             .map_err(ApiError::storage)?
             .ok_or_else(|| ApiError::not_found("job"))?,
     ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TraceQuery {
+    #[serde(default)]
+    prompt: usize,
+    layer: Option<usize>,
+    role: Option<trace::Role>,
+    start: Option<usize>,
+    end: Option<usize>,
+}
+
+type TraceQueryResult =
+    std::result::Result<Query<TraceQuery>, axum::extract::rejection::QueryRejection>;
+
+async fn trace_manifest(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    query: TraceQueryResult,
+) -> Result<Json<Value>> {
+    trace_slice(app, id, query, View::Manifest).await
+}
+
+async fn trace_tensor(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    query: TraceQueryResult,
+) -> Result<Json<Value>> {
+    trace_slice(app, id, query, View::Tensor).await
+}
+
+async fn trace_logit_lens(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    query: TraceQueryResult,
+) -> Result<Json<Value>> {
+    trace_slice(app, id, query, View::LogitLens).await
+}
+
+async fn trace_model_logits(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    query: TraceQueryResult,
+) -> Result<Json<Value>> {
+    trace_slice(app, id, query, View::ModelLogits).await
+}
+
+async fn trace_slice(
+    app: Shared,
+    id: String,
+    query: TraceQueryResult,
+    view: View,
+) -> Result<Json<Value>> {
+    let Query(TraceQuery {
+        prompt,
+        layer,
+        role,
+        start,
+        end,
+    }) = query.map_err(|_| ApiError::bad("invalid trace query"))?;
+    let slice = Slice {
+        view,
+        prompt,
+        layer,
+        role,
+        start,
+        end,
+    };
+    slice.check().map_err(|e| ApiError::bad(e.to_string()))?;
+    let job = app
+        .store
+        .lock()
+        .map_err(ApiError::storage)?
+        .job(&id)
+        .map_err(ApiError::storage)?
+        .filter(|j| j.kind == trace::JOB && j.state == JobState::Succeeded)
+        .ok_or_else(|| ApiError::not_found("trace result"))?;
+    match app.dispatcher.trace_read(&job, &slice).await.map_err(|e| {
+        eprintln!("Trace read failed for {id}: {e}");
+        ApiError(
+            StatusCode::BAD_GATEWAY,
+            "Trace worker could not read the result".into(),
+        )
+    })? {
+        ReadReply::Ok(data) => Ok(Json(data)),
+        ReadReply::Missing => Err(ApiError::not_found("trace slice")),
+        ReadReply::TooLarge => Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Select a smaller trace range".into(),
+        )),
+    }
 }
 
 async fn list_profiles(State(app): State<Shared>) -> Result<Json<Vec<crate::profiles::Profile>>> {
@@ -845,12 +1248,9 @@ async fn add_conversion(
     State(app): State<Shared>,
     headers: HeaderMap,
     payload: std::result::Result<Json<NewConversion>, JsonRejection>,
-) -> Result<(StatusCode, Json<Conversion>)> {
+) -> Result<Response> {
     let (request, submission) = read_submission(&headers, "conversions", payload)?;
-    if request.options.contains_key(brewery_worker::hy4::OPTION) {
-        return Err(ApiError::bad("Hy4 jobs require a single-stage /api/jobs request"));
-    }
-    let mut store = app.store.lock().map_err(ApiError::storage)?;
+    let store = app.store.lock().map_err(ApiError::storage)?;
     if let Some(submission) = &submission {
         match store.replay(submission).map_err(ApiError::storage)? {
             Replay::New => {}
@@ -859,7 +1259,7 @@ async fn add_conversion(
                     .conversion(&id)
                     .map_err(ApiError::storage)?
                     .ok_or_else(|| ApiError::storage("idempotent conversion is missing"))?;
-                return Ok((StatusCode::OK, Json(row)));
+                return Ok(Json(row).into_response());
             }
             Replay::Conflict => {
                 return Err(ApiError(
@@ -869,18 +1269,70 @@ async fn add_conversion(
             }
         }
     }
+    let fingerprint = dedupe::Request::new("conversions", &request).map_err(ApiError::storage)?;
+    let tx = store.submission_transaction().map_err(ApiError::storage)?;
+    if let Some(id) = find_duplicate(&headers, &tx, &fingerprint, submission.as_ref())? {
+        let row = store
+            .conversion(&id)
+            .map_err(ApiError::storage)?
+            .ok_or_else(|| ApiError::storage("duplicate conversion is missing"))?;
+        tx.commit().map_err(ApiError::storage)?;
+        return Ok(duplicate_reply(
+            &id,
+            serde_json::to_value(row).map_err(ApiError::storage)?,
+        ));
+    }
+    let active = store
+        .by_state(crate::domain::State::Running)
+        .map_err(ApiError::storage)?;
+    let (row, job, envelope) = admit_conversion(&app, &store, request, &active)?
+        .map_err(|reason| ApiError(StatusCode::CONFLICT, reason.text))?;
+    Store::create_conversion(&tx, &row, &job, &envelope, submission.as_ref())
+        .map_err(ApiError::storage)?;
+    fingerprint
+        .record(&tx, &row.id)
+        .map_err(ApiError::storage)?;
+    tx.commit().map_err(ApiError::storage)?;
+    Ok((StatusCode::CREATED, Json(row)).into_response())
+}
+
+async fn conversion_eligibility(
+    State(app): State<Shared>,
+    payload: std::result::Result<Json<NewConversion>, JsonRejection>,
+) -> Result<Json<Value>> {
+    let request = read(payload)?;
+    let store = app.store.lock().map_err(ApiError::storage)?;
+    let decision = match admit_conversion(&app, &store, request, &[]) {
+        Ok(Ok(_)) => eligibility::Entry::new(vec![]),
+        Ok(Err(reason)) => eligibility::Entry::new(vec![reason]),
+        Err(error) if error.0.is_client_error() => {
+            eligibility::Entry::new(vec![Reason::link(&error.1, "#/convert")])
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(Json(json!(decision)))
+}
+
+fn admit_conversion(
+    app: &App,
+    store: &Store,
+    request: NewConversion,
+    active: &[Job],
+) -> Result<std::result::Result<(Conversion, Job, Envelope), Reason>> {
+    if request.options.contains_key(brewery_worker::hy4::OPTION) {
+        return Err(ApiError::bad(
+            "Hy4 jobs require a single-stage /api/jobs request",
+        ));
+    }
     if !(1..=5).contains(&request.input_ids.len()) {
         return Err(ApiError::bad(
             "conversion requires one source and up to four auxiliary inputs",
         ));
     }
+    let hosts = app.effective_hosts().map_err(ApiError::storage)?;
     if let Some(host) = request.host.as_deref()
         && host != "auto"
-        && !app
-            .effective_hosts()
-            .map_err(ApiError::storage)?
-            .iter()
-            .any(|entry| entry.id == host)
+        && !hosts.iter().any(|entry| entry.id == host)
     {
         return Err(ApiError::bad("unknown worker host"));
     }
@@ -892,20 +1344,12 @@ async fn add_conversion(
                 .model(id)
                 .map_err(ApiError::storage)?
                 .ok_or_else(|| ApiError::bad("unknown model ID"))?;
-            if !app
-                .effective_hosts()
-                .map_err(ApiError::storage)?
-                .iter()
-                .any(|host| host.id == model.host)
-            {
+            if !hosts.iter().any(|host| host.id == model.host) {
                 return Err(ApiError::bad("input model's host is no longer configured"));
             }
             Ok(model)
         })
         .collect::<Result<Vec<_>>>()?;
-    let active = store
-        .by_state(crate::domain::State::Running)
-        .map_err(ApiError::storage)?;
     let profile = request
         .profile_revision
         .as_deref()
@@ -919,21 +1363,11 @@ async fn add_conversion(
                 .ok_or_else(|| ApiError::not_found("profile revision"))
         })
         .transpose()?;
-    let hosts = app.effective_hosts().map_err(ApiError::storage)?;
-    let (row, job, envelope) =
-        Conversion::start(request, inputs, &hosts, &active, profile.as_ref())
-            .map_err(ApiError::bad)?
-            .ok_or_else(|| {
-                ApiError(
-                    StatusCode::CONFLICT,
-                    "no eligible worker supports all conversion stages and requested options"
-                        .into(),
-                )
-            })?;
-    store
-        .create_conversion(&row, &job, &envelope, submission.as_ref())
-        .map_err(ApiError::storage)?;
-    Ok((StatusCode::CREATED, Json(row)))
+    match Conversion::start(request, inputs, &hosts, active, profile.as_ref()) {
+        Ok(admitted) => Ok(Ok(admitted)),
+        Err(StartError::Invalid(message)) => Err(ApiError::bad(message)),
+        Err(StartError::Blocked(reason)) => Ok(Err(reason)),
+    }
 }
 
 async fn list_conversions(State(app): State<Shared>) -> Result<Json<Vec<Conversion>>> {
@@ -977,7 +1411,7 @@ async fn cancel(State(app): State<Shared>, Path(id): Path<String>) -> Result<imp
     ))
 }
 
-fn read<T>(payload: std::result::Result<Json<T>, JsonRejection>) -> Result<T> {
+pub(crate) fn read<T>(payload: std::result::Result<Json<T>, JsonRejection>) -> Result<T> {
     payload
         .map(|Json(body)| body)
         .map_err(|e| ApiError(e.status(), e.body_text()))
@@ -1001,6 +1435,11 @@ impl ApiError {
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({"error":self.1}))).into_response()
+        (
+            self.0,
+            [("brewery-error", "1")],
+            Json(json!({"error":self.1})),
+        )
+            .into_response()
     }
 }

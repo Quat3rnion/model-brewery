@@ -1,5 +1,6 @@
 use super::*;
 use std::{
+    io::Read,
     os::fd::{AsRawFd, FromRawFd},
     thread,
     time::{Duration, Instant},
@@ -95,6 +96,13 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
         Ok(_) => execute(w, id, &base, &job, &mut created_work),
         Err(e) => Err(anyhow::anyhow!("{e}")),
     };
+    let mut _trace_lock = None;
+    let result = result.and_then(|value| {
+        if job.kind == trace::JOB {
+            _trace_lock = Some(lock(&w.cfg.root.join("trace.lock"))?);
+        }
+        Ok(value)
+    });
     let _guard = w.state_lock()?;
     let mut r = w.require(id)?;
     // The state lock orders cancellation against the durable terminal reply.
@@ -144,15 +152,33 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
             }
         }
     }
+    let result = result.and_then(|value| {
+        if !r.cancel {
+            if download {
+                publish_download(w, &base)?;
+            } else if job.kind == trace::JOB {
+                let request = trace::Request::worker(&job.options, job.prompt.as_deref())?;
+                publish_trace(w, id, &base, request.retain_jobs)?;
+            }
+        }
+        Ok(value)
+    });
+    if (matches!(
+        job.kind.as_str(),
+        trace::JOB | behavior_direction::JOB | sensitivity::JOB | circuit::JOB | damage::JOB
+    ) || scratch_eval::private_output(&job.kind))
+        && created_work
+        && (r.cancel || result.is_err())
+        && let Err(error) =
+            fs::remove_dir_all(base.join("work")).and_then(|()| File::open(&base)?.sync_all())
+    {
+        eprintln!("Private work directory cleanup failed: {error}");
+        r.reply = Reply::error("Private work directory cleanup failed");
+        return w.put(id, &r);
+    }
     r.reply = if r.cancel {
         Reply::new("cancelled", "process tree stopped")
     } else {
-        let result = result.and_then(|value| {
-            if download {
-                publish_download(w, &base)?;
-            }
-            Ok(value)
-        });
         match result {
             Ok(value) => Reply::success(value),
             Err(e) => Reply::error(e.to_string()),
@@ -161,14 +187,62 @@ pub fn supervise(w: &Worker, id: &str) -> Result<()> {
     w.put(id, &r)
 }
 
+fn publish_trace(w: &Worker, id: &str, base: &Path, retain: usize) -> Result<()> {
+    let root = w.cfg.root.join("trace-results");
+    fs::create_dir_all(&root)?;
+    ensure!(fs::symlink_metadata(&root)?.is_dir(), "invalid trace store");
+    let dest = root.join(id);
+    ensure!(!dest.exists(), "trace result already exists");
+    let source = base.join("work/trace");
+    let mut older = Vec::new();
+    for entry in fs::read_dir(&root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir()
+            && entry.file_name().to_str().is_some_and(|s| token(s).is_ok())
+        {
+            older.push((entry.metadata()?.modified()?, entry.path()));
+        }
+    }
+    older.sort_unstable();
+    for prompt in fs::read_dir(&source)? {
+        let dir = prompt?.path();
+        for file in fs::read_dir(&dir)? {
+            File::open(file?.path())?.sync_all()?;
+        }
+        File::open(&dir)?.sync_all()?;
+    }
+    File::open(&source)?.set_modified(std::time::SystemTime::now())?;
+    File::open(&source)?.sync_all()?;
+    fs::rename(&source, &dest)?;
+    let prune = (|| -> Result<()> {
+        let remove = (older.len() + 1).saturating_sub(retain);
+        for (_, old) in older.into_iter().take(remove) {
+            fs::remove_dir_all(old)?;
+        }
+        File::open(&root)?.sync_all()?;
+        File::open(&w.cfg.root)?.sync_all()?;
+        Ok(())
+    })();
+    if prune.is_err() {
+        let _ = fs::rename(&dest, &source);
+    }
+    prune
+}
+
 fn hy4_encode_slot(w: &Worker) -> Result<File> {
-    let file = fs::OpenOptions::new().read(true).write(true).create(true)
-        .truncate(false).open(w.cfg.root.join("hy4-encode.lock"))?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(w.cfg.root.join("hy4-encode.lock"))?;
     fs2::FileExt::try_lock_exclusive(&file).context("Another Hy4 encode is active")?;
     for entry in fs::read_dir(&w.jobs)? {
         let work = entry?.path().join("work");
         ensure!(
-            [hy4::FILE, hy4::RECEIPT, ".gate.partial"].iter().all(|name| !work.join(name).exists()),
+            [hy4::FILE, hy4::RECEIPT, ".gate.partial"]
+                .iter()
+                .all(|name| !work.join(name).exists()),
             "An existing Hy4 result or partial must be retired by the operator"
         );
     }
@@ -222,6 +296,104 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         (job.kind == "hf_download") == download.is_some(),
         "Worker is not configured for this operation"
     );
+    let scratch_job =
+        scratch_eval::private_output(&job.kind) || job.inputs.iter().any(scratch_eval::granted);
+    ensure!(
+        scratch_job || w.cfg.scratch_access.is_none(),
+        "scratch worker config is scoped to one job"
+    );
+    let hgn_request = if job.kind == hgn_edit::JOB {
+        let edit = w
+            .cfg
+            .hgn_edit
+            .as_ref()
+            .context("private HGN edits are not configured")?;
+        let original = w.require(id)?.job.context("HGN edit job is missing")?;
+        let req = edit.authorize(id, "start", &original)?;
+        ensure!(
+            w.hgn_parent(&original.inputs[0], &req)? == job.inputs[0].path,
+            "resolved HGN parent does not match the grant"
+        );
+        Some(req)
+    } else {
+        None
+    };
+    let hgn_check = if job.kind == hgn_checks::JOB {
+        let config = w
+            .cfg
+            .hgn_edit
+            .as_ref()
+            .context("private HGN checks are not configured")?;
+        let original = w.require(id)?.job.context("HGN check job is missing")?;
+        let req = hgn_checks::authorize(config, id, "start", &original)?;
+        ensure!(
+            original.inputs[0].path == job.inputs[0].path,
+            "resolved HGN root changed"
+        );
+        let paths = w
+            .hgn_check_sources(&original.inputs[0], &req)
+            .map_err(|_| anyhow::anyhow!("pinned HGN check inputs are unavailable"))?;
+        let report_path = paths[1].with_file_name(hgn_edit::REPORT);
+        let mut bytes = Vec::new();
+        weight_source::open_regular(&report_path)?
+            .take(LIMIT + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 <= LIMIT,
+            "HGN feedback receipt exceeds its limit"
+        );
+        let stored: Value = serde_json::from_slice(&bytes)?;
+        let producer = w.require(&req.child_producer)?;
+        ensure!(
+            producer
+                .reply
+                .result
+                .as_ref()
+                .is_some_and(|r| r["report"] == stored)
+                && stored["parent_sha256"] == req.parent_sha256,
+            "HGN feedback receipt changed after the edit"
+        );
+        use sha2::{Digest, Sha256};
+        let options = hgn_checks::EngineOptions {
+            request: req,
+            feedback_sha256: format!("{:x}", Sha256::digest(bytes)),
+        };
+        Some((
+            options,
+            paths,
+            serde_json::from_value::<hgn_edit::Report>(stored)?,
+        ))
+    } else {
+        None
+    };
+    if scratch_job && hgn_request.is_none() && hgn_check.is_none() {
+        let access = w
+            .cfg
+            .scratch_access
+            .as_ref()
+            .filter(|a| a.job_id == id && a.permits("start", job))
+            .context("Scratch access does not match the job")?;
+        for (index, input) in job.inputs.iter().enumerate() {
+            if let Some(pin) = access.paths.get(&input.path) {
+                ensure!(
+                    scratch_eval::granted(input)
+                        && input.extra.get("sha256").and_then(Value::as_str) == Some(pin),
+                    "Scratch input was not resolved with its current pin"
+                );
+                let mut emit = w.progress_callback(id)?;
+                let bundle = w.scratch_bundle(
+                    &input.path,
+                    pin,
+                    &mut progress::Reporter::new(&mut emit, Some((index, job.inputs.len()))),
+                )?;
+                ensure!(
+                    input.extra.get("bundle_sha256").and_then(Value::as_str)
+                        == Some(&bundle.digest),
+                    "Scratch input manifest changed"
+                );
+            }
+        }
+    }
     // Resolve and supervise are different processes. Do not hand off a newly
     // replaced grant root just because the earlier resolution succeeded.
     let _source_guard = if !w.cfg.source_grants.is_empty()
@@ -233,9 +405,147 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         None
     };
     let work = base.join("work");
-    fs::create_dir(&work)?;
+    if job.kind == trace::JOB {
+        let request = trace::Request::worker(&job.options, job.prompt.as_deref())?;
+        resources::disk_check(
+            &w.cfg.root,
+            w.disk_floor(job.resources.disk_reserve_bytes)
+                .checked_add(request.capture.byte_cap + (4 << 20))
+                .context("trace disk reserve overflow")?,
+        )?;
+    }
+    let gradient_backend = if matches!(job.kind.as_str(), sensitivity::JOB | circuit::JOB) {
+        let backend = if job.kind == circuit::JOB {
+            locate_edit::Backend::Cpu
+        } else {
+            sensitivity::Request::resolved(&job.options)?.0.backend
+        };
+        ensure!(
+            sensitivity::configured(&w.cfg.engine_env, backend, w.cfg.admission.as_deref()),
+            "pinned Lanternfish gradient backend is unavailable"
+        );
+        // The native runtime may expand BF16 weights to a private F32 GGUF.
+        let model_bytes = weight_source::open_regular(&job.inputs[0].path)?
+            .metadata()?
+            .len();
+        resources::disk_check(
+            &w.cfg.root,
+            w.disk_floor(job.resources.disk_reserve_bytes)
+                .saturating_add(sensitivity::RUNTIME_RESERVE + sensitivity::MAX_GRADIENT_BYTES)
+                .saturating_add(model_bytes.saturating_mul(2)),
+        )?;
+        Some(backend)
+    } else if job.kind == damage::JOB {
+        let req = damage::Request::parse(&job.options)?;
+        ensure!(
+            damage::configured(&w.cfg.engine_env, &req, w.cfg.admission.as_deref()),
+            "pinned damage map backend is unavailable"
+        );
+        let [a, b] = job.inputs.as_slice() else {
+            bail!("missing damage map sources")
+        };
+        let size = |input: &Input| -> Result<u64> {
+            Ok(weight_source::open_regular(&input.path)?.metadata()?.len())
+        };
+        let (a, b) = (size(a)?, size(b)?);
+        ensure!(
+            [a, b]
+                .into_iter()
+                .all(|size| size <= damage::MAX_MODEL_BYTES),
+            "damage map input exceeds disk budget"
+        );
+        // Each F32 model or corpus bundle can have one extra untied head.
+        let expanded = a * 2 + damage::MAX_GRADIENT_BYTES;
+        let scratch = if req.objective == damage::Objective::CorpusNll {
+            expanded * 2
+        } else {
+            (expanded + damage::MAX_GRADIENT_BYTES).max(b + damage::MAX_GRADIENT_BYTES / 2)
+        } + (128 << 20)
+            + req.backend.runtime_stage_reserve();
+        resources::disk_check(
+            &w.cfg.root,
+            w.disk_floor(job.resources.disk_reserve_bytes)
+                .saturating_add(scratch),
+        )?;
+        Some(req.backend)
+    } else {
+        None
+    };
+    let hgn_direction = job.kind == behavior_direction::JOB && trace::is_hgn(&job.inputs[0].kind);
+    if job.kind == behavior_direction::JOB {
+        resources::disk_check(
+            &w.cfg.root,
+            w.disk_floor(job.resources.disk_reserve_bytes)
+                .checked_add(trace::HARD_BYTE_CAP + (16 << 20))
+                .context("direction disk reserve overflow")?,
+        )?;
+    }
+    if matches!(
+        job.kind.as_str(),
+        ablation_search::SCREEN | ablation_search::hgn::JOB
+    ) {
+        resources::disk_check(
+            &w.cfg.root,
+            w.disk_floor(job.resources.disk_reserve_bytes)
+                .saturating_add(ablation_search::RESERVE),
+        )?;
+    }
+    let edit_backend = if job.kind == locate_edit::JOB {
+        let backend = locate_edit::Request::parse(&job.options)?.edit.backend;
+        let bytes = weight_source::open_regular(&job.inputs[0].path)?
+            .metadata()?
+            .len();
+        resources::disk_check(
+            &w.cfg.root,
+            w.disk_floor(job.resources.disk_reserve_bytes)
+                .saturating_add(bytes.saturating_mul(2))
+                .saturating_add(512 << 20)
+                .saturating_add(backend.runtime_stage_reserve()),
+        )?;
+        backend
+    } else {
+        locate_edit::Backend::Cpu
+    };
+    let gpu_edit = edit_backend.is_gpu() || heretic::job(&job.kind);
+    if gpu_edit {
+        ensure!(
+            scratch_job
+                && w.cfg.admission.is_some()
+                && w.cfg
+                    .engine_env
+                    .get(locate_edit::GPU_GATE)
+                    .is_some_and(|v| v == "1"),
+            "This edit requires GPU load permission and a GPU admission wrapper"
+        );
+    }
+    if hgn_request.is_some() || hgn_check.is_some() {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(&work)?;
+    } else {
+        fs::create_dir(&work)?;
+    }
     *created_work = true;
     let jobfile = base.join("engine-input.json");
+    let mut engine_job;
+    let job = if let Some(req) = &hgn_request {
+        engine_job = job.clone();
+        engine_job.options = to_value(req)?;
+        &engine_job
+    } else if let Some((options, paths, _)) = &hgn_check {
+        engine_job = job.clone();
+        engine_job.options = to_value(options)?;
+        engine_job.inputs = paths
+            .iter()
+            .map(|path| {
+                let mut input = job.inputs[0].clone();
+                input.path.clone_from(path);
+                input
+            })
+            .collect();
+        &engine_job
+    } else {
+        job
+    };
     atomic(&jobfile, job)?;
     let output = base.join("engine-output.json");
     let stderr = base.join("engine-stderr.log");
@@ -243,7 +553,16 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         let r = w.require(id)?;
         ensure!(!r.cancel, "cancel requested");
     }
-    let mut command = if job.kind == exl3_layer::JOB {
+    let mut command = if let Some(edit) = w
+        .cfg
+        .hgn_edit
+        .as_ref()
+        .filter(|_| hgn_request.is_some() || hgn_check.is_some())
+    {
+        let mut command = Command::new(&edit.build_admission);
+        command.args(["--"]).arg(&w.cfg.engine);
+        command
+    } else if job.kind == exl3_layer::JOB {
         let spec = exl3_layer::Spec::parse(&job.options)?;
         if spec.backend == exl3_layer::Backend::Cpu {
             Command::new(&w.cfg.engine)
@@ -284,16 +603,146 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .env("OMP_NUM_THREADS", "1");
         }
         c
-    } else if let Some(wrapper) = &w.cfg.admission {
+    } else if let Some(wrapper) = w.cfg.admission.as_ref().filter(|_| {
+        gradient_backend.map_or(
+            gpu_edit
+                || (!matches!(
+                    job.kind.as_str(),
+                    trace::JOB | behavior_direction::JOB | ablation_search::hgn::JOB
+                ) && !scratch_job),
+            |b| b.is_gpu(),
+        )
+    }) {
         let mut c = Command::new(wrapper);
         c.args(["--wait", "--"]).arg(&w.cfg.engine);
         c
     } else {
         Command::new(&w.cfg.engine)
     };
+    let hgn_trace = job.kind == trace::JOB && trace::is_hgn(&job.inputs[0].kind);
+    if hgn_request.is_some() {
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env(hgn_edit::CACHE, w.cfg.root.join(hgn_edit::CACHE_DIR))
+            .env(hgn_edit::RESERVE, w.cfg.disk_reserve_bytes.to_string());
+    } else if !hgn_trace
+        && hgn_check.is_none()
+        && (scratch_job
+            || gradient_backend.is_some()
+            || matches!(
+                job.kind.as_str(),
+                trace::JOB | behavior_direction::JOB | ablation_search::hgn::JOB
+            ))
+    {
+        let trace_keys = if job.kind == trace::JOB {
+            let (executable, libraries, _, _) =
+                trace::Request::worker(&job.options, job.prompt.as_deref())?
+                    .lanternfish_runtime()?
+                    .pins();
+            [executable, libraries]
+        } else {
+            [trace::EXECUTABLE, trace::LIB_DIR]
+        };
+        let keys: &[&str] = match job.kind.as_str() {
+            scratch_eval::GGUF => &[
+                "BREWERY_GGUF_SAFETENSORS",
+                "BREWERY_GGUF_QUANTIZER",
+                "BREWERY_GGUF_HF_EXPORTER",
+                "BREWERY_GGUF_PYTHON",
+                "BREWERY_LLAMA_CPP",
+                "BREWERY_CONVERTER_DISK_RESERVE_BYTES",
+            ],
+            scratch_eval::CHECKS => &[
+                scratch_eval::SCRIPT,
+                scratch_eval::RUNNER,
+                scratch_eval::RUNNER_SHA,
+                scratch_eval::RUNNER_LIB_DIR,
+                scratch_eval::CACHE,
+                scratch_eval::CONTRAST_CACHE,
+            ],
+            locate_edit::JOB => &[],
+            sensitivity::JOB | damage::JOB => &[
+                sensitivity::PIN,
+                sensitivity::MANIFEST_SHA,
+                locate_edit::GPU_GATE,
+            ],
+            circuit::JOB => &[sensitivity::PIN, sensitivity::MANIFEST_SHA],
+            kind if heretic::job(kind) => &[heretic::RUNTIME],
+            behavior_direction::JOB if hgn_direction => &[
+                trace::HGN_PYTHON,
+                trace::HGN_PYTHON_SHA256,
+                trace::HGN_ASSETS,
+                behavior_direction::CACHE,
+            ],
+            ablation_search::hgn::JOB => &[
+                trace::HGN_PYTHON,
+                trace::HGN_PYTHON_SHA256,
+                trace::HGN_ASSETS,
+                behavior_direction::CACHE,
+            ],
+            behavior_direction::JOB => {
+                &[trace::EXECUTABLE, trace::LIB_DIR, behavior_direction::CACHE]
+            }
+            ablation_search::SCREEN => &[
+                ablation_search::EXECUTABLE,
+                trace::PROJECTION_LIB_DIR,
+                behavior_direction::CACHE,
+            ],
+            _ => &trace_keys,
+        };
+        command.env_clear().envs(
+            keys.iter()
+                .copied()
+                .chain(
+                    (job.kind == locate_edit::JOB)
+                        .then(|| edit_backend.env_keys())
+                        .into_iter()
+                        .flatten(),
+                )
+                .chain(["BREWERY_CPU_THREADS"])
+                .chain(
+                    (job.kind == scratch_eval::CHECKS
+                        && job
+                            .options
+                            .get("registered_marker")
+                            .is_some_and(|v| !v.is_null()))
+                    .then_some(scratch_eval::registered::CACHE),
+                )
+                .chain(
+                    gradient_backend
+                        .into_iter()
+                        .flat_map(|b| b.visibility_vars().iter().copied()),
+                )
+                .chain(heretic::job(&job.kind).then_some(locate_edit::CUDA_DEVICES))
+                .filter_map(|key| w.cfg.engine_env.get(key).map(|value| (key, value))),
+        );
+        if gpu_edit || gradient_backend.is_some_and(locate_edit::Backend::is_gpu) {
+            command.env("PATH", "/usr/bin:/bin");
+        }
+    } else if hgn_trace || hgn_check.is_some() {
+        command.env_clear().envs(
+            [
+                trace::HGN_PYTHON,
+                trace::HGN_PYTHON_SHA256,
+                trace::HGN_ASSETS,
+                "BREWERY_CPU_THREADS",
+            ]
+            .into_iter()
+            .filter_map(|key| w.cfg.engine_env.get(key).map(|value| (key, value))),
+        );
+        if hgn_check.is_some() {
+            command.env("PATH", "/usr/bin:/bin");
+        }
+    } else {
+        command
+            .env_remove(scratch_eval::registered::CACHE)
+            .envs(w.cfg.engine_env.iter().filter(|(key, _)| {
+                key.as_str() != scratch_eval::registered::CACHE
+            }));
+    }
     command
         .current_dir(&work)
-        .envs(&w.cfg.engine_env)
         .stdin(File::open(jobfile)?)
         .stdout(File::create(&output)?)
         .stderr(File::create(stderr)?);
@@ -309,11 +758,20 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
                 .engine_env
                 .get("BREWERY_CPU_THREADS")
                 .cloned()
-                .or_else(|| env::var("BREWERY_CPU_THREADS").ok());
+                .or_else(|| {
+                    if scratch_job {
+                        None
+                    } else {
+                        env::var("BREWERY_CPU_THREADS").ok()
+                    }
+                });
             let ceiling = bounds.cpu_threads.map_or(64, |range| range.max);
             resources::cap_cpu(&mut command, requested.min(ceiling), configured.as_deref())?;
         }
-        if matches!(job.kind.as_str(), "inspect" | "plan" | "convert" | "verify") {
+        if matches!(
+            job.kind.as_str(),
+            "inspect" | "plan" | "convert" | "verify" | scratch_eval::GGUF
+        ) {
             let reserve = if bounds.disk_reserve_bytes.is_some()
                 || job.resources.disk_reserve_bytes.is_some()
             {
@@ -508,6 +966,267 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         value.is_object(),
         "Engine output is not a JSON object; check private engine-output.json"
     );
+    if let Some(req) = hgn_request {
+        ensure!(
+            value["kind"] == hgn_edit::JOB && value.as_object().is_some_and(|o| o.len() == 2),
+            "invalid HGN edit result"
+        );
+        let report: hgn_edit::Report = serde_json::from_value(value["report"].clone())?;
+        req.verify(&report)?;
+        let private = work.join(hgn_edit::PRIVATE);
+        let file = weight_source::open_regular(&private.join(hgn_edit::MODEL))?;
+        ensure!(
+            file.metadata()?.len()
+                == weight_source::open_regular(&job.inputs[0].path)?
+                    .metadata()?
+                    .len(),
+            "native HGN edit changed the checkpoint size"
+        );
+        ensure!(
+            load::<Value>(&private.join(hgn_edit::REPORT))? == value["report"],
+            "HGN edit report file does not match the engine receipt"
+        );
+        return Ok(value);
+    }
+    if let Some((options, _, feedback)) = hgn_check {
+        let report: hgn_checks::Report = serde_json::from_value(value.clone())?;
+        report.verify(&options.request, &feedback)?;
+        ensure!(
+            w.cfg.engine_env.get(trace::HGN_PYTHON_SHA256) == Some(&report.executable_sha256),
+            "HGN check Python pin does not match the worker"
+        );
+        return Ok(value);
+    }
+    if job.kind == behavior_direction::JOB {
+        if hgn_direction {
+            let configured_pin = w
+                .cfg
+                .engine_env
+                .get(trace::HGN_PYTHON_SHA256)
+                .map(String::as_str);
+            ensure!(
+                configured_pin.is_some() && value["executable_sha256"].as_str() == configured_pin,
+                "HGN direction Python pin does not match the worker"
+            );
+        }
+        behavior_direction::Request::parse(&job.options)?.verify_result(
+            &value,
+            job.inputs[0].extra["id"].as_str().unwrap_or_default(),
+            job.inputs[0].extra["sha256"].as_str().unwrap_or_default(),
+            &job.inputs[0].kind,
+        )?;
+        return Ok(value);
+    }
+    if job.kind == ablation_search::SCREEN {
+        let req = ablation_search::ScreenRequest::parse(&job.options)?;
+        ensure!(
+            job.inputs[0].extra["sha256"] == req.model_sha256,
+            "screen input hash mismatch"
+        );
+        serde_json::from_value::<ablation_search::ScreenReport>(value.clone())?.verify(&req)?;
+        return Ok(value);
+    }
+    if job.kind == ablation_search::hgn::JOB {
+        let req = ablation_search::hgn::Request::parse(&job.options)?;
+        ensure!(
+            job.inputs[0].extra["sha256"] == req.model_sha256,
+            "screen HGN input hash mismatch"
+        );
+        let executable = w
+            .cfg
+            .engine_env
+            .get(trace::HGN_PYTHON_SHA256)
+            .context("missing worker HGN Python pin")?;
+        serde_json::from_value::<ablation_search::hgn::Report>(value.clone())?
+            .verify(&req, Some(executable))?;
+        return Ok(value);
+    }
+    if job.kind == scratch_eval::CHECKS {
+        let hashes = std::array::from_fn(|i| {
+            job.inputs[i]
+                .extra
+                .get("sha256")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+        });
+        let runner = w
+            .cfg
+            .engine_env
+            .get(scratch_eval::RUNNER_SHA)
+            .context("scratch checks runner pin is missing")?;
+        let options = scratch_eval::check_options(&job.options)?;
+        scratch_eval::check_report(&value, hashes, runner, &options)?;
+        return Ok(value);
+    }
+    if job.kind == locate_edit::JOB {
+        let request = locate_edit::Request::parse(&job.options)?;
+        let pin = request.edit.backend.pin();
+        let factors: locate_edit::Factors = serde_json::from_value(value["factors"].clone())?;
+        factors.verify(
+            &request,
+            job.inputs[0].extra["sha256"].as_str().unwrap_or_default(),
+        )?;
+        ensure!(
+            value["kind"] == locate_edit::JOB
+                && value["parent_sha256"] == job.inputs[1].extra["sha256"]
+                && value["executable_sha256"] == pin.sha256
+                && value["lanternfish_commit"] == pin.commit,
+            "private edit receipt does not match input or executable pin"
+        );
+        return Ok(value);
+    }
+    if heretic::job(&job.kind) {
+        let spec = heretic::Options::parse(&job.kind, &job.options)?;
+        let runtime = Path::new(
+            w.cfg
+                .engine_env
+                .get(heretic::RUNTIME)
+                .context("Missing Heretic runtime")?,
+        )
+        .canonicalize()?;
+        spec.verify(&value, Some(&runtime.join("runs")))?;
+        ensure!(
+            job.inputs[0].extra["sha256"] == spec.base_sha256,
+            "Heretic base input changed"
+        );
+        return Ok(value);
+    }
+    if job.kind == scratch_eval::GGUF {
+        ensure!(
+            value["kind"] == "convert"
+                && value["output_format"] == "gguf"
+                && value["gguf_type"] == "BF16"
+                && value["file_verification"]["status"] == "passed"
+                && value["inputs"][0]["sha256"] == job.inputs[0].extra["sha256"]
+                && value["artifact"]["path"].as_str().map(Path::new)
+                    == Some(work.join("converted.gguf").as_path())
+                && value["artifact"]["kind"] == "gguf",
+            "Scratch GGUF did not return a verified conversion receipt"
+        );
+    }
+    if job.kind == trace::JOB {
+        let request = trace::Request::worker(&job.options, job.prompt.as_deref())?;
+        let runtime_matches = if trace::is_hgn(&job.inputs[0].kind) {
+            let python_pin = w
+                .cfg
+                .engine_env
+                .get(trace::HGN_PYTHON_SHA256)
+                .map(String::as_str);
+            value["runtime"] == trace::HGN_RUNTIME
+                && value["runtime_sha256"] == trace::HGN_RUNTIME_SHA256.trim_end()
+                && python_pin.is_some()
+                && value["executable_sha256"].as_str() == python_pin
+                && ["sidecar", "config", "tokenizer"]
+                    .into_iter()
+                    .all(|name| value["assets_sha256"][name].as_str().is_some_and(is_digest))
+        } else {
+            let (_, _, sha, commit) = request.lanternfish_runtime()?.pins();
+            value["lanternfish_commit"] == commit && value["executable_sha256"] == sha
+        };
+        ensure!(
+            value["kind"] == trace::JOB
+                && value["schema_version"] == 1
+                && value["model_id"].is_string()
+                && value["model_id"] == job.inputs[0].extra["id"]
+                && value["model_sha256"].as_str().is_some_and(is_digest)
+                && value["model_sha256"] == job.inputs[0].extra["sha256"]
+                && value.get("gguf_projection")
+                    == request
+                        .gguf_projection
+                        .as_ref()
+                        .map(|p| p.receipt())
+                        .as_ref()
+                && runtime_matches,
+            "trace receipt does not match resolved input and runtime"
+        );
+        let exports: Vec<trace::Export> = serde_json::from_value(value["prompts"].clone())?;
+        let root = work.join(trace::JOB);
+        ensure!(
+            fs::symlink_metadata(&root)?.is_dir()
+                && fs::read_dir(&root)?.count() == request.prompts.len()
+                && exports.len() == request.prompts.len(),
+            "incomplete trace results"
+        );
+        let mut spec = request.capture;
+        let cap = spec.byte_cap;
+        for (i, export) in exports.into_iter().enumerate() {
+            let dir = root.join(i.to_string());
+            ensure!(
+                trace::verify(&dir, &spec)? == export,
+                "trace receipt does not match export"
+            );
+            if let Some(projection) = &request.gguf_projection {
+                trace::verify_interventions(&dir, &export, &projection.applied_sites())?;
+            } else {
+                trace::verify_interventions(&dir, &export, &request.interventions)?;
+            }
+            if trace::is_hgn(&job.inputs[0].kind) {
+                trace::verify_hgn_projection(&dir, &export, request.hgn_projection.as_ref())?;
+                if let Some(projection) = &request.hgn_projection {
+                    ensure!(
+                        value["assets_sha256"] == serde_json::to_value(&projection.assets_sha256)?,
+                        "trace used different HGN direction assets"
+                    );
+                }
+            }
+            spec.byte_cap -= export.bytes;
+        }
+        ensure!(
+            value["bytes"].as_u64() == Some(cap - spec.byte_cap),
+            "invalid trace receipt byte count"
+        );
+        return Ok(value);
+    }
+    if job.kind == sensitivity::JOB {
+        let (request, revision) = sensitivity::Request::resolved(&job.options)?;
+        let input = &job.inputs[0];
+        request.check_model(input.extra["sha256"].as_str().unwrap_or_default())?;
+        let model_id = input.extra["id"]
+            .as_str()
+            .context("missing sensitivity source ID")?;
+        let artifact: sensitivity::Artifact = serde_json::from_value(value)?;
+        artifact.check(&request, model_id, &revision)?;
+        ensure!(
+            w.cfg.engine_env.get(sensitivity::MANIFEST_SHA) == Some(&artifact.manifest_sha256),
+            "sensitivity artifact runtime SHA-256 does not match worker pin"
+        );
+        return Ok(serde_json::to_value(artifact)?);
+    }
+    if job.kind == circuit::JOB {
+        let request = circuit::Request::parse(&job.options)?;
+        let input = &job.inputs[0];
+        request.check_model(input.extra["sha256"].as_str().unwrap_or_default())?;
+        let model_id = input.extra["id"]
+            .as_str()
+            .context("missing circuit source ID")?;
+        let artifact: circuit::Artifact = serde_json::from_value(value)?;
+        artifact.check(&request, model_id)?;
+        ensure!(
+            w.cfg.engine_env.get(sensitivity::MANIFEST_SHA) == Some(&artifact.manifest_sha256),
+            "circuit artifact runtime SHA-256 does not match worker pin"
+        );
+        return Ok(serde_json::to_value(artifact)?);
+    }
+    if job.kind == damage::JOB {
+        let request = damage::Request::parse(&job.options)?;
+        let [a, b] = job.inputs.as_slice() else {
+            bail!("missing damage map sources")
+        };
+        let ids = [
+            a.extra["id"].as_str().context("missing reference ID")?,
+            b.extra["id"].as_str().context("missing quantized ID")?,
+        ];
+        damage::check_result(&request, &value, ids)?;
+        ensure!(
+            w.cfg
+                .engine_env
+                .get(sensitivity::MANIFEST_SHA)
+                .map(String::as_str)
+                == value["manifest_sha256"].as_str(),
+            "damage artifact runtime SHA-256 does not match worker pin"
+        );
+        return Ok(value);
+    }
     if w.cfg.hy4_plan.as_ref().is_some_and(|p| p.encode.is_some()) {
         let artifact = &value["artifact"];
         let file = work.join(hy4::FILE);
@@ -515,10 +1234,14 @@ fn execute(w: &Worker, id: &str, base: &Path, job: &Job, created_work: &mut bool
         let file_metadata = fs::symlink_metadata(&file)?;
         let receipt_metadata = fs::symlink_metadata(&receipt)?;
         ensure!(
-            value["kind"] == "hy4_gate_encode" && value["verified"] == true
-                && artifact["kind"] == "gguf" && artifact["bytes"] == file_metadata.len()
-                && file_metadata.is_file() && file_metadata.nlink() == 1
-                && receipt_metadata.is_file() && receipt_metadata.nlink() == 1
+            value["kind"] == "hy4_gate_encode"
+                && value["verified"] == true
+                && artifact["kind"] == "gguf"
+                && artifact["bytes"] == file_metadata.len()
+                && file_metadata.is_file()
+                && file_metadata.nlink() == 1
+                && receipt_metadata.is_file()
+                && receipt_metadata.nlink() == 1
                 && receipt_metadata.len() <= 1 << 20
                 && artifact["sha256"].as_str().is_some_and(is_digest)
                 && artifact["path"].as_str().map(Path::new) == Some(file.as_path())

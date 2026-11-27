@@ -118,7 +118,7 @@ try {
           await startGate;
           return route.fulfill({ json: run, status: 201 });
         }
-        return route.fulfill({ json: run, status: 200 });
+        return route.fulfill({ json: { ...run, id: 'second-layer-workflow' }, status: 201 });
       }
       writes.push({ pathname, request });
       if (pathname === '/api/jobs' && request.kind === 'weight_inspect') {
@@ -135,8 +135,15 @@ try {
   });
 
   await page.goto(`${server.resolvedUrls.local[0]}#/convert`);
-  await page.getByRole('checkbox', { name: 'Layer recipe', exact: true }).check();
+  await page.getByRole('radiogroup', { name: 'Conversion mode' })
+    .getByRole('radio', { name: 'Layer recipe', exact: true }).check();
   const runButton = page.getByRole('button', { name: 'Run layer recipe', exact: true });
+  async function outputFormat(format) {
+    await page.getByLabel('Recipe output').selectOption(format);
+    // The select updates the hash; wait for the recipe to use the new format.
+    await page.getByText(format === 'gguf' ? /^Supported architectures: GPT-2 and Qwen2/
+      : /^Supported architectures: dense Llama and Qwen2/).waitFor();
+  }
   async function choose(name) {
     await page.getByRole('combobox', { name: 'Source checkpoint' }).click();
     await page.getByRole('option', { name: new RegExp(name) }).click();
@@ -161,17 +168,17 @@ try {
     assert.equal(await page.getByLabel('Default type',{exact:true}).getByRole('option',{name:type,exact:true}).count(),0);
     assert.deepEqual(await download(),{schema:'brewery.layer-quant.v1',source_sha256:fileSha,default_type:'BF16',layers:{0:type}});
     assert.ok(await runButton.isDisabled());
-    await page.getByRole('radio',{name:'GGUF file'}).check();
+    await outputFormat('gguf');
     assert.equal(await layer(0).inputValue(),type);
     assert.ok(await page.getByRole('button',{name:'Download recipe'}).isDisabled());
     assert.ok(await runButton.isDisabled());
-    await page.getByRole('radio',{name:'HGN archive'}).check();
+    await outputFormat('hgn');
     assert.equal(await layer(0).inputValue(),type);
   }
   await layer(0).selectOption('F16');
   await layer(1).selectOption('BF16');
-  await page.getByRole('radio', { name: 'GGUF file' }).check();
-  const assetSelect = page.getByRole('combobox', { name: 'Config and tokenizer assets', exact: true });
+  await outputFormat('gguf');
+  const assetSelect = page.getByRole('combobox', { name: 'Tokenizer and config files', exact: true });
   await assetSelect.waitFor();
   assert.equal(await assetSelect.inputValue(), '', 'assets must be selected explicitly');
   assert.equal(await assetSelect.getByRole('option', { name: /foreign|unavailable/i }).count(), 0);
@@ -197,14 +204,17 @@ try {
   const receipt = page.getByRole('article', { name: /Standalone weights.*GGUF layer recipe/ });
   await receipt.getByRole('link', { name: 'Verify job verify-stage' }).waitFor();
   assert.equal(await receipt.getByRole('link', { name: /in the Library/ }).count(), 0, 'convert completion is not registration');
+  await new Promise(resolve => setTimeout(resolve, 850));
   await runButton.click();
-  await page.getByText(/no second conversion was started/i).waitFor();
-  assert.deepEqual(requests, [requests[0], requests[0]], 'same request intentionally replays with the same key');
+  await page.getByText(/Started conversion second-layer-workflow/).waitFor();
+  assert.equal(requests.length, 2, 'a deliberate submission outside the duplicate window queues new work');
+  assert.notEqual(requests[1].key, requests[0].key);
+  assert.deepEqual(requests[1].request, requests[0].request);
   verified = true;
   const registered = receipt.getByRole('link', { name: /in the Library/ });
   await registered.waitFor();
   assert.equal(await registered.getAttribute('href'), '#/library?entry=output');
-  await page.getByRole('radio', { name: 'HGN archive' }).check();
+  await outputFormat('hgn');
   await page.getByText(/Offline HGN exporter:/).waitFor();
   assert.ok(await runButton.isDisabled());
   await page.getByRole('alert').filter({ hasText: /Q8_0.*HGN/ }).waitFor();
@@ -227,7 +237,7 @@ try {
 
   const defaultType = page.getByRole('combobox', { name: 'Default type', exact: true });
   await defaultType.selectOption('Q8G64');
-  await page.getByRole('radio', { name: 'GGUF file' }).check();
+  await outputFormat('gguf');
   await page.getByRole('alert').filter({ hasText: /Q8G64.*GGUF/ }).waitFor();
   assert.equal(await defaultType.inputValue(), 'Q8G64');
   assert.equal(await layer(0).inputValue(), 'Q8G64');
@@ -238,17 +248,19 @@ try {
   assert.deepEqual(await download(), recipe, 'only user edits resolve incompatible choices');
 
   await choose('Indexed weights');
+  await page.getByRole('button', { name: 'Read layers', exact: true }).click();
+  await page.getByRole('button', { name: 'Read next layers', exact: true }).click();
   await layer(9).selectOption('F16');
   assert.equal(await assetSelect.count(), 0, 'indexed sources provide their own assets');
   assert.ok(await runButton.isDisabled());
-  await page.getByText('GGUF recipe exporter is not enabled on the source host.', { exact: false }).waitFor();
-  assert.equal(await page.getByRole('link', { name: /host settings/i }).getAttribute('href'), '#/settings/infrastructure?host=tree-host');
+  const blocker = page.getByRole('link', { name: /GGUF recipe exporter is not enabled on the source host/ });
+  assert.equal(await blocker.getAttribute('href'), '#/settings/infrastructure?host=tree-host&section=policy');
   assert.equal(await layer(0).count(), 0, 'the previous source’s layer controls must not remain');
   assert.deepEqual(await download(), {
     schema: 'brewery.layer-quant.v1', source_sha256: treeSha, default_type: 'BF16', layers: { 9: 'F16' },
   });
   await choose('Pinned Flash-Next');
-  await page.getByRole('alert').filter({ hasText: /No layer-recipe exporter admits this pinned Flash-Next checkpoint/ }).waitFor();
+  await page.getByRole('alert').filter({ hasText: 'The layer-recipe exporters do not support this Flash-Next checkpoint.' }).waitFor();
   assert.equal(await downloadButton.count(), 0);
   assert.ok(await runButton.isDisabled());
   assert.equal(requests.length, 3, 'unsupported formats, pinned Flash-Next and unconfigured workers do not submit');

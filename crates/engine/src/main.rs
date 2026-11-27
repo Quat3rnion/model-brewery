@@ -1,15 +1,25 @@
+mod behavior_direction;
 mod benchmark;
+mod circuit;
 mod compare;
 mod converter;
+mod damage;
 mod exl3_layer;
 mod gguf;
 mod gguf_conversion;
+mod heretic;
 mod hf_download;
+mod hgn_checks;
 mod hgn_recipe;
 mod integrity;
 mod native_progress;
 mod progress;
 mod recipe;
+mod scratch_checks;
+mod scratch_locate;
+mod sensitivity;
+mod trace;
+mod w0_libraries;
 mod weight;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -155,15 +165,18 @@ fn native_json_admitted(
     // All converter arguments are absolute. Use a dedicated cwd for native
     // counters so they cannot replace the engine snapshot or enter an artifact.
     let cwd = env::current_dir()?.canonicalize()?;
-    let scratch = matches!(name, "convert" | "verify")
-        .then(|| {
-            tempfile::Builder::new()
-                .prefix(".native-progress-")
-                .permissions(fs::Permissions::from_mode(0o700))
-                .tempdir_in(cwd)
-                .ok()
-        })
-        .flatten();
+    let scratch = matches!(
+        name,
+        "convert" | "verify" | brewery_worker::scratch_eval::CHECKS
+    )
+    .then(|| {
+        tempfile::Builder::new()
+            .prefix(".native-progress-")
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir_in(cwd)
+            .ok()
+    })
+    .flatten();
     let native_path = scratch.as_ref().map(|dir| {
         let path = dir.path().join("progress.json");
         cmd.current_dir(dir.path())
@@ -390,6 +403,36 @@ fn run() -> Result<i32> {
     let result = match job.kind.as_str() {
         "benchmark" => benchmark::run(&job, &cwd, &progress)?,
         "compare" => compare::run(&job, &cwd, &progress)?,
+        brewery_worker::trace::JOB => trace::run(&job, &cwd, &progress)?,
+        brewery_worker::sensitivity::JOB => sensitivity::run(&job, &cwd, &progress)?,
+        brewery_worker::circuit::JOB => circuit::run(&job, &cwd, &progress)?,
+        brewery_worker::damage::JOB => damage::run(&job, &cwd, &progress)?,
+        brewery_worker::ablation_search::SCREEN => ablation_search::run(&job, &cwd, &progress)?,
+        brewery_worker::ablation_search::hgn::JOB => {
+            ablation_search::hgn::run(&job, &cwd, &progress)?
+        }
+        brewery_worker::hgn_edit::JOB => hgn_edit::run(&job, &cwd)?,
+        brewery_worker::hgn_checks::JOB => hgn_checks::run(&job, &cwd)?,
+        brewery_worker::behavior_direction::JOB => behavior_direction::run(&job, &cwd, &progress)?,
+        brewery_worker::scratch_eval::CHECKS => scratch_checks::run(&job, &cwd, &progress)?,
+        brewery_worker::locate_edit::JOB => scratch_locate::run(&job, &cwd, &progress)?,
+        kind if brewery_worker::heretic::job(kind) => heretic::run(&job, &cwd)?,
+        brewery_worker::scratch_eval::GGUF => {
+            ensure!(
+                brewery_worker::scratch_eval::gguf_options(&job.options)
+                    && job
+                        .inputs
+                        .iter()
+                        .map(|i| i.kind.as_str())
+                        .eq(["safetensors", "assets"])
+                    && job.inputs[0]
+                        .sha256
+                        .as_deref()
+                        .is_some_and(brewery_worker::is_digest),
+                "scratch GGUF needs pinned standalone SafeTensors, assets, and BF16 options"
+            );
+            gguf_conversion::run(&job, &cwd, &progress)?
+        }
         "hf_download" => hf_download::run(&job, &cwd, &progress)?,
         brewery_worker::exl3_layer::JOB => exl3_layer::run(&job, &cwd, &progress)?,
         "weight_inspect" | "weight_propose" | "weight_tune" | "weight_apply" => {
@@ -422,3 +465,5 @@ fn main() {
     };
     std::process::exit(code);
 }
+mod ablation_search;
+mod hgn_edit;

@@ -1,6 +1,10 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
+  import { fieldError, visibleBlockers } from '../lib/blockers';
+  import { focusAfterRemoval } from '../lib/focus';
+  import FieldError from './FieldError.svelte';
   import { listHosts, listIdentities, permitted, probeHostKey, problem, removeHost, saveHost, sshAction, validEndpoint, type Action, type Definition, type HostKey, type SshHost } from '../lib/ssh-hosts';
+  let { confirmRefresh, onDirty }: { confirmRefresh: () => boolean; onDirty: (dirty: boolean) => void } = $props();
   const blank = ():Definition => ({id:'',name:'',host:'',user:'',port:22,fingerprint:''});
   let hosts = $state<SshHost[]>([]);
   let available = $state(false), ready = $state(false), busy = $state(false);
@@ -11,8 +15,20 @@
   let choice = $state(''), custom = $state('');
   const selection = $derived(choice === 'custom' ? custom : choice || (draft.identity_file ? null : undefined));
   const issue = $derived(problem({...draft,identity_file:selection}));
-  let candidate = $state<HostKey>(), accepted = $state(false), probing = $state(false);
+  let endpointChanged = $state(false), touched = $state(false);
+  let candidate = $state<HostKey>(), probing = $state(false);
+  const issueNote = $derived(fieldError(visibleBlockers(issue ? [{field: 'definition', text: issue}] : [], { definition: touched }), 'definition'));
   let removing = $state(''), approved = $state('');
+  let firstField = $state<HTMLInputElement>();
+  let heading = $state<HTMLElement>();
+  let original = $state('');
+  const fields = (d: Definition, login: string | null | undefined) =>
+    JSON.stringify([d.id, d.name, d.host, d.user, d.port, d.fingerprint, login ?? '']);
+  const dirty = $derived(editing && fields(draft, selection) !== original);
+  $effect(() => {
+    onDirty(dirty);
+    return () => onDirty(false);
+  });
   const key = (h:SshHost) => JSON.stringify([h.id,h.revision,h.confirmation]);
   async function run(work:()=>Promise<void>) {
     if (busy) return;
@@ -21,71 +37,89 @@
     finally { busy = false; }
   }
   function refresh() { return run(async () => {
-    ready = false; editing = false;
     const [state, keys] = await Promise.all([listHosts(),listIdentities().catch(()=>undefined)]);
     inventory = keys;
     hosts = state.hosts; available = state.available; ready = true;
   }); }
   onMount(()=>{ void refresh(); });
-  function edit(h?:SshHost) {
-    candidate = undefined; accepted = false;
+  async function edit(h?:SshHost) {
+    candidate = undefined; endpointChanged = touched = false;
     draft = h ? {...h} : blank(); revision = h?.revision; editing = true;
     custom = h?.identity_file ?? '';
     choice = custom && !inventory?.identities.some(i=>i.path === custom) ? 'custom' : custom;
+    original = fields(draft, h?.identity_file);
     error = note = removing = approved = '';
+    await tick();
+    firstField?.focus();
   }
-  function clearProbe() {
+  function changedAddress() {
     candidate = undefined;
-    if (accepted) draft.fingerprint = '';
-    accepted = false; error = note = '';
+    draft.fingerprint = '';
+    endpointChanged = true;
+    error = note = '';
   }
   function probe() { return run(async () => {
-    clearProbe(); probing = true;
+    candidate = undefined; probing = true;
     try { candidate = await probeHostKey(draft.host,draft.port); }
     finally { probing = false; }
   }); }
   function accept() {
     if (!candidate || candidate.host !== draft.host || candidate.port !== draft.port) return;
-    draft.fingerprint = candidate.fingerprint; accepted = true; candidate = undefined;
+    void focusAfterRemoval(() => {
+      draft.fingerprint = candidate!.fingerprint;
+      endpointChanged = false;
+      candidate = undefined;
+    }, () => document.getElementById('ssh-host-key'));
     note = 'Fingerprint added to the draft. Save the definition to keep it.';
   }
   function update(h:SshHost) { hosts = [...hosts.filter(x=>x.id !== h.id),h].sort((a,b)=>a.id.localeCompare(b.id)); }
-  function save() { return run(async () => { update(await saveHost({...draft,identity_file:selection === draft.identity_file ? undefined : selection},revision)); editing = false; note = 'Host definition saved.'; }); }
+  function closeEdit() {
+    return focusAfterRemoval(() => editing = false, () => document.getElementById('add-ssh-host') ?? heading);
+  }
+  function save() { return run(async () => {
+    update(await saveHost({...draft,identity_file:selection === draft.identity_file ? undefined : selection},revision));
+    await closeEdit();
+    note = 'Host definition saved.';
+  }); }
   function action(h:SshHost,a:Action) {
     const confirmed = approved === key(h);
     return run(async () => { update(await sshAction(h,a,confirmed)); note = {test:'Connection verified.',plan:'Installation plan ready for review.',install:'Installation complete.'}[a]; });
   }
   function remove(h:SshHost) {
     if (removing !== key(h)) return;
-    return run(async () => { await removeHost(h); hosts = hosts.filter(x=>x.id!==h.id); note = 'Host definition removed. Remote files were not changed.'; });
+    return run(async () => {
+      await removeHost(h);
+      await focusAfterRemoval(() => hosts = hosts.filter(x=>x.id!==h.id), () => heading);
+      note = 'Host definition removed. Remote files were not changed.';
+    });
   }
 </script>
 
 <section class="panel" aria-labelledby="ssh-hosts-heading">
-  <header><h2 id="ssh-hosts-heading" tabindex="-1">SSH hosts</h2></header>
+  <header><h3 bind:this={heading} id="ssh-hosts-heading" tabindex="-1">SSH hosts</h3></header>
   <div class="body stack">
     <p class="small muted">Define a remote host, verify its SSH identity, then review the installation plan. Saving a definition does not connect to the host.</p>
     <div class="row">
-      <button type="button" class="btn small" disabled={busy} onclick={refresh}>Refresh SSH hosts</button>
-      {#if ready && !editing}<button type="button" class="btn small" disabled={busy} onclick={()=>edit()}>Add SSH host</button>{/if}
+      <button type="button" class="btn small" disabled={busy} onclick={() => { if (confirmRefresh()) void refresh(); }}>Refresh SSH hosts</button>
+      {#if ready && !editing}<button id="add-ssh-host" type="button" class="btn small" disabled={busy} onclick={()=>edit()}>Add SSH host</button>{/if}
     </div>
     {#if !ready && busy}<p role="status">Loading SSH hosts…</p>{/if}
     {#if ready}
       {#if !available}<p class="note warn">The SSH helper is unavailable. You can probe host keys and save definitions, but cannot test connections or install workers.</p>{/if}
       {#if editing}
-        <form class="stack" onsubmit={(e)=>{e.preventDefault(); if (!issue) void save();}}>
+        <form class="stack" onfocusout={() => touched = true} onsubmit={(e)=>{e.preventDefault(); if (!issue) void save();}}>
           <fieldset disabled={busy} class="stack">
             <legend>{revision === undefined ? 'New SSH host' : 'Edit SSH host'}</legend>
             <div class="grid-2">
               <label class="field">Host ID<input class="input" required disabled={revision !== undefined} bind:value={draft.id} /></label>
-              <label class="field">Display name<input class="input" required bind:value={draft.name} /></label>
-              <label class="field">Host address<input class="input" required oninput={clearProbe} bind:value={draft.host} autocomplete="off" spellcheck="false" /></label>
-              <label class="field">SSH port<input class="input" required type="number" min="1" max="65535" oninput={clearProbe} bind:value={draft.port} /></label>
+              <label class="field">Display name<input bind:this={firstField} class="input" required bind:value={draft.name} /></label>
+              <label class="field">Host address<input class="input" required oninput={changedAddress} bind:value={draft.host} autocomplete="off" spellcheck="false" /></label>
+              <label class="field">SSH port<input class="input" required type="number" min="1" max="65535" oninput={changedAddress} bind:value={draft.port} /></label>
               <label class="field">SSH account<input class="input" required bind:value={draft.user} autocomplete="off" spellcheck="false" /></label>
-              <label class="field">Host key fingerprint<input class="input mono" required oninput={()=>{accepted=false; candidate=undefined; note='';}} bind:value={draft.fingerprint} placeholder="SHA256:…" aria-describedby="ssh-pin-help" autocomplete="off" spellcheck="false" /></label>
+              <label class="field">Host key fingerprint<input id="ssh-host-key" class="input mono" required oninput={()=>{candidate=undefined; note='';}} bind:value={draft.fingerprint} placeholder="SHA256:…" aria-describedby="ssh-pin-help" autocomplete="off" spellcheck="false" /></label>
             </div>
             <p id="ssh-pin-help" class="xs muted">Get the expected SHA256 fingerprint from the host administrator through a trusted channel. Do not enter a password or private key.</p>
-            {#if revision === undefined}
+            {#if endpointChanged}<p class="note warn small">The address or port changed. Verify the fingerprint for this new address and port before saving.</p>{/if}
               <div class="row">
                 <button class="btn" type="button" disabled={!validEndpoint(draft.host,draft.port)} onclick={probe}>Probe host key</button>
                 <span class="xs muted" role="status">{probing ? 'Reading host key…' : 'Reads the key without signing in.'}</span>
@@ -99,7 +133,6 @@
                   <div><button class="btn" type="button" onclick={accept}>Accept fingerprint</button></div>
                 </div>
               {/if}
-            {/if}
             <div class="field"><label for="ssh-login-identity">SSH login identity</label>
               <select id="ssh-login-identity" class="input" bind:value={choice} disabled={!inventory} aria-describedby="ssh-identity-help">
                 <option value="">Use controller default</option>
@@ -118,15 +151,15 @@
             </p>
             <div class="row">
               <button class="btn primary" disabled={!!issue} type="submit">Save definition</button>
-              <button class="btn" type="button" onclick={()=>editing=false}>Cancel edit</button>
-              {#if issue}<span class="xs muted">{issue}</span>{/if}
+              <button class="btn" type="button" onclick={closeEdit}>Cancel edit</button>
+              <FieldError id="ssh-definition-error" error={issueNote} />
             </div>
           </fieldset>
         </form>
       {:else if !hosts.length}<p class="small muted">No SSH hosts defined.</p>{/if}
       {#each hosts as h (h.id)}
         <article class="stack">
-          <h3 class="break">{h.name} <span class="small muted">({h.id})</span></h3>
+          <h4 class="break">{h.name}{#if h.name !== h.id}{' '}<span class="small muted">({h.id})</span>{/if}</h4>
           <div class="small break"><strong>{h.status}</strong> · {h.user}@{h.host} · port {h.port} · revision {h.revision}</div>
           <div class="xs mono break">{h.fingerprint}</div>
           {#if !editing}
@@ -148,7 +181,7 @@
               <div class="note info stack">
                 <strong>Installation plan</strong>
                 <p class="small">Install the verified Brewery worker, engine and worker configuration in the home directory of {h.user} on {h.host}. No system services or accounts are changed.</p>
-                <div class="xs break">Plan ID: <span class="mono">{h.confirmation}</span></div>
+                <div class="xs break">Plan ID (identifies this installation plan): <span class="mono">{h.confirmation}</span></div>
                 <label><input type="checkbox" disabled={!available || busy} checked={approved === key(h)} onchange={(e)=>approved=e.currentTarget.checked ? key(h) : ''} /> I confirm this plan for {h.name}.</label>
                 <div><button class="btn primary" type="button" disabled={busy || !available || approved !== key(h)} onclick={()=>action(h,'install')}>Install on host</button></div>
               </div>

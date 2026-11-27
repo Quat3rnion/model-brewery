@@ -1,4 +1,4 @@
-mod inventory;
+pub(crate) mod inventory;
 mod layer_recipe;
 
 use crate::{
@@ -120,7 +120,13 @@ impl Tool {
         Self::pinned(work, VAR, SHA, "rocmfpx-quantize", "ROCmFPX quantizer")
     }
 
-    pub(crate) fn pinned(work: &Path, var: &str, sha: &str, name: &str, label: &str) -> Result<Self> {
+    pub(crate) fn pinned(
+        work: &Path,
+        var: &str,
+        sha: &str,
+        name: &str,
+        label: &str,
+    ) -> Result<Self> {
         let expected = env::var(sha).with_context(|| format!("{sha} is required"))?;
         ensure!(
             expected.len() == 64
@@ -129,10 +135,29 @@ impl Tool {
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
             "{sha} must be lowercase hexadecimal SHA-256"
         );
-        let configured = Tool::open(var)?;
+        Self::pinned_digest(work, var, &expected, name, label)
+    }
+
+    pub(crate) fn pinned_digest(
+        work: &Path,
+        var: &str,
+        expected: &str,
+        name: &str,
+        label: &str,
+    ) -> Result<Self> {
+        Self::stage_digest(work, Tool::open(var)?, expected, name, label)
+    }
+
+    pub(crate) fn stage_digest(
+        work: &Path,
+        configured: Self,
+        expected: &str,
+        name: &str,
+        label: &str,
+    ) -> Result<Self> {
         ensure!(configured.sha == expected, "{label} SHA-256 mismatch");
         // Run private verified bytes, not the mutable configured pathname.
-        // The operator must supply a self-contained CPU quantizer (no adjacent libraries).
+        // The tool cannot depend on libraries relative to the configured executable.
         let path = work.join(name);
         fs::copy(&configured.path, &path)?;
         configured.stamp.check(&configured.path)?;
@@ -169,6 +194,15 @@ impl Tool {
     }
 
     pub(crate) fn capture(&self, cmd: &mut Command, work: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
+        self.capture_for(cmd, work, Duration::from_secs(12 * 3600))
+    }
+
+    pub(crate) fn capture_for(
+        &self,
+        cmd: &mut Command,
+        work: &Path,
+        timeout: Duration,
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
         let mut out = tempfile::tempfile_in(work)?;
         let mut err = tempfile::tempfile_in(work)?;
         self.stamp.check(&self.path)?;
@@ -182,10 +216,7 @@ impl Tool {
             let sampled = out
                 .metadata()
                 .and_then(|o| err.metadata().map(|e| o.len().saturating_add(e.len())));
-            if sampled.is_err()
-                || sampled? > LOG_LIMIT
-                || started.elapsed() >= Duration::from_secs(12 * 3600)
-            {
+            if sampled.is_err() || sampled? > LOG_LIMIT || started.elapsed() >= timeout {
                 let _ = child.kill();
                 let _ = child.wait();
                 bail!("offline tool exceeded log or time limit");
@@ -221,6 +252,12 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     }
     let options: Options =
         serde_json::from_value(job.options.clone()).context("invalid GGUF options")?;
+    let scratch_private = job.kind == brewery_worker::scratch_eval::GGUF;
+    let kind = if scratch_private {
+        "convert"
+    } else {
+        &job.kind
+    };
     let namespace = match (
         options.encoder_family.as_deref(),
         options.encoder_revision.as_deref(),
@@ -258,7 +295,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         env::var_os("BREWERY_EXPECTED_SOURCE_SHA256").is_none(),
         "GGUF output is disabled on source-pinned qualification workers"
     );
-    let verify = job.kind == "verify";
+    let verify = kind == "verify";
     let source = job.inputs.first().context("GGUF source is required")?;
     let standalone = source.kind == "safetensors";
     let assets_index = if verify { 2 } else { 1 };
@@ -364,7 +401,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
     );
     let source_sha = integrity::source_hash(&job.inputs, &ids, &roles);
     let _phase = progress.start(
-        match job.kind.as_str() {
+        match kind {
             "inspect" => "inspect",
             "plan" => "plan",
             "convert" => "convert",
@@ -383,16 +420,24 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             "HF source must be an indexed snapshot directory"
         );
         let exporter = Tool::open("BREWERY_GGUF_HF_EXPORTER")?;
-        let inspect = export(&exporter, work, threads, &source.path, assets, None)?;
+        let inspect = export(
+            &exporter,
+            work,
+            threads,
+            &source.path,
+            assets,
+            None,
+            scratch_private,
+        )?;
         let supported = inspect["export_supported"]
             .as_bool()
             .context("invalid HF GGUF inspection receipt")?;
         hf = inspect;
         exporter_sha = Some(exporter.sha.clone());
-        if !supported && job.kind != "inspect" {
+        if !supported && kind != "inspect" {
             bail!("HF architecture cannot be exported to a single supported GGUF");
         }
-        if supported && (verify || job.kind == "convert") {
+        if supported && (verify || kind == "convert") {
             let estimate = ids[0]
                 .bytes
                 .checked_mul(4)
@@ -410,6 +455,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
                 &source.path,
                 assets,
                 Some(&export_dir),
+                scratch_private,
             )?;
             fp_path = export_dir.join("model.gguf");
             ensure!(
@@ -419,9 +465,9 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
             );
         }
     }
-    let estimate_only = needs_exporter && matches!(job.kind.as_str(), "inspect" | "plan");
+    let estimate_only = needs_exporter && matches!(kind, "inspect" | "plan");
     let temp_output = work.join("model.gguf");
-    let mut report = json!({"kind":job.kind,"source_format":source.kind,"gguf_type":options.gguf_type,
+    let mut report = json!({"kind":kind,"source_format":source.kind,"gguf_type":options.gguf_type,
         "requested_tensor_types":options.tensor_types,"hf_export":hf,"tensor_payloads_read":false});
     let mut file_verification = json!({"status":"not_performed"});
     let artifact;
@@ -456,7 +502,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         if !supported {
             disk["fits"] = json!(false);
         }
-        artifact = report_artifact(cwd, progress, &report, &job.kind)?;
+        artifact = report_artifact(cwd, progress, &report, kind)?;
     } else {
         let fp = Model::open(&fp_path, Namespace::Stock)?;
         fp.check_stock_source()?;
@@ -555,7 +601,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         report["architecture"] = json!(fp.architecture);
         report["gguf_tensors"] = fp.summary(&expected, namespace);
         report["output_gguf_bytes_estimate"] = json!(output_bytes);
-        if job.kind == "convert" || verify {
+        if kind == "convert" || verify {
             if !verify {
                 ensure!(disk["fits"] == true, "insufficient disk for GGUF output");
                 quant(false)?;
@@ -592,10 +638,10 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
                 publish.finish();
                 artifact = output.artifact(&destination, "gguf");
             } else {
-                artifact = report_artifact(cwd, progress, &report, &job.kind)?;
+                artifact = report_artifact(cwd, progress, &report, kind)?;
             }
         } else {
-            artifact = report_artifact(cwd, progress, &report, &job.kind)?;
+            artifact = report_artifact(cwd, progress, &report, kind)?;
         }
     }
     disk["scope"] = json!("GGUF payload estimate plus 5% and 64 MiB; not a disk reservation");
@@ -608,7 +654,7 @@ pub fn run(job: &Job, cwd: &Path, progress: &Progress) -> Result<Value> {
         backend_receipt["stock_runtime_compatible"] = json!(false);
     }
     Ok(
-        json!({"kind":job.kind,"host":source.host,"output_format":"gguf","gguf_type":options.gguf_type,
+        json!({"kind":kind,"host":source.host,"output_format":"gguf","gguf_type":options.gguf_type,
         "source_sha256":source_sha,"source_digest_scope":"role-qualified physical source bundles",
         "inputs":ids.iter().zip(&job.inputs).map(|(id,input)| id.input(input)).collect::<Vec<_>>(),
         "artifact":artifact,"report":report,"disk_preflight":disk,"file_verification":file_verification,
@@ -624,6 +670,7 @@ fn export(
     source: &Path,
     assets: Option<&Path>,
     output: Option<&Path>,
+    scratch_private: bool,
 ) -> Result<Value> {
     let mut cmd = tool.command(work, threads);
     for name in ["BREWERY_GGUF_PYTHON", "BREWERY_LLAMA_CPP"] {
@@ -642,6 +689,9 @@ fn export(
     .args(["--outtype", "bf16"]);
     if let Some(assets) = assets {
         cmd.arg("--assets").arg(assets);
+    }
+    if scratch_private {
+        cmd.arg("--scratch-private");
     }
     if let Some(output) = output {
         cmd.arg("--output").arg(output);

@@ -11,9 +11,9 @@ const model={id:'local-sample',name:'Private sample',path:'/models/'+'x'.repeat(
 const host={id:'frame',name:'Frame',capabilities:{convert:true}};
 const policy={...host,revision:1,paused:false,draining:false,installed_jobs:['convert'],allowed_jobs:['convert'],disabled_jobs:[],weight_editor:{available:true,enabled:false,capabilities:{}}};
 const routes=[
-  ['library','Library'],['queue','Jobs'],['transfers','Transfers'],['compare','Compare'],['convert','Convert'],
+  ['library','Library'],['queue','Jobs'],['transfers','Transfers'],['compare','Compare'],['trace','Trace'],['edits','Edit sessions'],['trace?job=missing','Trace','trace'],['edits?rev=missing','Edit sessions','edits'],['convert','Convert'],
   ['evaluate','Evaluate'],['benchmarks','Benchmarks'],['calibration','Calibration inputs'],['settings','Settings'],
-  [`jobs/${job.id}`,'Conversion','queue'],['profiles?format=gguf','Conversion profiles','convert'],
+  [`jobs/${job.id}`,'Convert step','queue'],['profiles?format=gguf','Conversion profiles','convert'],
   ['weights?source=local-sample','Weight edits','library'],['library?entry=local-sample','Library','library'],
   ['settings/infrastructure?host=frame&section=weights','Settings','settings','weight-settings-h'],
   ['settings/infrastructure?host=frame&section=policy','Settings','settings','host-policy-h'],
@@ -40,7 +40,8 @@ try {
         {profiles:[],hosts:[],conversions:[],entries:[]};
       return r.fulfill({json});
     });
-    await page.goto(base);
+    // The first load of the full app needs more time than one route step on a busy runner.
+    await page.goto(base,{timeout:20000});
     for(const [hash,heading,parent=hash,focus] of routes){
       try {
         await page.evaluate(h=>location.hash='#/'+h,hash);

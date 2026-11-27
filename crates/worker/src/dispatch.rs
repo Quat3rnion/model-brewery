@@ -268,10 +268,11 @@ impl Config {
             return Err(Error::Transport(e.into()));
         }
         drop(stdin);
-        let limit = if matches!(request, Rpc::SuggestPaths(_)) {
-            SUGGEST_JSON_LIMIT
-        } else {
-            LIMIT
+        let limit = match request {
+            Rpc::SuggestPaths(_) | Rpc::Stat(_) => SUGGEST_JSON_LIMIT,
+            Rpc::TraceRead { .. } => trace::RESPONSE_CAP as u64 + 128,
+            Rpc::DirectionModel(_) => 2048,
+            _ => LIMIT,
         };
         let value = decode_limited::<Value>(child.stdout.take().unwrap(), limit);
         if value.is_err() {
@@ -312,6 +313,15 @@ impl InitialRelaySlots {
 }
 
 fn stage(cfg: &Config, action: &str, dest: &str, id: &str, job: Job) -> Wire<Reply> {
+    if matches!(
+        job.kind.as_str(),
+        brewery_worker::hgn_edit::JOB | brewery_worker::hgn_checks::JOB
+    ) {
+        ensure_wire(
+            action == "start" && job.inputs.len() == 1 && job.inputs[0].host == dest,
+            "private HGN jobs require a same-host direct input",
+        )?;
+    }
     if action == "cleanup" {
         return cfg.rpc(dest, Rpc::Cleanup { id: id.into() });
     }
@@ -563,14 +573,35 @@ fn run() -> Wire<Value> {
             let reply: PathSuggestions = cfg.rpc(dest, Rpc::SuggestPaths(request))?;
             Ok(serde_json::to_value(reply).context("serialize path suggestions")?)
         }
-        [action, dest, id] if action != "suggest-paths" => {
+        [action, dest, id] if action == "trace-read" => {
+            token(id)?;
+            let cfg = config(dest)?;
+            let slice: trace::Slice = decode_limited(std::io::stdin().lock(), 2048)?;
+            slice.check()?;
+            cfg.rpc(dest, Rpc::TraceRead { id: id.into(), slice })
+        }
+        [action, dest, id] if action == "direction-model" => {
+            token(id)?;
+            let cfg = config(dest)?;
+            let request: direction_model::Request =
+                decode_limited(std::io::stdin().lock(), SUGGEST_JSON_LIMIT)?;
+            request.check()?;
+            cfg.rpc(dest, Rpc::DirectionModel(request))
+        }
+        [action, dest] if action == "stat" => {
+            let cfg = config(dest)?;
+            let request: StatRequest = decode_limited(std::io::stdin().lock(), SUGGEST_JSON_LIMIT)?;
+            let reply: PathState = cfg.rpc(dest, Rpc::Stat(request))?;
+            Ok(serde_json::to_value(reply).context("serialize path state")?)
+        }
+        [action, dest, id] if !matches!(action.as_str(), "suggest-paths" | "stat") => {
             token(id)?;
             let cfg = config(dest)?;
             let reply = run_job(&cfg, action, dest, id)?;
             Ok(serde_json::to_value(reply).context("serialize reply")?)
         }
         _ => Err(anyhow::anyhow!(
-            "usage: brewery-dispatch ACTION HOST JOB_ID | brewery-dispatch suggest-paths HOST"
+            "usage: brewery-dispatch ACTION HOST JOB_ID | brewery-dispatch (suggest-paths|stat) HOST"
         )
         .into()),
     }

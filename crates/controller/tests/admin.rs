@@ -10,6 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "support/scratch.rs"]
+mod scratch;
+
 struct Test {
     root: tempfile::TempDir,
     child: Option<Child>,
@@ -73,12 +76,20 @@ impl Test {
         if root.join("catalog.json").exists() {
             command.env("BREWERY_ADMIN_CATALOG", root.join("catalog.json"));
         }
+        if root.join("evaluation-operator.json").exists() {
+            command.env("BREWERY_EVALUATION_OPERATOR_FILE", root.join("evaluation-operator.json"));
+        } else {
+            command.env_remove("BREWERY_EVALUATION_OPERATOR_FILE");
+        }
         for name in ["DISPATCH", "WORKER", "ENGINE", "HELPER", "TUNER"] {
             command.env(
                 format!("BREWERY_LOCAL_EDIT_{name}"),
                 root.join(format!("editor-{name}")),
             );
         }
+        command
+            .env("BREWERY_COMPILED_PROGRAM_PYTHON", "/usr/bin/python3")
+            .env("BREWERY_COMPILED_PROGRAM_SCRIPT", root.join("program.py"));
         let mut child = command.spawn().unwrap();
         let until = Instant::now() + Duration::from_secs(4);
         self.addr = loop {
@@ -106,6 +117,16 @@ impl Test {
         body: Option<Value>,
     ) -> (u16, Value) {
         let method = if body.is_some() { "POST" } else { "GET" };
+        self.request_method(method, path, headers, media_type, body)
+    }
+    fn request_method(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &str,
+        media_type: &str,
+        body: Option<Value>,
+    ) -> (u16, Value) {
         let body = body.map(|b| b.to_string()).unwrap_or_default();
         let mut stream = TcpStream::connect(&self.addr).unwrap();
         stream
@@ -266,9 +287,12 @@ fn local_weight_editor_requires_an_installed_executor() {
 
 #[test]
 fn enabled_local_editor_uses_private_route_and_drains_on_disable() {
+    const NEW_WORK: &str = "Brewery-Allow-Duplicate: 1\r\n";
     let mut t = Test::new();
     let root = t.root.path();
-    let sources = root.join("sources");
+    // The default temp directory can be /tmp, which cannot be granted.
+    let model_fixture = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let sources = model_fixture.path().join("sources");
     fs::create_dir(&sources).unwrap();
     let config = root.join("local-worker.json");
     let original = json!({"root":root.join("ordinary"),"source_roots":[sources],"engine":"/usr/bin/false",
@@ -387,7 +411,7 @@ printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","w
     wait("worker progress");
     assert_eq!(t.admin(Some(toggle(0, false))).0, 409);
     assert_eq!(t.admin(Some(toggle(1, false))).0, 200);
-    assert_eq!(t.request("/api/jobs", "", Some(req.clone())).0, 409);
+    assert_eq!(t.request("/api/jobs", NEW_WORK, Some(req.clone())).0, 409);
     fs::remove_file(t.root.path().join("hold")).unwrap();
     assert_eq!(wait("succeeded")["result"]["source_format"], "hf");
     assert_eq!(
@@ -400,7 +424,7 @@ printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","w
         t.admin(None).1["hosts"][0]["weight_editor"]["enabled"],
         false
     );
-    assert_eq!(t.request("/api/jobs", "", Some(req)).0, 409);
+    assert_eq!(t.request("/api/jobs", NEW_WORK, Some(req)).0, 409);
 
     let grant = |action, revision, path: &std::path::Path| {
         t.request(
@@ -443,6 +467,13 @@ printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","w
     );
     let model_path = sources.join("test.gguf");
     fs::write(&model_path, "fixture").unwrap();
+    // The regular worker cannot see the directory approved for the editor.
+    let dispatch = t.root.path().join("dispatch");
+    fs::write(
+        &dispatch,
+        "#!/bin/sh\ncat >/dev/null\nprintf '{\"state\":\"outside_roots\"}\\n'\n",
+    )
+    .unwrap();
     let (status, model) = t.request(
         "/api/models",
         "",
@@ -456,6 +487,26 @@ printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","w
     fs::write(t.root.path().join("hold"), "").unwrap();
     let (status, running) = t.request("/api/jobs", "", Some(request.clone()));
     assert_eq!(status, 201, "{running}");
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let (_, state) = t.request("/api/state", "", None);
+        let row = state["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == model["id"])
+            .unwrap();
+        if row["reason"] != "The controller has not checked this path on the worker." {
+            assert_eq!(row["available"], Value::Null, "{row}");
+            assert_eq!(
+                row["reason"],
+                "The standard worker could not find or access this path. Editor access is not checked."
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "{row}");
+        sleep(Duration::from_millis(15));
+    }
     let poll = |id: &Value, field, expected: &str| {
         let deadline = Instant::now() + Duration::from_secs(4);
         let path = format!("/api/jobs/{}", id.as_str().unwrap());
@@ -469,13 +520,16 @@ printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","w
         }
     };
     poll(&running["id"], "progress", "worker progress");
-    let (status, queued) = t.request("/api/jobs", "", Some(request.clone()));
+    let (status, queued) = t.request("/api/jobs", NEW_WORK, Some(request.clone()));
     assert_eq!(status, 201, "{queued}");
     assert_eq!(queued["state"], "queued");
     let (status, revoke) = grant("remove", 2, &sources);
     assert_eq!(status, 200, "{revoke}");
     assert_eq!(confirm(&revoke).0, 200);
-    assert_eq!(t.request("/api/jobs", "", Some(request.clone())).0, 409);
+    assert_eq!(
+        t.request("/api/jobs", NEW_WORK, Some(request.clone())).0,
+        409
+    );
     fs::remove_file(t.root.path().join("hold")).unwrap();
     poll(&running["id"], "state", "succeeded");
     poll(&queued["id"], "state", "failed");
@@ -485,7 +539,7 @@ printf '%s\n' '{"schema":"brewery.weight-runtime.v1","jobs":["weight_inspect","w
         eval(t.admin(None).1)["model_directories"]["granted"],
         json!([])
     );
-    assert_eq!(t.request("/api/jobs", "", Some(request)).0, 409);
+    assert_eq!(t.request("/api/jobs", NEW_WORK, Some(request)).0, 409);
     assert_eq!(fs::read_to_string(model_path).unwrap(), "fixture");
 }
 
@@ -602,7 +656,8 @@ fn pause_drains_running_job_and_blocks_new_work_bound_to_the_source() {
         json!({"kind":"transfer_preview","host":"candidate","input_ids":[source["id"]]}),
         json!({"kind":"convert","host":"auto","input_ids":[source["id"]]}),
     ] {
-        let (status, response) = t.request("/api/jobs", "", Some(request));
+        let (status, response) =
+            t.request("/api/jobs", "Brewery-Allow-Duplicate: 1\r\n", Some(request));
         assert_eq!(status, 409, "{response}");
     }
     fs::remove_file(t.root.path().join("hold")).unwrap();

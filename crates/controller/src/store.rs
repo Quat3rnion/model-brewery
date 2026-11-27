@@ -1,22 +1,37 @@
 use crate::conversion::{self, Conversion};
 use crate::domain::{Envelope, Event, Job, Model, NewModel, Prompt, State, now};
 use crate::idempotency::{self, Replay, Submission};
+use crate::scratch::{Revision, RevisionState};
 use brewery_worker::hgn_recipe;
 use brewery_worker::operational::Settings;
-use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
+use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     fs::{File, OpenOptions},
     os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _},
-    path::Path,
+    path::{Path, PathBuf},
 };
+
+pub(crate) mod agent;
+mod crosscoder;
+mod findings;
+mod interventions;
+mod registered_evaluation;
+mod sae;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 pub struct Store {
     conn: Connection,
     _lock: File,
+    scratch: PathBuf,
+}
+
+pub enum PromptDeletion {
+    Deleted,
+    Missing,
+    InUse(String),
 }
 
 impl Store {
@@ -37,7 +52,7 @@ impl Store {
             .open(directory.join("controller.lock"))?;
         fs2::FileExt::try_lock_exclusive(&lock)
             .map_err(|e| format!("cannot lock the controller data directory: {e}"))?;
-        let conn = Connection::open(directory.join("controller.db"))?;
+        let mut conn = Connection::open(directory.join("controller.db"))?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=FULL;
@@ -50,11 +65,12 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(state, seq);
              DROP INDEX IF EXISTS one_active_job;
-              DROP INDEX IF EXISTS one_job_per_active_host;
+             DROP INDEX IF EXISTS one_job_per_active_host;
+             DROP INDEX IF EXISTS one_job_per_active_host_slot;
               CREATE UNIQUE INDEX IF NOT EXISTS one_job_per_active_host_slot
                 ON jobs(json_extract(body, '$.host'),
                         coalesce(json_extract(body, '$.host_slot'), 0))
-                WHERE state = 'running';
+                WHERE state = 'running' AND json_extract(body, '$.kind') <> 'search_ablation';
              CREATE TABLE IF NOT EXISTS events(
                seq INTEGER PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), body TEXT NOT NULL
              );
@@ -62,6 +78,13 @@ impl Store {
         )?;
         crate::feed::install(&conn)?;
         idempotency::install(&conn)?;
+        interventions::install(&conn)?;
+        sae::install(&conn)?;
+        crosscoder::install(&conn)?;
+        crate::dedupe::install(&conn)?;
+        agent::install(&conn)?;
+        findings::install(&conn)?;
+        registered_evaluation::install(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS profile_revisions(revision TEXT PRIMARY KEY, body TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS host_evaluation_profiles(
@@ -75,7 +98,156 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS conversions_active ON conversions(state);",
         )?;
-        Ok(Self { conn, _lock: lock })
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS scratch_revisions(
+                id TEXT PRIMARY KEY, parent_id TEXT NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS scratch_parent ON scratch_revisions(parent_id, state);",
+        )?;
+        backfill_model_metadata(&mut conn)?;
+        Ok(Self {
+            conn,
+            _lock: lock,
+            scratch: directory.canonicalize()?.join("scratch"),
+        })
+    }
+
+    pub fn scratch_root(&self) -> &Path {
+        &self.scratch
+    }
+
+    pub fn is_scratch_path(&self, path: &Path) -> bool {
+        path.starts_with(&self.scratch)
+            || path
+                .canonicalize()
+                .is_ok_and(|path| path.starts_with(&self.scratch))
+    }
+
+    pub fn is_private_editor_path(&self, path: &Path) -> Result<bool> {
+        let lanes = self.scratch.with_file_name("local-edit");
+        let candidate = |path: &Path| -> Result<bool> {
+            // Do not admit an enclosing directory as an HF or bundle source.
+            let Ok(relative) = path.strip_prefix(&lanes) else {
+                return Ok(lanes.starts_with(path));
+            };
+            if relative.components().count() <= 3 {
+                return Ok(true);
+            }
+            let mut parts = relative.iter();
+            parts.next(); // worker host
+            if parts.next().and_then(|p| p.to_str()) != Some("worker")
+                || parts.next().and_then(|p| p.to_str()) != Some("jobs")
+            {
+                return Ok(false);
+            }
+            let Some(id) = parts.next().and_then(|p| p.to_str()) else {
+                return Ok(true);
+            };
+            Ok(self.job(id)?.is_some_and(|job| job.scratch_job))
+        };
+        Ok(candidate(path)?
+            || match path.canonicalize() {
+                Ok(path) => candidate(&path)?,
+                Err(_) => false,
+            })
+    }
+
+    pub fn scratch_has_jobs(&self, id: &str, kind: Option<&str>) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM jobs j WHERE j.state IN ('queued','running')
+             AND (json_extract(j.body,'$.scratch_job') = 1
+                  OR json_extract(j.body,'$.kind') = ?3
+                  OR json_extract(j.body,'$.kind') = 'search_ablation')
+             AND (?2 IS NULL OR json_extract(j.body,'$.kind') = ?2)
+             AND (EXISTS(SELECT 1 FROM json_each(j.body,'$.input_ids') WHERE value = ?1)
+                  OR (json_extract(j.body,'$.kind') = ?4
+                      AND json_extract(j.envelope,'$.options.parent') = ?1)))",
+            params![
+                id,
+                kind,
+                brewery_worker::weight_spectra::JOB,
+                brewery_worker::hgn_edit::JOB
+            ],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn scratch(&self, id: &str) -> Result<Option<Revision>> {
+        read_one(
+            &self.conn,
+            "SELECT body FROM scratch_revisions WHERE id=?",
+            id,
+        )
+    }
+
+    pub fn scratches(&self) -> Result<Vec<Revision>> {
+        read_list(
+            &self.conn,
+            "SELECT body FROM scratch_revisions WHERE state <> 'discarded' ORDER BY rowid",
+            [],
+        )
+    }
+
+    pub fn scratch_count(&self) -> Result<u32> {
+        Ok(self.conn.query_row(
+            "SELECT count(*) FROM scratch_revisions WHERE state <> 'discarded'",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn has_scratch_children(&self, id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM scratch_revisions WHERE parent_id=? AND state <> 'discarded')",
+            [id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn insert_scratch(
+        &mut self,
+        row: &Revision,
+        submission: Option<&Submission<'_>>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO scratch_revisions(id,parent_id,state,body) VALUES(?,?,?,?)",
+            params![
+                row.id,
+                row.provenance.parent_id,
+                row.state.key(),
+                encode(row)?
+            ],
+        )?;
+        idempotency::record(&tx, submission, &row.id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn update_scratch(
+        &mut self,
+        row: &Revision,
+        old: RevisionState,
+        library: Option<&Model>,
+        submission: Option<&Submission<'_>>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        if tx.execute(
+            "UPDATE scratch_revisions SET state=?, body=? WHERE id=? AND state=?",
+            params![row.state.key(), encode(row)?, row.id, old.key()],
+        )? != 1
+        {
+            return Err("scratch state changed before commit".into());
+        }
+        if let Some(model) = library {
+            tx.execute(
+                "INSERT INTO models(id, body) VALUES (?, ?)",
+                params![model.id, encode(model)?],
+            )?;
+        }
+        idempotency::record(&tx, submission, &row.id)?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn feed_cursor(&self) -> rusqlite::Result<i64> {
@@ -164,16 +336,49 @@ impl Store {
     pub fn prompts(&self) -> Result<Vec<Prompt>> {
         read_list(&self.conn, "SELECT body FROM prompts ORDER BY rowid", [])
     }
+    pub fn update_prompt(&self, prompt: &Prompt) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE prompts SET body=? WHERE id=?",
+            params![encode(prompt)?, prompt.id],
+        )? == 1)
+    }
+    pub fn delete_prompt(&mut self, id: &str) -> Result<PromptDeletion> {
+        let tx = self.conn.transaction()?;
+        // A cancellation request leaves the job running until the worker
+        // confirms a terminal state.
+        let active = tx
+            .query_row(
+                "SELECT j.id FROM jobs j JOIN prompts p ON p.id=json_extract(j.body,'$.prompt_id')
+                 WHERE p.id=? AND j.state IN ('queued','running') ORDER BY j.seq LIMIT 1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(job) = active {
+            return Ok(PromptDeletion::InUse(job));
+        }
+        let deleted = tx.execute("DELETE FROM prompts WHERE id=?", [id])?;
+        tx.commit()?;
+        Ok(if deleted == 1 {
+            PromptDeletion::Deleted
+        } else {
+            PromptDeletion::Missing
+        })
+    }
+    // The web handler holds the Store lock and owns this transaction across
+    // duplicate lookup, admission, and enqueue. Admission only reads the Store.
+    pub fn submission_transaction(&self) -> rusqlite::Result<Transaction<'_>> {
+        Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+    }
+
     pub fn enqueue(
-        &mut self,
+        tx: &Transaction<'_>,
         job: &Job,
         envelope: &Envelope,
         submission: Option<&Submission<'_>>,
     ) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        insert_job(&tx, job, envelope)?;
-        idempotency::record(&tx, submission, &job.id)?;
-        tx.commit()?;
+        insert_job(tx, job, envelope)?;
+        idempotency::record(tx, submission, &job.id)?;
         Ok(())
     }
     pub fn conversions(&self) -> Result<Vec<Conversion>> {
@@ -207,20 +412,18 @@ impl Store {
         read_one(&self.conn, "SELECT body FROM conversions WHERE id=?", id)
     }
     pub fn create_conversion(
-        &mut self,
+        tx: &Transaction<'_>,
         row: &Conversion,
         job: &Job,
         envelope: &Envelope,
         submission: Option<&Submission<'_>>,
     ) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        insert_job(&tx, job, envelope)?;
+        insert_job(tx, job, envelope)?;
         tx.execute(
             "INSERT INTO conversions(id,state,current_job,body) VALUES (?,?,?,?)",
             params![row.id, row.state.key(), job.id, encode(row)?],
         )?;
-        idempotency::record(&tx, submission, &row.id)?;
-        tx.commit()?;
+        idempotency::record(tx, submission, &row.id)?;
         Ok(())
     }
     pub fn cancel_conversion(&mut self, id: &str) -> Result<Option<Conversion>> {
@@ -279,30 +482,50 @@ impl Store {
                     }
                 }
             };
-            let verified_output = if (row.format == crate::gguf::Format::Gguf
-                || row.native_layer_recipe())
-                && row.state == State::Succeeded
-            {
-                Some(
-                    self.envelope(&job.id)?
-                        .inputs
-                        .into_iter()
-                        .nth(1)
-                        .ok_or("verified conversion output missing")?,
-                )
+            let verified_output = if row.state == State::Succeeded {
+                let new_model =
+                    row.format == crate::gguf::Format::Gguf || row.native_layer_recipe();
+                let model = if new_model {
+                    self.envelope(&job.id)?.inputs.into_iter().nth(1)
+                } else if let Some(id) = &row.artifact_model_id {
+                    self.model(id)?
+                } else {
+                    None
+                };
+                if let Some(mut model) = model {
+                    let producer = &row.job_ids["convert"];
+                    let result = self
+                        .job_result(producer)?
+                        .ok_or("conversion receipt missing")?;
+                    model.job_id = Some(producer.clone());
+                    model.attest_output(&result["artifact"]);
+                    Some((model, new_model))
+                } else if new_model {
+                    return Err("verified conversion output missing".into());
+                } else {
+                    None
+                }
             } else {
                 None
             };
             let tx = self.conn.transaction()?;
-            if let Some(model) = verified_output {
-                tx.execute(
-                    "INSERT INTO models(id,body) VALUES (?,?)",
-                    params![model.id, encode(&model)?],
-                )?;
-                row.artifact_model_id = Some(model.id);
+            if let Some((model, new_model)) = verified_output {
+                if new_model {
+                    tx.execute(
+                        "INSERT INTO models(id,body) VALUES (?,?)",
+                        params![model.id, encode(&model)?],
+                    )?;
+                    row.artifact_model_id = Some(model.id);
+                } else {
+                    tx.execute(
+                        "UPDATE models SET body=? WHERE id=?",
+                        params![encode(&model)?, model.id],
+                    )?;
+                }
             }
             if let Some((next, envelope, artifact)) = next {
-                if let Some(model) = artifact {
+                if let Some(mut model) = artifact {
+                    model.job_id = Some(job.id.clone());
                     tx.execute(
                         "INSERT INTO models(id,body) VALUES (?,?)",
                         params![model.id, encode(&model)?],
@@ -649,9 +872,54 @@ impl Store {
     pub fn jobs(&self) -> Result<Vec<Job>> {
         read_list(&self.conn, "SELECT body FROM jobs ORDER BY seq", [])
     }
+
+    pub(crate) fn record_import(
+        &self,
+        job: &Job,
+        envelope: &Envelope,
+        result: &Value,
+    ) -> Result<()> {
+        let tx = self.submission_transaction()?;
+        tx.execute(
+            "INSERT INTO jobs(id,state,body,envelope,result) VALUES (?,?,?,?,?)",
+            params![
+                job.id,
+                job.state.key(),
+                encode(job)?,
+                encode(envelope)?,
+                encode(result)?
+            ],
+        )?;
+        event(&tx, job)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn direction_summaries(&self) -> Result<Vec<Value>> {
+        read_list(
+            &self.conn,
+            "SELECT json_object('id', id, 'version', json_extract(result,'$.schema_version'),
+                 'origin', coalesce(json_extract(result,'$.origin'),'fitted'),
+                 'model_id', json_extract(result,'$.model_id'),
+                 'model_sha256', json_extract(result,'$.model_sha256'),
+                 'created_at_ms', json_extract(body,'$.created_at'))
+             FROM jobs WHERE state='succeeded' AND result IS NOT NULL AND
+                 json_extract(body,'$.kind') IN (?1, ?2) ORDER BY seq DESC LIMIT 200",
+            params![
+                brewery_worker::behavior_direction::JOB,
+                crate::directions::import::JOB
+            ],
+        )
+    }
     pub fn detail(&self, id: &str) -> Result<Option<Value>> {
-        let Some(mut data): Option<Value> =
-            read_one(&self.conn, "SELECT body FROM jobs WHERE id = ?", id)?
+        let Some(mut data): Option<Value> = read_one(
+            &self.conn,
+            "SELECT json_set(body, '$.prompt_text',
+                             CASE WHEN json_type(envelope, '$.prompt') = 'text'
+                                  THEN json_extract(envelope, '$.prompt') END)
+             FROM jobs WHERE id = ?",
+            id,
+        )?
         else {
             return Ok(None);
         };
@@ -762,6 +1030,115 @@ impl Store {
     }
     pub fn update(&mut self, job: &mut Job, mut result: Option<Value>) -> Result<()> {
         // One transaction: no reader can see a terminal success without its immutable result.
+        let mut scratch = None;
+        let mut scratch_guard = None;
+        let mut heretic_output = None;
+        if job.scratch_job && job.state == State::Succeeded {
+            let verified = if job.cancel_requested {
+                job.state = State::Cancelled;
+                job.progress = "Scratch job cancelled".into();
+                Err("cancelled".into())
+            } else if job.kind == brewery_worker::hgn_edit::JOB {
+                crate::scratch::hgn_edit::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
+                    .map(Some)
+            } else if job.kind == brewery_worker::hgn_checks::JOB {
+                crate::scratch::hgn_checks::finish(
+                    self,
+                    job,
+                    result.as_ref().unwrap_or(&Value::Null),
+                )
+                .map(Some)
+            } else if job.kind == brewery_worker::locate_edit::JOB {
+                crate::scratch::locate::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
+                    .map(|(revision, safe_result, guard)| {
+                        scratch_guard = Some(guard);
+                        Some((revision, safe_result))
+                    })
+            } else if brewery_worker::heretic::job(&job.kind) {
+                crate::scratch::heretic::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
+                    .map(|(revision, safe_result, guard)| {
+                        scratch_guard = Some(guard);
+                        heretic_output = result
+                            .as_ref()
+                            .and_then(|r| r["run_directory"].as_str())
+                            .map(str::to_owned);
+                        Some((revision, safe_result))
+                    })
+            } else {
+                crate::scratch::jobs::finish(self, job, result.as_ref().unwrap_or(&Value::Null))
+            };
+            match verified {
+                Ok(Some((revision, safe_result))) => {
+                    scratch = Some(revision);
+                    result = Some(safe_result);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    if job.state != State::Cancelled {
+                        job.state = State::Failed;
+                        job.progress = "Scratch job result was not accepted".into();
+                        job.error = Some(error.to_string());
+                    }
+                    job.has_result = false;
+                    result = None;
+                }
+            }
+        }
+        if job.scratch_job && matches!(job.state, State::Failed | State::Cancelled) {
+            crate::scratch::jobs::clean_failed_conversion(self, job);
+        }
+        if job.state == State::Succeeded && job.kind == brewery_worker::damage::JOB {
+            use brewery_worker::damage;
+            let envelope = self.envelope(&job.id)?;
+            let check = (|| -> Result<()> {
+                let request = damage::Request::parse(&Value::Object(envelope.options))?;
+                let [a, b] = envelope.inputs.as_slice() else {
+                    return Err("missing damage map inputs".into());
+                };
+                Ok(damage::check_result(
+                    &request,
+                    result.as_ref().unwrap_or(&Value::Null),
+                    [&a.id, &b.id],
+                )?)
+            })();
+            if let Err(error) = check {
+                eprintln!(
+                    "Rejected quantization damage artifact for {}: {error}",
+                    job.id
+                );
+                job.state = State::Failed;
+                job.progress = "Quantization damage artifact was not accepted".into();
+                job.error = Some("Invalid quantization damage artifact".into());
+                job.has_result = false;
+                result = None;
+            }
+        }
+        if job.state == State::Succeeded && job.kind == brewery_worker::sensitivity::JOB {
+            let envelope = self.envelope(&job.id)?;
+            match crate::sensitivity::check(job, &envelope, result.take().unwrap_or(Value::Null)) {
+                Ok(receipt) => result = Some(serde_json::to_value(receipt)?),
+                Err(error) => {
+                    eprintln!("Rejected sensitivity artifact for {}: {error}", job.id);
+                    job.state = State::Failed;
+                    job.progress = "Sensitivity artifact was not accepted".into();
+                    job.error = Some("Invalid sensitivity artifact".into());
+                    job.has_result = false;
+                }
+            }
+        }
+        if job.state == State::Succeeded && job.kind == brewery_worker::circuit::JOB {
+            let envelope = self.envelope(&job.id)?;
+            match crate::circuit::check(&envelope, result.take().unwrap_or(Value::Null)) {
+                Ok(receipt) => result = Some(serde_json::to_value(receipt)?),
+                Err(error) => {
+                    eprintln!("Rejected circuit artifact for {}: {error}", job.id);
+                    job.state = State::Failed;
+                    job.progress = "Circuit artifact was not accepted".into();
+                    job.error = Some("Invalid circuit artifact".into());
+                    job.has_result = false;
+                }
+            }
+        }
         if job.state == State::Succeeded && job.kind == brewery_worker::exl3_layer::JOB {
             let receipt = result.as_ref().unwrap_or(&Value::Null);
             let envelope = self.envelope(&job.id)?;
@@ -873,8 +1250,33 @@ impl Store {
         } else {
             None
         };
+        if job.kind == brewery_worker::hgn_checks::JOB && job.state == State::Failed {
+            scratch = crate::scratch::hgn_checks::failed(self, job)?;
+        }
         let tx = self.conn.transaction()?;
-        if let Some(model) = artifact {
+        if let Some(row) = scratch {
+            if scratch_guard.is_some() || job.kind == brewery_worker::hgn_edit::JOB {
+                tx.execute(
+                    "INSERT INTO scratch_revisions(id,parent_id,state,body) VALUES(?,?,?,?)",
+                    params![
+                        row.id,
+                        row.provenance.parent_id,
+                        row.state.key(),
+                        encode(&row)?
+                    ],
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE scratch_revisions SET body=? WHERE id=? AND state='scratch'",
+                    params![encode(&row)?, row.id],
+                )?;
+            }
+        }
+        if let Some(mut model) = artifact {
+            model.job_id = Some(job.id.clone());
+            if let Some(receipt) = &result {
+                model.attest_output(&receipt["artifact"]);
+            }
             tx.execute(
                 "INSERT INTO models(id,body) VALUES (?,?)",
                 params![model.id, encode(&model)?],
@@ -882,11 +1284,66 @@ impl Store {
         }
         update_job(&tx, job, result)?;
         tx.commit()?;
+        if let Some(guard) = scratch_guard {
+            guard.keep();
+        }
+        if let Some(path) = heretic_output {
+            let _ = std::fs::remove_dir_all(path);
+        }
         Ok(())
     }
 }
 
 type NextConversion = (Job, Envelope, Option<Model>);
+
+fn backfill_model_metadata(conn: &mut Connection) -> Result<()> {
+    // The controller creates these model-ID links only when it publishes an
+    // output. Never infer identity from an arbitrary job input or path match.
+    let tx = conn.transaction()?;
+    {
+        let mut query = tx.prepare(
+            "WITH publications(model_id, job_id, artifact, verified, host) AS (
+                SELECT json_extract(j.result,'$.library_model_id'), j.id,
+                    json_extract(j.result,'$.artifact'), 1, json_extract(j.body,'$.host')
+                FROM jobs j WHERE j.state='succeeded'
+                    AND json_extract(j.body,'$.kind') IN ('hf_download','weight_apply')
+                    AND json_extract(j.body,'$.cancel_requested')=0
+                    AND json_extract(j.result,'$.verified')=1
+                UNION ALL
+                SELECT json_extract(c.body,'$.artifact_model_id'), j.id,
+                    json_extract(j.result,'$.artifact'), c.state='succeeded', json_extract(j.body,'$.host')
+                FROM conversions c JOIN jobs j ON j.id=json_extract(c.body,'$.job_ids.convert')
+                WHERE j.state='succeeded' AND json_extract(j.body,'$.kind')='convert'
+            )
+            SELECT m.body, p.job_id, p.artifact, p.verified FROM publications p
+            JOIN models m ON m.id=p.model_id
+              AND json_extract(m.body,'$.host')=p.host
+              AND json_extract(m.body,'$.path')=json_extract(p.artifact,'$.path')
+              AND json_extract(m.body,'$.kind')=json_extract(p.artifact,'$.kind')
+            WHERE json_extract(m.body,'$.job_id') IS NULL
+               OR (p.verified AND json_extract(m.body,'$.sha256') IS NULL)",
+        )?;
+        let mut rows = query.query([])?;
+        // Read the migration set before updating the table we are reading.
+        let mut models = Vec::new();
+        while let Some(row) = rows.next()? {
+            let mut model: Model = serde_json::from_str(&row.get::<_, String>(0)?)?;
+            model.job_id = Some(row.get(1)?);
+            if row.get::<_, bool>(3)? {
+                model.attest_output(&serde_json::from_str(&row.get::<_, String>(2)?)?);
+            }
+            models.push(model);
+        }
+        for model in models {
+            tx.execute(
+                "UPDATE models SET body=? WHERE id=?",
+                params![encode(&model)?, model.id],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
 
 fn save_conversion(tx: &Transaction<'_>, row: &Conversion) -> Result<()> {
     tx.execute(

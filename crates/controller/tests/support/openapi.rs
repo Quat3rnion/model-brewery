@@ -1,4 +1,5 @@
 use super::{Fixture, Read, Value};
+use serde_json::json;
 use std::collections::BTreeSet;
 
 const CONTRACT: &str = include_str!("../../../../api/openapi.json");
@@ -37,6 +38,50 @@ fn discovery_serves_json_under_the_loopback_guard() {
 fn contract_covers_the_controller_operations_and_resolves_local_refs() {
     let contract: Value = serde_json::from_str(CONTRACT).unwrap();
     assert_eq!(contract["openapi"], "3.1.0");
+    assert_eq!(
+        contract["paths"]["/api/scratch/{id}/ablate_direction"]["post"]["responses"]["202"]["content"]
+            ["application/json"]["schema"]["$ref"],
+        "#/components/schemas/Job"
+    );
+    let schemas = &contract["components"]["schemas"];
+    assert_eq!(
+        schemas["AblationSearchRequest"]["oneOf"][1]["required"],
+        json!(["targets", "source_layer"])
+    );
+    assert_eq!(
+        schemas["TraceOptions"]["properties"]["hgn_projection"]["$ref"],
+        "#/components/schemas/HgnTraceProjection"
+    );
+    assert_eq!(
+        schemas["TraceOptions"]["properties"]["gguf_projection"]["$ref"],
+        "#/components/schemas/GgufTraceProjection"
+    );
+    assert_eq!(schemas["ProjectionAlpha"]["maximum"], 4);
+    assert_eq!(
+        schemas["AblationSearchRequest"]["properties"]["alphas"]["items"]["$ref"],
+        "#/components/schemas/ProjectionAlpha"
+    );
+    assert_eq!(
+        schemas["HgnScreenResult"]["properties"]["configurations"]["maxItems"],
+        32
+    );
+    assert_eq!(
+        schemas["AblationSearchRequest"]["properties"]["registered"]["$ref"],
+        "#/components/schemas/RegisteredContrast"
+    );
+    assert!(schemas["AblationSearchRequest"]["properties"]["marker"].is_object());
+    assert!(schemas["AblationSearchRequest"]["properties"]["marker_tokens"].is_object());
+    assert_eq!(
+        schemas["BehaviorDirectionOptions"]["properties"]["registered"]["$ref"],
+        "#/components/schemas/RegisteredContrast"
+    );
+    assert_eq!(
+        schemas["BehaviorDirectionOptions"]["required"],
+        json!(["model_sha256", "layers"])
+    );
+    assert_eq!(schemas["RegisteredContrast"]["required"], json!(["name"]));
+    assert_eq!(schemas["RegisteredContrast"]["additionalProperties"], false);
+    assert_eq!(schemas["DirectionV2Export"]["properties"]["version"]["const"], 2);
     let operations = contract["paths"]
         .as_object()
         .unwrap()
@@ -54,9 +99,53 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         .collect::<BTreeSet<_>>();
     let expected = BTreeSet::from([
         ("get", "/api/openapi.json", "getOpenApi"),
+        ("get", "/api/interp/benchmark", "getInterpBenchmark"),
+        ("get", "/api/findings", "listFindings"),
+        ("post", "/api/findings", "createFinding"),
+        ("get", "/api/findings/{id}", "getFinding"),
+        ("post", "/api/findings/{id}/evidence", "addFindingEvidence"),
+        ("post", "/api/findings/{id}/replay", "replayFinding"),
         ("get", "/api/state", "getState"),
+        ("get", "/api/evaluation-sets", "listEvaluationSets"),
+        ("get", "/api/directions", "listDirections"),
+        ("get", "/api/directions/export", "exportDirection"),
+        ("post", "/api/admin/directions/import", "importDirection"),
+        (
+            "post",
+            "/api/admin/evaluation-sets",
+            "registerEvaluationSet",
+        ),
         ("get", "/api/events", "streamEvents"),
+        ("get", "/api/settings/agent-provider", "getAgentProvider"),
+        ("put", "/api/settings/agent-provider", "putAgentProvider"),
+        (
+            "put",
+            "/api/settings/agent-provider/key",
+            "setAgentProviderKey",
+        ),
+        (
+            "delete",
+            "/api/settings/agent-provider/key",
+            "removeAgentProviderKey",
+        ),
+        ("get", "/api/agent/sessions", "listAgentSessions"),
+        ("post", "/api/agent/sessions", "startAgentSession"),
+        ("get", "/api/agent/sessions/{id}", "getAgentSession"),
+        (
+            "post",
+            "/api/agent/sessions/{id}/cancel",
+            "cancelAgentSession",
+        ),
         ("post", "/api/suggestions/paths", "suggestPaths"),
+        ("get", "/mcp", "getMcpStream"),
+        ("post", "/mcp", "sendMcpMessage"),
+        ("get", "/api/models", "listModels"),
+        ("get", "/api/models/{id}/lineage", "readLineage"),
+        (
+            "get",
+            "/api/directions/{id}/versions/{version}",
+            "getDirection",
+        ),
         ("post", "/api/models", "createModel"),
         (
             "post",
@@ -64,11 +153,125 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
             "registerWeightCalibration",
         ),
         ("delete", "/api/models/{id}", "deleteModel"),
+        ("get", "/api/scratch", "listScratch"),
+        ("post", "/api/weight-spectra", "queueWeightSpectra"),
+        ("get", "/api/diff/tensors", "diffTensors"),
+        ("get", "/api/diff/traces", "diffTraces"),
+        ("get", "/api/diff/behavior", "diffBehavior"),
+        ("get", "/api/diff/token-loss", "diffTokenLoss"),
+        ("post", "/api/scratch", "createScratch"),
+        ("post", "/api/scratch/merge", "mergeModels"),
+        ("post", "/api/scratch/heretic", "runHeretic"),
+        ("post", "/api/scratch/heretic_reproduce", "reproduceHeretic"),
+        ("post", "/api/scratch/compile_program", "compileProgram"),
+        ("post", "/api/scratch/{id}/run_program", "runProgram"),
+        ("get", "/api/scratch/{id}", "getScratch"),
+        ("post", "/api/scratch/{id}/edits", "editScratch"),
+        (
+            "post",
+            "/api/scratch/{id}/ablate_direction",
+            "ablateScratchDirection",
+        ),
+        (
+            "post",
+            "/api/scratch/{id}/search_ablation",
+            "searchAblation",
+        ),
+        ("post", "/api/scratch/{id}/rome", "romeEdit"),
+        ("post", "/api/scratch/{id}/memit", "memitEdit"),
+        ("post", "/api/scratch/{id}/alphaedit", "alphaEdit"),
+        ("post", "/api/scratch/{id}/prune", "pruneScratch"),
+        (
+            "post",
+            "/api/scratch/experts/{id}/plan",
+            "planScratchExperts",
+        ),
+        (
+            "post",
+            "/api/scratch/experts/{id}/prune",
+            "pruneScratchExperts",
+        ),
+        ("get", "/api/scratch/{id}/delta", "getScratchDelta"),
+        ("post", "/api/scratch/{id}/gguf", "convertScratchGguf"),
+        ("get", "/api/scratch/{id}/checks", "getScratchChecks"),
+        ("post", "/api/scratch/{id}/checks", "runScratchChecks"),
+        ("post", "/api/scratch/{id}/discard", "discardScratch"),
+        (
+            "post",
+            "/api/scratch/{id}/publish-request",
+            "requestScratchPublish",
+        ),
+        ("post", "/api/admin/scratch/{id}/approve", "approveScratch"),
         ("post", "/api/prompts", "createPrompt"),
+        ("put", "/api/prompts/{id}", "updatePrompt"),
+        ("delete", "/api/prompts/{id}", "deletePrompt"),
         ("post", "/api/jobs", "createJob"),
         ("get", "/api/jobs/{id}", "getJob"),
+        ("get", "/api/jobs/{id}/trace", "getTraceManifest"),
+        ("get", "/api/jobs/{id}/sensitivity", "getTensorSensitivity"),
+        ("get", "/api/jobs/{id}/circuit", "getCircuit"),
+        (
+            "get",
+            "/api/jobs/{id}/quantization-damage",
+            "getQuantizationDamage",
+        ),
+        ("get", "/api/jobs/{id}/trace/tensor", "getTraceTensor"),
+        ("get", "/api/jobs/{id}/trace/features", "readFeatureTrace"),
+        (
+            "get",
+            "/api/jobs/{id}/trace/logit-lens",
+            "getTraceLogitLens",
+        ),
+        (
+            "get",
+            "/api/jobs/{id}/trace/model-logits",
+            "getTraceModelLogits",
+        ),
+        (
+            "get",
+            "/api/jobs/{id}/trace/routing-atlas",
+            "getRoutingAtlas",
+        ),
+        ("get", "/api/interventions", "listInterventions"),
+        ("get", "/api/saes", "listSaes"),
+        ("post", "/api/saes", "createSae"),
+        ("post", "/api/crosscoders", "importCrosscoder"),
+        ("get", "/api/crosscoders/{id}", "getCrosscoderDiff"),
+        (
+            "get",
+            "/api/crosscoders/{id}/safetensors",
+            "exportCrosscoderWeights",
+        ),
+        ("post", "/api/saes/{id}/versions", "createSaeVersion"),
+        ("get", "/api/saes/{id}/versions/{version}", "getSaeVersion"),
+        (
+            "get",
+            "/api/saes/{id}/versions/{version}/safetensors",
+            "exportSaeWeights",
+        ),
+        ("post", "/api/interventions", "createIntervention"),
+        (
+            "post",
+            "/api/interventions/{id}/versions",
+            "createInterventionVersion",
+        ),
+        (
+            "get",
+            "/api/interventions/{id}/versions/{version}",
+            "getInterventionVersion",
+        ),
+        (
+            "get",
+            "/api/interventions/{id}/versions/{version}/gguf",
+            "exportInterventionGguf",
+        ),
         ("post", "/api/jobs/{id}/cancel", "cancelJob"),
         ("post", "/api/conversions", "createConversion"),
+        (
+            "post",
+            "/api/conversions/eligibility",
+            "checkConversionEligibility",
+        ),
         ("get", "/api/conversions", "listConversions"),
         ("get", "/api/conversions/{id}", "getConversion"),
         ("post", "/api/conversions/{id}/cancel", "cancelConversion"),
@@ -111,6 +314,52 @@ fn contract_covers_the_controller_operations_and_resolves_local_refs() {
         ("post", "/api/profiles", "saveProfile"),
     ]);
     assert_eq!(operations, expected);
+    for (route, schema) in [
+        ("/api/interventions", "CreateIntervention"),
+        ("/api/interventions/{id}/versions", "NewInterventionVersion"),
+    ] {
+        let request = &contract["paths"][route]["post"]["requestBody"]["content"]["application/json"]
+            ["schema"];
+        assert_eq!(request["$ref"], format!("#/components/schemas/{schema}"));
+        assert_eq!(
+            contract["components"]["schemas"][schema]["properties"]["direction_rules"]["$ref"],
+            "#/components/schemas/DirectionInterventionRules"
+        );
+    }
+    let check = &contract["paths"]["/api/scratch/{id}/checks"]["post"]["requestBody"]["content"]["application/json"]
+        ["schema"];
+    assert_eq!(check["required"], json!(["sha256"]));
+    assert_eq!(
+        check["properties"]["behavior_direction"]["$ref"],
+        "#/components/schemas/BehaviorDirectionConfig"
+    );
+    let schemas = &contract["components"]["schemas"];
+    assert_eq!(
+        schemas["ScratchCheckBundle"]["properties"]["hgn_stored"]["$ref"],
+        "#/components/schemas/HgnStoredChecksReport",
+    );
+    assert_eq!(
+        schemas["Job"]["properties"]["kind"]["anyOf"][1]["enum"],
+        json!([
+            "scratch_gguf",
+            "scratch_checks",
+            "scratch_locate_edit",
+            "scratch_hgn_ablation",
+            "scratch_hgn_checks",
+            "weight_spectra",
+            "search_ablation",
+            "screen_ablation",
+            "screen_hgn_ablation",
+            "heretic",
+            "heretic_reproduce",
+            "imported_direction"
+        ])
+    );
+    assert_eq!(
+        schemas["BehaviorDirectionJob"]["properties"]["input_ids"]["x-brewery-input-kinds"],
+        json!([["gguf", "hgn", "hgn-v2"]])
+    );
+    assert!(schemas["BehaviorDirectionResult"]["properties"]["runtime_sha256"].is_object());
     let ids: BTreeSet<_> = operations.iter().map(|entry| entry.2).collect();
     assert_eq!(ids.len(), operations.len());
     walk_refs(&contract, &contract);
@@ -182,12 +431,12 @@ fn every_live_job_kind_has_one_typed_create_variant() {
                     || options["oneOf"]
                         .as_array()
                         .is_some_and(|variants| !variants.is_empty()
-                            && variants
-                                .iter()
-                                .all(|variant| {
-                                    let variant = variant.get("$ref").map_or(variant, |r| resolve(&contract, r));
-                                    variant["additionalProperties"] == false
-                                }))
+                            && variants.iter().all(|variant| {
+                                let variant = variant
+                                    .get("$ref")
+                                    .map_or(variant, |r| resolve(&contract, r));
+                                variant["additionalProperties"] == false
+                            }))
                     || options["allOf"].is_array(),
                 "{kind} options are not constrained"
             );
@@ -323,7 +572,10 @@ fn managed_gguf_layer_recipe_is_discoverable_and_round_trips() {
         &request_schema["then"]["then"]["properties"]["options"]["$ref"],
     );
     assert_closed_fields(recipe_options, &request["options"]);
-    let recipe = resolve(&contract, &recipe_options["properties"]["layer_recipe"]["$ref"]);
+    let recipe = resolve(
+        &contract,
+        &recipe_options["properties"]["layer_recipe"]["$ref"],
+    );
     assert_closed_fields(recipe, &request["options"]["layer_recipe"]);
     let source = app.register("alpha", "hf", "/source/base");
     request["input_ids"] = json!([source]);

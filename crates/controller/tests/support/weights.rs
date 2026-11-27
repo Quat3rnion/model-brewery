@@ -54,7 +54,7 @@ fn safetensors_apply_registers_same_kind_only_after_exact_proposal_and_manifest_
     configure_safetensors(&app, true);
     app.touch("weight-fixture");
     app.launch();
-    let models = || app.json("GET", "/api/state", None, 200)["models"].clone();
+    let models = || app.model_records();
     for (kind, path) in [
         ("safetensors", "/models/model.safetensors"),
         ("hf", "/models/hf"),
@@ -146,7 +146,7 @@ fn packed_apply_requires_the_exact_approved_receipt_and_supported_source_codec()
     app.touch("weight-fixture");
     app.touch("packed-weight-receipts");
     app.launch();
-    let models = || app.json("GET", "/api/state", None, 200)["models"].clone();
+    let models = || app.model_records();
     let mut applies = Vec::new();
     for (kind, dtype) in [("gguf", "Q4_0"), ("gguf", "Q8_0"), ("hgn", "Q8G64")] {
         if dtype == "Q8_0" {
@@ -205,7 +205,13 @@ fn packed_apply_requires_the_exact_approved_receipt_and_supported_source_codec()
     configure_hgn_weights(&app, true, true);
     app.launch();
     for apply in applies {
-        app.json("POST", "/api/jobs", Some(apply), 409);
+        let (status, reply) = app.request(
+            "POST",
+            "/api/jobs",
+            Some(apply),
+            "Brewery-Allow-Duplicate: 1\r\n",
+        );
+        assert_eq!(status, 409, "{reply}");
     }
 }
 
@@ -301,7 +307,7 @@ fn hgn_apply_registers_only_a_verified_reviewed_native_revision() {
         json!({"kind":"weight_apply","input_ids":[source],
         "options":{"proposal_job_id":proposed,"reviewed":reviewed}})
     };
-    let models = || app.json("GET", "/api/state", None, 200)["models"].clone();
+    let models = || app.model_records();
     let original = models();
     app.json("POST", "/api/jobs", Some(apply(false)), 400);
 

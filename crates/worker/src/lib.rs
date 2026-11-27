@@ -1,12 +1,23 @@
 use anyhow::{Context, Result, ensure};
+pub mod behavior_direction;
+pub mod circuit;
+pub mod compiled_program;
+pub mod damage;
+pub mod direction_model;
 pub mod exl3_layer;
+pub mod heretic;
 pub mod hf_download;
 pub mod hgn_recipe;
 pub mod hy4;
+pub mod locate_edit;
 pub mod operational;
 pub mod resources;
+pub mod scratch_eval;
+pub mod sensitivity;
 pub mod source_grants;
+pub mod trace;
 pub mod weight_source;
+pub mod weight_spectra;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -234,6 +245,21 @@ pub struct SuggestRequest {
     pub prefix: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatRequest {
+    pub path: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PathState {
+    File { bytes: u64 },
+    Directory,
+    Missing,
+    OutsideRoots,
+}
+
 pub fn validate_suggest_prefix(prefix: &str) -> Result<()> {
     ensure!(
         prefix.len() <= SUGGEST_PREFIX_BYTES
@@ -323,6 +349,12 @@ pub enum Rpc {
         detail: ProgressDetail,
     },
     SuggestPaths(SuggestRequest),
+    TraceRead {
+        id: String,
+        slice: trace::Slice,
+    },
+    Stat(StatRequest),
+    DirectionModel(direction_model::Request),
     Read {
         root: PathBuf,
         entry: Entry,
@@ -460,7 +492,10 @@ pub fn staging_error(detail: &str) -> &'static str {
         || detail.contains("No space left on device")
     {
         "Target disk space is insufficient; check free space and the configured reserve"
-    } else if detail.contains("hash mismatch")
+    } else if detail.contains("trace model SHA-256 mismatch") {
+        "Trace model SHA-256 mismatch; use the model revision bound to the intervention"
+    } else if detail.contains("scratch input SHA-256 mismatch")
+        || detail.contains("hash mismatch")
         || detail.contains("content mismatch")
         || detail.contains("changed while hashing")
     {
@@ -526,3 +561,6 @@ pub fn lock(p: &Path) -> Result<File> {
 pub fn available(p: &Path) -> Result<u64> {
     Ok(fs2::available_space(p)?)
 }
+pub mod ablation_search;
+pub mod hgn_checks;
+pub mod hgn_edit;

@@ -9,11 +9,40 @@ mod hf_tokens;
 #[path = "support/infra_hosts.rs"]
 mod infra_hosts;
 
+#[path = "support/interventions.rs"]
+mod interventions;
+
+#[path = "support/hgn_ablation.rs"]
+mod hgn_ablation;
+#[path = "support/mcp.rs"]
+mod mcp;
+
+#[path = "support/crosscoder.rs"]
+mod crosscoder;
+#[path = "support/sae.rs"]
+mod sae;
+
+#[path = "support/sensitivity.rs"]
+mod sensitivity;
+
+#[path = "support/circuit.rs"]
+mod circuit;
+
+#[path = "support/findings.rs"]
+mod findings;
+
+#[path = "support/damage.rs"]
+mod damage;
+
 #[path = "support/weights.rs"]
 mod weights;
 
 #[path = "support/settings.rs"]
 mod settings;
+#[path = "support/registered_evaluation.rs"]
+mod registered_evaluation;
+#[path = "support/direction_import.rs"]
+mod direction_import;
 use std::{
     fs,
     io::{Read, Write},
@@ -27,6 +56,9 @@ use std::{
 
 #[path = "support/conversions.rs"]
 mod conversions;
+
+#[path = "support/eligibility.rs"]
+mod eligibility;
 
 #[path = "support/exl3_layer.rs"]
 mod exl3_layer;
@@ -157,6 +189,18 @@ impl Fixture {
         )
     }
 
+    fn bytes(&self, method: &str, path: &str) -> (u16, Vec<u8>) {
+        let mut conn = self.open_request(method, path, None, "");
+        let mut data = Vec::new();
+        conn.read_to_end(&mut data).unwrap();
+        let split = data.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = std::str::from_utf8(&data[..split]).unwrap();
+        (
+            head.split_whitespace().nth(1).unwrap().parse().unwrap(),
+            data.split_off(split + 4),
+        )
+    }
+
     fn json(&self, method: &str, path: &str, body: Option<Value>, expected: u16) -> Value {
         let (status, body) = self.request(method, path, body, "");
         assert_eq!(status, expected, "{method} {path}: {body}");
@@ -177,8 +221,28 @@ impl Fixture {
         .into()
     }
 
+    fn model_records(&self) -> Value {
+        let mut state = self.json("GET", "/api/state", None, 200);
+        let mut models = state["models"].take();
+        for model in models.as_array_mut().unwrap() {
+            let model = model.as_object_mut().unwrap();
+            model.remove("available");
+            model.remove("reason");
+        }
+        models
+    }
+
     fn enqueue(&self, body: Value) -> String {
-        id(&self.json("POST", "/api/jobs", Some(body), 201)).into()
+        // Worker tests explicitly queue new work, including identical jobs
+        // under different worker/receipt conditions. Dedupe tests use POST directly.
+        let (status, response) = self.request(
+            "POST",
+            "/api/jobs",
+            Some(body),
+            "Brewery-Allow-Duplicate: 1\r\n",
+        );
+        assert_eq!(status, 201, "{response}");
+        id(&serde_json::from_str(&response).unwrap()).into()
     }
 
     fn detail(&self, id: &str) -> Value {
@@ -245,6 +309,9 @@ mod openapi;
 
 #[path = "support/idempotency.rs"]
 mod idempotency;
+
+#[path = "support/dedupe.rs"]
+mod dedupe;
 
 #[test]
 fn suggestions_bound_dispatch_and_leave_compute_idle() {
@@ -390,14 +457,27 @@ fn suggestions_validate_same_origin_json_and_forward_space_preserving_prefix() {
 #[test]
 fn hy4_gate_encode_requires_the_exact_same_worker_opt_in() {
     let mut app = Fixture::new();
-    fs::write(app.path("dispatch.json"), json!({"hosts":{
-        "alpha":{"local":true,"capabilities":{"hy4_encode":true}},
-        "beta":{"local":true,"capabilities":{"hy4_plan":true}}
-    }}).to_string()).unwrap();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts":{
+            "alpha":{"local":true,"capabilities":{"hy4_encode":true}},
+            "beta":{"local":true,"capabilities":{"hy4_plan":true}}
+        }})
+        .to_string(),
+    )
+    .unwrap();
     app.launch();
-    let model = |host| app.json("POST", "/api/models", Some(json!({
-        "name":"Pinned Hy4","host":host,"kind":"hf","path":"/models/hy4"
-    })), 201)["id"].clone();
+    let model = |host| {
+        app.json(
+            "POST",
+            "/api/models",
+            Some(json!({
+                "name":"Pinned Hy4","host":host,"kind":"hf","path":"/models/hy4"
+            })),
+            201,
+        )["id"]
+            .clone()
+    };
     let source = model("alpha");
     let other = model("beta");
     let body = json!({"kind":"convert","host":"alpha","input_ids":[source],
@@ -407,29 +487,230 @@ fn hy4_gate_encode_requires_the_exact_same_worker_opt_in() {
         ("kind", json!("plan"), 409),
         ("host", json!("auto"), 400),
         ("input_ids", json!([other]), 400),
-        ("options", json!({"hy4_overrides":{"blk.1.ffn_down_exps.weight":"Q8_0"}}), 400),
-        ("options", json!({"hy4_overrides":{"blk.1.attn_gate.weight":"Q8_0"},"threads":1}), 400),
+        (
+            "options",
+            json!({"hy4_overrides":{"blk.1.ffn_down_exps.weight":"Q8_0"}}),
+            400,
+        ),
+        (
+            "options",
+            json!({"hy4_overrides":{"blk.1.attn_gate.weight":"Q8_0"},"threads":1}),
+            400,
+        ),
         ("options", json!({}), 409),
     ] {
         let mut bad = body.clone();
         bad[key] = value;
         app.json("POST", "/api/jobs", Some(bad), status);
     }
-    app.json("POST", "/api/conversions", Some(json!({"host":"alpha","input_ids":[source],
-        "options":body["options"]})), 400);
+    app.json(
+        "POST",
+        "/api/conversions",
+        Some(json!({"host":"alpha","input_ids":[source],
+        "options":body["options"]})),
+        400,
+    );
+}
+
+#[test]
+fn diff_traces_matches_prompts_and_tokens() {
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({
+            "hosts":{"alpha":{"local":true,"capabilities":{"trace":true}}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let model = app.register("alpha", "gguf", "/models/trace.gguf");
+    let request = json!({"kind":"trace","host":"alpha","input_ids":[model],"prompt":"one two",
+        "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":3}});
+    let run = |body| {
+        let id = app.enqueue(body);
+        app.await_job(&id, |job| job["state"] == "succeeded");
+        id
+    };
+    let a = run(request.clone());
+    let mut edited = request.clone();
+    edited["options"]["interventions"] =
+        json!([{"layer":0,"role":"l_out","positions":[0],"op":"zero"}]);
+    let b = run(edited);
+    let path = format!("/api/diff/traces?a={a}&b={b}");
+    let result = app.json("GET", &path, None, 200);
+    assert_eq!(app.json("GET", &path, None, 200), result);
+    app.json("GET", &format!("{path}&start=2&end=1"), None, 400);
+    let row = &result["activations"][0];
+    assert_eq!(row["layer"], 0);
+    assert_eq!(row["role"], "l_out");
+    assert_eq!(row["position"], 0);
+    assert_eq!(row["l2"], 1.);
+    assert_eq!(row["linf"], 1.);
+    assert!(row["cosine"].is_null());
+    for key in ["model_logits", "logit_lens"] {
+        let logits = &result[key][0];
+        assert_eq!(logits["entered"], json!([8]));
+        assert_eq!(logits["exited"], json!([7]));
+        assert_eq!(logits["shared_count"], 2);
+        assert_eq!(logits["linf"], 1.);
+        assert!((logits["kl_a_to_b_shared"].as_f64().unwrap() - 0.08260774489474476).abs() < 1e-12);
+    }
+    let mut other = request.clone();
+    other["prompt"] = json!("different text");
+    let different = run(other);
+    app.json(
+        "GET",
+        &format!("/api/diff/traces?a={a}&b={different}"),
+        None,
+        422,
+    );
+    let mut other = request;
+    other["options"]["top_k"] = json!(2);
+    let different = run(other);
+    app.json(
+        "GET",
+        &format!("/api/diff/traces?a={a}&b={different}"),
+        None,
+        422,
+    );
+    fs::write(app.path("trace-token-mismatch"), &b).unwrap();
+    app.json("GET", &format!("{path}&start=0&end=1"), None, 422);
+    fs::write(app.path("trace-pruned"), "").unwrap();
+    app.json("GET", &path, None, 404);
+}
+
+#[test]
+fn trace_admits_hgn_library_input_but_not_hgn_interventions() {
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        r#"{"hosts":{"alpha":{"local":true,"capabilities":{"trace":true}}}}"#,
+    )
+    .unwrap();
+    app.launch();
+    let model = app.register("alpha", "hgn", "/models/checkpoint.hgn");
+    let mut body = json!({"kind":"trace","host":"alpha","input_ids":[model],"prompt":"one two",
+        "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":1,
+                   "interventions":[{"op":"zero","layer":0,"role":"l_out","positions":[0]}]}});
+    app.json("POST", "/api/jobs", Some(body.clone()), 400);
+    body["options"]
+        .as_object_mut()
+        .unwrap()
+        .remove("interventions");
+    let id = app.enqueue(body);
+    let job = app.await_job(&id, |job| job["state"] == "succeeded");
+    assert_eq!(job["result"]["envelope"]["inputs"][0]["kind"], "hgn");
+}
+
+#[test]
+fn trace_admission_and_reads_are_bounded() {
+    let mut app = Fixture::new();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({
+            "hosts": {"alpha":{"local":true,"capabilities":{"trace":true}}, "beta":{"local":true}},
+            "trace":{"default_byte_cap":65536,"max_byte_cap":131072,"retain_jobs":2}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    app.launch();
+    let model = app.register("alpha", "gguf", "/models/trace.gguf");
+    let body = json!({"kind":"trace","host":"alpha","input_ids":[model],"prompt":"one two",
+        "options":{"layers":[0],"roles":["l_out"],"positions":[0],"top_k":2}});
+    for (key, value) in [
+        ("byte_cap", json!(131073)),
+        ("roles", json!(["../weights"])),
+        ("positions", json!([4096])),
+        ("prompts", json!(["conflicts with prompt"])),
+        ("layers", json!((0..65).collect::<Vec<_>>())),
+        ("retain_jobs", json!(10)),
+        (
+            "interventions",
+            json!([{"op":"zero","layer":0,"role":"kq_soft_max","positions":[0]}]),
+        ),
+    ] {
+        let mut bad = body.clone();
+        bad["options"][key] = value;
+        app.json("POST", "/api/jobs", Some(bad), 400);
+    }
+    let mut off = body.clone();
+    off["host"] = json!("beta");
+    app.json("POST", "/api/jobs", Some(off), 409);
+    assert!(app.launches().is_empty());
+    assert_eq!(
+        app.json("GET", "/api/settings", None, 200)["trace"],
+        json!({"default_byte_cap":65536,"max_byte_cap":131072,"retain_jobs":2})
+    );
+    let id = app.enqueue(body);
+    let job = app.await_job(&id, |job| job["state"] == "succeeded");
+    assert_eq!(job["result"]["envelope"]["options"]["byte_cap"], 65536);
+    assert_eq!(job["result"]["envelope"]["options"]["retain_jobs"], 2);
+    let path = format!("/api/jobs/{id}/trace");
+    assert_eq!(app.json("GET", &path, None, 200)["schema_version"], 1);
+    app.json(
+        "GET",
+        &format!("{path}/tensor?layer=0&role=l_out&start=2&end=1"),
+        None,
+        400,
+    );
+    assert_eq!(
+        app.json(
+            "GET",
+            &format!("{path}/tensor?layer=0&role=l_out&start=0&end=1"),
+            None,
+            200
+        )["rows"][0]["data_base64"],
+        "AACAPw=="
+    );
+    app.json(
+        "GET",
+        &format!("{path}/tensor?layer=0&role=l_out"),
+        None,
+        413,
+    );
+    fs::write(app.path("trace-pruned"), "").unwrap();
+    app.json("GET", &path, None, 404);
+
+    let mut large = json!({"kind":"trace","input_ids":[model],
+        "options":{"layers":(0..65).collect::<Vec<_>>(),"roles":["l_out"],"positions":[0],"top_k":0,
+            "full_dump":true,"byte_cap":33554433,"prompts":["one","two"],
+            "interventions":[{"op":"scale","factor":0.5,"layer":0,"role":"l_out","positions":[0]}]}});
+    app.json("POST", "/api/jobs", Some(large.clone()), 400);
+    large["options"]["byte_cap"] = json!(131072);
+    let multi = app.enqueue(large);
+    let done = app.await_job(&multi, |job| job["state"] == "succeeded");
+    assert_eq!(
+        done["result"]["envelope"]["options"]["prompts"],
+        json!(["one", "two"])
+    );
 }
 
 #[test]
 fn hy4_plan_requires_an_opted_in_source_host_and_exact_override() {
     let mut app = Fixture::new();
-    fs::write(app.path("dispatch.json"), json!({"hosts":{
-        "alpha":{"local":true,"capabilities":{"hy4_plan":true}},
-        "beta":{"local":true}
-    }}).to_string()).unwrap();
+    fs::write(
+        app.path("dispatch.json"),
+        json!({"hosts":{
+            "alpha":{"local":true,"capabilities":{"hy4_plan":true}},
+            "beta":{"local":true}
+        }})
+        .to_string(),
+    )
+    .unwrap();
     app.launch();
-    let model = |host| app.json("POST", "/api/models", Some(json!({
-        "name":"Pinned Hy4","host":host,"kind":"hf","path":"/models/hy4"
-    })), 201)["id"].clone();
+    let model = |host| {
+        app.json(
+            "POST",
+            "/api/models",
+            Some(json!({
+                "name":"Pinned Hy4","host":host,"kind":"hf","path":"/models/hy4"
+            })),
+            201,
+        )["id"]
+            .clone()
+    };
     let source = model("alpha");
     let other = model("beta");
     let body = json!({"kind":"plan","host":"alpha","input_ids":[source],
@@ -438,8 +719,16 @@ fn hy4_plan_requires_an_opted_in_source_host_and_exact_override() {
     for (key, value, status) in [
         ("kind", json!("convert"), 409),
         ("input_ids", json!([other]), 400),
-        ("options", json!({"hy4_overrides":{"blk.1.ffn_up_exps.weight":"Q8_0"}}), 400),
-        ("options", json!({"hy4_overrides":{"blk.1.ffn_down_exps.weight":"Q8_0"},"threads":1}), 400),
+        (
+            "options",
+            json!({"hy4_overrides":{"blk.1.ffn_up_exps.weight":"Q8_0"}}),
+            400,
+        ),
+        (
+            "options",
+            json!({"hy4_overrides":{"blk.1.ffn_down_exps.weight":"Q8_0"},"threads":1}),
+            400,
+        ),
     ] {
         let mut bad = body.clone();
         bad[key] = value;
@@ -667,7 +956,10 @@ fn same_origin_library_survives_restart() {
     app.launch();
     let state = app.json("GET", "/api/state", None, 200);
     assert_eq!(state["hosts"][1]["reasons"]["plan"], "not installed");
-    assert_eq!(state["models"][0], model);
+    let mut model = model;
+    model.as_object_mut().unwrap().remove("available");
+    model.as_object_mut().unwrap().remove("reason");
+    assert_eq!(app.model_records(), json!([model]));
     assert_eq!(state["prompts"][0], created);
     app.json(
         "DELETE",
@@ -678,6 +970,345 @@ fn same_origin_library_survives_restart() {
     assert_eq!(
         app.json("GET", "/api/state", None, 200)["models"],
         json!([])
+    );
+}
+
+#[test]
+fn legacy_model_records_keep_their_identity_and_report_unknown_availability() {
+    let mut app = Fixture::new();
+    let state = app.path("state");
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    let db = rusqlite::Connection::open(state.join("controller.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE models(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+         INSERT INTO models VALUES
+         ('legacy-a','{\"id\":\"legacy-a\",\"name\":\"Manual\",\"host\":\"alpha\",\"path\":\"/models/a.gguf\",\"kind\":\"gguf\"}'),
+         ('legacy-b','{\"id\":\"legacy-b\",\"name\":\"Old host\",\"host\":\"gone\",\"path\":\"/models/b\",\"kind\":\"hf\"}');",
+    )
+    .unwrap();
+    drop(db);
+    app.launch();
+    let state = app.json("GET", "/api/state", None, 200);
+    let models = state["models"].as_array().unwrap();
+    assert_eq!(models.len(), 2);
+    for (model, (id, name, host, path, kind)) in models.iter().zip([
+        ("legacy-a", "Manual", "alpha", "/models/a.gguf", "gguf"),
+        ("legacy-b", "Old host", "gone", "/models/b", "hf"),
+    ]) {
+        assert_eq!(model["id"], id);
+        assert_eq!(model["name"], name);
+        assert_eq!(model["host"], host);
+        assert_eq!(model["path"], path);
+        assert_eq!(model["kind"], kind);
+        let expected = if host == "gone" {
+            json!(false)
+        } else {
+            Value::Null
+        };
+        assert_eq!(model.get("available"), Some(&expected));
+        if host == "gone" {
+            assert_eq!(
+                model["reason"],
+                "The owning worker is not configured or is disabled."
+            );
+        } else {
+            assert!(model["reason"].as_str().is_some_and(|s| !s.is_empty()));
+        }
+        for missing in ["sha256", "bytes", "job_id"] {
+            assert!(model.get(missing).is_none());
+        }
+    }
+}
+
+#[test]
+fn library_checks_models_asynchronously_and_caches_worker_replies() {
+    let mut app = Fixture::new();
+    app.touch("model-stat-fixture");
+    app.launch();
+    let paths = [
+        ("alpha", "/models/slow.gguf"),
+        ("alpha", "/models/current.gguf"),
+        ("beta", "/models/missing.gguf"),
+        ("beta", "/outside/outside.gguf"),
+        ("beta", "/models/unknown.gguf"),
+    ];
+    for (host, path) in paths {
+        app.register(host, "gguf", path);
+    }
+    let start = Instant::now();
+    let first = app.json("GET", "/api/state", None, 200);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "snapshot waited for worker"
+    );
+    assert!(first["models"][0]["available"].is_null());
+    let state = wait_for(|| {
+        let state = app.json("GET", "/api/state", None, 200);
+        (state["models"][0]["reason"] == "The controller could not check this path on the worker."
+            && state["models"][4]["reason"]
+                == "Worker does not report file state. Update the worker."
+            && state["models"][1]["available"] == true
+            && state["models"][2]["available"] == false
+            && state["models"][3]["available"] == false)
+            .then_some(state)
+    });
+    let models = state["models"].as_array().unwrap();
+    assert!(models[0]["available"].is_null());
+    assert_eq!(models[1]["bytes"], 7);
+    assert!(models[1].get("sha256").is_none());
+    assert_eq!(
+        models[2]["reason"],
+        "The model path does not exist on the worker."
+    );
+    assert_eq!(
+        models[3]["reason"],
+        "The worker does not allow access to this path."
+    );
+    assert!(models[4]["available"].is_null());
+    for _ in 0..3 {
+        app.json("GET", "/api/state", None, 200);
+    }
+    let calls = fs::read_to_string(app.path("model-stat-calls")).unwrap();
+    for (_, path) in paths {
+        assert_eq!(
+            calls.lines().filter(|line| *line == path).count(),
+            1,
+            "{calls}"
+        );
+    }
+    assert_eq!(state["event_cursor"], first["event_cursor"]);
+    assert_eq!(state["jobs"], json!([]));
+}
+
+#[test]
+fn library_preserves_directory_suffix_when_checking_safetensors_paths() {
+    let mut app = Fixture::new();
+    app.touch("model-stat-fixture");
+    app.launch();
+    app.register("beta", "safetensors", "/models/current.safetensors");
+    app.register("beta", "safetensors", "/models/current.safetensors/.");
+    let state = wait_for(|| {
+        let state = app.json("GET", "/api/state", None, 200);
+        state["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|model| model["available"].is_boolean())
+            .then_some(state)
+    });
+    assert_eq!(state["models"][0]["available"], true);
+    assert_eq!(state["models"][1]["available"], false);
+    let calls = fs::read_to_string(app.path("model-stat-calls")).unwrap();
+    assert!(
+        calls
+            .lines()
+            .any(|path| path == "/models/current.safetensors/.")
+    );
+}
+
+#[test]
+fn library_coalesces_paths_and_checks_other_workers_during_a_backlog() {
+    let mut app = Fixture::new();
+    app.touch("model-stat-fixture");
+    app.launch();
+    for _ in 0..8 {
+        app.register("alpha", "gguf", "/models/slow.gguf");
+        app.register("alpha", "gguf", "/models//slow.gguf");
+    }
+    for suffix in 0..8 {
+        app.register("alpha", "gguf", &format!("/models/{suffix}/slow.gguf"));
+    }
+    let beta = [
+        app.register("beta", "gguf", "/models/current.gguf"),
+        app.register("beta", "gguf", "/models//current.gguf"),
+        app.register("beta", "gguf", "/models/./current.gguf"),
+    ];
+    let start = Instant::now();
+    loop {
+        let state = app.json("GET", "/api/state", None, 200);
+        let models = state["models"].as_array().unwrap();
+        if beta.iter().all(|id| {
+            models
+                .iter()
+                .any(|model| model["id"] == id.as_str() && model["available"] == true)
+        }) {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "alpha backlog blocked beta"
+        );
+        sleep(Duration::from_millis(20));
+    }
+    let calls = fs::read_to_string(app.path("model-stat-calls")).unwrap();
+    assert_eq!(calls.lines().count(), 2, "{calls}");
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| *line == "/models/slow.gguf")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn job_detail_returns_submitted_prompt_after_edit_and_restart() {
+    let mut app = Fixture::new();
+    app.launch();
+    let a = app.register("alpha", "gguf", "/models/a.gguf");
+    let b = app.register("alpha", "gguf", "/models/b.gguf");
+    let saved = app.json(
+        "POST",
+        "/api/prompts",
+        Some(json!({"name":"Saved","text":"Original\n"})),
+        201,
+    );
+    app.touch("hold");
+    let from_saved =
+        app.enqueue(json!({"kind":"compare","input_ids":[a,b],"prompt_id":id(&saved)}));
+    let typed = app.enqueue(json!({"kind":"compare","input_ids":[a,b],"prompt":"Typed prompt\n"}));
+    let no_prompt = app.enqueue(json!({"kind":"cache_cleanup","host":"alpha"}));
+    app.json(
+        "PUT",
+        &format!("/api/prompts/{}", id(&saved)),
+        Some(json!({"name":"Saved","text":"Edited"})),
+        200,
+    );
+    app.stop();
+    app.launch();
+    let detail = app.detail(&from_saved);
+    assert_eq!(detail["prompt_text"], "Original\n");
+    assert_eq!(detail["prompt_id"], id(&saved));
+    let detail = app.detail(&typed);
+    assert_eq!(detail["prompt_text"], "Typed prompt\n");
+    assert!(detail["prompt_id"].is_null());
+    assert_eq!(
+        app.detail(&no_prompt).get("prompt_text"),
+        Some(&Value::Null)
+    );
+}
+
+#[test]
+fn saved_prompt_put_replaces_fields_without_changing_id() {
+    let mut app = Fixture::new();
+    app.launch();
+    let saved = app.json(
+        "POST",
+        "/api/prompts",
+        Some(json!({"name":"Old name","text":"Old text"})),
+        201,
+    );
+    let path = format!("/api/prompts/{}", id(&saved));
+    let change = json!({"name":"New name","text":"New text\n"});
+    for (request, status) in [
+        (json!({"name":"","text":"Valid text"}), 400),
+        (json!({"name":"Valid name","text":""}), 400),
+        (json!({"name":"Valid name"}), 422),
+    ] {
+        app.json("PUT", &path, Some(request), status);
+    }
+    assert_eq!(
+        app.request(
+            "PUT",
+            &path,
+            Some(change.clone()),
+            "Sec-Fetch-Site: cross-site\r\n"
+        )
+        .0,
+        403
+    );
+    app.json("PUT", &path, None, 415);
+    let before = app.json("GET", "/api/state", None, 200);
+    assert_eq!(before["prompts"], json!([saved]));
+    let updated = app.json("PUT", &path, Some(change.clone()), 200);
+    assert_eq!(
+        updated,
+        json!({"id":id(&saved),"name":"New name","text":"New text\n"})
+    );
+    let updated_state = app.json("GET", "/api/state", None, 200);
+    assert_eq!(
+        updated_state["event_cursor"],
+        before["event_cursor"].as_i64().unwrap() + 1
+    );
+    assert_eq!(app.json("PUT", &path, Some(change.clone()), 200), updated);
+    assert_eq!(app.json("GET", "/api/state", None, 200), updated_state);
+    app.stop();
+    app.launch();
+    assert_eq!(
+        app.json("GET", "/api/state", None, 200)["prompts"],
+        json!([updated])
+    );
+    app.json("PUT", "/api/prompts/missing", Some(change), 404);
+}
+
+#[test]
+fn saved_prompt_delete_refuses_active_jobs_and_preserves_history() {
+    let mut app = Fixture::new();
+    app.launch();
+    let saved = app.json(
+        "POST",
+        "/api/prompts",
+        Some(json!({"name":"Test","text":"Keep this text in job history."})),
+        201,
+    );
+    let other = app.json(
+        "POST",
+        "/api/prompts",
+        Some(json!({"name":"Queued","text":"Text for the queued job."})),
+        201,
+    );
+    let path = format!("/api/prompts/{}", id(&saved));
+    let a = app.register("alpha", "gguf", "/models/a.gguf");
+    let b = app.register("beta", "gguf", "/models/b.gguf");
+    app.touch("hold");
+    let submit = |prompt: &Value| {
+        app.enqueue(json!({"kind":"compare","input_ids":[a,b],"prompt_id":id(prompt)}))
+    };
+    let running = submit(&saved);
+    app.await_job(&running, |job| job["progress"] == "worker progress");
+    let queued = submit(&other);
+    assert_eq!(app.detail(&queued)["state"], "queued");
+    let blocked = |path: &str, job: &str| {
+        assert_eq!(
+            app.json("DELETE", path, None, 409)["error"],
+            format!("Job {job} uses this prompt.")
+        );
+    };
+    blocked(&path, &running);
+    let other_path = format!("/api/prompts/{}", id(&other));
+    blocked(&other_path, &queued);
+    assert_eq!(
+        app.request("DELETE", &path, None, "Origin: null\r\n").0,
+        403
+    );
+    app.remove("hold");
+    let completed = app.await_job(&running, |job| job["state"] == "succeeded");
+    app.await_job(&queued, |job| job["state"] == "succeeded");
+    app.json("DELETE", &other_path, None, 204);
+
+    app.touch("hold");
+    let active = submit(&saved);
+    app.await_job(&active, |job| job["progress"] == "worker progress");
+    app.touch("offline");
+    let cancelling = app.cancel(&active);
+    assert_eq!(cancelling["state"], "running");
+    assert_eq!(cancelling["cancel_requested"], true);
+    blocked(&path, &active);
+    app.remove("offline");
+    app.await_job(&active, |job| job["state"] == "cancelled");
+    let cursor = app.json("GET", "/api/state", None, 200)["event_cursor"]
+        .as_i64()
+        .unwrap();
+    app.json("DELETE", &path, None, 204);
+    app.json("DELETE", &path, None, 404);
+    let state = app.json("GET", "/api/state", None, 200);
+    assert_eq!(state["prompts"], json!([]));
+    assert_eq!(state["event_cursor"], cursor + 1);
+    assert_eq!(app.detail(&running), completed);
+    assert_eq!(
+        completed["result"]["envelope"]["prompt"],
+        "Keep this text in job history."
     );
 }
 

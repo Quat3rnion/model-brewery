@@ -10,6 +10,7 @@
 // Each kind is an opt-in host capability with the same name.
 
 import { obj } from './reports';
+import { readInventory, type InventoryPage } from './weightmap';
 import type { JobSummary, NewJob } from './types';
 
 export const WEIGHT_KINDS = ['weight_inspect', 'weight_propose', 'weight_tune', 'weight_apply'] as const;
@@ -268,6 +269,7 @@ export function readTuneReport(result: unknown): TuneReport | null {
 }
 
 export interface Inspected {
+  mode: 'value';
   tensor: string;
   index: number[];
   dtype: string;
@@ -276,11 +278,45 @@ export interface Inspected {
   source_sha256: string | null;
 }
 
-export function readInspect(result: unknown): Inspected | null {
+type InspectedTile = Omit<Inspected, 'mode' | 'index' | 'value'> & {
+  mode: 'tile';
+  origin: number[];
+  tile_shape: number[];
+  values: number[][];
+};
+
+type InspectReport = Inspected | InspectedTile | (InventoryPage & { mode: 'inventory' });
+
+const coordinates = (list: unknown, min: number): list is number[] =>
+  Array.isArray(list) && list.length > 0 && list.every((n) => Number.isSafeInteger(n) && n >= min);
+
+/** The manual editor reads single values; the result view also reads inventory pages and tiles. */
+export function readInspect(result: unknown, mode: 'value'): Inspected | null;
+export function readInspect(result: unknown): InspectReport | null;
+export function readInspect(result: unknown, mode?: 'value'): InspectReport | null {
   const r = obj(obj(result)?.report);
-  if (!r || !str(r.tensor) || !Array.isArray(r.index) || !str(r.dtype) || !num(r.value) || !Array.isArray(r.shape)) return null;
-  if (!r.shape.every((n) => Number.isSafeInteger(n))) return null;
-  return { tensor: r.tensor, index: r.index as number[], dtype: r.dtype, value: r.value, shape: r.shape as number[], source_sha256: str(r.source_sha256) ? r.source_sha256 : null };
+  if (!r) return null;
+  if (r.mode === 'inventory') {
+    const inventory = mode === 'value' ? null : readInventory(result);
+    return inventory ? { mode: 'inventory', ...inventory } : null;
+  }
+  if (!str(r.tensor) || !str(r.dtype) || !coordinates(r.shape, 1)) return null;
+  const base = { tensor: r.tensor, dtype: r.dtype, shape: r.shape, source_sha256: str(r.source_sha256) ? r.source_sha256 : null };
+  if (r.mode === 'tile') {
+    const { origin, tile_shape, values } = r;
+    const rank = base.shape.length;
+    if (mode === 'value' || !coordinates(origin, 0) || !coordinates(tile_shape, 1) ||
+        origin.length !== rank || tile_shape.length !== rank ||
+        !tile_shape.every((size, i) => size <= base.shape[i] - origin[i] && (i >= rank - 2 || size === 1))) return null;
+    const rows = rank === 1 ? 1 : tile_shape[rank - 2];
+    const cols = tile_shape[rank - 1];
+    if (!Array.isArray(values) || values.length !== rows ||
+        !values.every((row) => Array.isArray(row) && row.length === cols && row.every(num))) return null;
+    return { mode: 'tile', ...base, origin, tile_shape, values };
+  }
+  if (r.mode !== undefined && r.mode !== 'value') return null;
+  if (!coordinates(r.index, 0) || r.index.length !== r.shape.length || !num(r.value)) return null;
+  return { mode: 'value', ...base, index: r.index, value: r.value };
 }
 
 export interface Applied {
