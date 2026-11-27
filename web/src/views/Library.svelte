@@ -6,6 +6,7 @@
   import { weightAccess } from '../lib/weight-access';
   import HostSelect from '../components/HostSelect.svelte';
   import HfDownload from '../components/HfDownload.svelte';
+  import QsaTrainer from '../components/QsaTrainer.svelte';
   import Lineage from '../components/Lineage.svelte';
   import { hashParam, route } from '../lib/route.svelte';
   import Combobox from '../components/Combobox.svelte';
@@ -23,6 +24,13 @@
   const prompts = $derived(brewery.state?.prompts ?? []);
   const hosts = $derived(brewery.state?.hosts ?? []);
   const jobs = $derived(brewery.state?.jobs ?? []);
+  let teacherId = $state('');
+  const teacher = $derived(models.find(m => m.id === teacherId && m.kind === 'hf'));
+  async function openTrainer(id: string) {
+    teacherId = id;
+    await tick();
+    document.getElementById('qsa-heading')?.focus();
+  }
 
   // Register form
   let host = $state('');
@@ -215,6 +223,7 @@
 
   <HfDownload />
   <Lineage {models} />
+  {#if teacher}{#key teacher.id}<QsaTrainer {teacher} />{/key}{/if}
   <section class="panel" aria-labelledby="reg-h">
     <header><h2 id="reg-h">Register an entry</h2></header>
     <WorkflowGate workflow="register_manual">
@@ -349,6 +358,9 @@
                       </div>
                     </div>
                   {:else}
+                    {#if m.kind === 'hf'}
+                      <button class="btn ghost small" type="button" aria-label="Train QSA indexer for {modelLabel(m)}" onclick={() => openTrainer(m.id)}>Train QSA indexer</button>
+                    {/if}
                     {#if edit?.allowed}
                       <a class="btn ghost small" href="#/weights?source={encodeURIComponent(m.id)}" aria-label="Edit weights of {modelLabel(m)}">Edit weights</a>
                     {:else if edit}

@@ -359,6 +359,11 @@
     </div>
     </WorkflowGate>
     {:else}
+    {#if wfSource && hashParam(route.hash, 'indexer') && snapshot?.global.managed_conversion?.eligible === false}
+      <div class="body">
+        <ComponentPicker source={wfSource} idPrefix="wf-comp" linkedIndexer={hashParam(route.hash, 'indexer')} />
+      </div>
+    {/if}
     <WorkflowGate workflow="managed_conversion">
     <div class="body stack">
       <div class="grid-2">
@@ -401,7 +406,7 @@
         </div>
       </div>
 
-      {#if wfSource}<ComponentPicker bind:value={form.extras} source={wfSource} idPrefix="wf-comp" />{/if}
+      {#if wfSource}<ComponentPicker bind:value={form.extras} source={wfSource} idPrefix="wf-comp" linkedIndexer={hashParam(route.hash, 'indexer')} />{/if}
       <Advanced changed={optsChangedWf}>
         <div class="grid-3">
           {#each ['ht_backend', 'i4r_backend', 'q4cp_backend'] as const as key (key)}

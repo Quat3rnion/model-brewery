@@ -87,6 +87,7 @@ export interface Model {
   reason?: string;
   /** Job that produced this entry, when the controller registered an output. */
   job_id?: string;
+  qsa_provenance?: { training_job_id: string; teacher_model_id: string; teacher_sha256: string };
   [extra: string]: unknown;
 }
 

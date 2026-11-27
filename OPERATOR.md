@@ -1180,6 +1180,14 @@ enter an absolute path. The worker checks it when a job uses it.
 This optional offline job trains new QSA indexer weights from a frozen local
 Qwen3.8-27B teacher. It does not change the teacher weights.
 
+In **Library**, register the training and held-out text files as QSA corpora
+on the teacher's worker. Choose **Train QSA indexer** on the teacher, select
+the two corpora, and set the training options. Only **Queue training** starts
+the job. Open the job to compare held-out capture before and after training.
+After a successful run, follow **Select trained indexer in checkpoint
+components** to see the indexer in the existing picker. Selecting it does
+not apply it to a model or start a conversion.
+
 Use a regular GPU worker with direct source roots. Install its worker and
 engine from the same release as the controller. Keep the Python environment,
 trainer, and `resource-queue` outside the worker `root` and `source_roots`.
@@ -1231,7 +1239,9 @@ Use separate regular UTF-8 text files for training and held-out evaluation.
 Put one sample on each nonblank line. The trainer tokenizes each line as-is
 and adds an EOS token. Register each file as `qsa-corpus` on the teacher's
 worker. Keep each file at or below 64 MiB. The files must have different
-bytes. Keep the full teacher on the GPUs. The trainer needs at least 50 GiB
+bytes. The trainer also rejects identical packed token sequences shared
+between the two files. This check does not detect paraphrases or overlap
+at different token offsets. Keep the full teacher on the GPUs. The trainer needs at least 50 GiB
 of aggregate free GPU memory after a 3 GiB reserve on each GPU. CPU and disk
 offload are not supported.
 

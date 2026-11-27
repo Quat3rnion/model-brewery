@@ -5,10 +5,19 @@
   import { resolveSourceComponents, sourceComponentJobs } from '../lib/sourceComponents';
   import type { Model } from '../lib/types';
 
-  let { value = $bindable(), source, idPrefix, gguf = false }: {
-    value?:RoleSelection; source:Model; idPrefix:string; gguf?:boolean;
+  let { value = $bindable(), source, idPrefix, gguf = false, linkedIndexer }: {
+    value?:RoleSelection; source:Model; idPrefix:string; gguf?:boolean; linkedIndexer?:string | null;
   } = $props();
   const models = $derived(brewery.state?.models ?? []);
+  // Reference selection only: never add this ID to RoleSelection or conversion inputs.
+  const indexers = $derived(models.filter(m => {
+    const p = m.qsa_provenance;
+    return m.kind === 'qsa-indexer' && m.host === source.host && m.available !== false &&
+      p?.teacher_model_id === source.id && !!p.training_job_id && p.training_job_id === m.job_id &&
+      /^[a-f0-9]{64}$/.test(p.teacher_sha256) && (!source.sha256 || p.teacher_sha256 === source.sha256);
+  }));
+  let selection = $state<{ teacher: string; id: string } | null>(null);
+  const indexer = $derived(indexers.find(m => m.id === (selection?.teacher === source.id ? selection.id : linkedIndexer)));
   const candidates = $derived(sourceComponentJobs(source, brewery.state?.jobs ?? [], models));
   const evidence = $derived(resolveSourceComponents(source,
     candidates.flatMap(j=>brewery.details[j.id] ? [brewery.details[j.id]] : []), models));
@@ -39,7 +48,8 @@
   <h3 id="{idPrefix}-title">Checkpoint components</h3>
   <p class="small muted">{gguf
     ? 'GGUF output takes no separate component inputs. The source evidence below does not guarantee that the exporter writes each component.'
-    : 'Use the checkpoint defaults, or select a registered replacement. The conversion job reports what it used.'}</p>
+    : value ? 'Use the checkpoint defaults, or select a registered replacement. The conversion job reports what it used.'
+    : 'Inspect the source evidence and select a trained indexer for reference.'}</p>
   {#if failed}<div class="small" role="status">Some saved job details could not be loaded. <button type="button" class="btn small" onclick={retry}>Retry</button></div>{/if}
   <div class="roles">
     {#each COMPONENT_ROLES as r (r.kind)}
@@ -58,6 +68,8 @@
               {#each options as m (m.id)}<option value={m.id}>{modelLabel(m)} · {hostName(brewery.state?.hosts ?? [],m.host)}</option>{/each}
             </optgroup>{/if}
           </select>
+        {:else}
+          <strong class="small">{r.label}</strong>
         {/if}
         <span class="hint" id="{idPrefix}-{r.kind}-hint">
           {loading && fact.status==='unknown' ? 'Reading saved job evidence…' : fact.summary}
@@ -65,6 +77,23 @@
         </span>
       </div>
     {/each}
+    {#if source.kind === 'hf'}
+      <div class="field">
+        <label for="{idPrefix}-indexer">Trained QSA indexer</label>
+        <select class="input" id="{idPrefix}-indexer" disabled={!indexers.length} value={indexer?.id ?? ''}
+          onchange={e => selection = { teacher:source.id, id:e.currentTarget.value }} aria-describedby="{idPrefix}-indexer-hint">
+          <option value="">{indexers.length ? 'Choose a trained indexer' : 'No matching trained indexer'}</option>
+          {#each indexers as m (m.id)}<option value={m.id}>{modelLabel(m)}</option>{/each}
+        </select>
+        <span class="hint" id="{idPrefix}-indexer-hint">Reference only. HGN and GGUF conversion do not apply this component.</span>
+        {#if indexer?.qsa_provenance}
+          <span class="hint">Teacher SHA-256 at training: <span class="mono">{indexer.qsa_provenance.teacher_sha256}</span>.
+            {#if !source.sha256}The current teacher identity has not been verified.{/if}
+            <a href="#/jobs/{encodeURIComponent(indexer.qsa_provenance.training_job_id)}">Training job</a>
+          </span>
+        {/if}
+      </div>
+    {/if}
   </div>
 </section>
 

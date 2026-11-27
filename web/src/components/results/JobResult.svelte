@@ -9,6 +9,7 @@
   import ConversionSummary from './ConversionSummary.svelte';
   import SensitivityReport from './SensitivityReport.svelte';
   import CircuitReport from './CircuitReport.svelte';
+  import QsaReport from './QsaReport.svelte';
   import { selectionFrom } from '../../lib/components';
   import { missingSuites, readBenchmarkReport, requestedOf } from '../../lib/benchmark';
   import { formatBytes, shortHash } from '../../lib/format';
@@ -37,6 +38,8 @@
   <SensitivityReport {result} />
 {:else if kind === 'circuit' && result.schema_version === 1}
   <CircuitReport {result} jobId={job.id} />
+{:else if kind === 'qsa_train'}
+  <QsaReport {result} />
 {:else}
   <div class="stack">
     {#if conversion}<ConversionSummary {job} {result} />{/if}

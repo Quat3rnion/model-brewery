@@ -163,6 +163,7 @@ export function newestFirst(jobs: JobSummary[]): JobSummary[] {
 }
 
 export const MODEL_KINDS: { value: string; label: string; hint: string }[] = [
+  { value: 'qsa-corpus', label: 'QSA text corpus', hint: 'UTF-8 text file, up to 64 MiB. Register training and held-out files separately on the teacher worker, outside the checkpoint directory.' },
   { value: 'gguf', label: 'GGUF model', hint: 'A single .gguf file. Compare and trace.' },
   { value: 'hf', label: 'Hugging Face checkpoint', hint: 'Checkpoint directory. For weight editing, register the directory that contains the SafeTensors index and shards.' },
   { value: 'safetensors', label: 'SafeTensors file', hint: 'A standalone .safetensors file. For an indexed checkpoint, register its directory as a Hugging Face checkpoint instead.' },
@@ -185,11 +186,13 @@ export const CONVERT_SOURCE_KINDS: ReadonlySet<string> = new Set(['hf', 'gguf', 
 export const EXTRA_INPUT_KINDS = ['assets', 'ngram', 'vision', 'mtp'] as const;
 
 export function kindLabel(kind: string): string {
+  if (kind === 'qsa-indexer') return 'Trained QSA indexer';
   if (kind === 'hgn-archive') return 'Structural HGN archive';
   return MODEL_KINDS.find((k) => k.value === kind)?.label ?? kind;
 }
 
 const KIND_TITLES: Record<string, string> = {
+  qsa_train: 'Train QSA indexer',
   transfer_preview: 'Transfer preview',
   transfer: 'Transfer',
   cache_cleanup: 'Cache cleanup',
