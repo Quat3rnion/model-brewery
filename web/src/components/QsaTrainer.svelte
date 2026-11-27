@@ -1,6 +1,7 @@
 <script lang="ts">
   import { brewery } from '../lib/store.svelte';
   import { modelLabel } from '../lib/format';
+  import { hostWorkflowEligibility } from '../lib/eligibility';
   import { Submitter } from '../lib/submit.svelte';
   import type { Model } from '../lib/types';
   import Submit from './Submit.svelte';
@@ -9,6 +10,7 @@
   let { teacher }: { teacher: Model } = $props();
   const worker = $derived(brewery.state?.hosts.find(h => h.id === teacher.host));
   const hostLabel = $derived(worker?.name ?? teacher.host);
+  const eligibility = $derived(hostWorkflowEligibility(brewery.state?.eligibility, teacher.host, 'qsa_train'));
   const files = $derived((brewery.state?.models ?? []).filter(m => m.kind === 'qsa-corpus' &&
     m.host === teacher.host && m.available !== false && m.path !== teacher.path &&
     !m.path.startsWith(teacher.path.replace(/\/$/, '') + '/')));
@@ -18,7 +20,8 @@
   const evalFiles = $derived(files.filter(m => m.path !== training?.path));
   const int = (n: number, min: number, max: number) => Number.isInteger(n) && n >= min && n <= max;
   const blockers = $derived([
-    ...(worker?.capabilities?.qsa_train === true ? [] : [worker?.capability_reasons?.qsa_train?.text || worker?.reasons?.qsa_train || `${hostLabel} does not report QSA training support.`]),
+    ...(eligibility?.eligible === false ? (eligibility.reasons.length ? eligibility.reasons.map(r => r.text) : [`Training is not available on ${hostLabel}.`])
+      : worker?.capabilities?.qsa_train === true ? [] : [worker?.capability_reasons?.qsa_train?.text || worker?.reasons?.qsa_train || `${hostLabel} does not report QSA training support.`]),
     ...(teacher.available === false ? [teacher.reason || 'The teacher checkpoint is unavailable.'] : []),
     ...(!training || !evalFiles.some(m => m.id === heldout) ? ['Select two separate corpus files.'] : []),
     ...(!int(steps,1,10000) ? ['Use 1–10000 steps.'] : []),
