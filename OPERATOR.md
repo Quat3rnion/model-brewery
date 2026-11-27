@@ -1195,10 +1195,20 @@ Configure the worker:
 }
 ```
 
-For an explicit dispatch host, set `capabilities.qsa_train` to `true`. The
-controller probes the configured runtime at startup and disables this
-capability if the probe fails. The probe checks small GPU operations. It does
-not load the teacher or test its memory fit.
+For a direct dispatch host, set `capabilities.qsa_train` to `true`. For an
+already enrolled SSH worker, add its existing ID to the controller dispatch
+JSON's top-level `qsa_ssh_hosts` array, beside `hosts`. For example, set
+`"qsa_ssh_hosts": ["worker-id"]`. Do not add a duplicate host definition or a
+Settings toggle. If `qsa_ssh_hosts` is omitted or empty, the controller does
+not probe enrolled workers for QSA.
+
+At startup, the controller probes only opted-in hosts. Each startup probe
+reserves the shared GPU through the configured `gpu_queue`. If startup
+reservation or the probe fails, the controller leaves QSA unavailable for that
+run. Correct the cause. Restart the controller to retry the startup probe.
+During training, the engine repeats the probe inside the job's existing GPU
+reservation. It does not request another reservation. The probe checks small
+GPU operations. It does not load the teacher or test its memory fit.
 
 Install Python 3.11 or later and a CUDA or ROCm PyTorch build, version 2.6 or
 later. Do not use a CPU-only PyTorch build. Install the other packages from

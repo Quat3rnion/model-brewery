@@ -12,6 +12,7 @@ training corpus. This does not detect partial, shifted, or fuzzy matches.
 
 import argparse
 from contextlib import ExitStack, contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import itertools
@@ -185,6 +186,18 @@ def load_teacher_tokenizer(source, model_config, output):
         )
 
 
+def plan_teacher_devices(model, gpu_capacity):
+    from transformers.integrations.accelerate import _get_device_map
+
+    # In Transformers 5.22.1, sequential planning respects each supplied cap.
+    # Unlike "auto", it does not clip larger devices to a balanced share.
+    caps = {i: capacity for i, capacity in gpu_capacity.items() if capacity > 0}
+    plan = _get_device_map(model, "sequential", {**caps, "cpu": 0}, hf_quantizer=None)
+    if not plan or any(device not in caps for device in plan.values()):
+        raise RuntimeError("The BF16 teacher does not fit the per-GPU budgets; CPU and disk offload are not supported")
+    return plan
+
+
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--probe", action="store_true", help="Check GPU/backend readiness without loading a model")
@@ -271,7 +284,14 @@ def main():
                         for i in range(torch.cuda.device_count())}
         if sum(gpu_capacity.values()) < 50 * 1024**3:
             raise RuntimeError("Not enough free GPU memory for the BF16 27B checkpoint and training")
-        load = {"device_map": "auto", "max_memory": {**gpu_capacity, "cpu": 0}, "dtype": torch.bfloat16}
+        # The aggregate check is only a lower bound. Plan on a metadata-only
+        # copy so placement failures cannot start loading or offloading shards.
+        with torch.device("meta"):
+            template = Qwen3_5ForConditionalGeneration._from_config(
+                deepcopy(config), dtype=torch.bfloat16, attn_implementation="sdpa",
+            )
+        load = {"device_map": plan_teacher_devices(template, gpu_capacity), "dtype": torch.bfloat16}
+        del template
     with teacher_weight_view(source, teacher, output) as weight_view:
         model, loading = Qwen3_5ForConditionalGeneration.from_pretrained(
             weight_view, config=config, generation_config=GenerationConfig.from_model_config(config),
@@ -280,7 +300,7 @@ def main():
         )
     if any(loading.get(key) for key in ("missing_keys", "mismatched_keys", "error_msgs")):
         raise ValueError("The teacher checkpoint did not supply every required backbone tensor")
-    if not cpu and any(not isinstance(device, int) for device in model.hf_device_map.values()):
+    if not cpu and any(parameter.device.type != "cuda" for parameter in model.parameters()):
         raise RuntimeError("QSA training needs the whole teacher on GPUs; CPU and disk offload are not supported")
     model.eval().requires_grad_(False)
     teacher_parameters = {name: (parameter, parameter._version) for name, parameter in model.named_parameters()}

@@ -17,7 +17,32 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import PreTrainedTokenizerFast, Qwen3_5Config, Qwen3_5ForConditionalGeneration
 
-from qsa_train import load_teacher_tokenizer, teacher_source, teacher_weight_view, tokenizer_source
+from qsa_train import (
+    load_teacher_tokenizer, plan_teacher_devices, teacher_source, teacher_weight_view, tokenizer_source,
+)
+
+
+class TeacherPlacementTest(unittest.TestCase):
+    def test_asymmetric_caps_keep_teacher_on_gpus_without_offload(self):
+        class MetaModel(torch.nn.Sequential):
+            _no_split_modules = ["Linear"]
+            all_tied_weights_keys = {}
+
+        # 62 indivisible 1-GiB layers, but the fixture itself allocates no tensors.
+        model = MetaModel(*(torch.nn.Linear(32, 2**24, bias=False, device="meta", dtype=torch.bfloat16)
+                            for _ in range(62)))
+        gib = 1 << 30
+        plan = plan_teacher_devices(model, {0: 44 * gib, 1: 22 * gib})
+        self.assertEqual(set(plan.values()), {0, 1})
+        self.assertEqual(len(plan), 62)
+        self.assertGreater(sum(device == 0 for device in plan.values()), 32)
+        for device, cap in ((0, 44), (1, 22)):
+            self.assertLessEqual(sum(value == device for value in plan.values()), cap)
+
+        # Equal aggregate capacity is no guarantee: the planner reserves room
+        # for a whole layer on device zero and must not fall back to disk.
+        with self.assertRaisesRegex(RuntimeError, "CPU and disk offload"):
+            plan_teacher_devices(model, {0: 40 * gib, 1: 22 * gib})
 
 
 class TeacherSourcePolicyTest(unittest.TestCase):
